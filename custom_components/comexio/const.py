@@ -1,4 +1,5 @@
-from collections.abc import Iterator, Mapping
+from bisect import bisect_right
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set as AbstractSet
 from dataclasses import dataclass
 import logging
 import re
@@ -28,6 +29,7 @@ from aiocomexio.knx import (
     KNX_DPT_DIGITAL_AMBIGUOUS as KNX_DPT_DIGITAL_AMBIGUOUS,
     KNX_DPT_DIGITAL_DEVICE_CLASS as KNX_DPT_DIGITAL_DEVICE_CLASS,
 )
+from aiocomexio.webio import quickbus_command_name
 from homeassistant.util import slugify
 
 _LOGGER = logging.getLogger(__name__)
@@ -56,12 +58,29 @@ DEFAULT_SCHEMA_KNX = "K{KnxId} {KnxTitle}"
 # keys for API access
 CONF_API_USERNAME = "api_username"
 CONF_API_PASSWORD = "api_password"  # nosec B105
+# SHA-256 fingerprint (64 lowercase hex digits) of Comexio's TLS certificate, pinned at setup (see
+# certificate.py). Present: every request goes over HTTPS with that pin. Absent: plain HTTP, and
+# each setup tries to switch the entry over.
+CONF_CERTIFICATE_FINGERPRINT = "certificate_fingerprint"
 
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
 
 CONF_COVER_KEYWORDS = "cover_keywords"
-DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
+DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind, markise, awning"
+# Default before markise/awning joined it (#179); entries that saved exactly this list get the new
+# default on migration 1.3 -> 1.4 (see migrate_entry_options), a customised list is kept.
+LEGACY_DEFAULT_COVER_KEYWORDS = "rollo, jalousie, blind"
+
+# Where the Web-IO devices push to (#165): the resolved address (ha_address.py), the host and port of
+# HA's external_url, or a URL of the user's own. Only host and port are written to the Web-IO devices;
+# their commands keep HTTP whatever the scheme (Comexio picks HTTP or HTTPS itself).
+CONF_WEBHOOK_ADDRESS_MODE = "webhook_address_mode"
+CONF_WEBHOOK_URL = "webhook_url"
+WEBHOOK_ADDRESS_AUTO = "auto"
+WEBHOOK_ADDRESS_EXTERNAL = "external"
+WEBHOOK_ADDRESS_CUSTOM = "custom"
+WEBHOOK_ADDRESS_MODES = [WEBHOOK_ADDRESS_AUTO, WEBHOOK_ADDRESS_EXTERNAL, WEBHOOK_ADDRESS_CUSTOM]
 
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
@@ -72,7 +91,7 @@ CONF_IGNORED_KNX = "ignored_knx"
 # Ids the user explicitly chose "leave as writable switch" for in the knx_dpt_ambiguous
 # repair flow (see repairs.py) — distinct from CONF_IGNORED_KNX (excludes a KNX object from
 # HA entirely); this only suppresses the classification nag for that one id. Same comma/
-# range string format, parsed with expand_ignored_marker_ids().
+# range string format, parsed with parse_ignored_ids().
 CONF_KNX_DPT_SUFFIX_IGNORED = "knx_dpt_suffix_ignored"
 
 # The option-key VALUES below keep the legacy "logikplan" spelling — they are persisted
@@ -92,7 +111,8 @@ DEFAULT_FUNCTION_PLAN_PLAN_PREFIX = "HA"
 # offers the KNX cleanup as a repair issue. Removed again right after that check.
 # Minor version 3: entries created before DEFAULT_SCHEMA_IO dropped {ExtName} get the old
 # default pinned into their options (see migrate_entry_options).
-CONFIG_ENTRY_MINOR_VERSION = 3
+# Minor version 4: entries that saved the old default cover keywords get the new default.
+CONFIG_ENTRY_MINOR_VERSION = 4
 CONF_KNX_PRERELEASE_CLEANUP_PENDING = "knx_prerelease_cleanup_pending"
 # Repair issue translation keys; the issue id is "{key}_{server_id}".
 ISSUE_UNINSTALL_CLEANUP = "uninstall_cleanup"
@@ -134,11 +154,15 @@ FUNCTION_PLAN_KNX_CLUSTER_SIZE = 50
 # by one). Extensions-per-plan capacity derives from CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN:
 # 50 → 1, 100 → 2, 150 → 3 extensions per plan; each extension fills exactly one column.
 CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
+# Quickbus cluster plans ("HA - QB [1,3]"): opted-in Quickbus device ids (str). The plan name
+# lists the device ids; a plan has as many columns as an IO plan has extensions, and devices
+# stack within a column while they fit its height (see io_plan_member_origins).
+CONF_FUNCTION_PLAN_QUICKBUS_DEVICES = "logikplan_quickbus_devices"
 
 
 # Web-IO class split: HA maintains separate Web-IO device classes on the Comexio
-# server — one per source category (Marker, physical IO, KNX object) — derived from the
-# single webio_name field in the config/options flow by appending a suffix. The webIoId
+# server — one per source category (Marker, physical IO, KNX object, Quickbus IO) — derived
+# from the single webio_name field in the config/options flow by appending a suffix. The webIoId
 # (the per-command key inside $FubModules["10"]) is a global counter across ALL Web-IO
 # devices on a Comexio server, never reused per-device (verified live 2026-07-27), so
 # commands from every class can share one flat webio_commands lookup without ambiguity.
@@ -146,14 +170,22 @@ CONF_FUNCTION_PLAN_IO_EXTENSIONS = "logikplan_io_extensions"
 WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
+WEBIO_CLASS_QUICKBUS = WebioClass.QUICKBUS
 WEBIO_CLASSES = tuple(WebioClass)
 
 # Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
-# as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}" —
-# centralized here so the build and classify sides can't drift apart.
+# as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}",
+# Quickbus IOs as "QB{io_id}" (their identifier repeats per device, only the IO's Id is
+# unique) — centralized here so the build and classify sides can't drift apart.
 _IO_AUDIT_KEY_PREFIX = "IO_"
 _MARKER_AUDIT_KEY_PREFIX = "M"
 _KNX_AUDIT_KEY_PREFIX = "K"
+_QUICKBUS_AUDIT_KEY_PREFIX = "QB"
+
+# parse_config() output key of the Quickbus IOs (Multitouch gestures, motion sensors, ...). The
+# integration keeps them apart from "io": every IO code path addresses an IO by ext_name +
+# identifier, which a Quickbus IO's G1/TL1/R repeats on every device of the same kind.
+QUICKBUS_IO_DATA_KEY = "quickbus_io"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -164,15 +196,17 @@ class SourceCategory:
     with numeric ids, mirrored 1:1 and clustered into "HA - <label> [n-m]" id-range
     function plans. Physical IOs are the odd one out (ext/identifier composite keys,
     one cluster plan per extension, binary_sensor support) and keep some special
-    handling at the call sites where genericity isn't reachable. Adding a further
-    Comexio module type = one more entry in SOURCE_CATEGORIES.
+    handling at the call sites where genericity isn't reachable. Quickbus IOs share the
+    IOs' $FubModules group but are keyed by their IO Id, read-only and wired into their
+    own column plans ("HA - QB [..]", see IoPlanKind). Adding a further Comexio module type = one more entry in
+    SOURCE_CATEGORIES.
     """
 
     key: WebioClass
     fub_module_type: str  # $FubModules key holding the raw source items
-    data_key: str  # parse_config() output-dict key ("markers"/"io"/"knx")
+    data_key: str  # parse_config() output-dict key ("markers"/"io"/"knx"/"quickbus_io")
     audit_key_prefix: str  # coordinator audit-map key prefix
-    webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]")
+    webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]"/" [QB]")
     label: str  # short display label for sync/audit messages (English — used in UI/log text)
     german_label: str  # German equivalent, used only in options_flow.py's German-only inline
     # validation errors ("Merker" is the correct German automation term, distinct from the
@@ -182,8 +216,8 @@ class SourceCategory:
     schema_default: str  # default entity-name schema
     id_placeholder: str  # entity-name schema format key for the id
     title_placeholder: str  # entity-name schema format key for the title
-    unique_id_infix: str  # HA unique_id infix ("m"/""/"k")
-    range_clustered: bool  # True → id-range cluster plans; False → one plan per extension
+    unique_id_infix: str  # HA unique_id infix ("m"/""/"k"/"qb")
+    range_clustered: bool  # True → id-range cluster plans; False → IO: one plan per extension, Quickbus: none
     supports_trigger_pairs: bool  # True → [TRIG]/[TP] items get a shared-trigger-plan self-reset pair
     import_conf_key: str  # entry.options opt-in flag
     import_default: bool  # default for the opt-in flag (KNX ships OFF)
@@ -252,6 +286,30 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         import_default=False,
         ignored_conf_key=CONF_IGNORED_KNX,
     ),
+    # IOs of Quickbus devices (Multitouch gestures, motion sensors, ...): same $FubModules group
+    # as the IOs, so it must stay after IO here — category_by_fub_module_type("1") is the IO
+    # category. Read-only entities (no known API write path), one HA device per Quickbus device,
+    # Web-IO commands in their own class, wired into QB cluster plans (IO_PLAN_KIND_QUICKBUS). Named with the IO
+    # schema: aiocomexio renders {ExtName} as the Quickbus device's name.
+    WebioClass.QUICKBUS: SourceCategory(
+        key=WebioClass.QUICKBUS,
+        fub_module_type="1",
+        data_key=QUICKBUS_IO_DATA_KEY,
+        audit_key_prefix=_QUICKBUS_AUDIT_KEY_PREFIX,
+        webio_name_suffix=" [QB]",
+        label="Quickbus",
+        german_label="Quickbus",
+        schema_conf_key=CONF_SCHEMA_IO,
+        schema_default=DEFAULT_SCHEMA_IO,
+        id_placeholder="IoId",
+        title_placeholder="IoTitle",
+        unique_id_infix="qb",
+        range_clustered=False,
+        supports_trigger_pairs=False,
+        import_conf_key="import_quickbus",
+        import_default=True,
+        ignored_conf_key=None,
+    ),
 }
 
 
@@ -279,6 +337,50 @@ def active_webio_classes(conf: Mapping[str, Any]) -> tuple[WebioClass, ...]:
         for cls in WEBIO_CLASSES
         if conf.get(SOURCE_CATEGORIES[cls].import_conf_key, SOURCE_CATEGORIES[cls].import_default)
     )
+
+
+def required_webio_classes(conf: Mapping[str, Any], data: Mapping[str, Any]) -> tuple[WebioClass, ...]:
+    """The opted-in Web-IO classes that must exist on the server (audit "missing class", sync create).
+
+    The Quickbus class only once a selected Quickbus device has an IO (webio_quickbus_ios):
+    import_quickbus is on by default, so without this every installation without a Quickbus
+    device would get an empty [QB] class created and, until then, a "missing Web-IO class"
+    repair — and a Quickbus IO only reaches HA through its wired plan pair, so a class for no
+    selected device is of no use. data: the (imported) parse result.
+    """
+    return tuple(
+        cls for cls in active_webio_classes(conf) if cls != WebioClass.QUICKBUS or webio_quickbus_ios(conf, data)
+    )
+
+
+def quickbus_device_id(io: Mapping[str, Any]) -> str:
+    """Quickbus device id of a Quickbus IO, as it is stored in the options and named in QB plan names."""
+    return str(io["quickbus"]["device_id"])
+
+
+def selected_quickbus_devices(conf: Mapping[str, Any], data: Mapping[str, Any]) -> set[str]:
+    """Quickbus device ids selected for the QB plans; every device while the option was never saved.
+
+    Comexio refuses writes to a Quickbus IO, so its value reaches HA only through a Web-IO command
+    wired in a QB plan — all devices by default, the user can deselect some.
+    """
+    if CONF_FUNCTION_PLAN_QUICKBUS_DEVICES in conf:
+        return {str(device_id) for device_id in conf[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES]}
+    return {quickbus_device_id(io) for io in data.get(QUICKBUS_IO_DATA_KEY, [])}
+
+
+def webio_quickbus_ios(conf: Mapping[str, Any], data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The Quickbus IOs that get a Web-IO command: those of the selected devices.
+
+    A command of an unselected device would never be wired, so it would push nothing.
+    """
+    selected = selected_quickbus_devices(conf, data)
+    return [io for io in data.get(QUICKBUS_IO_DATA_KEY, []) if quickbus_device_id(io) in selected]
+
+
+def quickbus_device_label(device_id: str, name: str | None) -> str:
+    """Display label of a Quickbus device, as in its Web-IO command names: "QB3 MT1"."""
+    return f"QB{device_id} {one_line(name)}" if name else f"QB{device_id}"
 
 
 def import_disabled_issue_id(webio_class: str, server_id: str) -> str:
@@ -375,10 +477,10 @@ def io_audit_key(ext_name: str, identifier: str) -> str:
 
 
 def source_audit_key(category: SourceCategory, item_id: object) -> str:
-    """Build the internal audit-map key identifying a range_clustered source item (Marker/KNX).
+    """Build the internal audit-map key identifying a source item keyed by its id (Marker/KNX/Quickbus IO).
 
-    Registry-driven counterpart to io_audit_key(): every range_clustered category keys its
-    audit-map entries by a plain "<prefix><id>" string (e.g. "M5"/"K5"), so one function
+    Registry-driven counterpart to io_audit_key(): every such category keys its audit-map
+    entries by a plain "<prefix><id>" string (e.g. "M5"/"K5"/"QB211"), so one function
     covers all of them via category.audit_key_prefix — classify_audit_key() is the reverse
     lookup (audit key -> WebioClass) for callers that need to go the other way.
     """
@@ -482,6 +584,25 @@ SYNC_DURATION_FUNCTION_PLAN_ELEMENT = (
 MARKER_TYPE_INTERVAL = 3
 MARKER_INTERVAL_MAX_VALUE = 86400
 
+# Range of a temperature marker number (is_temperature_marker_name below, user decision
+# 2026-10-17, #179): down to about absolute zero so negative correction offsets and outdoor
+# setpoints are settable, up to a generous ceiling that still blocks gross typos. The
+# minimum is -273, not -273.15: the frontend's number input counts its steps from the
+# minimum, so -273.15 with step 0.1 accepted only values ending in 5 (49.95, 50.05).
+MARKER_TEMPERATURE_MIN_VALUE = -273.0
+MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
+
+# A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
+# word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not
+# a temperature.
+_MARKER_TEMPERATURE_NAME_RE = re.compile(r"temp|setpoint|°c|\bgrad\b", re.IGNORECASE)
+
+
+def is_temperature_marker_name(name: str) -> bool:
+    """Whether a marker name marks a temperature (number/sensor unit heuristic)."""
+    return _MARKER_TEMPERATURE_NAME_RE.search(name) is not None
+
+
 # Round-boundary size the KNX bridge marker block is aligned to (user decision 2026-09-14,
 # see project_knx_write_path_design memory) — also caps how far _free_marker_ids() looks
 # above an already-established block's start when hunting for a reusable blank marker, so
@@ -578,6 +699,44 @@ def webio_range_check_entity_id(server_id: str) -> str:
     return f"button.comexio_{slugify(server_id)}_webio_range_check"
 
 
+def one_line(text: object) -> str:
+    """A name from Comexio on one line, for a log line, notification or service response.
+
+    Control characters (newlines included) become spaces and runs of whitespace collapse: a newline in a
+    name set in Comexio would forge extra log lines or break a notification's layout. Only for output, never
+    for an identity (tokens, issue ids, option values keep the raw name). Any value is shown as str() would:
+    a backup's name read back as null must not abort the log line or the work around it.
+    """
+    return " ".join("".join(c if c.isprintable() else " " for c in str(text)).split())
+
+
+def one_line_values(placeholders: Mapping[str, object]) -> dict[str, str]:
+    """Translation placeholders shown in a repair, every value on one line: the issue data keeps the raw names."""
+    return {key: one_line(value) for key, value in placeholders.items()}
+
+
+def _label_char(raw: str, index: int) -> str:
+    char = raw[index]
+    if char == "\\":
+        return "\\\\"
+    if char == " ":
+        hidden = index in (0, len(raw) - 1) or raw[index - 1] == " "  # a space the frontend would not show
+        return "\\x20" if hidden else char
+    return char if char.isprintable() else ascii(char)[1:-1]
+
+
+def distinct_one_line(text: object) -> str:
+    """A name on one line for a selector label, different for every different name.
+
+    one_line would show two names that differ only in line breaks or spacing alike, and a label is resolved
+    back by equality. Here a control character, a space the frontend would not show (leading, trailing or
+    repeated) and a backslash are written as escapes instead (`Hall\\nway`), so the label is the same on every
+    rebuild and no two names share one. A name without such characters is shown unchanged.
+    """
+    raw = str(text)
+    return "".join(_label_char(raw, index) for index in range(len(raw)))
+
+
 def stable_object_id(unique_id: str) -> str:
     """Object id (entity_id without domain) a Comexio IO/Marker/KNX entity requests for itself.
 
@@ -633,7 +792,17 @@ def migrate_entry_options(minor_version: int, data: Mapping[str, Any], options: 
         # "Ignore" was given for the old, much narrower doubled-prefix repair; the stable
         # entity_id migration is a different question and must be offered once.
         new_options.pop(CONF_ENTITY_ID_MIGRATION_IGNORED, None)
+    if minor_version < 4:
+        saved = options.get(CONF_COVER_KEYWORDS, data.get(CONF_COVER_KEYWORDS))
+        if saved is not None and parse_keyword_list(saved) == parse_keyword_list(LEGACY_DEFAULT_COVER_KEYWORDS):
+            # Saved the old default unchanged (the options form stores the shown default too).
+            new_options[CONF_COVER_KEYWORDS] = DEFAULT_COVER_KEYWORDS
     return new_options
+
+
+def parse_keyword_list(keywords: Any) -> list[str]:
+    """A comma-separated keyword option as a list: lower-case, stripped, no blanks (coordinator + migration)."""
+    return [kw.strip().lower() for kw in str(keywords).split(",") if kw.strip()]
 
 
 # Result dict keys shared between coordinator._async_webio_range_check_tick and the
@@ -655,6 +824,20 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 # Consecutive failed ticks before the diagnostics fall back to "unknown" instead of
 # silently keeping the last successful reading forever.
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
+
+# System info (free storage, time server settings, uptime): own slow poll, independent of the
+# config audit (skipped during a sync) — the values change slowly, a reboot shows within one interval.
+SYSTEM_INFO_POLL_INTERVAL_SEC = 300
+# Consecutive failed polls before the readings fall back to "unknown" (one hiccup keeps the last values).
+SYSTEM_INFO_FAIL_STREAK_THRESHOLD = 2
+# The boot time is now - uptime, which moves by the request latency on every poll: an estimate
+# within this many seconds of the known boot time keeps it (no state change, no recorder row).
+SYSTEM_BOOT_TIME_TOLERANCE_SEC = 60
+
+
+def system_info_signal(server_id: str) -> str:
+    """Dispatcher signal fired after every system info poll (see coordinator._async_system_info_tick)."""
+    return f"{DOMAIN}_{server_id}_system_info_update"
 
 
 def plan_watch_signal(server_id: str) -> str:
@@ -714,6 +897,11 @@ FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC = 600
 # Minimum gap after a refused auto-start before the next attempt: a check can follow within seconds
 # (switch turned on, fast preview polling), which would use up both attempts on a short-lived refusal.
 FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC = 60
+# Minimum gap before a deleted plan's alarm push that reached no notify service is sent again: the
+# checks run every few seconds while a plan card is open, and a removed phone must not get a retry each.
+FUNCTION_PLAN_WATCHDOG_PUSH_RETRY_SEC = 300
+# Longest wait for one notify service to take a watchdog push; a slower one counts as failed (retried like any).
+FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC = 30
 # After Comexio was unreachable (a poll or run-state fetch failed to connect, or HA's own emergency
 # reboot) the watchdog waits this long from the first successful read before judging the plans
 # again: a booting Comexio starts its plans itself, so a stopped plan then is no fault.
@@ -723,9 +911,31 @@ FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC = 600
 SETUP_UNREACHABLE_ENTRIES = f"{DOMAIN}_setup_unreachable"
 # ComexioAPI.last_login_error when the server could not be reached or answered garbage.
 LOGIN_ERROR_CONNECTION = "connection"
+# ComexioAPI.last_login_error when the server presented another certificate than the pinned one.
+LOGIN_ERROR_CERTIFICATE = "certificate"
+# What a user action learns when its login met LOGIN_ERROR_CERTIFICATE.
+CERTIFICATE_CHANGED_MSG = (
+    "Comexio presents another certificate than the pinned one — nothing is sent to it until you decide "
+    "in Settings → Repairs."
+)
+# ComexioAPI.last_login_error when Comexio answered and refused the credentials (setup and poll ask for reauth).
+LOGIN_ERROR_REJECTED = "rejected"
 # notify services (e.g. "mobile_app_pixel_8") that get a push with a "Start plan" action when a
 # managed plan stops; the action comes back as a mobile_app_notification_action event.
 CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY = "function_plan_watchdog_notify"
+# Longest the watchdog holds back a newly stopped plan while the plan list is re-read to tell a deleted
+# plan from a stopped one (a full poll takes a few seconds; one that brings no plan list must not mute it).
+FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC = 120
+# Longest an unload (HA's own reload) waits for a running sync, function plan restore or edit.
+FUNCTION_PLAN_UNLOAD_WAIT_SEC = 120
+# How often that unload looks whether the restore is over (it watches the lock, see async_wait_before_unload).
+FUNCTION_PLAN_UNLOAD_POLL_SEC = 0.5
+# Longest a deleted plan's Restore (watchdog push or repair) waits for a restore running elsewhere.
+FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC = 120
+# How often that Restore compares the plan now holding the deleted plan's ID, should another take it meanwhile.
+FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS = 3
+# Longest error detail a failed Restore names in its notification (an aiohttp error may carry a whole URL).
+FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX = 200
 # User plans (not managed by HA) the watchdog also keeps an eye on: list of picks "<fub_id>:<name>"
 # (see watchdog_user_plan_pick); a bare "<fub_id>" is a pick saved before the name was.
 CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS = "function_plan_watchdog_user_plans"
@@ -735,6 +945,68 @@ MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
     """unique_id of a function plan's run-state binary sensor — the plan id only, never its name."""
     return f"comexio_{server_id}_fub{fub_id}".lower()
+
+
+def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:
+    """unique_id of an extension module's firmware update entity, from the extension's name as Comexio reports it."""
+    return f"comexio_{server_id}_{ext_name}_firmware_update".lower()
+
+
+def quickbus_io_unique_id(server_id: str, io_id: str | int) -> str:
+    """unique_id of a Quickbus IO's entity — its IO Id only: G1/TL1 repeat on every device of a kind."""
+    return f"comexio_{server_id}_{SOURCE_CATEGORIES[WebioClass.QUICKBUS].unique_id_infix}{io_id}".lower()
+
+
+# Comexio's name for the IO-Server's own onboard IOs: its HA device keeps the plain name.
+BASE_EXTENSION_NAME = "BASE"
+
+
+def extension_device_name(server_id: str, ext_name: str) -> str:
+    """HA device name of an extension module: "<server> EXT - <name>", so all modules list together.
+
+    The IO-Server's onboard IOs (BASE) stay "<server> BASE" — the main unit, not an add-on module.
+    """
+    if is_base_extension(ext_name):
+        return f"{server_id} {BASE_EXTENSION_NAME}"
+    return f"{server_id} EXT - {one_line(ext_name)}"
+
+
+def is_base_extension(ext_name: str) -> bool:
+    """True for the IO-Server's onboard IOs — case-insensitive, like their lower-cased device identifier."""
+    return ext_name.upper() == BASE_EXTENSION_NAME
+
+
+def known_extension_names(data: Mapping[str, Any], include_offline: bool) -> set[str]:
+    """Names of the extensions the poll reports IOs for, offline ones only with ``include_offline``.
+
+    Counts Quickbus hosts too: a module that only hosts Quickbus devices lists no IO of its own.
+    """
+    ios = (*data.get("io", []), *data.get(QUICKBUS_IO_DATA_KEY, []))
+    return {io["ext_name"] for io in ios if include_offline or not io.get("offline")}
+
+
+def marker_device_name(server_id: str) -> str:
+    """HA device name of the marker group: "<server> Markers"."""
+    return f"{server_id} Markers"
+
+
+def extension_firmware_object_id(server_id: str, ext_name: str) -> str:
+    """Object id of an extension's firmware entity, as HA derived it before the device got its "EXT - " tag.
+
+    The entity names itself "Firmware" on the extension device, so HA would now derive
+    "<server> EXT - <ext> Firmware"; requesting the old id keeps new installs on the same ids.
+    """
+    return slugify(f"{server_id} {ext_name} Firmware")
+
+
+def quickbus_device_name(server_id: str, device_name: str) -> str:
+    """HA device name of a Quickbus device: "<server> QB - <name>", so all Quickbus devices list together."""
+    return f"{server_id} QB - {one_line(device_name)}"
+
+
+def quickbus_io_platform(io: Mapping[str, Any]) -> str:
+    """Platform of a Quickbus IO's entity: read-only always (no known API write path for its address)."""
+    return "binary_sensor" if io.get("is_binary") else "sensor"
 
 
 def function_plan_id(fid: Any) -> int | None:
@@ -752,6 +1024,46 @@ def function_plan_ids(fub_data: Mapping[str, Any]) -> set[int]:
     return {fub_id for fid in fub_data if (fub_id := function_plan_id(fid)) is not None}
 
 
+def _readable_plan_entry_id(fid: Any, info: Any) -> int | None:
+    """Plan id of a readable $Fubs entry: a canonical key, dict info, and an Id it carries matching the key."""
+    if (fub_id := function_plan_id(fid)) is None or not isinstance(info, dict):
+        return None
+    if "Id" in info and str(info["Id"]) != str(fid):
+        return None
+    return fub_id
+
+
+def function_plans(fub_data: Mapping[str, Any]) -> Iterator[tuple[int, dict[str, Any]]]:
+    """(fub_id, plan info) per readable plan in a $Fubs listing (see unreadable_plan_keys for what is skipped)."""
+    for fid, info in fub_data.items():
+        if (fub_id := _readable_plan_entry_id(fid, info)) is not None:
+            yield fub_id, info
+
+
+def function_plan_info(fub_data: Mapping[str, Any], fub_id: int | str) -> dict[str, Any]:
+    """The $Fubs info of plan fub_id, {} when it is not listed or its entry is unreadable."""
+    key = str(fub_id)
+    info = fub_data.get(key)
+    if info is None and (plan_id := function_plan_id(key)) is not None:
+        info = fub_data.get(plan_id)  # a listing keyed by int, which function_plan_id accepts as well
+    return info if _readable_plan_entry_id(key, info) is not None else {}
+
+
+def unreadable_plan_keys(fub_data: Mapping[str, Any]) -> list[str]:
+    """Keys of a $Fubs listing function_plans skips.
+
+    A key that is no plan id as str(fub_id) spells it, an entry that is no plan info, or an Id the entry
+    carries that differs from its key. A listing with any such key is unknown, never "these plans are
+    gone": the skipped entry may be a plan.
+    """
+    return [str(fid) for fid, info in fub_data.items() if _readable_plan_entry_id(fid, info) is None]
+
+
+# Sync actions acting on the audit's function plan findings only: refused while the plan list has
+# unreadable entries (the findings are unknown then), so the repair dialog does not offer them either.
+PLAN_WIRING_ACTIONS = frozenset({"function_plan_add_missing", "knx_bridge_add_missing"})
+
+
 def watchdog_user_plan_pick(fub_id: int, name: str) -> str:
     """Saved form of a user plan picked for the watchdog: its ID and its name.
 
@@ -766,6 +1078,33 @@ def parse_watchdog_user_plan_pick(value: object) -> tuple[int, str | None] | Non
     if not raw_id.isdigit():
         return None
     return int(raw_id), (name if separator else None)
+
+
+def repointed_watchdog_user_plan_picks(
+    options: Mapping[str, Any], plan_name: str, old_fub_id: int, new_fub_id: int, *, old_id_still_live: bool = False
+) -> list[Any] | None:
+    """The watchdog's user-plan picks with plan_name's pick moved from old_fub_id to new_fub_id.
+
+    For a restore-as-new, which gives a plan a fresh ID: the watched plan stays watched. A bare-ID
+    pick (saved before names were) moves too when old_fub_id is free, as it can only mean this
+    plan; while another plan holds old_fub_id (old_id_still_live) it watches that one and stays.
+    None if no pick matched.
+    """
+    movable_names = (plan_name,) if old_id_still_live else (None, plan_name)
+    raw_picks = options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS)
+    if not isinstance(raw_picks, list):
+        return None
+    moved = False
+    picks: list[Any] = []
+    for value in raw_picks:
+        pick = parse_watchdog_user_plan_pick(value)
+        kept = value
+        if pick is not None and pick[0] == old_fub_id and pick[1] in movable_names:
+            kept = watchdog_user_plan_pick(new_fub_id, plan_name)
+            moved = True
+        if kept not in picks:
+            picks.append(kept)
+    return picks if moved else None
 
 
 # Bus-Load-Watchdog: self-healing reaction to a sustained bus-load rise (observed root cause:
@@ -844,6 +1183,9 @@ WEBHOOK_VALUE_LOG_MSG = "Webhook %s push: %s = %r (prev %r)"
 # WARNING emitted when a webhook pushes a value for an IO key that is not in the parsed config
 # index — the value cannot be tracked and is dropped. Args: ext name, identifier, new value.
 WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — not tracked, dropped"
+
+# The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
+WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
 
 # Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
 # opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.
@@ -1034,6 +1376,223 @@ def io_group_headers(identifiers: list[str]) -> dict[int, str]:
     return _io_row_blocks(identifiers)[1]
 
 
+def _io_ident_blocks(_member: str, ios: Sequence[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
+    """Rows + type-group headers of an extension column (see _io_row_blocks)."""
+    return _io_row_blocks([io["identifier"] for io in ios])
+
+
+def _quickbus_io_order(io: Mapping[str, Any]) -> tuple[int, str]:
+    """Comexio's own order of a Quickbus device's IOs: by IO Id (a malformed Id sorts last)."""
+    io_id = str(io.get("id"))
+    return (int(io_id), io_id) if io_id.isascii() and io_id.isdecimal() else (2**31, io_id)
+
+
+def quickbus_column_blocks(member: str, ios: Sequence[Mapping[str, Any]]) -> tuple[dict[str, int], dict[int, str]]:
+    """Rows + header of a Quickbus device block: its name as the one header, then its IOs in Comexio's order.
+
+    The type-group rows of an extension column do not fit: G1, TL1, R or HUM name no IO type.
+    member: the device id — the header shows the device name the IOs carry.
+    """
+    rows = {io["identifier"]: row for row, io in enumerate(sorted(ios, key=_quickbus_io_order), start=1)}
+    name = ios[0]["quickbus"].get("name") if ios else None
+    return rows, ({0: io_group_header_text(one_line(name or quickbus_device_label(member, None)))} if rows else {})
+
+
+@dataclass(frozen=True, kw_only=True)
+class IoPlanKind:
+    """One kind of managed column plan: IO extensions ("HA - IO [..]") or Quickbus devices ("HA - QB [..]").
+
+    Both wire each IO of a member (an extension / a Quickbus device) to its Web-IO command at a
+    deterministic slot and share the column count (50/100/150 pairs → 1/2/3 columns per plan).
+    An extension fills a column of its own; Quickbus devices often bring only a handful of IOs,
+    so they stack within a column while they fit its height (stacked). Only what tells the
+    kinds apart lives here.
+    """
+
+    label: str  # plan-name label: "{prefix} - {label} [A,B]"
+    data_key: str  # coordinator-data key of the IOs ("io" / "quickbus_io")
+    conf_key: str  # entry.options key of the opted-in members
+    member_noun: str  # English noun of one member for logs and messages
+    member_of: Callable[[Mapping[str, Any]], str]  # member an IO belongs to (extension name / device id)
+    member_display: Callable[[Mapping[str, Any]], str]  # its member as shown to the user
+    command_name: Callable[[Mapping[str, Any]], str]  # its Web-IO command name
+    column_blocks: Callable[[str, Sequence[Mapping[str, Any]]], tuple[dict[str, int], dict[int, str]]]
+    stacked: bool  # members share a column while they fit (else one column per member)
+    member_fallback: Callable[[str], str]  # a member with no IO in the data, as shown to the user
+
+    def member_ios(self, data: Mapping[str, Any] | None, member: str) -> list[dict[str, Any]]:
+        """The IOs of one member in data (coordinator data or a fresh parse)."""
+        return [io for io in (data or {}).get(self.data_key, []) if self.member_of(io) == member]
+
+    def member_label(self, data: Mapping[str, Any] | None, member: str) -> str:
+        """A member as shown to the user (repairs, notifications): the extension / "QB3 MT1"."""
+        ios = self.member_ios(data, member)
+        return self.member_display(ios[0]) if ios else self.member_fallback(member)
+
+    def rows_needed(self, data: Mapping[str, Any] | None, member: str) -> int:
+        """Column rows one member package needs in data (IOs + header/blank separator rows)."""
+        rows, _headers = self.column_blocks(member, self.member_ios(data, member))
+        return (max(rows.values()) + 1) if rows else 0
+
+
+def io_plan_member_origins(
+    kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int
+) -> dict[str, tuple[int, int]]:
+    """(column, first row) of every member of a column plan, in membership order.
+
+    An extension gets the column of its membership index. Quickbus devices fill a column top
+    to bottom, one blank row apart, and move on to the next column once the next device would
+    not fit — membership order never changes and a new device is appended, so a placed device
+    keeps its slot. A device taller than a column starts a fresh column and wraps into the ones
+    after it.
+    rows_needed: rows of one member incl. its header.
+    """
+    if not kind.stacked:
+        return {member: (index, 0) for index, member in enumerate(members)}
+    origins: dict[str, tuple[int, int]] = {}
+    column = row = 0
+    for member in members:
+        need = rows_needed(member)
+        if not need:  # no IO any more (device gone): it takes no rows, not even a blank one
+            origins[member] = (column, row)
+            continue
+        start = row + 1 if row else 0  # a blank row below the device above
+        if row and start + need > rows_per_col:
+            column, start = column + 1, 0
+        origins[member] = (column, start)
+        row = start + need
+        if row >= rows_per_col:
+            column, row = column - (-row // rows_per_col), 0
+    return origins
+
+
+def io_plan_columns(kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int) -> int:
+    """Columns a column plan's members take (see io_plan_member_origins)."""
+    if not kind.stacked:
+        return len(members)
+    if not members:
+        return 0
+    column, row = io_plan_member_origins(kind, members, rows_needed, rows_per_col)[members[-1]]
+    return column - (-(row + rows_needed(members[-1])) // rows_per_col)
+
+
+def canvas_columns(x_max: float) -> int:
+    """Column groups a plan canvas x_max wide takes (FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH apart)."""
+    return max(1, round((x_max - FUNCTION_PLAN_LAYOUT_X_MARKER) / FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH))
+
+
+# Why a column plan member was not wired (resolve_io_clusters → the sync summary).
+PLAN_FAILURE_NOT_RESOLVED = "not resolved/created"
+PLAN_FAILURE_OFF_CANVAS = "no longer fits the plan canvas — delete the plan in Comexio to have it laid out afresh"
+PLAN_FAILURE_UNREADABLE_PLAN_LIST = "not placed — the plan list has unreadable entries, one may be its plan"
+PLAN_FAILURE_AFTER_GONE_MEMBER = (
+    "not wired — a device before it in the plan has no IOs loaded (removed, every IO ignored, or missing"
+    " from this poll); if that stays so, delete the plan in Comexio to have it laid out afresh"
+)
+
+
+def io_plan_overflow(
+    kind: IoPlanKind,
+    members: list[str],
+    rows_needed: Callable[[str], int],
+    rows_per_col: int,
+    max_columns: int,
+    *,
+    check_first: bool = False,
+) -> list[str]:
+    """Members of a Quickbus plan that end past its last canvas column, in membership order.
+
+    A device joins only while the plan's columns take it, but its IO count can grow later (or the
+    plan's paper change): the devices behind it then move right, past the canvas edge. From the
+    first member that ends there on, every later one is returned too, as each is placed after it.
+    The first member only with check_first (a fresh plan would take it, e.g. this plan's paper
+    shrank): otherwise no layout fits it, and failing it would leave its plan empty on every sync.
+    Columns beyond the configured capacity but still on the canvas are fine. An extension keeps its
+    own column (empty list).
+    """
+    if not kind.stacked:
+        return []
+    first = next(
+        (
+            i
+            for i in range(0 if check_first else 1, len(members))
+            if io_plan_columns(kind, members[: i + 1], rows_needed, rows_per_col) > max_columns
+        ),
+        len(members),
+    )
+    return members[first:]
+
+
+def io_plan_shifted(kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int]) -> list[str]:
+    """Members of a Quickbus plan placed after a member that takes no rows any more, in membership order.
+
+    A device without IOs (removed, or every IO ignored) stays in the plan name and its pairs stay
+    in the plan, but io_plan_member_origins gives it no rows: every device after it gets origins
+    inside the old slots, so a new pair would land on existing wiring. The sort refuses such a
+    plan too (_column_plan_sort_skip). An extension keeps its own column (empty list).
+    """
+    if not kind.stacked:
+        return []
+    first = next((i for i, member in enumerate(members) if not rows_needed(member)), len(members))
+    return members[first + 1 :]
+
+
+IO_PLAN_KIND_IO = IoPlanKind(
+    label="IO",
+    data_key="io",
+    conf_key=CONF_FUNCTION_PLAN_IO_EXTENSIONS,
+    member_noun="extension",
+    member_of=lambda io: io["ext_name"],
+    member_display=lambda io: io["ext_name"],
+    command_name=lambda io: f"HA IO {io['ext_name']} {io['identifier']}",
+    column_blocks=_io_ident_blocks,
+    stacked=False,
+    member_fallback=lambda ext_name: ext_name,
+)
+IO_PLAN_KIND_QUICKBUS = IoPlanKind(
+    label="QB",
+    data_key=QUICKBUS_IO_DATA_KEY,
+    conf_key=CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
+    member_noun="Quickbus device",
+    member_of=quickbus_device_id,
+    member_display=lambda io: quickbus_device_label(quickbus_device_id(io), io["quickbus"].get("name")),
+    command_name=quickbus_command_name,
+    column_blocks=quickbus_column_blocks,
+    stacked=True,
+    member_fallback=lambda device_id: quickbus_device_label(device_id, None),
+)
+IO_PLAN_KINDS = (IO_PLAN_KIND_IO, IO_PLAN_KIND_QUICKBUS)
+
+
+def io_plan_kind_of(io: Mapping[str, Any]) -> IoPlanKind:
+    """Column-plan kind of an IO: Quickbus for an IO of a Quickbus device, IO otherwise."""
+    return IO_PLAN_KIND_QUICKBUS if io.get("quickbus") else IO_PLAN_KIND_IO
+
+
+# Key of the member in a missing-wiring item of a column plan: "ext_name" for an IO extension,
+# "quickbus_device" for a Quickbus device (both items also carry "name" and "identifier").
+_IO_PLAN_ITEM_MEMBER_KEYS = {IO_PLAN_KIND_IO.label: "ext_name", IO_PLAN_KIND_QUICKBUS.label: "quickbus_device"}
+
+
+def io_plan_gap_item(name: str, io: Mapping[str, Any]) -> dict[str, Any]:
+    """Missing-wiring item of one IO in its column plan (audit function_plan_missing)."""
+    kind = io_plan_kind_of(io)
+    return {"name": name, _IO_PLAN_ITEM_MEMBER_KEYS[kind.label]: kind.member_of(io), "identifier": io["identifier"]}
+
+
+def io_plan_item_member(item: Mapping[str, Any]) -> tuple[IoPlanKind, str] | None:
+    """(kind, member) of a column-plan missing-wiring item, None for a marker/KNX item."""
+    for kind in IO_PLAN_KINDS:
+        if (member := item.get(_IO_PLAN_ITEM_MEMBER_KEYS[kind.label])) is not None:
+            return kind, member
+    return None
+
+
+def io_plan_label(io: Mapping[str, Any]) -> str:
+    """Display label of an IO in a column plan: "<extension or Quickbus device> <identifier>"."""
+    return f"{io_plan_kind_of(io).member_display(io)} {io['identifier']}"
+
+
 # need for ha ip dns validation, to avoid false positives
 KNOWN_DOMAINS = [
     "fritz.box",
@@ -1047,8 +1606,8 @@ KNOWN_DOMAINS = [
     "internal",
 ]
 
-# HA address resolution (ha_address.py): the homeassistant.<domain> candidates are looked up in
-# parallel, each capped at this timeout, so a slow NXDOMAIN/mDNS miss no longer adds up per domain.
+# HA address resolution (ha_address.py): the one lookup of a known name, and each of the
+# homeassistant.<domain> candidates (looked up in parallel, only as the last resort), is capped at this.
 HA_ADDRESS_DNS_TIMEOUT_SEC = 5.0
 # How long a definite miss (the name does not exist) of one homeassistant.<domain> candidate is
 # trusted before it is looked up again. Timeouts are never cached.
@@ -1065,8 +1624,8 @@ def parse_ignored_marker_tokens(
     Empty tokens are skipped. `parsed` is an int for a single ID, a (start, end)
     tuple for an inclusive range, or None if the token could not be parsed.
 
-    Shared low-level parser: `expand_ignored_marker_ids` below uses it for lenient runtime
-    expansion, `options_flow._normalize_ignored_ids` uses it for strict UI validation.
+    Shared low-level parser: `split_ignored_ids` below uses it for lenient runtime
+    parsing, `options_flow._normalize_ignored_ids` uses it for strict UI validation.
     """
     for token in raw.replace(";", ",").replace(" ", ",").replace(".", ",").split(","):
         display_token = token.strip()
@@ -1091,20 +1650,198 @@ def parse_ignored_marker_tokens(
                 yield display_token, None
 
 
-def expand_ignored_marker_ids(raw: str, prefix_chars: str = "Mm") -> set[int]:
-    """Expand an ignored-ids config string (markers or KNX) to a set of integer IDs.
+def split_ignored_ids(raw: str, prefix_chars: str = "Mm") -> tuple[set[int], set[tuple[int, int]]]:
+    """Split an ignored-ids config string into its single IDs and its inclusive (start, end) ranges.
+
+    A single ID a range also covers (a hand-edited '1-10,5') is left out: it is redundant, and
+    pruning it as a single would report a removal while the range still ignores it.
+    Invalid tokens are silently ignored (runtime use; options_flow validates separately).
+    """
+    singles: set[int] = set()
+    ranges: set[tuple[int, int]] = set()
+    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
+        if isinstance(parsed, tuple):
+            ranges.add(parsed)
+        elif parsed is not None:
+            singles.add(parsed)
+    return {i for i in singles if not ignored_id_in_ranges(i, ranges)}, ranges
+
+
+def invalid_ignored_tokens(raw: str, prefix_chars: str = "Mm") -> list[str]:
+    """The tokens of an ignored-ids string that are no ID or range — a rewrite of the string drops them."""
+    return [token for token, parsed in parse_ignored_marker_tokens(raw, prefix_chars) if parsed is None]
+
+
+def ignored_id_in_ranges(source_id: int, ranges: Iterable[tuple[int, int]]) -> bool:
+    """True if one of the inclusive ranges covers source_id — without expanding the ranges."""
+    return any(start <= source_id <= end for start, end in ranges)
+
+
+def _merged_intervals(intervals: Iterable[tuple[int, int]]) -> tuple[tuple[int, int], ...]:
+    """Sorted, disjoint, non-adjacent inclusive intervals covering the same IDs."""
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return tuple(merged)
+
+
+def _subtracted_intervals(
+    keep: tuple[tuple[int, int], ...], drop: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """keep's IDs minus drop's (both merged) — linear in the number of intervals, never in the IDs."""
+    result: list[tuple[int, int]] = []
+    first = 0
+    for keep_start, end in keep:
+        start = keep_start
+        while first < len(drop) and drop[first][1] < start:
+            first += 1
+        cut = first
+        while cut < len(drop) and drop[cut][0] <= end:
+            if drop[cut][0] > start:
+                result.append((start, drop[cut][0] - 1))
+            start = max(start, drop[cut][1] + 1)
+            cut += 1
+        if start <= end:
+            result.append((start, end))
+    return tuple(result)
+
+
+class IgnoredIds(AbstractSet[int]):
+    """The IDs an ignore-list covers, held as sorted, disjoint inclusive intervals.
+
+    Membership and every set operation work on the intervals themselves, so a range costs no
+    memory or time however wide it is ('1-1000000000' expanded into a set would exhaust it).
+    Only iterating visits every ID; len() raises OverflowError past sys.maxsize, like len(range(...)).
+    The other operand of an operator is iterated only when it is not an IgnoredIds, i.e. finite.
+    """
+
+    __slots__ = ("_intervals", "_starts")
+
+    def __init__(self, singles: Iterable[int] = (), ranges: Iterable[tuple[int, int]] = ()) -> None:
+        bounds = [(min(start, end), max(start, end)) for start, end in ranges]
+        self._intervals = _merged_intervals([*bounds, *((i, i) for i in singles)])
+        self._starts = [start for start, _end in self._intervals]
+
+    @staticmethod
+    def _intervals_of(other: AbstractSet[Any]) -> tuple[tuple[int, int], ...]:
+        """other's integer IDs as merged intervals; other's non-integers are never covered here."""
+        if isinstance(other, IgnoredIds):
+            return other._intervals
+        return _merged_intervals((i, i) for i in other if isinstance(i, int))
+
+    @staticmethod
+    def _only_ints(other: AbstractSet[Any]) -> bool:
+        return isinstance(other, IgnoredIds) or all(isinstance(i, int) for i in other)
+
+    def __contains__(self, item: object) -> bool:
+        if not isinstance(item, int):
+            return False
+        index = bisect_right(self._starts, item) - 1
+        return index >= 0 and item <= self._intervals[index][1]
+
+    def __iter__(self) -> Iterator[int]:
+        for start, end in self._intervals:
+            yield from range(start, end + 1)
+
+    def __bool__(self) -> bool:
+        # Not via __len__: a range wider than sys.maxsize IDs makes len() raise OverflowError.
+        return bool(self._intervals)
+
+    def __len__(self) -> int:
+        return sum(end - start + 1 for start, end in self._intervals)
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and self._intervals == self._intervals_of(other)
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __le__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return not _subtracted_intervals(self._intervals, self._intervals_of(other))
+
+    def __ge__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self._only_ints(other) and not _subtracted_intervals(self._intervals_of(other), self._intervals)
+
+    def __lt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self <= other and self != other
+
+    def __gt__(self, other: AbstractSet[Any]) -> bool:
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self >= other and self != other
+
+    def __sub__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        """Remove other's IDs (e.g. the unignorable bridge markers) without expanding a range."""
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    def __rsub__(self, other: AbstractSet[Any]) -> set[Any]:
+        # other is no IgnoredIds here (that one's __sub__ ran first), so it is finite to walk.
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return {i for i in other if i not in self}
+
+    def __and__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet):
+            return NotImplemented
+        return self - IgnoredIds(ranges=_subtracted_intervals(self._intervals, self._intervals_of(other)))
+
+    __rand__ = __and__
+
+    def __or__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        return IgnoredIds(ranges=(*self._intervals, *self._intervals_of(other)))
+
+    __ror__ = __or__
+
+    def __xor__(self, other: AbstractSet[Any]) -> "IgnoredIds":
+        if not isinstance(other, AbstractSet) or not self._only_ints(other):
+            return NotImplemented
+        theirs = self._intervals_of(other)
+        return IgnoredIds(
+            ranges=(*_subtracted_intervals(self._intervals, theirs), *_subtracted_intervals(theirs, self._intervals))
+        )
+
+    __rxor__ = __xor__
+
+    def isdisjoint(self, other: Iterable[Any]) -> bool:
+        if isinstance(other, IgnoredIds):
+            return not self & other
+        return not any(i in self for i in other)
+
+    def __repr__(self) -> str:
+        return f"IgnoredIds({format_ignored_ids(set(), set(self._intervals))!r})"
+
+
+def parse_ignored_ids(raw: str, prefix_chars: str = "Mm") -> IgnoredIds:
+    """The IDs an ignored-ids config string (markers or KNX) covers, ranges kept unexpanded.
 
     Invalid tokens are silently ignored (runtime use; options_flow validates separately).
     """
-    result: set[int] = set()
-    for _token, parsed in parse_ignored_marker_tokens(raw, prefix_chars):
-        if parsed is None:
-            continue
-        if isinstance(parsed, tuple):
-            result.update(range(parsed[0], parsed[1] + 1))
-        else:
-            result.add(parsed)
-    return result
+    singles, ranges = split_ignored_ids(raw, prefix_chars)
+    return IgnoredIds(singles, ranges)
+
+
+def format_ignored_ids(singles: set[int], ranges: set[tuple[int, int]], prefix: str = "") -> str:
+    """The ignored-ids option string: singles and ranges sorted by start, e.g. '1,3,8-12'.
+
+    The one writer of the format, so a rewrite never flattens the user's ranges into single IDs.
+    A single ID a range already covers (e.g. '1-3,2') is dropped as redundant.
+    """
+    items = sorted([*ranges, *((i, i) for i in singles if not ignored_id_in_ranges(i, ranges))])
+    return ",".join(f"{prefix}{start}" if start == end else f"{prefix}{start}-{end}" for start, end in items)
 
 
 def is_valid_entity_name_schema(schema: Any) -> bool:

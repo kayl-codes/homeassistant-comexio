@@ -6,6 +6,7 @@ connects markers to their matching WebIO commands on the plan canvas, reusing ex
 canvas elements where possible and claiming free grid slots (via ._grid) for new ones.
 """
 
+from collections.abc import Set as AbstractSet
 import logging
 import time
 
@@ -19,25 +20,34 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_X_WEBIO as _LAYOUT_X_WEBIO,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
-    expand_ignored_marker_ids,
+    IgnoredIds,
+    function_plan_info,
+    one_line,
+    parse_ignored_ids,
 )
-from ._context import _ensure_comexio_login, _get_canvas_grid_dims, _plan_activation_note, _resolve_function_plan
+from ._context import (
+    _ensure_comexio_login,
+    _get_canvas_grid_dims,
+    _plan_activation_note,
+    _resolve_function_plan,
+    refuse_while_plans_busy,
+)
 from ._grid import _find_first_free_grid_position, _get_occupied_grid_slots
 
 _LOGGER = logging.getLogger(__name__)
 
 
-def _parse_ignored_marker_ids(conf: dict) -> set[int]:
-    """Parse the ignored_markers option string into a set of marker IDs.
+def _parse_ignored_marker_ids(conf: dict) -> IgnoredIds:
+    """Parse the ignored_markers option string into the marker IDs it covers.
 
-    Delegates entirely to expand_ignored_marker_ids (see its docstring for separator/
+    Delegates entirely to parse_ignored_ids (see its docstring for separator/
     whitespace/range/invalid-token handling) so this wrapper can't drift from it.
     """
-    return expand_ignored_marker_ids(conf.get(CONF_IGNORED_MARKERS, ""))
+    return parse_ignored_ids(conf.get(CONF_IGNORED_MARKERS, ""))
 
 
 def _resolve_requested_marker_ids(
-    raw_input: str, all_markers: bool, markers_by_id: dict, ignored_ids: set[int]
+    raw_input: str, all_markers: bool, markers_by_id: dict, ignored_ids: AbstractSet[int]
 ) -> tuple[list[int], list[str]]:
     """Resolve the requested marker IDs from the service call's `marker_id`/`all_markers` input.
 
@@ -243,13 +253,13 @@ async def _connect_marker_to_webio(
     expected_cmd_name = f"HA {marker['name']}"
     webio_cmd = webio_commands.get(expected_cmd_name)
     if not webio_cmd:
-        _LOGGER.warning("Function Plan Connect: M%s — WebIO '%s' not found", marker_id, expected_cmd_name)
-        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' not found"
+        _LOGGER.warning("Function Plan Connect: M%s — WebIO '%s' not found", marker_id, one_line(expected_cmd_name))
+        return None, None, f"M{marker_id}: WebIO '{one_line(expected_cmd_name)}' not found"
 
     # ref_id for type=10 (WebIO) is the local FubModules dict-key (webIoId), not cmdId
     web_ref_id = webio_cmd.get("webIoId")
     if web_ref_id is None:
-        return None, None, f"M{marker_id}: WebIO '{expected_cmd_name}' has no webIoId"
+        return None, None, f"M{marker_id}: WebIO '{one_line(expected_cmd_name)}' has no webIoId"
 
     conn_type = "binary" if marker["type"] == "digital" else "analog"
 
@@ -270,7 +280,7 @@ async def _connect_marker_to_webio(
         _LOGGER.info("Function Plan Connect: M%s — already connected in plan, skipped", marker_id)
         return (
             None,
-            f"M{marker_id} ({marker['name']}): already connected in plan {fub_id}"
+            f"M{marker_id} ({one_line(marker['name'])}): already connected in plan {fub_id}"
             f" (elem {existing_marker_elem}→{existing_webio_elem})",
             None,
         )
@@ -303,12 +313,13 @@ async def _connect_marker_to_webio(
     if already_wired:
         return (
             None,
-            f"M{marker_id} ({marker['name']}): already wired (elem {elem_marker}→{elem_webio}), no new connection",
+            f"M{marker_id} ({one_line(marker['name'])}): already wired (elem {elem_marker}→{elem_webio}), "
+            "no new connection",
             None,
         )
 
     result = (
-        f"M{marker_id} ({marker['name']}) → elem={elem_marker} | "
+        f"M{marker_id} ({one_line(marker['name'])}) → elem={elem_marker} | "
         f"WebIO webIoId={web_ref_id} → elem={elem_webio} ({conn_type})"
     )
     return result, None, None
@@ -367,70 +378,75 @@ async def handle_function_plan_connect(hass: HomeAssistant, call: ServiceCall) -
 
     if not await _ensure_comexio_login(hass, api, error_title):
         return
+    # Again after the login round-trip: a restore may have started meanwhile.
+    if refuse_while_plans_busy(hass, coordinator, error_title):
+        return
 
-    plan_info = api.fub_data.get(str(fub_id), {})
-    was_active = bool(plan_info.get("Active", True))
-    await coordinator.async_function_plan_change_backup(fub_id, f"connect_poc {[f'M{m}' for m in marker_ids]}")
-    if was_active:
-        await api.function_plan_stop_fup(fub_id)
+    # No await since the check: a restore starting from here on refuses until the writes end.
+    with coordinator.plan_edit():
+        plan_info = function_plan_info(api.fub_data, fub_id)
+        was_active = bool(plan_info.get("Active", True))
+        await coordinator.async_function_plan_change_backup(fub_id, f"connect_poc {[f'M{m}' for m in marker_ids]}")
+        if was_active:
+            await api.function_plan_stop_fup(fub_id)
 
-    # Canvas bounds and column layout — DPI+orientation always from plan data
-    canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
-    canvas_format, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
-    _LOGGER.info(
-        "Function Plan Connect: Canvas %s %.0f×%.0f (Plan fub_id=%s)",
-        canvas_format,
-        x_max,
-        y_max,
-        fub_id,
-    )
-    _LOGGER.info(
-        "Function Plan Connect: Canvas %s (%.0f×%.0f) → %d rows/column, %d columns",
-        canvas_format,
-        x_max,
-        y_max,
-        rows_per_col,
-        max_cols,
-    )
-
-    # Load current plan state: existing elements + connections
-    existing_by_ref, connected_pairs, occupied_slots, plan_data = await _load_connect_poc_topology(
-        api, fub_id, rows_per_col, max_cols
-    )
-
-    _LOGGER.info("Function Plan Connect: fub_id=%s, %d markers to process: %s", fub_id, len(marker_ids), marker_ids)
-    t_start = time.monotonic()
-    results: list[str] = []
-    errors: list[str] = []
-    skipped: list[str] = []
-
-    for marker_id in marker_ids:
-        marker = markers_by_id.get(marker_id)
-        result, skip, error = await _connect_marker_to_webio(
-            api,
+        # Canvas bounds and column layout — DPI+orientation always from plan data
+        canvas_format_raw = str(call.data.get("canvas_format", "")).strip().upper()
+        canvas_format, x_max, y_max, rows_per_col, max_cols = _get_canvas_grid_dims(api, fub_id, canvas_format_raw)
+        _LOGGER.info(
+            "Function Plan Connect: Canvas %s %.0f×%.0f (Plan fub_id=%s)",
+            canvas_format,
+            x_max,
+            y_max,
             fub_id,
-            marker_id,
-            marker,
-            webio_commands,
-            existing_by_ref,
-            connected_pairs,
-            occupied_slots,
+        )
+        _LOGGER.info(
+            "Function Plan Connect: Canvas %s (%.0f×%.0f) → %d rows/column, %d columns",
+            canvas_format,
+            x_max,
+            y_max,
             rows_per_col,
             max_cols,
-            canvas_format,
-            plan_data,
         )
-        if result:
-            results.append(result)
-        if skip:
-            skipped.append(skip)
-        if error:
-            errors.append(error)
 
-    duration = time.monotonic() - t_start
-    # Plan was stopped above whenever it was active, so it must always be resumed
-    # here regardless of `results` — otherwise a no-op run (e.g. all markers
-    # already connected) leaves a previously active plan stopped permanently.
-    activated = await api.function_plan_run_fup(fub_id) if was_active else False
-    msg, title = _build_connect_poc_summary(fub_id, results, skipped, errors, duration, was_active, activated)
-    persistent_notification.async_create(hass, msg, title=title)
+        # Load current plan state: existing elements + connections
+        existing_by_ref, connected_pairs, occupied_slots, plan_data = await _load_connect_poc_topology(
+            api, fub_id, rows_per_col, max_cols
+        )
+
+        _LOGGER.info("Function Plan Connect: fub_id=%s, %d markers to process: %s", fub_id, len(marker_ids), marker_ids)
+        t_start = time.monotonic()
+        results: list[str] = []
+        errors: list[str] = []
+        skipped: list[str] = []
+
+        for marker_id in marker_ids:
+            marker = markers_by_id.get(marker_id)
+            result, skip, error = await _connect_marker_to_webio(
+                api,
+                fub_id,
+                marker_id,
+                marker,
+                webio_commands,
+                existing_by_ref,
+                connected_pairs,
+                occupied_slots,
+                rows_per_col,
+                max_cols,
+                canvas_format,
+                plan_data,
+            )
+            if result:
+                results.append(result)
+            if skip:
+                skipped.append(skip)
+            if error:
+                errors.append(error)
+
+        duration = time.monotonic() - t_start
+        # Plan was stopped above whenever it was active, so it must always be resumed
+        # here regardless of `results` — otherwise a no-op run (e.g. all markers
+        # already connected) leaves a previously active plan stopped permanently.
+        activated = await api.function_plan_run_fup(fub_id) if was_active else False
+        msg, title = _build_connect_poc_summary(fub_id, results, skipped, errors, duration, was_active, activated)
+        persistent_notification.async_create(hass, msg, title=title)

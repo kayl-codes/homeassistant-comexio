@@ -13,7 +13,7 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - Focus on correctness: logic errors, unhandled edge cases, race conditions, resource leaks, silent failures
   (swallowed exceptions, fallbacks that hide stale or missing data), and wrong use of Home Assistant APIs.
 - Do **not** comment on formatting, import order or line length — ruff (`ruff check` + `ruff format`, line length
-  120, rule sets B, C4, E, F, I, SIM, UP, W) enforces those in CI.
+  120, rule sets B, C4, E, F, FURB, I, PERF, PIE, PLE, PLW, RET, RSE, SIM, UP, W) enforces those in CI.
 - Do not suggest extra defensive checks for service fields already validated by the service schema or entity
   selectors; suggest guards only where data bypasses those validators.
 - Where validation guarantees a dict key exists, prefer `data["key"]` over `data.get("key")` so contract
@@ -21,13 +21,31 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 
 ## Project rules to check
 
-- **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
-  constants (S1192). Tuning values and thresholds belong in `const.py`, not inline.
+- **Complexity:** cognitive complexity ≤ 15 per function as SonarCloud measures it (S3776).
+  `test_cognitive_complexity.py` checks it locally with complexipy; its `BASELINE` is the only permitted exception
+  (functions SonarCloud accepts but complexipy rates above 15) — flag a new entry there. No duplicated string
+  literals — extract constants (S1192). Tuning values and thresholds belong in `const.py`, not inline.
 - **Stable IDs:** unique_ids and entity_ids carry only the technical address (`comexio_{server_id}_m{id}`,
   `..._k{id}`, `..._{ext_name}_{identifier}`, `..._fub{id}`); only the display name carries the Comexio
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
 - **Persisted identifiers:** the lowercase `logikplan_*` option keys, `Store` storage keys and the plan-selector
   unique_id are frozen legacy spellings. Flag renames without migration code.
+- **Changed defaults reach saved entries:** the initial config flow (into `entry.data`) and the options form (into
+  `entry.options`) store the shown default together with the user's input, so an entry that holds the key in either
+  keeps the old default as if the user had typed it, while an entry that holds it in neither reads the current
+  `DEFAULT_*` at runtime (the code reads `{**entry.data, **entry.options}`, so a migrated option overrides an old data
+  value; a key read straight from `entry.data` instead needs `async_migrate_entry` to pass an updated `data=` as
+  well). A changed default needs a config entry migration (except in the last case below): bump
+  `CONFIG_ENTRY_MINOR_VERSION` and add an `if minor_version < N` branch to `migrate_entry_options`
+  (`async_migrate_entry` and the config flow's `MINOR_VERSION` follow the constant). Flag a changed default without
+  it.
+  - Existing installs should get it, and a form saves the key: the branch replaces a saved value equal to the old
+    default, compared the way the code reads it, and keeps a customised one (accepted trade-off: a user who
+    deliberately chose the old default is migrated too; the PR says so).
+  - Only new installs should get it: the branch pins the old default into entries without a saved value (as
+    1.2 -> 1.3 does with `LEGACY_DEFAULT_SCHEMA_IO`).
+  - Existing installs should get it, and no form ever saves the key: no migration needed, the runtime fallback
+    already delivers it.
 - **Terminology:** "function plan" is the English term in code, services, logs, notifications and en/fr/es
   translations; "Logikplan" is the German translation, used in `de.json` and the German sections of the Markdown
   docs (and as a parenthetical gloss such as "function plan (Logikplan)"), never in English UI text or code. Never
@@ -35,6 +53,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Translations:** `translations/strings.json` is authoritative; every new key must also exist in `en.json`,
   `de.json`, `fr.json` and `es.json`. `persistent_notification` texts are English.
 - **Services:** every service logs its parameters and reports its duration.
+- **Descriptions follow the behaviour:** a change in what an option, service, switch or repair does updates its
+  description in the same PR — `services.yaml`, the option and field descriptions in `strings.json` and all
+  translation files, and the README/CONFIGURATION sections that describe it. Flag a behaviour change whose
+  descriptions still state the old behaviour (#181). A description of a protection or eligibility rule names the
+  attribute the code checks (e.g. the marker's CategoryId), not an origin it is assumed to stand for ("created by
+  HA", "created in Studio") — markers from the Studio plan editor carry CategoryId 1 like API-created ones (#186).
 - **Concurrency:** Web-IO syncs run under the coordinator's `_sync_lock`; webhook values arriving during a config
   fetch must win over the stale API snapshot (guard R1). Flag changes that weaken these guards.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
@@ -47,25 +71,195 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   last poll; `None` until the first full poll), never by a bulk-load snapshot — the bulk load may omit plans. Flag
   code that drops findings, backups or watches of a plan only because a snapshot lacks it.
 - **Plan identity:** a function plan is identified by its `fub_id` and its name together — Comexio reuses the
-  `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches or
-  findings to a plan by only one of the two.
+  `fub_id` of a deleted plan, and plan names are not unique. Flag code that matches backups, snapshots, watches,
+  findings or in-flight guards of a vanished plan (the set of plans whose restore runs) to a plan by only one of
+  the two — a guard keyed by name alone blocks a same-named other plan (#181). A live plan can be renamed while an
+  operation on it runs, so the exclusion of operations on a live plan is a lock or the `plan_edit()` marker, never a
+  name-keyed set. A plan recreated under the same `fub_id` and name counts as the same plan — its backups and
+  watches carry over on purpose; an accepted limit, do not flag it. A selection stored as a `fub_id` alone means the plan holding that id now: code that moves such a
+  selection to another id (e.g. after a restore as new plan) leaves it in place while another live plan holds the
+  old id (#181). The same goes for ids derived from a plan — repair issue ids, push tags, push action ids,
+  notification ids. An id of a plan Comexio no longer has (a vanished watched plan, an orphaned backup) carries the
+  `fub_id` and a digest of the name (`vanished_plan_token`, `orphaned_backup_issue_id`), never the `fub_id` alone:
+  two gone plans can share an id. The digest is a cut SHA-256 of at least 48 bits — a 32-bit checksum such as
+  CRC32 lets two names of one `fub_id` share an id. A new id picks its length once; an existing id keeps its digest
+  length: it is persisted, and its clean-up pattern matches exactly that length (`orphaned_backup_issue_id`: 12 hex
+  digits, `vanished_plan_token`: 16) — lengthening it orphans the ids already raised. A push or repair that acts on
+  a live plan checks before acting that the plan it was raised for is still the one under the id — the `fub_id`
+  and the name it was raised for (the "Start plan" action carries `vanished_plan_token`, the stopped-plan repair
+  its `plan_name`; `watches_plan_raised_for`), not only that the id is watched: Comexio may have given the id to
+  another watched plan since (#185). A legacy pick stored as a bare `fub_id` (no name) means the user plan holding
+  that id now, like any selection stored as a `fub_id` alone — acting on that plan, renamed or not, is intended, do
+  not flag it. The exception covers only that bare-ID watch: an HA-managed plan that holds the id is matched by
+  name, and a "Start plan" action sent before it carried the token (no name) starts only a bare-ID pick.
+- **Push tags are shared slots:** a live plan's push carries the tag `plan_{fub_id}` (`_push_tag`), and a newer
+  push or a `clear_notification` under that tag replaces or removes whatever the phone shows there — also the
+  current alarm of another plan that holds the ID now. A push whose action is ignored as stale is taken off the
+  phone or replaced, never left with a button that does nothing. Before clearing a `plan_{fub_id}` push, check that
+  the ID's plan is not stopped: while it is, its own alarm holds the tag (`async_dismiss_push` keeps it) — that
+  alarm, pushed on the stop and sent again to a target that did not take it, is what replaced the stale push, so
+  keeping the tag is not leaving the stale push in place. The phone shows the push under a tag that arrived last,
+  so every send under one tag (push or clear) holds the tag's lock (`_push_lock`), and what it depends on is judged
+  under that lock: the clear's "not stopped" check (`keep_stopped=True`), and every push with a "Start plan"
+  button (alarm, busy/failed reply, outdated replacement) only while the ID still holds that stopped plan, same name
+  (`while_stopped=True`) — a stop or start judged while another send waited would else have its alarm taken off,
+  a running plan get a button, or another plan under the ID a push naming the old one (#187). Flag a send under a
+  shared tag outside that lock, a start-button push without `while_stopped`, a deleted plan's push with buttons without a `vanished_guard` (`_VanishedGuard`: not once restored, nor once a check dropped the plan from vanished or listed it again), and a condition judged before waiting
+  for the lock. The locks are dropped once no send holds or waits for them, and are module-wide (`_PUSH_LOCKS`):
+  a reloaded entry's watchdog sends under the old one's tags while its sends may still be on their way, so a lock
+  per instance does not serialize them. The unload closes the old watchdog once the platforms unloaded (`close()`,
+  judged under the lock), so what its still-running check queues behind the new one's alarm is dropped; not before
+  the unload's wait (the awaited restore's push would be lost) nor on a failed unload (alarms silenced for good). After an await, a closed watchdog applies
+  nothing to the server's shared repairs: its snapshot predates the new one's. A plan's last push with buttons, delivered
+  before the reload or still on its way, is the reloaded watchdog's to clear (`_ACTIONABLE_TAGS`, module-wide) for a
+  plan it sees running or no longer watches (tags of its own server only), judged under the lock (`only_actionable`). Flag a post-await write of a closed watchdog. Each notify call is bounded
+  (`FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC`), since a hanging one holds the lock. Clears and replacements reach the notify targets
+  configured now; a phone whose target was removed is out of HA's reach and not a finding. A failed clear is logged
+  and not retried: pressing the stale action again sends it again. A deleted plan's push has its own
+  `vanished_{token}` tag and is removed by that token, not by the `fub_id`. Only `clear_notification` goes to
+  mobile_app notify services alone (`mobile_app_only=True`), since any other service shows it as text; alarms
+  and replacement pushes go to every configured target. Flag a clear or replacement under a shared tag without
+  that check, and a stale push left in place (#185).
+- **Names are no proof:** "a plan with that name exists" proves neither that a restore or create succeeded nor which
+  plan it is — a half-built earlier restore or an unrelated plan with the same name matches too. A create succeeded
+  only if it reports the new plan's `fub_id`; that id proves the create, not the restore built on it — a restore
+  succeeded only by its final status (see *Report after the final status*). Persisted data still matches a plan by
+  `fub_id` and name together (see *Plan identity*). The one valid name lookup recovers the id after Comexio confirmed a create without
+  returning one, and accepts only exactly one plan with that name whose id was unknown before the create
+  (`_find_created_plan`). It cannot tell that plan from a same-named plan created in Comexio Studio at the same
+  moment — an accepted limit, concurrent Studio edits are out of scope; do not flag it. Flag any other name lookup
+  used as a success check or as the plan's identity.
 - **Data read from Comexio:** an entry counts as missing from a list or mapping read from Comexio (e.g. `$Fubs`)
   only after the whole list passed a shape check — every entry has the expected type, its key is a canonical id
   string, and an `Id` the entry carries matches that key. An unreadable or malformed list means "unknown", never "deleted". Flag code that turns a
-  read or parse failure into "entry missing" and acts on it (#158).
+  read or parse failure into "entry missing" and acts on it (#158). A failed read is also no fresh reading: the
+  steps that do not depend on it still run, and steps that judge by elapsed time do not use the last known values
+  as if they were new. Flag an early return on a failed read that skips the independent steps (#181).
+- **User-entered sizes are never expanded unbounded:** a value the user types that stands for many items — an ID
+  range such as `100-1000000000` in an ignore-list, a count, a span — is checked by membership or arithmetic; it is
+  turned into one object per item (a set, a list, a loop over every ID) only behind a cap checked before the
+  expansion, so the work stays bounded. An over-cap value is rejected as a whole with a message naming it, never
+  cut off at the cap — a truncated range ignores or acts on only part of what the user asked for, silently. Such a
+  cap holds for every path that expands the value, applied the same way — the options flow, the coordinator, the
+  services and the audit; a cap only the form checks lets an older saved value or a service call through to an
+  expanding path. A reader that only checks membership or does arithmetic needs no cap. Flag code that expands a
+  user-entered range or count without a cap, a cap that truncates instead of rejecting, and a cap that only some
+  expanding paths apply (#198).
+- **Fail closed on every transport error:** `get_raw_config` raises a plain `ComexioConnectionError` when the
+  failure has no aiohttp or timeout cause. A path that must refuse when Comexio cannot be read (a delete gate, a
+  safety check) catches `ComexioConnectionError` next to `aiohttp.ClientError` and `TimeoutError`; otherwise the
+  error escapes the gate and the service ends without a result or notification. Flag a fail-closed `except` behind
+  `get_raw_config` that lacks it (#186).
+- **Names from Comexio are cleaned before output:** plan, marker and IO names come from the Comexio admin and can
+  hold line breaks or control characters. Before a name goes into a log line, a notification or a service response,
+  replace non-printable characters and collapse whitespace to one line (`const.one_line`), so a name cannot
+  split a log entry or break the notification layout. Flag new code that writes a Comexio name to a log line,
+  notification or response unfiltered; entity display names are out of scope (#186).
+- **Stored values are checked against the allowed set:** a value read back from a `Store` or from the config entry
+  (a protocol, a mode, an enum-like string) is compared with the values the code knows before it drives a decision.
+  An unknown value — a typo, a newer version's value after a downgrade, a hand-edited file — counts as "unknown",
+  never as one of the known values by default. Flag code that branches on a stored value with an `else` that
+  silently treats every other value as a known one (#222).
+- **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
+  credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
+  info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
+- **A selection filters every path:** once the user narrows what the integration manages — selected Quickbus
+  devices, opted-in Web-IO classes, managed plan kinds — every path that builds or acts on those items applies the
+  same filter through one shared helper: the generation service and the sync, the audit
+  and its repair items, the add-missing action. That includes items taken from an earlier audit result, which may
+  predate a changed selection or an offline device. Flag a path that reads `coordinator.data` or a cached result
+  directly where a sibling path filters by the selection (#220).
+- **Unavailable items keep their selection:** an options form offers only the items available now (an offline
+  extension hides its IOs and Quickbus devices), but a saved selection that is treated as authoritative must keep
+  the IDs of the hidden items — otherwise saving the form while a device is offline deselects it for good, and it
+  gets no Web-IO commands or plan wiring when it returns. Flag a form that rebuilds a selection only from the
+  currently offered options (#220).
+- **One snapshot per layout:** positions that must fit together (member origins, pair rows, header offsets, the
+  sort grid) come from the same config read; mixing cached coordinator data with a fresh reload lets one block
+  overlap another when the data changed in between. A writer that reloads before it writes compares the row counts
+  its origins were derived from with the fresh read and writes nothing for a member when they differ
+  (`stacked_rows` in `function_plan_add_io_pairs`) and reports it as not wired; a sync starts from the cached
+  coordinator data, so only a sync after the next poll lays that member out from one snapshot again.
+  A member whose origin would move goes to the failures with its reason instead of being wired at the new origin
+  over pairs already placed: a stacked member behind one left without rows (`const.io_plan_shifted`), a first
+  member a shrunk canvas no longer holds (`io_plan_overflow(..., check_first=True)`). Flag positions computed from
+  two different data sources, and pairs added at a recomputed origin while the elements already placed stay where
+  they were (#220).
+- **No guessed default on a missed lookup:** when the metadata of an item is gone (a removed IO, a vanished
+  device), derive its category from where it was found — the plan, class or member it sits in — instead of falling
+  back to a fixed default such as `WEBIO_CLASS_IO`; a wrong default routes the item to a path that never handles
+  it. Flag a fallback constant on a failed lookup where the context still tells the right answer (#220).
 - **Re-check under the lock:** state checked before waiting for a lock (an armed preview, a selection generation, a
   cached object, a running sync or restore) can change while waiting; check it again once the lock is held, as
   `plan_preview.async_follow_selection` does. Flag a check followed by `async with <lock>` without that re-check.
+- **Hold the guard across the writes:** a check that refuses to start while a restore, sync, cleanup or plan edit
+  runs protects only if the caller then holds the lock or the `coordinator.plan_edit()` marker across all of its
+  writes, and the other operation checks that lock or marker too, in both directions. Flag a "nothing is running"
+  check followed by writes without either, and a new operation that writes function plans or backups without
+  joining the mutual exclusion (`refuse_while_plans_busy`, `_async_acquire_sync_lock`, `_cleanup_blocked_by_sync`,
+  the restore refusal) (#176).
+- **Awaits inside the guard's `try`:** every `await` between setting a guard flag (`unloading = True`, a busy flag)
+  and the `try/finally` that resets it sits inside the `try` — a raised or cancelled await otherwise leaves the flag
+  set forever. Flag an `await` between the flag assignment and the `try` (#181).
+- **No await between reading and writing the options:** code that copies `entry.options`, changes the copy and
+  saves it with `async_update_entry` has no `await` in between — another save during that await (options flow,
+  watchdog, sync) is otherwise overwritten with the stale copy. Await follow-ups (push dismissal, notifications)
+  after the save. Flag an `await` between the read of `entry.options` and its write (#181).
+- **No stale write-back after an await:** the same holds for state judged before an await and assigned after it.
+  The watchdog's check judges the stopped plans, awaits Auto-Start, then writes them back — a plan started from its
+  repair or push meanwhile is left out (`_started_in_check`), else its repair and alarm come back while it runs.
+  Flag state read before an `await` and assigned back after it without merging what changed meanwhile (#187).
+  The same per item in a loop that awaits once per plan (a start, a push): what the loop decided before it began
+  (to start, to push, to clear) is re-checked for each plan right before its own await and its answer — a plan
+  started or restored while an earlier plan's await ran keeps its confirmation (`_started_in_check`,
+  `unless_restored`).
+- **Skip guards before the first write:** a list chosen up front (the classes a sync runs, the plans a repair
+  fixes) can be stale by the time an item's turn comes — an options save mid-sync can empty a class. The guard
+  against writing for nothing (an empty template, no wanted command) runs right before that item's first write and
+  covers every branch that would write it, not just one of them: `_decide_effective_action` checks
+  `_class_template_empty` before the no-device recreate (the class is skipped, Comexio creates no device for an
+  empty class) as well as before Fast-Track. What the guard prevents depends on the branch: a class that still has a
+  device is not skipped but delta-synced without Fast-Track, which deletes the orphans its start-of-sync audit
+  (`last_audit_results`) captured; a command dropped after that audit stays on Comexio until a later audit captures
+  it. Flag a guard that only one of several writing branches passes through, a guard that also
+  skips the cleanup an existing item still needs, and an item written on the strength of a decision taken before
+  the loop (#220).
+- **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
+  unloads the platforms; the wait is bounded and polls — it never queues on a lock — for every operation that
+  writes Comexio, the options or the backup store: a restore, a sync, a vanished-plan restore, a plan edit, a
+  backup change from a service or repair. A new
+  long-running operation joins that wait and refuses to start while `coordinator.unloading` is set. Flag an
+  operation that can still run or start after the unload passed its wait (#181).
+- **Background tasks report the whole flow:** a task started with `async_create_background_task` (or
+  `hass.async_create_task`) wraps its whole flow — waits and lookups included, not only the main call — in one
+  error path that logs and reports the failure; otherwise an early exception vanishes in the task. A one-off flow
+  (a restore, a service) reports each failure to the user (notification, push); a recurring task reports by the
+  rule *Repeated calls stay quiet*. A follow-up after the success (repoint, confirmation push) gets its own `try`, so its failure does not
+  report the finished work as failed (#181).
+- **Report after the final status:** a result report (a "restored completely/OK" flag, a success push or note) is
+  recorded only after the last status change — a later step (lineage move, reference repoint, warnings) can still
+  turn OK into PARTIAL, and a report written earlier claims a success that did not happen (#181).
+- **A finished write stays reported:** once a step wrote Comexio in a way the operation cannot take back (a plan
+  was built, a command saved), a later step's error — any exception, not only network errors or timeouts — does not
+  report the whole operation as failed: the result keeps the finished write and names the failed step. A "failed"
+  result invites a retry that writes it a second time (e.g. a restored plan whose start failed, built twice).
+  Flag an `except` after such a write that is narrower than the errors the later step can raise, or that reports
+  the operation as failed (#181).
 - **Early returns:** a coordinator cycle that changes state an entity shows and then returns early still calls
   `async_update_listeners()`, otherwise the entity shows the old state until the next poll.
 - **Timestamps:** a timestamp that starts a cooldown or retry interval, or records the last attempt, is taken
   after the awaited request it belongs to, not before — otherwise a slow Comexio shortens the interval.
 - **Repeated calls stay quiet:** paths the plan card or a timer repeats (keepalive, retries, periodic ticks) report
   failures at debug level, without a persistent notification or repair each time — e.g.
-  `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure.
+  `_resolve_coordinator(..., quiet=True)`. Flag a repeated path that notifies on every failure. A failed action that
+  is retried on each check waits a minimum interval between attempts, each kind of action with its own constant in
+  `const.py` — the plan card checks every few seconds (#181). An open-ended retry series warns only on the first
+  failure and logs the retries at debug level; a series capped by a give-up counter may warn on each counted
+  attempt. Automatic retries are not sent while Comexio is unreachable or its state could not be read; a start the
+  user triggers from a repair or push is not held back by this (it still needs a successful login).
 - **Repair flows read the current entry:** before a destructive action (cleanup, delete, reset), a repair flow
   step reads the current config entry state (`options`/`data`) again instead of relying on `issue_data` alone —
   the dialog may have been open while the user changed the options, so the issue data can be stale (#160).
@@ -85,6 +279,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
   raise site). A computed `translation_key` must come from a `self.` helper returning constants or from a
   parameter whose callers pass constants; `is_fixable` stays a literal `True`/`False`.
+- No translation string contains a URL (hassfest rejects it); an example address goes into a description
+  placeholder the code fills (`tests/unit/test_translation_urls.py` enforces it).
 - A test for an action that must leave Comexio and the entities untouched (ignore, cancel, abort) asserts what the
   action does change — e.g. the saved ignore option, the dismissed issue — and that no deleting or writing method of
   the API, the entity/device registry or the recorder ran: `assert_not_awaited()` for coroutines,
@@ -101,7 +297,40 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   of a race or timeout switches the state during the await it targets (e.g. inside the mocked call) and proves the
   timeout fired; a quick check is to break the target path (raise the timeout, drop the guard) and see it fail
   (#168).
+- An assertion fails for every value but the expected one. `assert data.get(key) is None` also passes when the
+  key is stored with `None`, `assert not reason or "phrase" in reason` passes when no reason comes back, and
+  `assert x in (a, None)` passes on either — assert the exact outcome instead: `assert key not in data`,
+  `assert reason is None` for the case that must not skip, the full expected text or value for the case that must.
+  Quick check: make the code return `None` or another value and see the test fail (#220).
+- A test of a value handed along a chain (a flow step to the next step, a resolved setting to the command builder
+  and its payload, a task to the executor and the API write) asserts at the end of the chain: the payload actually
+  built, the arguments the API mock received, what the last step saves of the first step's input. Checking an
+  intermediate attribute, the order of lines in the source, or a fake that replaces the stage under test also
+  passes when that stage drops the value. A multi-step flow test runs the steps one after the other with every
+  other field filled in, instead of seeding the later step's state by hand (#222).
+- A test of a step that validates before it acts (a config, reauth or reconfigure step that tests the login, a
+  check before a write) asserts whether the validation ran, not only the result (entry created, data unchanged, error
+  shown): the success case and every failure the validation reports assert it ran — e.g.
+  `api.login.assert_awaited_once()`; a path that is meant to reject before validating (a taken server id, a wrong
+  device) asserts it did not — `api.login.assert_not_awaited()`, or that no API was built. A flow that ends in an
+  abort after the validation (`reauth_successful`, `reconfigure_successful`) is a success case. A success test
+  otherwise passes when the step stores unchecked input; a failure test passes when the step rejects before it ever
+  validated (#207).
+- A parametrized test of a dispatch names each case's expected handler(s) and asserts that those ran and the others
+  did not (for an exclusive route: exactly one handler; for an intentional fan-out: every expected handler ran and every
+  forbidden one did not); a sum of awaits over several handlers also passes when an action is routed to the wrong one. A test of a
+  second call (a cache, a remembered result, a skipped repeat) first asserts the first call did the work — the
+  lookups, the result — otherwise it passes when the first call never ran the path either (#192).
+- A test that two operations exclude each other through a lock proves the second one actually waits at that lock:
+  while the first holds it, assert the second is queued on it (e.g. the lock's waiter count, `waiting_at=` in
+  `test_plan_watchdog.py`) and has not yet done its work, then release and assert it runs. A test that only checks
+  the final order or outcome also passes when the second operation never takes the lock (#187).
 - Test function parameters carry type annotations.
+- A `pytest.raises` block makes exactly one call, the tested one; build its arguments before the `with`, and enter
+  no other context manager after `pytest.raises` in the same `with` — its `__enter__` is a call too; wrap such a
+  sequence in a local function and call that (SonarCloud S5778). `tests/unit/test_pytest_raises_single_call.py` enforces this for literal
+  `pytest.raises(...)` with-items; check by hand a `pytest.raises` bound to a name or passed as a parametrize argument
+  (`with expectation:`) and a local function called inside the block.
 
 ## GitHub Actions
 

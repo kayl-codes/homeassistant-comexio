@@ -2,12 +2,14 @@
 
 import asyncio
 import contextlib
+from datetime import timedelta
 import logging
 from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import (
     ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
     ComexioDataError,
@@ -16,7 +18,10 @@ from aiocomexio import (
     CreatedFunctionPlan,
     LiveStates,
     RawConfig,
+    SystemInfo,
+    TimeServerSettings,
     WebioBaseInfo,
+    WebioCommandForm,
 )
 import aiohttp
 import pytest
@@ -141,6 +146,181 @@ def test_concurrent_full_logins_log_in_once(comexio_api: ComexioAPI, client: Mag
     client.login.assert_awaited_once()
 
 
+async def _slow_refusal() -> None:
+    await asyncio.sleep(0)  # the other caller is on its way before Comexio answers
+    raise ComexioAuthenticationError("no")
+
+
+def test_refused_credentials_are_not_sent_again(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Review (Sourcery, #212/#213): with reauth pending, no poll may retry them — a lockout risk."""
+    client.login = AsyncMock(side_effect=_slow_refusal)
+
+    async def both() -> list[bool]:
+        # The second caller waits for the refused login under the lock and must not repeat it.
+        return list(await asyncio.gather(comexio_api._full_login(), comexio_api._full_login()))
+
+    assert asyncio.run(both()) == [False, False]
+    assert asyncio.run(comexio_api._full_login()) is False
+    client.login.assert_awaited_once()
+    assert comexio_api.last_login_error == "rejected"
+    assert comexio_api.credentials_refused is True
+
+
+def test_new_credentials_lift_the_refusal(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    refused_password = comexio_api.password
+    _fail(client, "login", ComexioAuthenticationError("no"))
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    comexio_api.password = "changed"
+    assert comexio_api.credentials_refused is False
+    client.login = AsyncMock()
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is True
+    client.login.assert_awaited_once()
+    comexio_api.password = refused_password
+    assert comexio_api.credentials_refused is True  # accepting other credentials says nothing about the refused ones
+
+
+def test_preview_and_main_login_do_not_both_send_refused_credentials(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Review (Sourcery, #213): the preview logs in outside _login_lock, on its own client."""
+    preview = MagicMock()
+    client.login = AsyncMock(side_effect=_slow_refusal)
+    preview.login = AsyncMock(side_effect=_slow_refusal)
+
+    async def both() -> list[bool]:
+        return list(
+            await asyncio.gather(comexio_api._full_login(), comexio_api._login(preview, comexio_api._credentials()))
+        )
+
+    assert asyncio.run(both()) == [False, False]
+    assert client.login.await_count + preview.login.await_count == 1
+
+
+def test_a_login_with_replaced_credentials_leaves_the_refusal_alone(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Review (Sourcery, #213): an old login finishing late must not set or lift the current refusal."""
+
+    async def refused_after_reconfigure() -> None:
+        comexio_api.password = "changed"
+        raise ComexioAuthenticationError("no")
+
+    client.login = AsyncMock(side_effect=refused_after_reconfigure)
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    assert comexio_api.credentials_refused is False  # the refusal was for the old password
+    assert comexio_api.last_login_error == "connection"  # no reauth: the new password was never tried
+
+    comexio_api.password = "old"
+    refused = (comexio_api.host, comexio_api.username, "changed again")
+    comexio_api._refused_credentials = {comexio_api._refusal_key(refused)}
+
+    async def accepted_after_reconfigure() -> None:
+        comexio_api.password = "changed again"
+
+    client.login = AsyncMock(side_effect=accepted_after_reconfigure)
+    # Not a success either: the caller would mark the old client logged in and go on with a new, logged-out one.
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    assert comexio_api.last_login_error == "connection"
+    assert comexio_api._refused_credentials == {
+        comexio_api._refusal_key(refused)
+    }  # the accepted old password does not lift it
+    assert comexio_api.credentials_refused is True
+
+
+def test_a_login_waiting_through_a_reconfigure_is_not_sent(comexio_api: ComexioAPI) -> None:
+    """Review (Sourcery, #213): a client built before a reconfigure waits for the login lock meanwhile."""
+    stale = MagicMock()
+    stale.login = AsyncMock(side_effect=ComexioAuthenticationError("no"))
+    fresh = MagicMock()
+    fresh.login = AsyncMock()
+
+    async def run() -> None:
+        stale_credentials = comexio_api._credentials()
+        async with comexio_api._login_request_lock:
+            waiting = asyncio.create_task(comexio_api._login(stale, stale_credentials))
+            await asyncio.sleep(0)
+            comexio_api.password = "new and valid"
+        assert await waiting is False
+        assert comexio_api.last_login_error == "connection"  # not "rejected": no reauth for untried credentials
+        assert comexio_api.credentials_refused is False
+        assert await comexio_api._login(fresh, comexio_api._credentials()) is True
+
+    asyncio.run(run())
+    stale.login.assert_not_awaited()
+    fresh.login.assert_awaited_once()
+
+
+def test_every_refused_credential_set_stays_refused(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Review (Sourcery, #213): switching back to credentials refused before must not send them again."""
+    first_password = comexio_api.password
+    _fail(client, "login", ComexioAuthenticationError("no"))
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    comexio_api.password = "second, also wrong"
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    comexio_api.password = first_password
+    assert comexio_api.credentials_refused is True
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    assert client.login.await_count == 2
+
+
+def test_refused_credentials_keep_no_password(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Review (Sourcery, #213): refused passwords must not pile up in memory as plain text."""
+    comexio_api.password = "s3cret-but-wrong"
+    _fail(client, "login", ComexioAuthenticationError("no"))
+    assert asyncio.run(comexio_api._login(client, comexio_api._credentials())) is False
+    assert comexio_api.credentials_refused is True
+    assert not any("s3cret-but-wrong" in key for key in comexio_api._refused_credentials)
+
+
+def test_queued_preview_tick_does_not_log_in_after_a_refusal(comexio_api: ComexioAPI) -> None:
+    """Review (Sourcery, #213): ticks that passed the first check wait for the preview lock meanwhile."""
+    comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    async def run() -> aiohttp.ClientSession | None:
+        async with comexio_api._preview_session_lock:
+            queued = asyncio.create_task(comexio_api.ensure_preview_session())
+            await asyncio.sleep(0)
+            comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
+        return await queued
+
+    assert asyncio.run(run()) is None
+    comexio_api._login.assert_not_awaited()
+
+
+def test_api_user_change_does_not_lift_the_refusal(comexio_api: ComexioAPI) -> None:
+    """Review (Sourcery, #213): the API user (Basic Auth for writes) is not part of the admin login."""
+    comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
+    comexio_api.api_user = "someone-else"
+    comexio_api.api_pass = "other"
+    assert comexio_api.credentials_refused is True
+
+
+def test_connection_failure_does_not_count_as_a_refusal(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    _fail(client, "login", _connection_error())
+    assert asyncio.run(comexio_api._full_login()) is False
+    assert asyncio.run(comexio_api._full_login()) is False
+    assert client.login.await_count == 2
+    assert comexio_api.credentials_refused is False
+
+
+def test_preview_session_does_not_log_in_with_refused_credentials(comexio_api: ComexioAPI) -> None:
+    comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
+    comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+    comexio_api._login.assert_not_awaited()
+
+
+def test_system_info_does_not_log_in_with_refused_credentials(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Review (Sourcery, #212): the 5-minute system info poll kept retrying them while reauth was pending."""
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.login = AsyncMock()
+    comexio_api._refused_credentials = {comexio_api._refusal_key(comexio_api._login_credentials())}
+
+    reading = asyncio.run(comexio_api.get_system_info())
+
+    assert reading.info_error == reading.uptime_error == "re-login failed (rejected)"
+    client.login.assert_not_awaited()
+
+
 def test_failed_login_forgets_the_logged_in_client(comexio_api: ComexioAPI, client: MagicMock) -> None:
     comexio_api._logged_in_client = client
     client.is_logged_in = AsyncMock(return_value=False)
@@ -181,7 +361,7 @@ def test_preview_session_is_kept_while_the_settings_are_unchanged(comexio_api: C
 
 def test_logged_in_preview_session_is_kept(comexio_api: ComexioAPI) -> None:
     # A preview session that logged in under the current settings survives later client reads.
-    async def login_ok(_client: object) -> bool:
+    async def login_ok(_client: object, _credentials: object) -> bool:
         return True
 
     comexio_api._login = login_ok  # type: ignore[method-assign]
@@ -213,7 +393,7 @@ def test_waiting_preview_tick_does_not_reuse_an_outdated_session(comexio_api: Co
 def test_preview_login_under_old_settings_is_discarded(comexio_api: ComexioAPI) -> None:
     # Settings that change while the preview login is in flight must not leave a session
     # bound to the old host behind; the next poll opens a fresh one.
-    async def login_while_reconfigured(_client: object) -> bool:
+    async def login_while_reconfigured(_client: object, _credentials: object) -> bool:
         comexio_api.host = "10.0.0.2"
         return True
 
@@ -256,6 +436,20 @@ def test_get_raw_config_failed_re_login_is_empty(comexio_api: ComexioAPI, client
     assert asyncio.run(comexio_api.get_raw_config()) == {}
     assert comexio_api.last_login_error == "rejected"
     assert comexio_api.config_relogin_unreachable is False  # Comexio answered
+    assert comexio_api.config_relogin_rejected is True  # the poll asks for reauth
+
+
+def test_get_raw_config_rejected_flag_is_for_this_fetch_only(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """A refused re-login flags its own fetch; the next good fetch clears it although last_login_error stays."""
+    _fail(client, "get_raw_config", ComexioAuthenticationError("lapsed"))
+    _fail(client, "login", ComexioAuthenticationError("rejected"))
+    asyncio.run(comexio_api.get_raw_config())
+    assert comexio_api.config_relogin_rejected is True
+
+    client.get_raw_config = AsyncMock(return_value=RawConfig({"FubModules": {"2": {}}}, {}, {}, None))
+    asyncio.run(comexio_api.get_raw_config())
+    assert comexio_api.config_relogin_rejected is False
+    assert comexio_api.last_login_error == "rejected"
 
 
 def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
@@ -266,6 +460,7 @@ def test_get_raw_config_unanswered_re_login_is_flagged_for_this_fetch_only(
     _fail(client, "login", _connection_error())
     assert asyncio.run(comexio_api.get_raw_config()) == {}
     assert comexio_api.config_relogin_unreachable is True
+    assert comexio_api.config_relogin_rejected is False  # no answer is no refusal: no reauth
 
     client.get_raw_config = AsyncMock(return_value=RawConfig({"FubModules": {"2": {}}}, {}, {}, None))
     asyncio.run(comexio_api.get_raw_config())
@@ -337,18 +532,27 @@ def _block_page(value: str, version: str, active: int = 1) -> RawConfig:
         "FubBaseConfig": {"1": {"FubElementId": 104, "Name": "in_0", "Value": value}},
         "Fubs": {"7": {"Id": 7, "Name": f"Plan {value}", "Active": active}},
         "Paper": {"1": {"Id": 1, "Name": f"Paper {value}"}},
+        "CurrentSceneConfig": {"31": {"name": f"Scene {value}", "common": [], "scene": []}},
     }
     return RawConfig(variables, {"1": {"unit": version}}, {"2": {"input": version}}, version)
 
 
 def _page_state(page: RawConfig) -> tuple[Any, ...]:
-    """What a fetch that applied page leaves in block_settings, io_types, io_input_types, comexio_version."""
+    """What a fetch that applied page leaves in block_settings, io_types, io_input_types, comexio_version,
+    module_configs."""
     value = page.variables["FubBaseConfig"]["1"]["Value"]
-    return {"104": {"in_0": value}}, page.io_types, page.io_input_types, page.comexio_version
+    scenes = {"13": {"31": {"name": f"Scene {value}", "common": [], "scene": []}}}
+    return {"104": {"in_0": value}}, page.io_types, page.io_input_types, page.comexio_version, scenes
 
 
 def _api_state(comexio_api: ComexioAPI) -> tuple[Any, ...]:
-    return comexio_api.block_settings, comexio_api.io_types, comexio_api.io_input_types, comexio_api.comexio_version
+    return (
+        comexio_api.block_settings,
+        comexio_api.io_types,
+        comexio_api.io_input_types,
+        comexio_api.comexio_version,
+        comexio_api.module_configs,
+    )
 
 
 OLDER_PAGE = _block_page("10", "11.0.2")
@@ -513,7 +717,8 @@ def test_a_newest_failure_keeps_the_newer_parsed_page_for_an_overtaken_fetch(
 
     assert (middle, newest) == (NEWER_PAGE.variables, {})
     assert oldest is NEWER_PAGE.variables
-    assert _api_state(comexio_api) == (None, *_page_state(NEWER_PAGE)[1:])
+    # The failure drops both caches; io_types and the version stay those of the middle page.
+    assert _api_state(comexio_api) == (None, *_page_state(NEWER_PAGE)[1:4], None)
 
 
 @pytest.mark.parametrize("older_finishes_first", [False, True], ids=["older-last", "older-first"])
@@ -543,7 +748,7 @@ def test_an_older_config_fetch_after_a_failed_newer_one_changes_nothing(
 
     assert overlap.newer == {}
     assert overlap.older is OLDER_PAGE.variables
-    assert _api_state(comexio_api) == (None, {"1": {"unit": "before"}}, {"2": {"input": "before"}}, "11.0.1")
+    assert _api_state(comexio_api) == (None, {"1": {"unit": "before"}}, {"2": {"input": "before"}}, "11.0.1", None)
 
 
 def test_an_older_config_fetch_finishing_first_applies_until_the_newer_one_does(
@@ -928,6 +1133,19 @@ def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, clie
     assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
 
 
+def test_knx_catalog_meeting_another_certificate_keeps_last_known_good(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    catalog = {"KnxPoints": {"1": {}}}
+    comexio_api.seed_knx_dpt_catalog(catalog, "11.0.1")
+    comexio_api.comexio_version = "11.0.2"
+    err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+    _fail(client, "get_knx_dpt_catalog", err)
+    assert asyncio.run(comexio_api.get_knx_dpt_catalog()) is catalog
+    assert comexio_api.get_knx_dpt_catalog_snapshot() == (catalog, "11.0.1")
+    assert comexio_api.certificate_mismatch is err  # reported, not swallowed as a plain fetch failure
+
+
 def test_knx_catalog_failure_without_cache_is_empty(comexio_api: ComexioAPI, client: MagicMock) -> None:
     _fail(client, "get_knx_dpt_catalog", _connection_error())
     assert asyncio.run(comexio_api.get_knx_dpt_catalog()) == {}
@@ -1072,6 +1290,105 @@ def test_misc_reads_fall_back_on_failure(
     assert asyncio.run(call(comexio_api)) == expected
 
 
+SYSTEM_INFO = SystemInfo(free_storage_percent=42.5, time_server=TimeServerSettings(True, "pool.ntp.org", 3600))
+
+
+def test_system_info_returns_both_parts(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+
+
+@pytest.mark.parametrize("err", [_connection_error(), HTTP_ERROR, ComexioDataError("no duration")])
+def test_system_info_failure_drops_only_its_part(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
+    # One failed fetch must not cost the other reading: both are tried, each failure is its own None + cause.
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    _fail(client, "get_system_info", err)
+    assert asyncio.run(comexio_api.get_system_info()) == (None, timedelta(days=3), str(err), None)
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    _fail(client, "get_uptime", err)
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, None, None, str(err))
+
+
+def test_system_info_logs_in_again_on_a_lapsed_session(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), SYSTEM_INFO])
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    client.login.assert_awaited_once()
+    assert client.get_system_info.await_count == 2
+
+
+def test_system_info_uptime_fetch_retries_after_the_polls_re_login(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), SYSTEM_INFO])
+    client.get_uptime = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), timedelta(days=3)])
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    # The uptime fetch reuses the poll's one re-login.
+    client.login.assert_awaited_once()
+    assert client.get_uptime.await_count == 2
+
+
+def test_system_info_failed_relogin_is_the_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.get_uptime = AsyncMock(side_effect=ComexioAuthenticationError("login form"))
+    client.login = AsyncMock(side_effect=_connection_error())
+
+    reading = asyncio.run(comexio_api.get_system_info())
+
+    assert (reading.info, reading.uptime) == (None, None)
+    assert reading.info_error == reading.uptime_error == "re-login failed (connection)"
+    # Without a session the retry would only see the login form again.
+    assert client.get_system_info.await_count == 1
+    # Review (Sourcery, #204): one re-login per poll — the uptime fetch does not try again.
+    client.login.assert_awaited_once()
+    assert client.get_uptime.await_count == 1
+
+
+def test_system_info_lapse_on_the_uptime_fetch_only_logs_in_there(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), timedelta(days=3)])
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    client.login.assert_awaited_once()
+
+
+def test_system_info_both_parts_share_one_relogin(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    client.get_system_info = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), SYSTEM_INFO])
+    client.get_uptime = AsyncMock(side_effect=[ComexioAuthenticationError("login form"), timedelta(days=3)])
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    client.login.assert_awaited_once()
+
+
+def test_system_info_takes_over_a_login_that_finished_after_its_request(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """Review (Sourcery, #204): a second login would clear the jar of the session another caller just logged in."""
+    comexio_api._logged_in_client = client
+
+    answers: list[SystemInfo | None] = [None, SYSTEM_INFO]
+
+    async def lapsed_then_relogged_elsewhere() -> SystemInfo:
+        answer = answers.pop(0)
+        if answer is None:
+            # The config poll logs in again while this request is still on its way back with the login form.
+            comexio_api._login_generation += 1
+            raise ComexioAuthenticationError("login form")
+        return answer
+
+    client.get_system_info = AsyncMock(side_effect=lapsed_then_relogged_elsewhere)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.get_system_info()) == (SYSTEM_INFO, timedelta(days=3), None, None)
+    client.login.assert_not_awaited()
+
+
 # --- Web-IO ---
 
 
@@ -1180,9 +1497,16 @@ def test_save_single_command_failure_is_false(comexio_api: ComexioAPI, client: M
 
 
 @pytest.mark.parametrize("err", [ComexioDataError("no min/max fields"), _connection_error()])
-def test_webio_command_range_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
-    _fail(client, "get_webio_command_range", err)
-    assert asyncio.run(comexio_api.get_webio_command_range(5, 3)) == (None, None)
+def test_webio_command_form_failure_is_none(comexio_api: ComexioAPI, client: MagicMock, err: Exception) -> None:
+    _fail(client, "get_webio_command_form", err)
+    assert asyncio.run(comexio_api.get_webio_command_form(5, 3)) is None
+
+
+def test_webio_command_form_is_passed_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    form = WebioCommandForm(min=-32768.0, max=32767.0, protocol=1)
+    client.get_webio_command_form = AsyncMock(return_value=form)
+    assert asyncio.run(comexio_api.get_webio_command_form(5, 3)) is form
+    client.get_webio_command_form.assert_awaited_once_with(5, 3)
 
 
 _PLAN_WRITES_BOOL = [

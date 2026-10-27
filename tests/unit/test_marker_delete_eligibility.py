@@ -1,4 +1,4 @@
-"""marker_delete eligibility: CategoryId gate, force (untitled + unplaced), record parsing."""
+"""marker_delete eligibility: placement + CategoryId gate, force (untitled only), record parsing."""
 
 import asyncio
 from typing import Any
@@ -29,55 +29,59 @@ RECORDS = {
 ALL_IDS = [1, 2, 3, 4, 5, 6, 7]  # M7 absent (already deleted / never existed)
 
 
+def _classify(ids: list[int], records: dict, placements: dict | None = None, force: bool = False) -> tuple:
+    """(deletable, sorted protected ids) — the reasons are checked in test_marker_delete_placement."""
+    deletable, protected = _classify_marker_delete_ids(ids, records, placements or {}, force)
+    return deletable, sorted(protected)
+
+
 def test_without_force_only_api_created_and_absent_ids_are_deletable() -> None:
     # Regression 2026-09-25: protected ids used to abort the whole call — now they are only
     # split off, the API-created ones in the same batch stay deletable.
-    deletable, protected = _classify_marker_delete_ids(ALL_IDS, RECORDS, None)
-    assert deletable == [5, 6, 7]
-    assert protected == [1, 2, 3, 4]
+    assert _classify(ALL_IDS, RECORDS) == ([5, 6, 7], [1, 2, 3, 4])
 
 
 def test_force_adds_only_untitled_unplaced_markers() -> None:
-    deletable, protected = _classify_marker_delete_ids(ALL_IDS, RECORDS, {4})
-    assert deletable == [3, 5, 6, 7]
-    assert protected == [1, 2, 4]
+    assert _classify(ALL_IDS, RECORDS, {4: ["Test4"]}, force=True) == ([3, 5, 6, 7], [1, 2, 4])
 
 
-def test_force_with_unknown_placement_grants_nothing() -> None:
-    # placed_ids=None: plans could not all be loaded — force must not open the gate.
-    assert _classify_marker_delete_ids([3], RECORDS, None) == ([], [3])
+def test_a_placed_marker_is_protected_whatever_its_category() -> None:
+    """Regression (live test 2026-10-16): a placed CategoryId==1 marker was deletable without force."""
+    placements = {mid: ["Test4"] for mid in ALL_IDS}
+    assert _classify(ALL_IDS, RECORDS, placements) == ([], ALL_IDS)
+    assert _classify(ALL_IDS, RECORDS, placements, force=True) == ([], ALL_IDS)
 
 
 @pytest.mark.parametrize("name", ["   ", "", None])
 def test_force_treats_blank_names_as_untitled(name: Any) -> None:
-    assert _classify_marker_delete_ids([9], {9: _marker(9, name)}, set()) == ([9], [])
+    assert _classify([9], {9: _marker(9, name)}, force=True) == ([9], [])
 
 
 @pytest.mark.parametrize("name", ["x", 0, ["a"]])
 def test_force_treats_titled_or_malformed_names_as_titled(name: Any) -> None:
-    assert _classify_marker_delete_ids([9], {9: _marker(9, name)}, set()) == ([], [9])
+    assert _classify([9], {9: _marker(9, name)}, force=True) == ([], [9])
 
 
 @pytest.mark.parametrize("category", [True, 1.0, "1", None, 2])
 def test_malformed_category_is_not_api_created(category: Any) -> None:
-    assert _classify_marker_delete_ids([9], {9: _marker(9, "t", category)}, None) == ([], [9])
+    assert _classify([9], {9: _marker(9, "t", category)}) == ([], [9])
 
 
 @pytest.mark.parametrize("category", [2, -1, True, False, 0.0, "0", None])
 def test_force_requires_studio_category(category: Any) -> None:
     # Regression (Sourcery, PR #94): force only opens CategoryId==0 — an unknown or malformed
     # CategoryId stays protected even when the marker is untitled and unplaced.
-    assert _classify_marker_delete_ids([9], {9: _marker(9, "", category)}, set()) == ([], [9])
+    assert _classify([9], {9: _marker(9, "", category)}, force=True) == ([], [9])
 
 
 def test_force_with_missing_category_stays_protected() -> None:
     record = {"Id": 9, "ShortName": "M9", "Name": "", "Type": 1}
-    assert _classify_marker_delete_ids([9], {9: record}, set()) == ([], [9])
+    assert _classify([9], {9: record}, force=True) == ([], [9])
 
 
 def test_load_all_plans_verified_fails_closed_on_malformed_plan_id(comexio_api: ComexioAPI) -> None:
-    # Regression (Sourcery, PR #94): a non-numeric $Fubs key raised ValueError out of the force
-    # gate instead of ignoring force — and replaced the cached plan list before failing.
+    # Regression (Sourcery, PR #94): a non-numeric $Fubs key raised ValueError out of the
+    # placement check instead of refusing — and replaced the cached plan list before failing.
     cached = {"1": {"Id": 1}}
     comexio_api._fub_data = cached
     assert asyncio.run(comexio_api._load_all_plans_verified({"1": {}, "x": {}}, strict=True)) is None
@@ -121,7 +125,7 @@ def _ref(ref_type: Any, ref_id: Any) -> dict[str, Any]:
 
 
 def test_placed_marker_ids_strict_collects_marker_refs() -> None:
-    plans = {1: _plan(_ref(2, "4"), _ref(1, 3), {"name": "AND"}), 2: _plan(_ref("2", 8)), 3: _plan()}
+    plans = {1: _plan(_ref(2, "4"), _ref(1, 3), {"name": "AND", "reference": None}), 2: _plan(_ref("2", 8)), 3: _plan()}
     assert _placed_marker_ids_strict(plans) == {4, 8}
 
 
@@ -134,6 +138,8 @@ def test_placed_marker_ids_strict_collects_marker_refs() -> None:
         _plan(_ref(2, None)),
         _plan("malformed element"),
         _plan({"reference": "malformed"}),
+        # Regression (Sourcery, PR #186): a missing "reference" key read as "no reference".
+        _plan({"name": "AND"}),
         # Regression (Sourcery, PR #94): a reference without a readable type used to be skipped
         # as "not a marker", so a placed marker behind it looked unplaced.
         _plan({"reference": {"ref_id": 4}}),

@@ -3,6 +3,7 @@ from collections.abc import Iterable
 import contextlib
 from datetime import timedelta
 import logging
+from typing import Any
 
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
@@ -11,19 +12,23 @@ from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady,
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.util import slugify
 
-from .api import ComexioAPI
+from .certificate import (
+    async_clear_certificate_changed,
+    async_create_api,
+    async_remove_certificate_pushes,
+    async_replaced_fingerprint,
+    async_report_certificate_changed,
+)
 from .const import (
-    CONF_API_PASSWORD,
-    CONF_API_USERNAME,
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
-    CONF_PASSWORD,
     CONF_SERVER_ID,
-    CONF_USERNAME,
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
     LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
+    QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
     SOURCE_CATEGORIES,
     STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC,
@@ -32,13 +37,18 @@ from .const import (
     STATISTICS_UNITS_CHANGED_ISSUE_PREFIX,
     MarkerKind,
     WebioClass,
+    extension_firmware_update_unique_id,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    known_extension_names,
     migrate_entry_options,
+    quickbus_io_platform,
+    quickbus_io_unique_id,
     stable_object_id,
     webio_range_check_entity_id,
 )
 from .coordinator import ComexioCoordinator
+from .entity import track_quickbus_devices
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .services import async_setup_services
 
@@ -58,6 +68,42 @@ PLATFORMS = [
 ]
 
 
+# A pinned entry connects over HTTPS only; the reconfigure flow is the way back to plain HTTP.
+_HTTPS_RETRY_HINT = " (over HTTPS — if Comexio no longer serves HTTPS, reconfigure the entry to go back to HTTP)"
+
+# unique_id suffixes (after "comexio_{server_id}_") of the always-present server-level entities, kept by
+# the orphan cleanup in async_setup_entry — an entity missing here is deleted from the registry on every setup.
+SERVER_LEVEL_UNIQUE_ID_SUFFIXES = (
+    "webio_sync_start_btn",
+    "webio_sync_cancel_btn",
+    "webio_sync_status_sensor",
+    "entity_id_fix_btn",
+    "fw_check_btn",
+    "webio_range_check_btn",
+    "statistics_cleanup_btn",
+    "uninstall_cleanup_btn",
+    "offline_extensions_sensor",
+    "logikplan_plan_selector",
+    "function_plan_backups_sensor",
+    "orphaned_backups",
+    "version_sensor",
+    "plan_changed_sensor",
+    "plan_backup_selector",
+    "bus_load_sensor",
+    "sd_card_sensor",
+    "free_storage_sensor",
+    "last_boot_sensor",
+    "connection",
+    "time_server_problem",
+    "plan_preview_sensor",
+    "plan_preview_image",
+    "function_plan_toggle_btn",
+    "managed_plans_problem",
+    "function_plan_auto_start",
+    "function_plan_auto_start_user",
+)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
     _LOGGER.info("Comexio__init__: Entered async_setup_entry")
@@ -65,15 +111,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     hass.data.setdefault(DOMAIN, {})
     server_id = entry.data[CONF_SERVER_ID]
 
-    # Initialize API
-    api = ComexioAPI(
-        hass,
-        entry.data[CONF_HOST],
-        entry.data[CONF_USERNAME],
-        entry.data[CONF_PASSWORD],
-        api_user=entry.data.get(CONF_API_USERNAME),
-        api_pass=entry.data.get(CONF_API_PASSWORD),
-    )
+    # Initialize API (an entry still on plain HTTP is switched to HTTPS here when Comexio serves it)
+    try:
+        api = await async_create_api(hass, entry)
+    except (ConfigEntryNotReady, ConfigEntryAuthFailed):
+        # Raised only once Comexio answered the HTTPS login (see async_create_api).
+        _track_setup_outage(hass, entry.entry_id, False)
+        raise
 
     # Initialize Coordinator (passes config_entry to base class, sets api.config_entry and server_id)
     coordinator = ComexioCoordinator(hass, api, entry)
@@ -95,13 +139,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     try:
         if not await api.login():
-            if api.last_login_error == LOGIN_ERROR_CONNECTION:
-                _LOGGER.warning(
-                    "Comexio login failed due to a connection problem for %s — will retry", entry.data[CONF_HOST]
+            if (actual := await async_replaced_fingerprint(api)) is not None:
+                # Never accepted on its own: the repair shows both fingerprints and asks.
+                async_report_certificate_changed(hass, entry, actual)
+                raise ConfigEntryNotReady(
+                    f"Comexio at {entry.data[CONF_HOST]} presents another certificate than the pinned one — see Repairs"
                 )
-                raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}")
+            if api.last_login_error == LOGIN_ERROR_CONNECTION:
+                hint = _HTTPS_RETRY_HINT if CONF_CERTIFICATE_FINGERPRINT in entry.data else ""
+                _LOGGER.warning(
+                    "Comexio login failed due to a connection problem for %s — will retry%s",
+                    entry.data[CONF_HOST],
+                    hint,
+                )
+                raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}{hint}")
             _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
             raise ConfigEntryAuthFailed
+        async_clear_certificate_changed(hass, entry.entry_id)
         await coordinator.async_config_entry_first_refresh()
     except Exception:
         # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
@@ -164,6 +218,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(track_quickbus_devices(coordinator))
 
     # Extension firmware check: nightly window, version-gated (see
     # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.
@@ -176,6 +231,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
     # cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
+    # Free storage, time server settings, uptime: own slow poll (see const.SYSTEM_INFO_POLL_INTERVAL_SEC).
+    entry.async_on_unload(coordinator.async_start_system_info_poll())
     # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
     entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
     # After the platforms: the auto-start switches have restored the user's choice by now.
@@ -218,6 +275,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                     _LOGGER.warning("Webhook IO event missing ext/io: %s", data)
                     return
                 coordinator.update_io_by_name(ext, io_id, val)
+            elif webhook_type == "quickbus":
+                qb_io_id = data.get("id")
+                if qb_io_id is None:
+                    _LOGGER.warning("Webhook Quickbus event missing id: %s", data)
+                    return
+                coordinator.update_quickbus_io(qb_io_id, val)
             elif webhook_type == "knx":
                 # Blind guess: KNX webhook payload shape assumed identical to markers
                 # (no real KNX hardware/sample payload available — see project_knx_objects memory).
@@ -304,36 +367,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for io in coordinator.data.get("io", []):
         if not io.get("offline") or include_offline:
             active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
+    quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
+    active_unique_ids |= quickbus_platforms.keys()
 
     # Server-level buttons and sensors (these are always active)
-    active_unique_ids.update(
-        f"comexio_{server_id}_{suffix}"
-        for suffix in (
-            "webio_sync_start_btn",
-            "webio_sync_cancel_btn",
-            "webio_sync_status_sensor",
-            "entity_id_fix_btn",
-            "fw_check_btn",
-            "webio_range_check_btn",
-            "statistics_cleanup_btn",
-            "uninstall_cleanup_btn",
-            "offline_extensions_sensor",
-            "logikplan_plan_selector",
-            "function_plan_backups_sensor",
-            "orphaned_backups",
-            "version_sensor",
-            "plan_changed_sensor",
-            "plan_backup_selector",
-            "bus_load_sensor",
-            "sd_card_sensor",
-            "plan_preview_sensor",
-            "plan_preview_image",
-            "function_plan_toggle_btn",
-            "managed_plans_problem",
-            "function_plan_auto_start",
-            "function_plan_auto_start_user",
-        )
-    )
+    active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
 
     # Function plan run-state sensors (sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
@@ -368,10 +406,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # same way as the IO entities above, since extension existence is independent of the
     # firmware check ever having run — entities just stay "unknown" until the first check.
     active_unique_ids.add(f"comexio_{server_id}_base_firmware_update")
-    for ext_name in {
-        io["ext_name"] for io in coordinator.data.get("io", []) if not io.get("offline") or include_offline
-    }:
-        active_unique_ids.add(f"comexio_{server_id}_{ext_name}_firmware_update".lower())
+    for ext_name in known_extension_names(coordinator.data, include_offline):
+        active_unique_ids.add(extension_firmware_update_unique_id(server_id, ext_name))
 
     # Build expected-platform map so that entities which migrated to a different
     # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.
@@ -400,6 +436,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 expected_platform[uid] = "binary_sensor" if is_input else "switch"
             else:
                 expected_platform[uid] = "sensor" if is_input else "number"
+    expected_platform.update(quickbus_platforms)
     # The run-state sensors were binary sensors before they became enum sensors.
     expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
 
@@ -412,7 +449,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
         for io in coordinator.data.get("io", [])
         if io.get("offline") and not include_offline
-    }
+    } | quickbus_offline_uids
     coordinator.offline_entity_statistic_ids = (
         {
             e.entity_id
@@ -478,6 +515,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_check_orphaned_statistics(conf)
 
     return True
+
+
+def _quickbus_entity_uids(
+    server_id: str, data: dict[str, Any], include_offline: bool
+) -> tuple[dict[str, str], set[str]]:
+    """(unique_id → platform of each active Quickbus IO entity, unique_ids of the offline ones).
+
+    Quickbus IOs are read-only (binary_sensor/sensor, see quickbus_io_platform); an IO of a
+    Quickbus device on an offline extension counts as offline like the extension's own IOs.
+    """
+    active: dict[str, str] = {}
+    offline: set[str] = set()
+    for io in data.get(QUICKBUS_IO_DATA_KEY, []):
+        uid = quickbus_io_unique_id(server_id, io["id"])
+        if io.get("offline") and not include_offline:
+            offline.add(uid)
+        else:
+            active[uid] = quickbus_io_platform(io)
+    return active, offline
 
 
 def _setup_unreachable_entries(hass: HomeAssistant) -> set[str]:
@@ -635,6 +691,8 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool: 
     plain v0.9.x installs just clear it again.
     1.2 -> 1.3: pins the old IO naming schema into entries that never saved one, so the new
     DEFAULT_SCHEMA_IO only applies to new installs (see const.migrate_entry_options).
+    1.3 -> 1.4: an entry that saved the old default cover keywords gets the new default
+    (markise/awning added, #179); a customised list is kept.
     """
     if entry.version > 1:
         # Downgrade from a future major version: refuse rather than guess the layout.
@@ -677,15 +735,35 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_reload_entry("options changed")
 
 
+# HA awaits async_remove_entry, so it stays a coroutine without an await of its own (S7503 false positive).
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:  # NOSONAR
+    """Drop the entry's certificate_changed repair, which has nothing left to fix, and its push on the phones."""
+    async_remove_certificate_pushes(hass, entry)
+
+
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Unload and cleanup."""
-    if webhook_id := hass.data[DOMAIN].get(f"{entry.entry_id}_webhook"):
-        webhook.async_unregister(hass, webhook_id)
-
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    running = hass.data[DOMAIN].get(entry.entry_id)
+    unload_ok = False
+    try:
+        if running is not None and hasattr(running, "api"):
+            await running.async_wait_before_unload()
+        if webhook_id := hass.data[DOMAIN].get(f"{entry.entry_id}_webhook"):
+            webhook.async_unregister(hass, webhook_id)
+        unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    finally:
+        if not unload_ok and running is not None and hasattr(running, "api"):
+            running.unloading = False  # the entry stays loaded: restores and plan edits may start again
     if unload_ok:
-        coordinator = hass.data[DOMAIN].pop(entry.entry_id)
+        # A default like the get() above: the config flow's fallback reload also reaches an entry whose coordinator
+        # is missing, and a KeyError here would leave that entry failed to unload.
+        coordinator = hass.data[DOMAIN].pop(entry.entry_id, None)
         if coordinator and hasattr(coordinator, "api"):
+            # Only now, not before the wait: the work it waited for still sends its pushes, and a failed unload
+            # keeps them. The reloaded entry's watchdog takes the plans' pushes over (its first check alarms every
+            # stopped and deleted plan); a check of this one still running sends nothing more (a push with buttons
+            # on its way still arrives: the new watchdog's checks take it off for a plan they see running).
+            coordinator.plan_watchdog.close()
             # Stop the connection-value poll timer (and any pending preview refresh) before
             # closing the sessions it polls through — otherwise the timer keeps firing on
             # this now-unloaded entry, each tick racing close() for the preview session.

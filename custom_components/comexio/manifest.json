@@ -4,12 +4,12 @@
   "after_dependencies": ["recorder"],
   "codeowners": ["@kayl-codes"],
   "config_flow": true,
-  "dependencies": ["webhook"],
+  "dependencies": ["network", "webhook"],
   "documentation": "https://github.com/kayl-codes/homeassistant-comexio",
   "integration_type": "hub",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/kayl-codes/homeassistant-comexio/issues",
   "loggers": ["aiocomexio"],
-  "requirements": ["aiocomexio==0.5.0", "idna>=3.15"],
-  "version": "0.20.0-rc1"
+  "requirements": ["aiocomexio==0.8.1", "idna>=3.15"],
+  "version": "0.20.0-rc3"
 }

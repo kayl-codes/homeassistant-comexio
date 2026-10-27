@@ -6,6 +6,7 @@ import pathlib
 from typing import Any
 from urllib.parse import quote
 
+from aiocomexio import format_fingerprint
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -19,8 +20,8 @@ from homeassistant.const import (
     EntityCategory,
     UnitOfTemperature,
 )
-from homeassistant.core import HomeAssistant, State, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.core import Event, HomeAssistant, State, callback
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -28,7 +29,16 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .certificate import (
+    CONNECTION_CERTIFICATE_CHANGED,
+    CONNECTION_HTTP,
+    CONNECTION_STATES,
+    certificate_issue_id,
+    connection_state,
+    presented_fingerprint,
+)
 from .const import (
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
@@ -45,7 +55,10 @@ from .const import (
     MarkerKind,
     bus_load_signal,
     function_plan_ids,
+    function_plan_info,
     function_plan_run_state_unique_id,
+    is_temperature_marker_name,
+    system_info_signal,
 )
 from .coordinator import ComexioCoordinator
 from .entity import (
@@ -53,12 +66,19 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
+    hub_device_info,
+    quickbus_ios_for_platform,
 )
 from .function_plan_backup import summarize_orphaned_backups
 
 _LOGGER = logging.getLogger(__name__)
+
+# Attributes of ComexioConnectionSensor: the pinned certificate and, while the repair is open, the presented one.
+ATTR_PINNED_FINGERPRINT = "pinned_fingerprint"
+ATTR_PRESENTED_FINGERPRINT = "presented_fingerprint"
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -88,6 +108,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             for io in coordinator.data.get("io", [])
             if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
         )
+
+    # Quickbus IOs (multitouch, motion detectors, ...) are read-only, outputs included
+    entities.extend(
+        ComexioQuickbusSensor(coordinator, coordinator.server_id, io)
+        for io in quickbus_ios_for_platform(coordinator, conf, "sensor")
+    )
 
     if conf.get("import_markers", True):
         ignored_ids = coordinator.ignored_marker_ids
@@ -128,6 +154,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioFunctionPlanCountSensor(coordinator, coordinator.server_id),
             ComexioWebioCommandCountSensor(coordinator, coordinator.server_id),
             ComexioWatchdogEventSensor(coordinator, coordinator.server_id),
+            ComexioFreeStorageSensor(coordinator, coordinator.server_id),
+            ComexioLastBootSensor(coordinator, coordinator.server_id),
+            ComexioConnectionSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -206,6 +235,10 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
             return val
 
 
+class ComexioQuickbusSensor(ComexioQuickbusIOEntity, ComexioIOSensor):
+    """An analog IO of a Quickbus device (brightness, temperature, ...), read-only."""
+
+
 class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
     """Representation of a read-only ("[RO]"-suffixed) analog Comexio Marker.
 
@@ -228,7 +261,7 @@ class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):
             if "%" in name_lower or is_cover or "dimmer" in name_lower:
                 self._attr_native_unit_of_measurement = PERCENTAGE
                 self._attr_icon = "mdi:window-shutter" if is_cover else "mdi:percent"
-            elif any(x in name_lower for x in ["soll", "temp", "setpoint"]):
+            elif is_temperature_marker_name(name_lower):
                 self._attr_device_class = SensorDeviceClass.TEMPERATURE
                 self._attr_native_unit_of_measurement = UnitOfTemperature.CELSIUS
             else:
@@ -254,7 +287,7 @@ class ComexioKnxSensor(ComexioKnxEntity, ComexioMarkerSensor):
 
         # Same DPT-over-name-heuristic precedence as ComexioKnxNumber (see its own comment,
         # number.py) — a read-only KNX object must not inherit ComexioMarkerSensor's
-        # "soll/temp/setpoint" name guess when the resolved DPT says otherwise (or says
+        # temperature name guess (is_temperature_marker_name) when the resolved DPT says otherwise (or says
         # nothing at all, e.g. an unresolved/unmapped DPT keeps the name heuristic instead).
         if knx.get("dpt_min") is not None and knx.get("dpt_max") is not None:
             self._attr_native_unit_of_measurement = knx.get("dpt_unit") or None
@@ -566,6 +599,126 @@ class ComexioBusLoadSensor(SensorEntity):
         self.async_write_ha_state()
 
 
+class _ComexioSystemInfoSensor(ComexioStableEntityIdMixin, SensorEntity):
+    """Base of the system info sensors: fed by the coordinator's own system info poll.
+
+    Not a CoordinatorEntity, like ComexioBusLoadSensor: the readings arrive via system_info_signal,
+    on their own cadence (const.SYSTEM_INFO_POLL_INTERVAL_SEC), not with the config poll.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _unique_id_suffix: str
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = f"comexio_{server_id}_{self._unique_id_suffix}"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, system_info_signal(self.server_id), self.async_write_ha_state)
+        )
+
+
+class ComexioFreeStorageSensor(_ComexioSystemInfoSensor):
+    """Free space of the Comexio's internal storage (%), from the system dashboard."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_icon = "mdi:harddisk"
+    _attr_translation_key = "free_storage"
+    _unique_id_suffix = "free_storage_sensor"
+
+    @property
+    def native_value(self) -> float | None:
+        return self.coordinator.system_info.free_storage_percent
+
+
+class ComexioLastBootSensor(_ComexioSystemInfoSensor):
+    """When the Comexio system last started: now - its uptime, held steady between polls (see system_info)."""
+
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_translation_key = "last_boot"
+    _unique_id_suffix = "last_boot_sensor"
+
+    @property
+    def native_value(self) -> datetime | None:
+        return self.coordinator.system_info.boot_time
+
+
+class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
+    """How HA talks to Comexio: HTTPS with the pinned certificate, plain HTTP, or stopped on a changed certificate.
+
+    Not a CoordinatorEntity: while the entry is loaded it stays available when the polls fail on a changed
+    certificate, which is just when an automation wants to see it. A setup that meets a changed certificate
+    does not load the entry, so after such a restart the sensor is unavailable and the repair alone remains.
+    Follows the certificate_changed repair through the issue registry; a new pin changes the entry data,
+    which reloads the entry and so this sensor.
+    The fingerprints are public certificate hashes, kept out of the recorder only because they never
+    change between states.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.ENUM
+    _attr_options = CONNECTION_STATES
+    _attr_translation_key = "connection"
+    _unrecorded_attributes = frozenset({ATTR_PINNED_FINGERPRINT, ATTR_PRESENTED_FINGERPRINT})
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self._attr_unique_id = f"comexio_{server_id}_connection"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    @property
+    def native_value(self) -> str:
+        return connection_state(self.hass, self.coordinator.config_entry)
+
+    @property
+    def icon(self) -> str:
+        state = self.native_value
+        if state == CONNECTION_HTTP:
+            return "mdi:lock-open-variant"
+        return "mdi:lock-alert" if state == CONNECTION_CERTIFICATE_CHANGED else "mdi:lock"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        entry = self.coordinator.config_entry
+        pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+        presented = presented_fingerprint(self.hass, entry.entry_id)
+        return {
+            ATTR_PINNED_FINGERPRINT: format_fingerprint(pinned) if pinned is not None else None,
+            ATTR_PRESENTED_FINGERPRINT: format_fingerprint(presented) if presented is not None else None,
+        }
+
+    async def async_added_to_hass(self) -> None:
+        issue_id = certificate_issue_id(self.coordinator.config_entry.entry_id)
+
+        @callback
+        def _is_this_issue(data: ir.EventIssueRegistryUpdatedData) -> bool:
+            return data["domain"] == DOMAIN and data["issue_id"] == issue_id
+
+        @callback
+        def _issue_updated(_event: Event[ir.EventIssueRegistryUpdatedData]) -> None:
+            self.async_write_ha_state()
+
+        self.async_on_remove(
+            self.hass.bus.async_listen(
+                ir.EVENT_REPAIRS_ISSUE_REGISTRY_UPDATED, _issue_updated, event_filter=_is_this_issue
+            )
+        )
+
+
 class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):
     """Diagnostic sensor: number of Comexio extension modules known to HA (online + offline)."""
 
@@ -810,8 +963,7 @@ class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorE
 
     @property
     def _fub(self) -> dict[str, Any] | None:
-        fub = self.coordinator.api.fub_data.get(str(self._fub_id))
-        return fub if isinstance(fub, dict) else None
+        return function_plan_info(self.coordinator.api.fub_data, self._fub_id) or None
 
     @property
     def name(self) -> str:

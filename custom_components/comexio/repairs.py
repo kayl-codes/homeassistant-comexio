@@ -3,20 +3,28 @@ import asyncio
 import logging
 import time
 
+from aiocomexio import ComexioError, fetch_certificate_fingerprint
 from homeassistant.components import persistent_notification
 from homeassistant.components.repairs import RepairsFlow
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
 from homeassistant.util import slugify
 import voluptuous as vol
 
+from .certificate import (
+    ISSUE_CERTIFICATE_CHANGED,
+    async_clear_certificate_changed,
+    async_report_certificate_changed,
+    certificate_placeholders,
+)
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
     CLEANUP_SCOPE_IO,
     CLEANUP_SCOPE_KNX,
     CLEANUP_SCOPE_MARKER,
+    CLEANUP_SCOPE_QUICKBUS,
     CLEANUP_SCOPES,
     SKIPPED_KNX_BRIDGE_MARKERS,
     count_placeholder,
@@ -24,8 +32,10 @@ from .cleanup_scope import (
     scope_of_class,
 )
 from .const import (
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
+    CONF_HOST,
     CONF_IMPORT_DISABLED_IGNORED,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_SERVER_ID,
@@ -44,11 +54,13 @@ from .const import (
     ICON_RENAME,
     ICON_ROCKET,
     ICON_SYNC,
+    ICON_WARNING,
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     ISSUE_UNINSTALL_CLEANUP,
     MARKER_READ_ONLY_SUFFIX,
     MARKER_TRIGGER_SUFFIXES,
+    PLAN_WIRING_ACTIONS,
     SOURCE_CATEGORIES,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
@@ -59,15 +71,20 @@ from .const import (
     WEBIO_CLASS_KNX,
     WebioClass,
     active_webio_classes,
-    expand_ignored_marker_ids,
+    format_ignored_ids,
+    invalid_ignored_tokens,
+    one_line,
+    one_line_values,
     prune_import_disabled_ignored,
     source_category,
+    split_ignored_ids,
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
+    unreadable_plan_keys,
 )
-from .function_plan_backup import is_orphaned_identity
+from .function_plan_backup import PlanBackupsNotMovedError, is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
-from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED
+from .plan_watchdog import ISSUE_FUNCTION_PLAN_STOPPED, ISSUE_FUNCTION_PLAN_VANISHED, vanished_plan_restorable
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -78,6 +95,12 @@ ACTION_KNX_TRIG = "trig"
 ACTION_KEEP = "keep"
 ACTION_DELETE = "delete"
 ACTION_PREVIEW = "preview"
+ACTION_RESTORE = "restore"
+ACTION_UNWATCH = "unwatch"
+# A vanished plan whose ID another plan holds now: watch that plan instead, or take it over as the plan renamed.
+ACTION_WATCH_HOLDER = "watch_holder"
+ACTION_TAKE_OVER_RENAME = "take_over_rename"
+ACTION_START_PLAN = "start"
 ACTION_CLEANUP = "cleanup"
 ACTION_ENABLE = "enable"
 
@@ -96,13 +119,42 @@ def _is_knx_cluster_plan(plan_name: str) -> bool:
 def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str:
     """Merge newly-ignored KNX ids into the CONF_KNX_DPT_SUFFIX_IGNORED option string.
 
-    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, reusing
-    expand_ignored_marker_ids for parsing so the two stay in sync if that format ever changes.
+    Same comma/range-list format as CONF_IGNORED_MARKERS/CONF_IGNORED_KNX, parsed and written
+    by the shared const helpers so the two stay in sync — ranges the user wrote stay ranges.
     """
     knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
-    ids = expand_ignored_marker_ids(existing_raw, knx_prefix + knx_prefix.lower())
-    ids.update(new_ids)
-    return ",".join(f"{knx_prefix}{i}" for i in sorted(ids))
+    prefix_chars = knx_prefix + knx_prefix.lower()
+    if invalid := invalid_ignored_tokens(existing_raw, prefix_chars):
+        _LOGGER.warning("Dropping invalid entries %s from the KNX DPT suffix ignore list", invalid)
+    singles, ranges = split_ignored_ids(existing_raw, prefix_chars)
+    return format_ignored_ids(singles | new_ids, ranges, knx_prefix)
+
+
+# Why the webhook URL from the options is unusable (ha_address.webhook_url_error keys): (German, English).
+_ADDRESS_FALLBACK_REASONS = {
+    "invalid_url": ("keine gültige http(s)-Adresse", "not a valid http(s) address"),
+    "loopback_url": ("eine Loopback-Adresse", "a loopback address"),
+    "insecure_url": ("unverschlüsseltes HTTP außerhalb des lokalen Netzes", "plain HTTP outside the local network"),
+}
+
+
+def _address_fallback_note(issue_data: dict, is_de: bool) -> str | None:
+    """The note that the server address fix sets the automatic address instead of the options' URL; None if not."""
+    reason = issue_data.get("address_fallback")
+    if not reason:
+        return None
+    de_reason, en_reason = _ADDRESS_FALLBACK_REASONS.get(reason, (reason, reason))
+    address = issue_data.get("ha_address") or "?"
+    if is_de:
+        return (
+            f"{ICON_WARNING} Die Webhook-URL aus den Optionen ist nicht nutzbar ({de_reason}). Die Korrektur "
+            f"der Server-Adresse setzt stattdessen die automatische Adresse **{address}**. Für die eigene Adresse "
+            "zuerst die URL korrigieren."
+        )
+    return (
+        f"{ICON_WARNING} The webhook URL from the options is unusable ({en_reason}). Fixing the server "
+        f"address sets the automatic address **{address}** instead. Correct the URL first to use your own address."
+    )
 
 
 def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
@@ -124,27 +176,48 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
         else:
             cluster_noun, item_noun, item_noun_cap = "Marker cluster plan", "markers", "Markers"
         if gap == total:
-            lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {plan_name} missing:** all {gap} {item_noun}")
+            lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {one_line(plan_name)} missing:** all {gap} {item_noun}")
         else:
-            lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {plan_name}:** {gap} of {total}")
-    for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
-        if gap == total:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
-        else:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} partially wired:** {gap} of {total} IOs missing")
+            lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {one_line(plan_name)}:** {gap} of {total}")
+    lines.extend(
+        _io_column_gap_line(f"Extension {ext}", "an IO", gap, total)
+        for ext, (gap, total) in detail.get("ios_by_ext", {}).items()
+    )
+    lines.extend(
+        _io_column_gap_line(f"Quickbus device {one_line(device)}", "a QB", gap, total)
+        for device, (gap, total) in detail.get("quickbus_by_device", {}).items()
+    )
     return lines
+
+
+def _io_column_gap_line(member: str, plan_noun: str, gap: int, total: int) -> str:
+    """Summary bullet for one IO extension / Quickbus device with missing wiring."""
+    if gap == total:
+        return f"* {ICON_PUZZLE} **{member} not yet in {plan_noun} cluster plan:** all {gap} IOs"
+    return f"* {ICON_PUZZLE} **{member} partially wired:** {gap} of {total} IOs missing"
+
+
+def _column_noun(n_extensions: int, n_quickbus_devices: int) -> str:
+    """Noun of the column-plan members an add-missing action adds (extensions / Quickbus devices)."""
+    if not n_quickbus_devices:
+        return "extension" if n_extensions == 1 else "extensions"
+    if not n_extensions:
+        return "Quickbus device" if n_quickbus_devices == 1 else "Quickbus devices"
+    return "extensions and Quickbus devices"
 
 
 def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> str:
     """Label of the add-missing repair action, worded by gap kind.
 
-    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions
-    "Add extension(s) to Function Plan"; individual missing connections
+    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions / Quickbus
+    devices "Add extension(s) to Function Plan"; individual missing connections
     (partially wired plans/extensions, legacy issues) keep "Wire in Function Plan".
     """
     markers_by_plan = detail.get("markers_by_plan", {}) if detail else {}
     ios_by_ext = detail.get("ios_by_ext", {}) if detail else {}
-    if not markers_by_plan and not ios_by_ext:
+    qb_by_device = detail.get("quickbus_by_device", {}) if detail else {}
+    columns = [*ios_by_ext.values(), *qb_by_device.values()]
+    if not markers_by_plan and not columns:
         return f"{ICON_LINK} Wire in Function Plan ({lp_missing_c}x{eta})"
     parts = []
     if marker_gap := sum(gap for name, (gap, _total) in markers_by_plan.items() if not _is_knx_cluster_plan(name)):
@@ -152,17 +225,17 @@ def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> st
     if knx_gap := sum(gap for name, (gap, _total) in markers_by_plan.items() if _is_knx_cluster_plan(name)):
         parts.append(f"{knx_gap} KNX objects")
     parts.extend(f"{ext} +{gap} IOs" for ext, (gap, _total) in ios_by_ext.items())
+    parts.extend(f"{one_line(device)} +{gap} IOs" for device, (gap, _total) in qb_by_device.items())
     detail_str = f"({', '.join(parts)},{eta})"
     all_whole = all(gap == total for gap, total in markers_by_plan.values()) and all(
-        gap == total for gap, total in ios_by_ext.values()
+        gap == total for gap, total in columns
     )
     if not all_whole:
         return f"{ICON_LINK} Wire in Function Plan {detail_str}"
     if markers_by_plan:
-        noun = "Function Plan" if len(markers_by_plan) == 1 and not ios_by_ext else "Function Plans"
+        noun = "Function Plan" if len(markers_by_plan) == 1 and not columns else "Function Plans"
         return f"{ICON_PUZZLE} Add {noun} {detail_str}"
-    noun = "extension" if len(ios_by_ext) == 1 else "extensions"
-    return f"{ICON_PUZZLE} Add {noun} to Function Plan {detail_str}"
+    return f"{ICON_PUZZLE} Add {_column_noun(len(ios_by_ext), len(qb_by_device))} to Function Plan {detail_str}"
 
 
 _CLEANUP_SCOPE_LABELS = {
@@ -170,6 +243,7 @@ _CLEANUP_SCOPE_LABELS = {
     CLEANUP_SCOPE_MARKER: f"{ICON_DELETE} Markers only",
     CLEANUP_SCOPE_IO: f"{ICON_DELETE} IOs only",
     CLEANUP_SCOPE_KNX: f"{ICON_DELETE} KNX only",
+    CLEANUP_SCOPE_QUICKBUS: f"{ICON_DELETE} Quickbus only",
 }
 
 
@@ -306,6 +380,17 @@ def _sync_running(hass: HomeAssistant, entry_id: str | None) -> bool:
     return coordinator is not None and (coordinator.in_sync or coordinator._sync_lock.locked())
 
 
+def _without_refused_plan_options(hass: HomeAssistant, entry_id: str | None, options: dict[str, str]) -> dict[str, str]:
+    """options without the plan wiring actions the sync refuses while the plan list has unreadable entries.
+
+    The press is non-blocking, so the dialog would report a refused action as executed.
+    """
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+    if coordinator is None or not unreadable_plan_keys(coordinator.api.fub_data):
+        return options
+    return {key: label for key, label in options.items() if key not in PLAN_WIRING_ACTIONS}
+
+
 async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict | None):
     """Create a flow to fix a repair issue."""
     return ComexioRepairFlow(issue_id, data)
@@ -332,6 +417,17 @@ def count_referencing_automations_and_scripts(hass: HomeAssistant, entity_ids: l
     return str(len(referencing))
 
 
+def _action_schema(actions: list[str], translation_key: str) -> vol.Schema:
+    """A repair dialog's choice of actions, the first one preselected."""
+    return vol.Schema(
+        {
+            vol.Required("action", default=actions[0]): SelectSelector(
+                SelectSelectorConfig(options=actions, mode=SelectSelectorMode.LIST, translation_key=translation_key)
+            )
+        }
+    )
+
+
 class ComexioRepairFlow(RepairsFlow):
     """Handler for Comexio repair flows."""
 
@@ -356,8 +452,12 @@ class ComexioRepairFlow(RepairsFlow):
             return await self.async_step_knx_dpt_suffix()
         if self.issue_id.startswith(f"{ISSUE_ORPHANED_PLAN_BACKUPS}_"):
             return await self.async_step_orphaned_backups()
+        if self.issue_id.startswith(f"{ISSUE_CERTIFICATE_CHANGED}_"):
+            return await self.async_step_certificate_changed()
         if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_STOPPED}_"):
             return await self.async_step_function_plan_stopped()
+        if self.issue_id.startswith(f"{ISSUE_FUNCTION_PLAN_VANISHED}_"):
+            return await self.async_step_function_plan_vanished()
         if self.issue_id.startswith(f"{ISSUE_IMPORT_DISABLED}_"):
             return await self.async_step_import_disabled()
 
@@ -638,10 +738,15 @@ class ComexioRepairFlow(RepairsFlow):
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
             # exact estimate: approximate the affected-plan count from the detail split (one
-            # finalize cost per marker-cluster plan / IO extension) instead of a flat single
+            # finalize cost per marker-cluster plan / IO extension / Quickbus device) instead of a flat single
             # SYNC_DURATION_FUNCTION_PLAN_FINALIZE, which would undercount multi-plan repairs.
             affected_plan_count = (
-                max(1, len(lp_detail.get("markers_by_plan", {})) + len(lp_detail.get("ios_by_ext", {})))
+                max(
+                    1,
+                    len(lp_detail.get("markers_by_plan", {}))
+                    + len(lp_detail.get("ios_by_ext", {}))
+                    + len(lp_detail.get("quickbus_by_device", {})),
+                )
                 if lp_detail
                 else 1
             )
@@ -695,6 +800,8 @@ class ComexioRepairFlow(RepairsFlow):
                         "Web-IO device does not match the current Home Assistant address. "
                         "This prevents receiving status updates via webhooks."
                     )
+                if fallback := _address_fallback_note(self.issue_data, is_de):
+                    summary += f"\n\n{fallback}"
             else:
                 # CASE 2: Configuration issues (with optional IP mismatch)
                 if is_de:
@@ -739,6 +846,8 @@ class ComexioRepairFlow(RepairsFlow):
                         f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
                         f"{'Falsch' if is_de else 'Incorrect'}"
                     )
+                    if fallback := _address_fallback_note(self.issue_data, is_de):
+                        lines.append(f"  * {fallback}")
 
                 if is_de:
                     footer = f"\n\nWeb-IO-Befehle: {ha_count} (HA) zu {com_count} (Comexio)"
@@ -838,7 +947,11 @@ class ComexioRepairFlow(RepairsFlow):
                     label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
                 else:
                     label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
-                specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
+                specific_options["update_ip"] = f"{label} ({format_time(SYNC_DURATION_WRITE).strip()})"
+
+            specific_options = _without_refused_plan_options(
+                self.hass, self.issue_data.get("entry_id"), specific_options
+            )
 
             # Calculate Full Sync ETA
             total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0)
@@ -887,7 +1000,7 @@ class ComexioRepairFlow(RepairsFlow):
         """Handle the uninstall/cleanup repair flow (cleanup button + KNX pre-release cleanup issue).
 
         Tears down what the integration created in Comexio for the chosen scope
-        (full / marker / io / knx, see cleanup_scope): HA-managed Function Plans, then the
+        (full / marker / io / knx / quickbus, see cleanup_scope): HA-managed Function Plans, then the
         Web-IO device instances, then the Web-IO device classes; knx/full also reset the
         KNX bridge markers. This is destructive and not reversible, so — unlike the other
         fix flows — the default choice is 'ignore' unless the issue names a default scope
@@ -966,21 +1079,26 @@ class ComexioRepairFlow(RepairsFlow):
         )
 
     def _cleanup_blocked_by_sync(self, coordinator, scope: str, notif_id: str, notify_enabled: bool) -> bool:
-        """Whether a sync, range check or reload holds _sync_lock, so the cleanup must not start.
+        """Whether a sync, range check or reload holds _sync_lock, or a restore runs, so the cleanup must not start.
 
         Covers a sync pressed between the dialog's submit and the cleanup task starting; reports
         it and re-raises the issue so the user can run the cleanup again afterwards. Split out of
         _async_run_cleanup to keep its cognitive complexity within SonarQube S3776's limit.
         """
-        if not coordinator._sync_lock.locked():
+        # A restore or a plan edit (sort, connect, …) changes function plans the cleanup deletes.
+        if not (
+            coordinator._sync_lock.locked() or coordinator._restore_lock.locked() or coordinator.plan_edits_running
+        ):
             return False
-        _LOGGER.warning("[%s] Uninstall cleanup not started — a sync is running", coordinator.server_id)
+        _LOGGER.warning(
+            "[%s] Uninstall cleanup not started — a sync, restore or plan edit is running", coordinator.server_id
+        )
         if notify_enabled:
             _post_result_notification(
                 self.hass,
                 notif_id,
-                "A sync, Web-IO range check or reload started before the cleanup could begin — nothing "
-                "was removed. Run the cleanup again once it has finished.",
+                "A sync, Web-IO range check, function plan restore, function plan edit or reload started before the "
+                "cleanup could begin — nothing was removed. Run the cleanup again once it has finished.",
                 f"Comexio Uninstall Cleanup ({coordinator.server_id})",
             )
         self._reraise_cleanup_issue(coordinator, scope)
@@ -1072,12 +1190,16 @@ class ComexioRepairFlow(RepairsFlow):
         await asyncio.sleep(0.5)
         _LOGGER.info("[%s] Reloading integration after uninstall cleanup...", coordinator.server_id)
         try:
-            await self.hass.config_entries.async_reload(entry.entry_id)
+            # The caller holds _sync_lock, which comes first in the lock order (restores_held_off).
+            async with coordinator.restores_held_off():
+                reloaded = await self.hass.config_entries.async_reload(entry.entry_id)
         except Exception:
             _LOGGER.exception(
                 "[%s] Reload after uninstall cleanup failed — reload the integration manually",
                 coordinator.server_id,
             )
+            reloaded = False
+        if not reloaded:
             # Posted regardless of notify_enabled: the flow has already closed, and without a
             # reload the entities keep reflecting the pre-cleanup state.
             persistent_notification.async_create(
@@ -1199,7 +1321,7 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_show_form(
                 step_id="knx_dpt_suffix",
                 description_placeholders={
-                    "name": current["name"],
+                    "name": one_line(current["name"]),
                     "remaining": str(len(self._knx_dpt_items) - 1),
                 },
                 data_schema=vol.Schema(
@@ -1290,7 +1412,7 @@ class ComexioRepairFlow(RepairsFlow):
             if await api.rename_knx_object(k_id, new_title):
                 renamed_count += 1
             else:
-                failed.append(item["name"])
+                failed.append(one_line(item["name"]))
         return renamed_count, failed, newly_ignored
 
     def _knx_dpt_suffix_result_title(self, renamed_count: int, newly_ignored: set[int], failed: list[str]) -> str:
@@ -1313,6 +1435,51 @@ class ComexioRepairFlow(RepairsFlow):
             names = ", ".join(failed)
             title += f" ({len(failed)} fehlgeschlagen: {names})" if is_de else f" ({len(failed)} failed: {names})"
         return title
+
+    async def async_step_certificate_changed(self, user_input=None):
+        """Show pinned and presented fingerprint; on confirmation pin the presented one if Comexio still shows it.
+
+        Never pins anything the user has not seen: the certificate is read again on confirmation, and
+        a different one than shown is put up for comparison instead.
+        """
+        entry = self.hass.config_entries.async_get_entry(str(self.issue_data.get("entry_id")))
+        if entry is None or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="entry_not_found")
+        shown = str(self.issue_data.get("actual"))
+        placeholders = certificate_placeholders(entry, shown)
+        if user_input is None:
+            return self.async_show_form(step_id="certificate_changed", description_placeholders=placeholders)
+        try:
+            current = await fetch_certificate_fingerprint(entry.data[CONF_HOST])
+        except (ComexioError, ValueError) as err:
+            _LOGGER.warning("Comexio certificate could not be read again for the repair: %s", err)
+            return self.async_abort(reason="cannot_connect", description_placeholders=placeholders)
+        if current == entry.data[CONF_CERTIFICATE_FINGERPRINT]:
+            # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
+            async_clear_certificate_changed(self.hass, entry.entry_id)
+            if entry.state is not ConfigEntryState.LOADED:
+                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+            return self.async_abort(reason="certificate_restored", description_placeholders=placeholders)
+        if current != shown:
+            # Yet another certificate than the one the user just compared: put that one up instead.
+            async_report_certificate_changed(self.hass, entry, current)
+            return self.async_abort(
+                reason="certificate_changed_again", description_placeholders=certificate_placeholders(entry, current)
+            )
+        _LOGGER.warning(
+            "Comexio at %s: certificate %s pinned by the user, replacing %s",
+            entry.data[CONF_HOST],
+            placeholders["actual"],
+            placeholders["pinned"],
+        )
+        # A loaded entry reloads through its update listener on the data change below.
+        reload = entry.state is not ConfigEntryState.LOADED
+        self.hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: current})
+        async_clear_certificate_changed(self.hass, entry.entry_id)  # also removes the push from the phones
+        if reload:
+            self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        return self.async_create_entry(data={})
 
     async def async_step_orphaned_backups(self, user_input=None):
         """Delete or keep the backups of a deleted plan whose retention has passed, or look at them first."""
@@ -1359,7 +1526,12 @@ class ComexioRepairFlow(RepairsFlow):
             # would delete it).
             loaded = await coordinator.async_load_orphaned_plan_into_preview(fub_id, plan_name)
             return self.async_abort(reason="loaded_in_preview" if loaded else "preview_failed")
-        title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
+        if coordinator.unloading or coordinator._restore_lock.locked():
+            # A restore moves and marks backups; after the unload's wait a write would hit a torn-down entry.
+            return self.async_abort(reason="backups_busy")
+        # No await since the check: a restore starting from here on refuses until the change ends.
+        with coordinator.plan_edit():
+            title = await self._async_apply_orphaned_backups_action(manager, user_input["action"], fub_id, plan_name)
         ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
         if title is None:
             return self.async_abort(reason="already_deleted")
@@ -1368,36 +1540,190 @@ class ComexioRepairFlow(RepairsFlow):
         return self.async_create_entry(title=title, data={})
 
     async def async_step_function_plan_stopped(self, user_input=None):
-        """Start a stopped HA-managed function plan again."""
+        """Start a stopped watched function plan again, ignore its repair, or stop watching it (user plans)."""
         coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
         if coordinator is None:
             return self.async_abort(reason="entry_not_found")
-        placeholders = {
-            key: str(self.issue_data.get(key, "?")) for key in ("plan_name", "fub_id", "attempts", "gave_up_at")
-        }
+        placeholders = one_line_values(
+            {key: self.issue_data.get(key, "?") for key in ("plan_name", "fub_id", "attempts", "gave_up_at")}
+        )
         # Read when the dialog opens, so it is current without rewriting the issue on every check.
         placeholders["last_check"] = coordinator.plan_watchdog.last_check_text()
-        if user_input is None:
-            return self.async_show_form(
-                step_id="function_plan_stopped", description_placeholders=placeholders, data_schema=vol.Schema({})
-            )
         fub_id = int(self.issue_data["fub_id"])
-        if not coordinator.is_watched_plan(fub_id):
-            # Unselected, deleted or its ID reused while the dialog was open: not the watchdog's plan to start.
+        if user_input is None:
+            actions = [ACTION_START_PLAN, ACTION_IGNORE]
+            # Read from the options, not the watchdog: its user plans are known only after its first check.
+            if coordinator.is_watched_user_plan(fub_id):
+                # HA's own plans are always watched: only a user plan can be taken off the list.
+                actions.append(ACTION_UNWATCH)
+            return self.async_show_form(
+                step_id="function_plan_stopped",
+                description_placeholders=placeholders,
+                data_schema=_action_schema(actions, "function_plan_stopped_action"),
+            )
+        if not coordinator.watches_plan_raised_for(fub_id, lambda name: name == self.issue_data.get("plan_name")):
+            # Unselected, deleted or its ID reused while the dialog was open — also by another watched
+            # plan, so the name is compared, not only whether the ID is watched: not this repair's plan to start.
             # The issue goes too, also while a sync keeps the watchdog's own clean-up waiting.
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             return self.async_abort(reason="plan_not_watched", description_placeholders=placeholders)
+        action = user_input.get("action", ACTION_START_PLAN)
+        if action == ACTION_UNWATCH:
+            if not await coordinator.async_unwatch_user_plan(fub_id, str(self.issue_data["plan_name"])):
+                # Its pick names only the ID, which another plan holds now (a notification says so): the
+                # repair stays, as the plan stays watched.
+                return self.async_abort(reason="still_watched", description_placeholders=placeholders)
+            is_de = self.hass.config.language == "de"
+            return self.async_create_entry(title="Nicht mehr überwacht" if is_de else "No longer watched", data={})
         if coordinator.api.get_fub_active(fub_id):
             # Started meanwhile (in Comexio, by the auto-start or another repair).
             await coordinator.plan_watchdog.async_plan_started(fub_id)
             coordinator.async_update_listeners()
             return self.async_abort(reason="already_running", description_placeholders=placeholders)
+        if action == ACTION_IGNORE:
+            # An abort, not an entry: a finished repair flow deletes its issue, and with it the ignore.
+            if not await coordinator.plan_watchdog.async_ignore_stopped(fub_id):
+                # Its repair was cleared meanwhile: the plan ran again since the dialog opened.
+                return self.async_abort(reason="already_running", description_placeholders=placeholders)
+            return self.async_abort(reason="ignored", description_placeholders=placeholders)
+        return await self._async_start_stopped_plan(coordinator, fub_id, placeholders)
+
+    async def _async_start_stopped_plan(self, coordinator, fub_id: int, placeholders: dict[str, str]):
         if coordinator.managed_plan_start_blocked:
             return self.async_abort(reason="busy")
-        if not await coordinator.async_start_managed_plan(fub_id):
+        started = await coordinator.async_start_managed_plan(fub_id)
+        if started is None:
+            # An edit, sync or restore started while the login awaited Comexio: nothing was sent.
+            return self.async_abort(reason="busy")
+        if not started:
             return self.async_abort(reason="start_failed", description_placeholders=placeholders)
         title = "Plan gestartet" if self.hass.config.language == "de" else "Plan started"
         return self.async_create_entry(title=title, data={})
+
+    async def async_step_function_plan_vanished(self, user_input=None):
+        """Restore a deleted watched user plan from its newest backup, or stop watching it.
+
+        While another plan holds its ID (issue data current_name: renamed, or the ID reused) also: watch
+        that plan instead, or, its content matching the plan's last backup, take it over as the plan renamed.
+        """
+        holder = None if (raw_holder := self.issue_data.get("current_name")) is None else str(raw_holder)
+        keys = ("plan_name", "fub_id") if holder is None else ("plan_name", "fub_id", "current_name")
+        placeholders = one_line_values({key: self.issue_data.get(key, "?") for key in keys})
+        fub_id = int(self.issue_data["fub_id"])
+        name = str(self.issue_data.get("plan_name", ""))
+        coordinator = self.hass.data.get(DOMAIN, {}).get(self.issue_data.get("entry_id"))
+        if user_input is None:
+            actions = await self._async_vanished_plan_actions(coordinator, fub_id, name, holder)
+            return self.async_show_form(
+                step_id="function_plan_vanished",
+                description_placeholders=placeholders,
+                data_schema=_action_schema(actions, "function_plan_vanished_action"),
+            )
+        if coordinator is None:
+            return self.async_abort(reason="entry_not_found")
+        if coordinator.plan_watchdog.vanished is None:
+            # Not checked since setup (no plan list read yet): unknown, so the repair stays.
+            return self.async_abort(reason="check_pending", description_placeholders=placeholders)
+        if (fub_id, name) not in coordinator.plan_watchdog.vanished:
+            # Restored, unpicked or back meanwhile.
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="plan_not_missing", description_placeholders=placeholders)
+        is_de = self.hass.config.language == "de"
+        if user_input["action"] == ACTION_UNWATCH:
+            await coordinator.async_unwatch_user_plan(fub_id, name)
+            return self.async_create_entry(title="Nicht mehr überwacht" if is_de else "No longer watched", data={})
+        if user_input["action"] in (ACTION_WATCH_HOLDER, ACTION_TAKE_OVER_RENAME) and holder is not None:
+            rename = user_input["action"] == ACTION_TAKE_OVER_RENAME
+            return await self._async_watch_vanished_plan_holder(coordinator, fub_id, name, holder, rename=rename)
+        try:
+            has_backup = await coordinator.async_newest_backup_field(fub_id, name) is not None
+        except Exception:
+            # The backups failed to load: the restore below reads them again and reports a failure itself.
+            _LOGGER.warning(
+                "Function plan '%s' (ID %s): backups not readable for the repair", one_line(name), fub_id, exc_info=True
+            )
+            has_backup = True
+        if not has_backup:
+            return self.async_abort(reason="no_backup", description_placeholders=placeholders)
+        # A background task: a restore can outlast the repair dialog; it reports through its notifications.
+        self.hass.async_create_background_task(
+            coordinator.async_restore_vanished_plan(fub_id, name),
+            name=f"{DOMAIN}_{coordinator.server_id}_restore_plan_{fub_id}",
+        )
+        return self.async_create_entry(title="Wiederherstellung gestartet" if is_de else "Restore started", data={})
+
+    async def _async_vanished_plan_actions(self, coordinator, fub_id: int, name: str, holder: str | None) -> list[str]:
+        """The vanished plan dialog's choices, the most likely first.
+
+        With another plan on the ID: "take over the rename" when its content matches the plan's last
+        backup (plan_rename_suspected), else "watch it instead". "Restore" only for a plan its backups
+        can be found by (a bare-ID pick its backups name ambiguously has no backup identity), and not
+        for a suspected rename: the restored copy would run beside the renamed original.
+        """
+        if holder is not None and coordinator is not None:
+            if await self._async_rename_suspected(coordinator, fub_id, name, holder):
+                return [ACTION_TAKE_OVER_RENAME, ACTION_UNWATCH]
+            holder_actions = [ACTION_WATCH_HOLDER]
+        else:
+            holder_actions = []
+        restore = [ACTION_RESTORE] if vanished_plan_restorable(fub_id, name) else []
+        return [*restore, *holder_actions, ACTION_UNWATCH]
+
+    @staticmethod
+    async def _async_rename_suspected(coordinator, fub_id: int, name: str, holder: str) -> bool | None:
+        """plan_rename_suspected after loading the backups; None when they fail to load (no rename offered)."""
+        try:
+            await coordinator.function_plan_backup.async_load()
+        except Exception:
+            _LOGGER.warning(
+                "Function plan '%s' (ID %s): backups not readable, no rename offered",
+                one_line(name),
+                fub_id,
+                exc_info=True,
+            )
+            return None
+        return coordinator.plan_rename_suspected(fub_id, name, holder)
+
+    async def _async_watch_vanished_plan_holder(
+        self, coordinator, fub_id: int, name: str, holder: str, *, rename: bool
+    ):
+        """Watch the plan holding a vanished plan's ID instead; as a rename, with the plan's backups moved to it."""
+        placeholders = one_line_values({"plan_name": name, "fub_id": str(fub_id), "current_name": holder})
+        if rename:
+            suspected = await self._async_rename_suspected(coordinator, fub_id, name, holder)
+            if suspected is None:
+                return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
+            if not suspected:
+                # Its content changed since the dialog opened: no longer recognisable as the same plan.
+                return self.async_abort(reason="rename_not_confirmed", description_placeholders=placeholders)
+        if (
+            coordinator.unloading
+            or (rename and coordinator._restore_lock.locked())
+            or coordinator.vanished_restore_running(fub_id, name)
+        ):
+            # A restore moves the same backups; after the unload's wait a write would hit a torn-down entry.
+            # This plan's own Restore would build it anew beside the holder, its pick swapped away from it.
+            return self.async_abort(reason="backups_busy")
+        try:
+            # No await since the check: a restore starting from here on refuses until the move ends.
+            with coordinator.plan_edit():
+                done = await coordinator.async_watch_id_holder(fub_id, name, holder, rename=rename)
+        except PlanBackupsNotMovedError:
+            _LOGGER.exception("Function plan '%s' (ID %s): its backups could not be moved", one_line(name), fub_id)
+            return self.async_abort(reason="backups_not_moved", description_placeholders=placeholders)
+        if not done:
+            # Another plan holds the ID by now, or the pick was changed in the options meanwhile.
+            _LOGGER.warning(
+                "Function plan '%s' (ID %s): not switched to '%s', the ID or the pick changed meanwhile",
+                one_line(name),
+                fub_id,
+                one_line(holder),
+            )
+            return self.async_abort(reason="holder_changed", description_placeholders=placeholders)
+        is_de = self.hass.config.language == "de"
+        if rename:
+            return self.async_create_entry(title="Umbenennung übernommen" if is_de else "Rename taken over", data={})
+        return self.async_create_entry(title="Überwachung umgestellt" if is_de else "Now watching it", data={})
 
     async def _async_apply_orphaned_backups_action(
         self, manager, action: str, fub_id: int, plan_name: str

@@ -4,7 +4,10 @@
       "server_id_exists": "Este nombre de instancia ya está en uso.",
       "cannot_connect": "Error de conexión con Comexio.",
       "invalid_auth": "Credenciales no válidas (Usuario/Contraseña UI).",
-      "unknown": "Se ha producido un error inesperado."
+      "unknown": "Se ha producido un error inesperado.",
+      "certificate_changed": "Comexio presenta otro certificado distinto del guardado. Revísalo en Ajustes → Reparaciones.",
+      "certificate_unstable": "Comexio presentó en la prueba de inicio de sesión otro certificado distinto del de hace un momento. Puede que otra cosa en la red responda en su lugar; revísala e inténtalo de nuevo.",
+      "invalid_host": "No es un nombre de host ni una dirección IP (opcionalmente con :puerto) – sin http://, rutas ni similares."
     },
     "step": {
       "user": {
@@ -20,12 +23,14 @@
           "import_markers": "Crear entidades para marcadores",
           "import_ios": "Crear entidades para IOs",
           "import_knx": "Crear entidades para objetos KNX",
+          "import_quickbus": "Crear entidades para dispositivos Quickbus (multitouch, detectores de movimiento, ...)",
           "scan_interval": "Intervalo de consulta en segundo plano (min)",
           "cover_keywords": "Palabras clave para detectar persianas"
         }
       },
       "reconfigure": {
         "title": "Reconfigurar conexión Comexio",
+        "description": "Conexión: **{protocol}**\nCertificado fijado (SHA-256): `{fingerprint}`\n\nEn cuanto Comexio ofrece HTTPS, la integración se conecta cifrada y fija el certificado automáticamente. HTTP significa que Comexio no ofrece HTTPS: la conexión no está cifrada.",
         "data": {
           "host": "Host / Dirección IP",
           "username": "Usuario (Administrador)",
@@ -37,10 +42,27 @@
           "password": "Dejar en blanco para mantener la contraseña existente.",
           "api_password": "Dejar en blanco para mantener la contraseña existente."
         }
+      },
+      "reconfigure_http": {
+        "title": "¿Cambiar a HTTP sin cifrar?",
+        "description": "**{host}** no ofrece HTTPS. El certificado fijado:\n`{pinned}`\n\nSi continúas, Home Assistant se conecta por HTTP simple – sin cifrar, incluido el inicio de sesión de administrador – y descarta el certificado fijado. El próximo inicio fija el certificado que Comexio presente entonces.\n\nSi Comexio debería ofrecer HTTPS (o simplemente no está accesible ahora), cierra este diálogo y no cambia nada."
+      },
+      "reconfigure_certificate": {
+        "title": "¿Confiar en otro certificado?",
+        "description": "**{host}** presenta un certificado distinto del fijado.\n\nFijado (SHA-256):\n`{pinned}`\n\nPresentado (SHA-256):\n`{actual}`\n\nCompara el valor presentado con el SHA-256 que la página de administración de Comexio muestra en los hashes de certificado. Continúa solo si coinciden – entonces se fija el nuevo certificado. De lo contrario, cierra este diálogo y no cambia nada."
+      },
+      "reauth_confirm": {
+        "title": "Volver a autenticar Comexio",
+        "description": "Comexio en {host} rechazó las credenciales de administrador guardadas. Introduce las actuales.",
+        "data": {
+          "username": "Usuario (Administrador)",
+          "password": "Contraseña (Administrador)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Configuración de conexión actualizada correctamente."
+      "reconfigure_successful": "Configuración de conexión actualizada correctamente.",
+      "reauth_successful": "Reautenticación correcta."
     }
   },
   "selector": {
@@ -106,6 +128,28 @@
         "ignore": "🔇 Ignorar (conservarlo todo)",
         "enable": "🔁 Volver a activar la importación"
       }
+    },
+    "function_plan_stopped_action": {
+      "options": {
+        "start": "▶️ Iniciar el plan ahora",
+        "ignore": "🔕 Ignorar (hasta que el plan vuelva a ejecutarse)",
+        "unwatch": "🚫 Dejar de vigilar este plan"
+      }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Restaurar desde la copia más reciente",
+        "unwatch": "🚫 Dejar de supervisar este plan",
+        "take_over_rename": "✏️ Adoptar el cambio de nombre (las copias se mueven)",
+        "watch_holder": "👁️ Supervisar en su lugar el plan que ahora tiene este ID"
+      }
+    },
+    "webhook_address_mode": {
+      "options": {
+        "auto": "Automática (dirección local)",
+        "external": "URL externa de HA",
+        "custom": "Dirección propia"
+      }
     }
   },
   "options": {
@@ -123,6 +167,7 @@
           "logikplan_plan_prefix": "Prefijo de nombre para los planes de función gestionados",
           "logikplan_max_pairs_per_plan": "Máx. de pares por plan de función gestionado",
           "logikplan_io_extensions": "Extensiones gestionadas como planes de clúster de IO",
+          "logikplan_quickbus_devices": "Dispositivos Quickbus gestionados como planes de clúster QB",
           "ignored_markers": "IDs de marcadores a excluir de la conexión de planes de función",
           "ignored_knx": "IDs de objetos KNX a excluir de la conexión de planes de función",
           "cover_keywords": "Palabras clave para detectar persianas",
@@ -130,29 +175,46 @@
           "bus_watchdog_enabled": "Activar el Bus-Load Watchdog",
           "bus_watchdog_auto_reboot": "Permitir el reinicio automático de Comexio ante una carga de bus de emergencia",
           "function_plan_watchdog_notify": "Watchdog de planes de funciones: push a",
-          "function_plan_watchdog_user_plans": "Watchdog de planes de funciones: vigilar también planes de usuario"
+          "function_plan_watchdog_user_plans": "Watchdog de planes de funciones: vigilar también planes de usuario",
+          "webhook_address_mode": "Dirección del webhook (push Comexio → HA)"
         },
         "data_description": {
           "schema_marker": "Variables disponibles: '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_knx": "Variables disponibles: '{{KnxId}}', '{{KnxTitle}}'",
           "schema_io": "Variables disponibles: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "logikplan_plan_prefix": "Prefijo de los planes de clúster creados automáticamente. Los planes se llamarán, por ejemplo: HA - Marker [1-100].",
-          "logikplan_max_pairs_per_plan": "Cuántos pares de Web-IO y marcador caben en un plan gestionado antes de crear un nuevo plan de clúster. Para los planes de clúster de IO esto equivale a 1 (50), 2 (100) o 3 (150) extensiones por plan. Los planes de clúster KNX ignoran este ajuste y siempre usan un tamaño fijo de 50.",
+          "logikplan_max_pairs_per_plan": "Cuántos pares de Web-IO y marcador caben en un plan gestionado antes de crear un nuevo plan de clúster. Para los planes de clúster de IO y Quickbus esto equivale a 1 (50), 2 (100) o 3 (150) columnas por plan: una extensión por columna, mientras que los dispositivos Quickbus se apilan en una columna mientras quepan. Los planes de clúster KNX ignoran este ajuste y siempre usan un tamaño fijo de 50.",
           "logikplan_io_extensions": "Los IO de cada extensión seleccionada se cablean en un plan de clúster de IO gestionado (p. ej. HA - IO [Ext]), una columna por extensión. Empiece con una sola extensión para probar y añada las demás después.",
-          "ignored_markers": "IDs de marcadores y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'M' (p. ej. '123, 456; 789' o 'M123, M456' o '8-12'). Solo se pueden excluir marcadores con descripción.",
-          "ignored_knx": "IDs de objetos KNX y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'K' (p. ej. '123, 456; 789' o 'K123, K456' o '8-12'). Solo se pueden excluir objetos KNX con descripción.",
+          "logikplan_quickbus_devices": "Los IO de cada dispositivo Quickbus seleccionado se cablean en un plan de clúster QB gestionado (p. ej. HA - QB [1,3], nombrado por ID de dispositivo), apilados en las columnas del plan, para que Comexio envíe sus valores a Home Assistant. Solo lectura: Comexio no ofrece ninguna forma de escribir un IO Quickbus. Todos los dispositivos están seleccionados hasta que lo cambie; solo los dispositivos seleccionados reciben comandos Web-IO.",
+          "ignored_markers": "IDs de marcadores y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'M' (p. ej. '123, 456; 789' o 'M123, M456' o '8-12'). Solo se pueden excluir marcadores con descripción. Un ID suelto que ya no existe se elimina automáticamente; un rango se mantiene tal cual y abarca también los IDs creados más tarde.",
+          "ignored_knx": "IDs de objetos KNX y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'K' (p. ej. '123, 456; 789' o 'K123, K456' o '8-12'). Solo se pueden excluir objetos KNX con descripción. Un ID suelto que ya no existe se elimina automáticamente; un rango se mantiene tal cual y abarca también los IDs creados más tarde.",
           "cover_keywords": "Lista separada por comas (ej: persiana, toldo, cortina)",
           "function_plan_backup_retention_months": "Cuando la copia más reciente de un plan eliminado directamente en Comexio supera este plazo, una reparación pregunta si eliminar o conservar sus copias — no se elimina nada sin tu confirmación. Las copias de un plan que sigue existiendo nunca se ven afectadas. La acción 'Function Plan Purge Orphaned Backups' elimina de una vez todas las vencidas.",
           "bus_watchdog_enabled": "Ante una subida sostenida de la carga del bus, reinicia automáticamente los planes de función de clúster gestionados por HA (de atrás hacia adelante) para intentar aliviarla. No es destructivo para el propio sistema Comexio.",
           "bus_watchdog_auto_reboot": "Si la carga del bus promedia más del 90 % durante 5 minutos, se dispara un reinicio COMPLETO e INMEDIATO de Comexio, sin confirmación. Desactivado por defecto — actívelo solo cuando confíe en el mecanismo.",
-          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
-          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. No incluyas los planes que detienes a propósito (pruebas)."
+          "function_plan_watchdog_notify": "Servicios de notificación (p. ej. notify.mobile_app_tu_telefono) que reciben un push cuando se detiene un plan de funciones vigilado (gestionado por HA, o un plan de usuario elegido abajo). El push tiene un botón «Iniciar plan» y desaparece en cuanto el plan vuelve a ejecutarse. Un plan de usuario vigilado eliminado en Comexio también recibe un push, con los botones «Restaurar» (su copia de seguridad más reciente, como plan nuevo) y «Dejar de vigilar»; si su ID lo tiene ahora otro plan (renombrado, o ID reasignado), solo «Dejar de vigilar» — restáuralo o adopta el cambio de nombre en su reparación. También reciben un push urgente cuando Comexio presenta otro certificado TLS distinto del fijado. Déjalo vacío para no enviar push; la reparación se crea en cualquier caso.",
+          "function_plan_watchdog_user_plans": "Planes de usuario (no gestionados por Home Assistant) que deben ejecutarse siempre. El watchdog los trata como los planes HA: reparación, sensor de problema y push cuando uno se detiene. El interruptor Inicio automático de planes (planes de usuario) los vuelve a iniciar por sí mismo. Un plan elegido que se eliminó en Comexio no se inicia: su reparación y su push ofrecen restaurarlo desde su copia de seguridad más reciente o dejar de vigilarlo. Un plan renombrado en Comexio sin cambios de contenido se sigue automáticamente (la selección y las copias adoptan el nuevo nombre). Si su ID lo tiene ahora otro plan (renombrado, o ID reasignado), la reparación también ofrece supervisar ese plan en su lugar o, si su contenido coincide con la última copia de seguridad, adoptar el cambio de nombre (las copias se mueven). No incluyas los planes que detienes a propósito (pruebas).",
+          "webhook_address_mode": "A dónde envía Comexio los valores en vivo. Automática: la dirección local de HA. URL externa de HA: host y puerto de la URL externa de los ajustes de red de HA (https sin puerto significa 443). Dirección propia: una URL que introduces en el siguiente paso. Con una dirección externa o propia, el push sale de tu red y pasa por Internet. Después ejecuta una sincronización Web-IO."
+        }
+      },
+      "webhook_url": {
+        "title": "Dirección de webhook propia",
+        "data": {
+          "webhook_url": "URL del webhook"
+        },
+        "data_description": {
+          "webhook_url": "URL base de Home Assistant tal como Comexio debe alcanzarla, p. ej. {example_url} — sin ruta. Si esta dirección es pública, el push pasa por Internet."
         }
       }
     },
     "error": {
       "invalid_number": "Introduzca un número entero válido.",
-      "invalid_schema": "Esquema de nombres no válido. Use solo los nombres de variables indicados entre llaves y cierre cada llave."
+      "invalid_schema": "Esquema de nombres no válido. Use solo los nombres de variables indicados entre llaves y cierre cada llave.",
+      "invalid_url": "Introduce una URL http:// o https:// con host, sin ruta, consulta ni credenciales.",
+      "loopback_url": "Una dirección de loopback (localhost, 127.x, 0.0.0.0) no es accesible desde Comexio.",
+      "insecure_url": "Una dirección http:// solo se permite dentro de la red local: fuera de ella, los valores cruzarían Internet sin cifrar. Usa https://.",
+      "insecure_external_url": "La URL externa de Home Assistant es una dirección http:// fuera de la red local: los valores cruzarían Internet sin cifrar. Configura primero una URL externa https://.",
+      "no_external_url": "Home Assistant no tiene una URL externa utilizable. Configúrala primero en Ajustes → Sistema → Red."
     }
   },
   "entity": {
@@ -230,12 +292,29 @@
         "name": "Número de comandos Web-IO"
       },
       "watchdog_event": {
-        "name": "Último evento del Watchdog"
+        "name": "Último evento del watchdog de carga del bus"
+      },
+      "free_storage": {
+        "name": "Almacenamiento libre"
+      },
+      "last_boot": {
+        "name": "Último arranque"
+      },
+      "connection": {
+        "name": "Conexión",
+        "state": {
+          "https": "HTTPS (cifrada)",
+          "http": "HTTP (sin cifrar)",
+          "certificate_changed": "Certificado cambiado"
+        }
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Problema planes gestionados"
+      },
+      "time_server_problem": {
+        "name": "Ajuste del servidor de hora"
       }
     },
     "switch": {
@@ -322,7 +401,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Limpieza de desinstalación",
-            "description": "Elige qué eliminar de Comexio. En total, la integración creó {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO y {class_count} clase(s) Web-IO.\n\n* **Everything** lo elimina todo.\n* **Markers only / IOs only / KNX only** eliminan solo los planes de funciones, el dispositivo y la clase Web-IO de esa parte. El plan de disparo compartido solo se elimina por completo si no contiene pares de disparo de la otra categoría; de lo contrario, Markers/KNX solo eliminan sus propios pares.\n* **KNX only** y **Everything** también borran los títulos de los marcadores puente KNX sin usar, que vuelven a quedar libres. Un marcador puente que usas en un plan de funciones propio solo pierde sus sufijos [K…], [RO] y [TRIG] y sigue como marcador normal con su valor inicial. Los marcadores en sí no se eliminan.\n\nEsta acción no se puede deshacer. Los planes de funciones eliminados pierden su cableado permanentemente."
+            "description": "Elige qué eliminar de Comexio. En total, la integración creó {plan_count} plan(es) de funciones, {device_count} dispositivo(s) Web-IO y {class_count} clase(s) Web-IO.\n\n* **Everything** lo elimina todo.\n* **Markers only / IOs only / KNX only / Quickbus only** eliminan solo los planes de funciones, el dispositivo y la clase Web-IO de esa parte. El plan de disparo compartido solo se elimina por completo si no contiene pares de disparo de la otra categoría; de lo contrario, Markers/KNX solo eliminan sus propios pares.\n* **KNX only** y **Everything** también borran los títulos de los marcadores puente KNX sin usar, que vuelven a quedar libres. Un marcador puente que usas en un plan de funciones propio solo pierde sus sufijos [K…], [RO] y [TRIG] y sigue como marcador normal con su valor inicial. Los marcadores en sí no se eliminan.\n\nEsta acción no se puede deshacer. Los planes de funciones eliminados pierden su cableado permanentemente."
           }
         },
         "abort": {
@@ -382,7 +461,8 @@
           "plan_exists_again": "Este plan vuelve a existir en Comexio, así que sus copias ya no están huérfanas. No se ha cambiado nada.",
           "already_deleted": "Estas copias ya se eliminaron. No se ha cambiado nada.",
           "loaded_in_preview": "La copia más reciente del plan se muestra ahora en la tarjeta del plan (Plan → Orphaned plans). Esta reparación sigue abierta hasta que conserves o elimines las copias.",
-          "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto o que los selectores de plan estén desactivados. Las copias no se han modificado."
+          "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto, que se haya elegido entretanto otro plan en los selectores de plan o que los selectores de plan estén desactivados. Las copias no se han modificado.",
+          "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
         }
       }
     },
@@ -392,15 +472,17 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan de funciones gestionado detenido",
-            "description": "El plan de funciones **{plan_name}** (ID {fub_id}) lo gestiona Home Assistant, pero no se está ejecutando en Comexio. Los marcadores, IO, objetos KNX o disparadores que conecta no llegan a Home Assistant hasta que vuelva a ejecutarse.\n\nÚltima comprobación: {last_check}.\n\n**Enviar** inicia el plan ahora. Para que la integración inicie ese plan por sí misma, activa el interruptor **Inicio automático de planes (planes HA)** del dispositivo de planes de funciones."
+            "description": "El plan de funciones **{plan_name}** (ID {fub_id}) lo gestiona Home Assistant, pero no se está ejecutando en Comexio. Los marcadores, IO, objetos KNX o disparadores que conecta no llegan a Home Assistant hasta que vuelva a ejecutarse.\n\nÚltima comprobación: {last_check}.\n\n**Iniciar el plan** lo inicia ahora. Para que la integración inicie ese plan por sí misma, activa el interruptor **Inicio automático de planes (planes HA)** del dispositivo de planes de funciones.\n**Ignorar** oculta esta reparación y su notificación push; el plan sigue vigilado, y su próxima parada tras volver a ejecutarse las genera de nuevo."
           }
         },
         "abort": {
           "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
           "already_running": "El plan {plan_name} (ID {fub_id}) vuelve a ejecutarse. No se cambió nada.",
           "plan_not_watched": "El plan {plan_name} (ID {fub_id}) ya no se supervisa (deseleccionado, eliminado o su ID reasignado). No se inició nada.",
-          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
-          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta, una edición de plan de funciones o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
+          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta.",
+          "ignored": "La reparación de {plan_name} (ID {fub_id}) se ignora y su notificación push se ha eliminado. El plan sigue vigilado: cuando haya vuelto a ejecutarse, su próxima parada crea una nueva reparación. Las reparaciones ignoradas se muestran en el menú (⋮) de la página Reparaciones.",
+          "still_watched": "El plan {plan_name} (ID {fub_id}) sigue vigilado: su selección en las opciones solo indica el ID, que ahora tiene otro plan. Quita la selección en las opciones de la integración para dejar de vigilarlo."
         }
       }
     },
@@ -410,15 +492,17 @@
         "step": {
           "function_plan_stopped": {
             "title": "Plan de usuario vigilado detenido",
-            "description": "El plan de usuario **{plan_name}** (ID {fub_id}) lo vigila el watchdog de planes de funciones, pero no se está ejecutando en Comexio.\n\nÚltima comprobación: {last_check}.\n\n**Enviar** inicia el plan ahora. Para que la integración inicie ese plan por sí misma, activa el interruptor **Inicio automático de planes (planes de usuario)** del dispositivo de planes de funciones. Para dejar de vigilarlo, quítalo de las opciones de la integración."
+            "description": "El plan de usuario **{plan_name}** (ID {fub_id}) lo vigila el watchdog de planes de funciones, pero no se está ejecutando en Comexio.\n\nÚltima comprobación: {last_check}.\n\n**Iniciar el plan** lo inicia ahora. Para que la integración inicie ese plan por sí misma, activa el interruptor **Inicio automático de planes (planes de usuario)** del dispositivo de planes de funciones.\n**Ignorar** oculta esta reparación y su notificación push; el plan sigue vigilado, y su próxima parada tras volver a ejecutarse las genera de nuevo.\n**Dejar de vigilar** lo quita de los planes de usuario vigilados."
           }
         },
         "abort": {
           "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
           "already_running": "El plan {plan_name} (ID {fub_id}) vuelve a ejecutarse. No se cambió nada.",
           "plan_not_watched": "El plan {plan_name} (ID {fub_id}) ya no se supervisa (deseleccionado, eliminado o su ID reasignado). No se inició nada.",
-          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
-          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta, una edición de plan de funciones o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
+          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta.",
+          "ignored": "La reparación de {plan_name} (ID {fub_id}) se ignora y su notificación push se ha eliminado. El plan sigue vigilado: cuando haya vuelto a ejecutarse, su próxima parada crea una nueva reparación. Las reparaciones ignoradas se muestran en el menú (⋮) de la página Reparaciones.",
+          "still_watched": "El plan {plan_name} (ID {fub_id}) sigue vigilado: su selección en las opciones solo indica el ID, que ahora tiene otro plan. Quita la selección en las opciones de la integración para dejar de vigilarlo."
         }
       }
     },
@@ -428,15 +512,59 @@
         "step": {
           "function_plan_stopped": {
             "title": "El plan de funciones se detiene una y otra vez",
-            "description": "Plan Auto-Start inició el plan de funciones **{plan_name}** (ID {fub_id}) {attempts} veces, pero cada vez el inicio fue rechazado o el plan se detuvo de nuevo poco después. Lo más probable es que el plan tenga un error, por lo que Auto-Start deja de intentarlo para este plan.\n\nÚltimo intento fallido: {gave_up_at}. Última comprobación: {last_check}.\n\nRevisa el plan en Comexio Studio. Auto-Start se reanuda por sí solo en cuanto el plan vuelve a detectarse en ejecución.\n\n**Enviar** inicia el plan una vez ahora."
+            "description": "Plan Auto-Start inició el plan de funciones **{plan_name}** (ID {fub_id}) {attempts} veces, pero cada vez el inicio fue rechazado o el plan se detuvo de nuevo poco después. Lo más probable es que el plan tenga un error, por lo que Auto-Start deja de intentarlo para este plan.\n\nÚltimo intento fallido: {gave_up_at}. Última comprobación: {last_check}.\n\nRevisa el plan en Comexio Studio. Auto-Start se reanuda por sí solo en cuanto el plan vuelve a detectarse en ejecución.\n\n**Iniciar el plan** lo inicia una vez ahora. **Ignorar** oculta esta reparación y su notificación push hasta que el plan vuelva a ejecutarse. En un plan de usuario, **Dejar de vigilar** lo quita de los planes de usuario vigilados."
           }
         },
         "abort": {
           "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
           "already_running": "El plan {plan_name} (ID {fub_id}) vuelve a ejecutarse. No se cambió nada.",
           "plan_not_watched": "El plan {plan_name} (ID {fub_id}) ya no se supervisa (deseleccionado, eliminado o su ID reasignado). No se inició nada.",
-          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
-          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta."
+          "busy": "Ahora mismo hay en curso una sincronización, una restauración, una consulta, una edición de plan de funciones o el watchdog de carga del bus. No se cambió nada; inténtalo de nuevo en un momento.",
+          "start_failed": "Comexio no confirmó el inicio de {plan_name} (ID {fub_id}). Revisa el plan en Comexio Studio; esta reparación sigue abierta.",
+          "ignored": "La reparación de {plan_name} (ID {fub_id}) se ignora y su notificación push se ha eliminado. El plan sigue vigilado: cuando haya vuelto a ejecutarse, su próxima parada crea una nueva reparación. Las reparaciones ignoradas se muestran en el menú (⋮) de la página Reparaciones.",
+          "still_watched": "El plan {plan_name} (ID {fub_id}) sigue vigilado: su selección en las opciones solo indica el ID, que ahora tiene otro plan. Quita la selección en las opciones de la integración para dejar de vigilarlo."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "El plan de funciones {plan_name} ya no existe",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de funciones supervisado eliminado",
+            "description": "El plan de funciones supervisado **{plan_name}** (ID {fub_id}) ya no existe en Comexio — se eliminó, por ejemplo en Comexio Studio.\n\n**Restaurar** lo reconstruye a partir de su copia de seguridad más reciente como un plan nuevo y lo inicia; sigue supervisado con su nuevo ID. Para restaurar una copia más antigua, usa la tarjeta del plan (Plan → Orphaned plans).\n**Dejar de supervisar** lo quita de los planes de usuario supervisados."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
+          "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
+          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo.",
+          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento.",
+          "rename_not_confirmed": "El contenido de {current_name} ya no coincide con la última copia de seguridad de {plan_name}, así que no se adoptó el cambio de nombre. No se cambió nada — vuelve a abrir la reparación para elegir de nuevo.",
+          "backups_not_moved": "Las copias de seguridad de {plan_name} no se pudieron mover a {current_name}, así que no se cambió nada. Consulta el registro de Home Assistant.",
+          "holder_changed": "El ID {fub_id} ya no tiene {current_name}, o la selección de {plan_name} se cambió entretanto en las opciones; los planes supervisados quedan como están. Consulta el registro de Home Assistant.",
+          "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Plan de funciones {plan_name} no encontrado con el ID {fub_id}",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Plan de funciones supervisado no encontrado",
+            "description": "El plan de funciones supervisado **{plan_name}** (ID {fub_id}) no se encontró en Comexio: el ID {fub_id} ahora lo tiene el plan **{current_name}**. O bien el plan se renombró, o bien se eliminó y Comexio asignó su ID a otro plan.\n\n**Adoptar el cambio de nombre** se ofrece cuando el contenido de {current_name} coincide con la última copia de seguridad de {plan_name} pero la integración no pudo seguir el cambio de nombre por sí misma (normalmente lo hace): el watchdog supervisa entonces {current_name}, y las copias de {plan_name} continúan con el nuevo nombre. El mismo contenido no demuestra que sea el mismo plan (p. ej. dos planes vacíos).\n**Supervisar {current_name} en su lugar** supervisa el plan que ahora tiene el ID; las copias de seguridad quedan como están.\n**Restaurar** reconstruye {plan_name} a partir de su copia más reciente como un plan nuevo y lo inicia; sigue supervisado con su nuevo ID.\n**Dejar de supervisar** quita {plan_name} de los planes de usuario supervisados."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado.",
+          "plan_not_missing": "El plan {plan_name} (ID {fub_id}) ya no falta (restaurado o ya no supervisado). No se cambió nada.",
+          "no_backup": "No hay ninguna copia de seguridad de {plan_name} (ID {fub_id}) para restaurarlo. No se cambió nada — puedes dejar de supervisarlo.",
+          "check_pending": "La lista de planes aún no se ha leído desde que se inició Home Assistant, así que todavía no se sabe si {plan_name} (ID {fub_id}) sigue faltando. No se cambió nada; vuelve a intentarlo en un momento.",
+          "rename_not_confirmed": "El contenido de {current_name} ya no coincide con la última copia de seguridad de {plan_name}, así que no se adoptó el cambio de nombre. No se cambió nada — vuelve a abrir la reparación para elegir de nuevo.",
+          "backups_not_moved": "Las copias de seguridad de {plan_name} no se pudieron mover a {current_name}, así que no se cambió nada. Consulta el registro de Home Assistant.",
+          "holder_changed": "El ID {fub_id} ya no tiene {current_name}, o la selección de {plan_name} se cambió entretanto en las opciones; los planes supervisados quedan como están. Consulta el registro de Home Assistant.",
+          "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
         }
       }
     },
@@ -461,6 +589,23 @@
           "import_enabled": "La importación de esta categoría vuelve a estar activada. No se ha cambiado nada.",
           "sync_running": "Ahora mismo se está ejecutando una sincronización, una comprobación de rango Web-IO o una recarga de la integración. No se ha cambiado nada — vuelve a abrir esta reparación cuando haya terminado.",
           "entry_not_found": "No se encontró la entrada de configuración asociada — puede que se haya eliminado."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id}: certificado cambiado",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Certificado de Comexio cambiado",
+            "description": "Comexio **{server_id}** ({host}) presenta otro certificado TLS distinto del guardado en la configuración. Hasta que decidas, Home Assistant no le envía nada.\n\nGuardado (SHA-256):\n`{pinned}`\n\nPresentado ahora (SHA-256):\n`{actual}`\n\nCompara el nuevo valor con el valor SHA-256 que la página de administración de Comexio muestra entre las huellas del certificado. Si coincide — por ejemplo, porque se generó un certificado nuevo en Comexio —, confirma para guardarlo; la integración se recarga. Si no coincide, otra cosa responde en lugar de Comexio: no confirmes, cierra este diálogo y revisa tu red."
+          }
+        },
+        "abort": {
+          "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
+          "cannot_connect": "No se pudo volver a leer el certificado de Comexio ({host}). No se cambió nada; inténtalo de nuevo cuando Comexio esté accesible.",
+          "certificate_restored": "Comexio vuelve a presentar el certificado guardado. No se cambió nada.",
+          "certificate_changed_again": "Comexio presenta ahora otro certificado más:\n`{actual}`\n\nNo se cambió nada. Vuelve a abrir la reparación para comparar ese."
         }
       }
     }

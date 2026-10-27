@@ -10,8 +10,10 @@ from aiocomexio import ComexioConnectionError
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.coordinator import ComexioCoordinator, _io_live_requests
+from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY
+from custom_components.comexio.coordinator import ComexioCoordinator, _io_label, _io_live_requests
 from tests.common import load_json_fixture
+from tests.unit.conftest import QUICKBUS_IO_INPUT_TYPES, QUICKBUS_IO_TYPES
 
 # config_basic: BASE (extension 1, online) carries I1=11, Q1=12, AI1=13 and the inactive Q2=14;
 # UD 1 (extension 2) is offline and carries QI1=21. Config page values: I1 "1", Q1 0, AI1 "21,5", QI1 "55".
@@ -19,6 +21,9 @@ ONLINE_REQUESTS = [(1, "11"), (1, "12"), (1, "13")]
 NO_VALUE_YET = {"11": None, "12": None, "13": None, "21": None}
 NO_LIVE_VALUE_LOG = "Comexio sent no live value for IOs"
 FETCH_FAILED_LOG = "IO live states fetch failed"
+# config_quickbus: BASE (extension 1) carries the physical I1=11 and the Quickbus IOs of MT Flur (201-204) and
+# MT Bad (211, 213); extension 2 carries BM Diele (301 PIR1, 302 TL1). Every config page value is 0.
+QUICKBUS_REQUESTS = [(1, "201"), (1, "202"), (1, "203"), (1, "204"), (1, "211"), (1, "213"), (2, "301"), (2, "302")]
 
 IoLive = dict[str, Any] | None | BaseException | AsyncMock
 
@@ -41,8 +46,6 @@ def _coordinator(
         "_io_real_value_ids": set(io_states) if real_ids is None else set(real_ids),
         "_polled_io_real_ids": set(),
         "_unanswered_io_ids": set(),
-        "_ios_without_ext_id": set(),
-        "_conflicting_io_ids": set(),
         "_io_live_fetch_failing": False,
         "_io_index": {},
         "_fire_plan_event": MagicMock(),
@@ -53,7 +56,7 @@ def _coordinator(
         "_last_poll_scraped": False,
         "_polled_plan_ids": None,
         "note_comexio_unreachable": MagicMock(),
-        "_referenced_marker_ids": lambda: set(),
+        "_referenced_marker_ids": set,
         "_last_referenced_markers_from_snapshot": False,
         "_last_referenced_marker_ids": set(),
     }
@@ -84,8 +87,11 @@ def _poll(
         fetch = io_live if isinstance(io_live, AsyncMock) else AsyncMock(return_value=io_live)
         api.get_io_live_states = fetch
     _raw, parsed, _knx = asyncio.run(coordinator._async_fetch_parsed_config(entry_conf or {}))
-    coordinator._merge_polled_states({"markers": parsed["markers"], "io": parsed["io"]})
-    return {io["id"]: io for io in parsed["io"]}, {m["id"]: m for m in parsed["markers"]}, fetch
+    coordinator._merge_polled_states(
+        {"markers": parsed["markers"], "io": parsed["io"], QUICKBUS_IO_DATA_KEY: parsed[QUICKBUS_IO_DATA_KEY]}
+    )
+    ios = {io["id"]: io for io in (*parsed["io"], *parsed[QUICKBUS_IO_DATA_KEY])}
+    return ios, {m["id"]: m for m in parsed["markers"]}, fetch
 
 
 def _values(ios: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -260,28 +266,6 @@ def test_a_failed_fetch_leaves_the_unanswered_set_alone(api: ComexioAPI, caplog:
     assert coordinator._unanswered_io_ids == {"13"}
 
 
-def test_an_io_with_a_non_integer_extension_id_is_skipped_and_logged_once(
-    api: ComexioAPI, caplog: pytest.LogCaptureFixture
-) -> None:
-    conf = _config()
-    # "²" passes str.isdigit but not int(): isdecimal must reject it before the int() call.
-    conf["FubModules"]["1"]["²"] = conf["FubModules"]["1"].pop("1")
-    coordinator = _coordinator(api)
-
-    with caplog.at_level(logging.WARNING):
-        ios, _markers, fetch = _poll(coordinator, conf, {})
-    fetch.assert_awaited_once_with([])
-    assert ios["13"]["value"] is None
-    assert "No live value requested for IOs BASE AI1, BASE I1, BASE Q1: their extension id is no integer (²)" in (
-        caplog.text
-    )
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        _poll(coordinator, conf, {})
-    assert "No live value requested" not in caplog.text
-
-
 def test_webhook_value_during_the_io_fetch_wins(api: ComexioAPI) -> None:
     """R1: a push that lands while get_io_live_states is awaited is newer than the poll's answer."""
     coordinator = _coordinator(api)
@@ -365,8 +349,6 @@ def test_an_empty_scrape_prunes_nothing(api: ComexioAPI) -> None:
 def _seed_trackers(coordinator: ComexioCoordinator) -> None:
     coordinator._polled_io_real_ids = {"13"}
     coordinator._unanswered_io_ids = {"13"}
-    coordinator._ios_without_ext_id = {"12"}
-    coordinator._conflicting_io_ids = {"11"}
     coordinator._io_live_fetch_failing = True
 
 
@@ -375,13 +357,13 @@ def test_io_import_off_skips_the_fetch_and_resets_the_trackers(api: ComexioAPI) 
     coordinator = _coordinator(api)
     _seed_trackers(coordinator)
 
-    _ios, _markers, fetch = _poll(coordinator, _config(), {"13": "74"}, entry_conf={"import_ios": False})
+    _ios, _markers, fetch = _poll(
+        coordinator, _config(), {"13": "74"}, entry_conf={"import_ios": False, "import_quickbus": False}
+    )
 
     fetch.assert_not_awaited()
     assert coordinator._polled_io_real_ids == set()
     assert coordinator._unanswered_io_ids == set()
-    assert coordinator._ios_without_ext_id == set()
-    assert coordinator._conflicting_io_ids == set()
     assert coordinator._io_live_fetch_failing is False
 
 
@@ -435,45 +417,11 @@ def test_a_persistent_fetch_failure_warns_once_and_reports_its_end(
     assert poll({"11": "1", "12": "0", "13": "20"}) == []
 
 
-def test_conflicting_io_ids_are_left_out_and_logged_on_change(
-    api: ComexioAPI, caplog: pytest.LogCaptureFixture
-) -> None:
-    """One IO id under two online extensions: only that id is left out, the other IOs keep their live values."""
-    conf = _config()
-    ud1 = conf["FubModules"]["1"]["2"]
-    ud1["extension"]["Identifier"] = "1000-2000-3001"  # online
-    ud1["inoutput"]["21"]["Id"] = 13  # the same IO id as BASE AI1
-    coordinator = _coordinator(api, io_states={"13": 18.25})
+def test_io_live_requests_leave_out_offline_extensions() -> None:
+    """An offline extension cannot answer: its IOs keep their last known value instead of being asked for."""
+    ios = [{"id": "13", "ext_id": "1"}, {"id": "12", "ext_id": "3", "offline": True}, {"id": "201", "ext_id": 1}]
 
-    with caplog.at_level(logging.WARNING):
-        ios, _markers, fetch = _poll(coordinator, conf, {"11": "1", "12": "0", "13": "74"})
-
-    fetch.assert_awaited_once_with([(1, "11"), (1, "12")])
-    assert (ios["11"]["value"], ios["12"]["value"], ios["13"]["value"]) == (1.0, 0.0, 18.25)
-    assert (
-        "[iosrv1] No live value requested for IOs BASE AI1 (id 13), UD 1 QI1 (id 13): "
-        "each IO id appears under several extensions"
-    ) in caplog.text
-    assert NO_LIVE_VALUE_LOG not in caplog.text
-
-    caplog.clear()
-    with caplog.at_level(logging.WARNING):
-        _poll(coordinator, conf, {"11": "1", "12": "0"})
-    assert "No live value requested" not in caplog.text
-
-
-def test_io_live_requests_drop_only_conflicting_ids() -> None:
-    """Identical duplicates stay (aiocomexio collapses them); an id under two extension ids goes entirely."""
-    ios = [
-        {"id": "13", "ext_id": "1"},
-        {"id": "13", "ext_id": "2"},
-        {"id": "11", "ext_id": "1"},
-        {"id": "11", "ext_id": 1},
-        {"id": "12", "ext_id": "3", "offline": True},
-        {"id": "16", "ext_id": "٣"},  # Arabic-Indic 3: isdecimal, but aiocomexio refuses non-ASCII
-    ]
-
-    assert _io_live_requests(ios) == ([(1, "11"), (1, "11")], {"13"})
+    assert _io_live_requests(ios) == [(1, "13"), (1, "201")]
 
 
 def test_an_io_that_left_the_request_is_not_reported_as_recovered(
@@ -493,3 +441,56 @@ def test_an_io_that_left_the_request_is_not_reported_as_recovered(
     fetch.assert_awaited_once_with([])
     assert "Live values back" not in caplog.text
     assert coordinator._unanswered_io_ids == set()
+
+
+@pytest.fixture
+def quickbus_api(api: ComexioAPI) -> ComexioAPI:
+    api.io_types = QUICKBUS_IO_TYPES
+    api.io_input_types = QUICKBUS_IO_INPUT_TYPES
+    return api
+
+
+def test_quickbus_ios_take_their_live_value_and_keep_a_pushed_one(quickbus_api: ComexioAPI) -> None:
+    """A Quickbus IO's config page 0 is a placeholder as well: a pushed motion "1" must survive the next poll."""
+    coordinator = _coordinator(quickbus_api, io_states={"301": 1.0})
+    ios, _markers, fetch = _poll(coordinator, load_json_fixture("config_quickbus.json"), {"11": "1", "302": "21,5"})
+
+    fetch.assert_awaited_once_with([(1, "11"), *QUICKBUS_REQUESTS])
+    assert (ios["11"]["value"], ios["301"]["value"], ios["302"]["value"], ios["201"]["value"]) == (1.0, 1.0, 21.5, None)
+    assert {io_id: coordinator.io_states[io_id] for io_id in ("301", "302", "201")} == {
+        "301": 1.0,
+        "302": 21.5,
+        "201": None,
+    }
+    assert {"301", "302"} <= coordinator._io_real_value_ids
+
+
+def test_only_quickbus_ios_are_asked_for_while_the_io_import_is_off(quickbus_api: ComexioAPI) -> None:
+    """import_ios off, import_quickbus on: the Quickbus entities still need their live value, the physical IOs not."""
+    coordinator = _coordinator(quickbus_api)
+    _ios, _markers, fetch = _poll(
+        coordinator, load_json_fixture("config_quickbus.json"), {"201": "1"}, entry_conf={"import_ios": False}
+    )
+
+    fetch.assert_awaited_once_with(QUICKBUS_REQUESTS)
+    assert coordinator.io_states["201"] == 1.0
+
+
+def test_pruning_keeps_the_quickbus_io_values(api: ComexioAPI) -> None:
+    """Quickbus IOs live in io_states too: only an IO gone from both lists loses its value."""
+    coordinator = _coordinator(api, io_states={"11": 1.0, "301": 1.0, "99": 5.0})
+
+    coordinator._prune_vanished_states(
+        {"FubModules": {"1": {}}}, {"io": [{"id": "11"}], QUICKBUS_IO_DATA_KEY: [{"id": "301"}], "knx": []}
+    )
+
+    assert coordinator.io_states == {"11": 1.0, "301": 1.0}
+    assert coordinator._io_real_value_ids == {"11", "301"}
+
+
+def test_an_unanswered_quickbus_io_is_logged_with_its_device() -> None:
+    """A Quickbus identifier (G1, TL1) repeats on every device: the log names the device, not the extension."""
+    io = {"id": "211", "ext_name": "BASE", "identifier": "G1", "quickbus": {"device_id": "2", "name": "MT Bad"}}
+
+    assert _io_label(io) == "QB2 MT Bad G1"
+    assert _io_label({"id": "11", "ext_name": "BASE", "identifier": "I1", "quickbus": None}) == "BASE I1"

@@ -22,6 +22,9 @@ from ..const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
+    IoPlanKind,
+    function_plan_info,
+    one_line,
 )
 from ..coordinator import ComexioCoordinator
 from ._context import (
@@ -122,7 +125,7 @@ async def _resolve_visualize_snapshot_source(
     if snapshot is None:
         persistent_notification.async_create(
             hass,
-            f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).",
+            f"No snapshot found for plan '{one_line(plan_name)}' (fub {fub_id}, kind={kind}, slot={slot}).",
             title=error_title,
         )
         return None
@@ -169,7 +172,7 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     (coordinator, api, fub_id, plan_name, elements, connections, source, label_metadata),
     or None on any failure (a notification has already been posted).
     """
-    ctx = await _resolve_function_plan_context(hass, call, error_title)
+    ctx = await _resolve_function_plan_context(hass, call, error_title, edits_plan=False)
     if ctx is None:
         return None
     coordinator, api, fub_id = ctx
@@ -181,7 +184,7 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
     if not plan_data:
         persistent_notification.async_create(hass, f"Plan {fub_id} could not be loaded.", title=error_title)
         return None
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
     return (
         coordinator,
         api,
@@ -224,17 +227,18 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
 
     if fmt == "svg":
         block_settings = coordinator.snapshot_block_settings_for_source(fub_id, plan_name, source)
+        paper_format = coordinator.snapshot_paper_format_for_source(fub_id, plan_name, source)
         # In turn with the card's selection renders and re-renders (plan_preview), and as the newest
         # request it supersedes selection follows still queued, so none of them overwrites it.
         async with coordinator.preview_follow_lock:
             coordinator.preview_follow_generation += 1
             preview_url = await coordinator.async_generate_plan_preview(
-                fub_id, plan_name, elements, connections, source, label_metadata, block_settings
+                fub_id, plan_name, elements, connections, source, label_metadata, block_settings, paper_format
             )
         persistent_notification.async_create(
             hass,
-            f"Preview for '{plan_name}' updated — see the Preview image.",
-            title=f"Function Plan Visualize — {plan_name}",
+            f"Preview for '{one_line(plan_name)}' updated — see the Preview image.",
+            title=f"Function Plan Visualize — {one_line(plan_name)}",
         )
         return {"plan_name": plan_name, "url": preview_url}
 
@@ -284,18 +288,34 @@ async def handle_function_plan_sort(hass: HomeAssistant, call: ServiceCall) -> N
         return
     coordinator, api, fub_id = ctx
     if not _is_managed_cluster_plan(coordinator, fub_id):
-        plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+        plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
         persistent_notification.async_create(
             hass,
-            f"Plan '{plan_name}' (ID {fub_id}) is not an HA-managed cluster plan. "
+            f"Plan '{one_line(plan_name)}' (ID {fub_id}) is not an HA-managed cluster plan. "
             "Sort rewrites every element position — on a hand-built Comexio plan "
             "this would destroy its layout.",
             title=_TITLE_SORT_ERR,
         )
         return
-    await async_sort_function_plan(
-        hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
-    )
+    with coordinator.plan_edit():
+        await async_sort_function_plan(
+            hass, coordinator, api, fub_id, canvas_format=str(call.data.get("canvas_format", ""))
+        )
+
+
+def _sort_row_step(coordinator: ComexioCoordinator, fub_id: int) -> float:
+    """Vertical distance between two rows of the sorted plan."""
+    if coordinator.is_trigger_plan(fub_id):
+        return FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
+    if coordinator.is_knx_cluster_plan(fub_id):
+        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
+        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
+        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
+        # no visual gap between one pair and the next — user report: "alles press an press".
+        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
+        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
+        return FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
+    return FUNCTION_PLAN_LAYOUT_Y_STEP
 
 
 async def async_sort_function_plan(
@@ -309,11 +329,12 @@ async def async_sort_function_plan(
 ) -> dict | None:
     """Sort all plan elements by marker/KNX ID, snapping every element to the exact grid.
 
-    Managed IO cluster plans ('{prefix} - IO [...]') are not marker-sorted — their
-    deterministic extension-column grid (io_column_rows) is restored instead.
+    Managed IO / Quickbus cluster plans ('{prefix} - IO [...]' / '{prefix} - QB [...]') are not
+    marker-sorted — their deterministic column grid (IoPlanKind.column_blocks) is restored instead.
 
-    Returns a result dict (success, pairs, orphans, act_note, activated, duration) or
-    None when the plan could not be loaded or is empty. With notify=False no persistent
+    Returns a result dict (success, pairs, orphans, act_note, activated, duration), one with
+    success False and skipped (the reason) when nothing was sorted — an empty plan, or a
+    column plan the sort leaves as it is — or None when the plan could not be loaded. With notify=False no persistent
     notifications are created — used by the sync button, which reports the result in its
     own summary notification.
 
@@ -324,20 +345,9 @@ async def async_sort_function_plan(
     """
     t_start = time.monotonic()
     if was_active is None:
-        was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+        was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
 
-    if coordinator.is_trigger_plan(fub_id):
-        row_step = FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP
-    elif coordinator.is_knx_cluster_plan(fub_id):
-        # A KNX bridge pair's two WebIO hops already sit FUNCTION_PLAN_LAYOUT_ROW_HEIGHT apart
-        # (see _grid.py's _KNX_LOOPBACK_Y_OFFSET). Using that SAME value for the pair-to-pair
-        # row_step too (tried 2026-09-20) made every row in the plan perfectly equidistant, with
-        # no visual gap between one pair and the next — user report: "alles press an press".
-        # FUNCTION_PLAN_KNX_LAYOUT_Y_STEP keeps the within-pair hop gap tight while restoring a
-        # visibly larger gap between pairs (see its own docstring in const.py for the numbers).
-        row_step = FUNCTION_PLAN_KNX_LAYOUT_Y_STEP
-    else:
-        row_step = FUNCTION_PLAN_LAYOUT_Y_STEP
+    row_step = _sort_row_step(coordinator, fub_id)
     canvas_label, x_max, rows_per_col, max_cols = _sort_canvas_bounds(api, fub_id, canvas_format, row_step)
 
     plan_data = await api.function_plan_load_elements(fub_id)
@@ -350,11 +360,10 @@ async def async_sort_function_plan(
         coordinator, plan_data, fub_id, x_max, rows_per_col, max_cols, row_step
     )
     if not new_positions:
+        skipped = sort_line or "No elements in plan."
         if notify:
-            persistent_notification.async_create(
-                hass, "No elements in plan.", title=f"Function Plan Sort Plan {fub_id}"
-            )
-        return None
+            persistent_notification.async_create(hass, skipped, title=f"Function Plan Sort Plan {fub_id}")
+        return {"success": False, "skipped": skipped, "activated": False}
 
     _LOGGER.info(
         "Function Plan Sort: Plan %s — %d pairs, %d single elements, %d positions (io_plan=%s, active=%s)",
@@ -398,6 +407,42 @@ def _sort_canvas_bounds(api, fub_id: int, canvas_format: str | None, row_step: f
     return canvas_label, x_max, rows_per_col, max_cols
 
 
+def _column_plan_sort_skip(
+    coordinator: ComexioCoordinator,
+    fub_id: int,
+    column_plan: tuple[IoPlanKind, list[str]],
+    rows_per_col: int,
+    max_cols: int,
+) -> str | None:
+    """Why the sort must leave a managed column plan as it is (the sort line), or None to sort it."""
+    kind, members = column_plan
+    data = coordinator.data or {}
+    if not data.get(kind.data_key):
+        # No IO data (Quickbus import off, failed parse): the marker sort would scramble its column grid.
+        return (
+            f"Plan {fub_id} is a managed {kind.label} plan, but no {kind.label} IOs are loaded"
+            " — sort skipped to keep its column grid."
+        )
+    if missing := [member for member in members if not kind.member_ios(data, member)]:
+        # A member without IO data gets no rows: its pairs would be parked off the grid, its header
+        # dropped and a stacked member below it moved up into its slots. A member removed from
+        # Comexio for good stays in the plan name, so the message names the way out.
+        names = ", ".join(one_line(kind.member_label(data, member)) for member in missing)
+        return (
+            f"Plan {fub_id} is a managed {kind.label} plan, but no IOs are loaded for {names}"
+            " — sort skipped to keep its column grid; if it was removed from Comexio,"
+            " delete the plan in Comexio to have the next sync lay it out afresh."
+        )
+    if overflow := coordinator.io_plan_overflow(members, kind, rows_per_col, max_cols):
+        # Its grid would move these members' pairs off the canvas.
+        names = ", ".join(one_line(kind.member_label(coordinator.data, member)) for member in overflow)
+        return (
+            f"Plan {fub_id} is a managed {kind.label} plan, but {names} no longer fit its {max_cols} columns"
+            " — sort skipped; delete the plan in Comexio to have the next sync lay it out afresh."
+        )
+    return None
+
+
 def _sort_compute_positions(
     coordinator: ComexioCoordinator,
     plan_data: dict,
@@ -412,18 +457,24 @@ def _sort_compute_positions(
     # of being sorted into the grid as orphans.
     pinned = _pinned_template_positions(plan_data, x_max)
     pinned_ids = {eid for eid, _x, _y in pinned}
-    io_members = coordinator.managed_io_plan_members(fub_id)
+    column_plan = coordinator.managed_column_plan(fub_id)
+    io_members = column_plan[1] if column_plan else None
     header_slots: list[tuple[float, float, str]] = []
-    if io_members and (coordinator.data or {}).get("io"):
-        # Managed IO cluster plan: the marker sort would scramble the extension grid —
+    if column_plan and (skip_line := _column_plan_sort_skip(coordinator, fub_id, column_plan, rows_per_col, max_cols)):
+        _LOGGER.warning("Function Plan Sort: %s", skip_line)
+        return [], 0, 0, skip_line, header_slots, io_members
+    if column_plan:
+        # Managed IO / Quickbus cluster plan: the marker sort would scramble the column grid —
         # restore the deterministic column layout the wire path produced instead.
-        placed, n_pairs, leftovers = _assign_io_grid_positions(coordinator, plan_data, io_members, rows_per_col)
+        kind, members = column_plan
+        placed, n_pairs, leftovers = _assign_io_grid_positions(coordinator, plan_data, members, rows_per_col, kind)
         leftovers = [eid for eid in leftovers if eid not in pinned_ids]
         new_positions = placed + _park_leftover_positions(placed, leftovers, rows_per_col) + pinned
         n_single = len(leftovers)
-        header_slots = _io_header_slots(coordinator, io_members, rows_per_col)
+        header_slots = _io_header_slots(coordinator, members, rows_per_col, kind)
         sort_line = (
-            f"{n_pairs} IO pairs restored in the extension grid [{','.join(io_members)}]"
+            f"{n_pairs} {kind.label} pairs restored in the {kind.member_noun} grid"
+            f" [{','.join(one_line(m) for m in members)}]"
             f" + {n_single} further elements parked to the right + {len(header_slots)} block headers."
         )
     else:
@@ -470,16 +521,17 @@ async def handle_function_plan_stop(hass: HomeAssistant, call: ServiceCall) -> N
         return
     coordinator, api, fub_id = ctx
 
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, plan_name)
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
+    _LOGGER.info("Function Plan Stop: fub_id=%s name='%s'", fub_id, one_line(plan_name))
     t_start = time.monotonic()
-    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
-        success = await api.function_plan_stop_fup(fub_id)
+    with coordinator.plan_edit():
+        async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STOPPING):
+            success = await api.function_plan_stop_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
+        f"Plan '{one_line(plan_name)}' (ID {fub_id}) stopped.\nDuration: {duration:.1f}s"
         if success
-        else f"Stop failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
+        else f"Stop failed (plan '{one_line(plan_name)}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
     _report_run_stop_result(hass, msg, success=success, action="Stop")
 
@@ -492,16 +544,17 @@ async def handle_function_plan_activate(hass: HomeAssistant, call: ServiceCall) 
         return
     coordinator, api, fub_id = ctx
 
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-    _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, plan_name)
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
+    _LOGGER.info("Function Plan Activate: fub_id=%s name='%s'", fub_id, one_line(plan_name))
     t_start = time.monotonic()
-    async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
-        success = await api.function_plan_run_fup(fub_id)
+    with coordinator.plan_edit():
+        async with coordinator.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING):
+            success = await api.function_plan_run_fup(fub_id)
     duration = time.monotonic() - t_start
     msg = (
-        f"Plan '{plan_name}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
+        f"Plan '{one_line(plan_name)}' (ID {fub_id}) saved and activated.\nDuration: {duration:.1f}s"
         if success
-        else f"Activation failed (plan '{plan_name}', ID {fub_id}).\nDuration: {duration:.1f}s"
+        else f"Activation failed (plan '{one_line(plan_name)}', ID {fub_id}).\nDuration: {duration:.1f}s"
     )
     _report_run_stop_result(hass, msg, success=success, action="Activate")
 

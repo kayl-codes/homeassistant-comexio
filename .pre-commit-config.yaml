@@ -19,6 +19,13 @@ repos:
         args: [ --fix ]
       - id: ruff-format
 
+  # Bandit, same scope as the CI job "Security check - Bandit" (B105 flags constant names like *_TOKEN_*, #181)
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.9.4  # keep in sync with bandit==<version> in .github/workflows/ci.yml
+    hooks:
+      - id: bandit
+        files: ^custom_components/comexio/.*\.py$
+
   # requirements.txt aus manifest.json ableiten (Quelle der Wahrheit bleibt manifest.json)
   - repo: local
     hooks:

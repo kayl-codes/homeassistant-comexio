@@ -47,9 +47,9 @@ pytest tests/ha -o asyncio_mode=auto
 ## Code quality rules
 
 - Line length: 120 (see `pyproject.toml`)
-- Ruff rule sets: B, C4, E, F, I, SIM, UP, W
+- Ruff rule sets: B, C4, E, F, I, SIM, UP, W, plus the Sourcery-style refactoring sets FURB, PERF, PIE, PLE, PLW, RET, RSE (PLR/TRY left out as noise), plus PT012/PT018 (one statement per `pytest.raises`, no composite asserts — SonarCloud S5778/S9073). PT012 misses a nested call (`check(build(x))`); `tests/unit/test_pytest_raises_single_call.py` enforces one call per `pytest.raises` block
 - Sourcery enabled for all files except `.github/` and `tests/`
-- Cognitive complexity ≤ 15; no duplicated string literals (extract constants)
+- Cognitive complexity ≤ 15 as SonarCloud measures it (S3776), for every function; no duplicated string literals (extract constants). `tests/unit/test_cognitive_complexity.py` measures it with complexipy before the push. complexipy scores close to but not exactly like SonarCloud, so the one permitted exception is its `BASELINE`: functions SonarCloud accepts but complexipy already rated above 15, pinned at that score — lower or drop an entry once the function is simpler, never add one for new code
 - **Tests alongside ruff:** every change runs `pytest tests/unit` (and, for HA-facing code, `pytest tests/ha` in WSL) in addition to `ruff check` / `ruff format` before it counts as done (the pre-commit hook `pytest-unit` and the CI job `tests` enforce the same). A red test is a finding, not an obstacle — never delete or loosen an assertion to make it pass.
 - **Snapshots:** a failing snapshot means the output changed. If the change is intended, regenerate with `--snapshot-update` and state the reviewed snapshot diff in the PR; otherwise fix the code.
 - **Regression tests:** every bug fix in pure logic (parsers, command builders, diff/render/analysis) gets a test that fails without the fix. Test data goes to `tests/fixtures/comexio/` and must be synthetic.
@@ -128,6 +128,8 @@ The sync button (`ComexioSyncButton.async_handle_press`) chooses between two str
 
 The coordinator's `last_audit_results` dict (populated every poll) drives both strategies. The sync lock (`_sync_lock`) prevents concurrent runs.
 
+Column plans — IO extensions (`{prefix} - IO [A,B]`, option `logikplan_io_extensions`) and Quickbus devices (`{prefix} - QB [1,3]` by device id, option `logikplan_quickbus_devices` holds device ids) — run on one machinery parameterized by `const.IoPlanKind` (`IO_PLAN_KIND_IO` / `IO_PLAN_KIND_QUICKBUS`): 50/100/150 pairs per plan → 1/2/3 columns, deterministic rows (`column_blocks`), no sort pass. An extension takes a column of its own; Quickbus devices (`stacked`) fill a column top to bottom, one blank row apart, and a device joins the first plan whose columns still hold it — `const.io_plan_member_origins` gives every member its (column, row) and is shared by the wire path and the grid/sort code. `coordinator.managed_io_groups()` is the single source of which `(kind label, member)` pairs are wired (opted in, online; a selected Quickbus device that is gone or on an offline extension is skipped). Users see a Quickbus member as `QB3 MT1` (`IoPlanKind.member_label`). The Quickbus selection defaults to every device while the option was never saved (`const.selected_quickbus_devices`), and only selected devices get Web-IO commands (`webio_quickbus_ios` / `coordinator.webio_source_data()` feed the audit map, the Web-IO builders and `required_webio_classes`) — an unwired Quickbus command would push nothing. Quickbus IOs are wired only (Comexio → HA): the Comexio API answers `Forbidden` to Quickbus writes.
+
 ### Unique ID and entity_id scheme
 
 **Rule: ids carry only the technical address; only the display name carries the Comexio description.** A renamed description or a changed naming schema must never change a unique_id or entity_id. Every case below is pinned by a test (`tests/unit/test_entity_naming.py`, `test_api_parse_config.py`) — extend those tables instead of special-casing. A new entity class requests its entity_id through `ComexioStableEntityIdMixin` (or `ComexioFunctionPlanEntityMixin` on the function plan device); `test_every_entity_class_requests_a_stable_entity_id` fails otherwise. HA-derived ids are a deliberate exception listed in `HA_DERIVED_ENTITY_ID_CLASSES`.
@@ -136,10 +138,14 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 |-------------|-----------|--------------------------|
 | Marker entity | `comexio_{server_id}_m{id}` | `{domain}.{server_id}_m{id}` |
 | KNX entity | `comexio_{server_id}_k{id}` | `{domain}.{server_id}_k{id}` |
+| Quickbus IO entity (read-only) | `comexio_{server_id}_qb{io_id}` | `{binary_sensor|sensor}.{server_id}_qb{io_id}` |
 | IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
 | Function plan run state | `comexio_{server_id}_fub{id}` | `sensor.{server_id}_fub{id}` |
 | Orphaned backups sensor | `comexio_{server_id}_orphaned_backups` | `sensor.{server_id}_orphaned_backups` |
 | Function plan problem sensor | `comexio_{server_id}_managed_plans_problem` | `binary_sensor.{server_id}_managed_plans_problem` |
+| Free storage sensor | `comexio_{server_id}_free_storage_sensor` | `sensor.{server_id}_free_storage_sensor` |
+| Last boot sensor | `comexio_{server_id}_last_boot_sensor` | `sensor.{server_id}_last_boot_sensor` |
+| Time server setting sensor | `comexio_{server_id}_time_server_problem` | `binary_sensor.{server_id}_time_server_problem` |
 | Plan Auto-Start switches | `comexio_{server_id}_function_plan_auto_start[_user]` | `switch.{server_id}_function_plan_auto_start[_user]` |
 | Sync button | `comexio_{server_id}_webio_sync_start_btn` | HA-derived |
 | Cancel button | `comexio_{server_id}_webio_sync_cancel_btn` | HA-derived |
@@ -147,12 +153,16 @@ The coordinator's `last_audit_results` dict (populated every poll) drives both s
 
 The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.ComexioStableEntityIdMixin`. HA applies it only when an entity is first registered; existing entities keep their entity_id (renaming them breaks automations/dashboards and orphans statistics), but HA stores it as `suggested_object_id`, so HA's "recreate entity ID" yields the stable id too. Existing installs converge via the opt-in `entity_id_mismatch` repair / "Fix Entity IDs" button (`const.entity_id_migration_target`, `coordinator.async_migrate_entity_ids`): the recorder moves history and statistics along, automations/scripts/dashboards are not rewritten — the repair shows how many automations/scripts reference the old ids.
 
+### Device names
+
+Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name` / `marker_device_name`): `<server> BASE` (onboard IOs, no tag, matched case-insensitively), `<server> EXT - <ext>`, `<server> QB - <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> Markers` (no tag). Plain letter tags, no brackets: the HA frontend sorts with ICU, where `[` would sort before `#` and push `<server> # Function plans` away from the hub. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}`. An entity whose entity_id HA derives from its device name must not pick up a tag: the extension firmware entity requests its pre-tag id `const.extension_firmware_object_id` (`update.{server}_{ext}_firmware`).
+
 ### Entity naming (configurable)
 
 Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templates. `SafeDict` (in `aiocomexio.config`) leaves unknown `{keys}` unchanged. Default schemas:
 
 - Marker: `"M{MarkerId} {MarkerTitle}"`
-- IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> <ext>` + entity name". The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.
+- IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> EXT - <ext>` + entity name" (`<server> BASE` for the onboard IOs). The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.
 - Available placeholders: `ServerAlias`, `MarkerId`, `MarkerTitle`, `ExtName`, `IoId`, `IoTitle`
 - An unnamed marker, and an IO whose description is empty or merely repeats its identifier, gets the title `#nn` — the title is never empty, so no schema renders an empty name or a dangling separator. Accepted limit: a schema of only `{IoTitle}` names all unnamed IOs of an extension `#nn`.
 

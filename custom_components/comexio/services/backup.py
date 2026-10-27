@@ -7,6 +7,7 @@ everything that reads/writes the stored backup catalog (function_plan_backup.py)
 than acting on the live plan directly.
 """
 
+import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timedelta
 import json
@@ -21,6 +22,7 @@ from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.util import dt as dt_util
 
+from ..api import plan_format_settable
 from ..const import (
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -30,9 +32,17 @@ from ..const import (
     ICON_SUCCESS,
     ICON_WARNING,
     TIMESTAMP_DISPLAY_FORMAT,
+    function_plan_info,
+    one_line,
 )
 from ..coordinator import ComexioCoordinator
-from ..function_plan_backup import SNAPSHOT_COMEXIO_VERSION, is_orphaned_identity, retention_cutoff
+from ..function_plan_backup import (
+    SNAPSHOT_COMEXIO_VERSION,
+    format_paper_format,
+    is_orphaned_identity,
+    retention_cutoff,
+    snapshot_paper_format,
+)
 from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
 from ..function_plan_block_settings import (
     block_settings_diff,
@@ -41,14 +51,23 @@ from ..function_plan_block_settings import (
     settings_to_write,
     snapshot_block_settings,
 )
+from ..function_plan_module_configs import module_configs_diff, snapshot_module_configs, uses_module_configs
+from ..function_plan_module_restore import (
+    TRANSPORT_ERRORS,
+    ModuleConfigRestore,
+    check_rules,
+    module_configs_line,
+    restore_in_place,
+)
 from ..orphaned_backups import delete_all_orphaned_backup_issues, delete_orphaned_backup_issue
 from ._context import (
-    _LOGIN_FAILED_MSG,
     NO_PLAN_SELECTED_MSG,
     _async_get_service_context,
     _parse_snapshot_field,
     _resolve_backup_identity,
     _resolve_fub_id,
+    login_failed_message,
+    service_flag,
 )
 from ._yaml_sync import _refresh_service_descriptions
 
@@ -80,6 +99,54 @@ _MISSING_VALUE = "—"
 # Diff line when a side of the diff was stored before block settings were captured (#nv = no
 # value): without it a values diff would silently look like "nothing changed".
 _NO_BLOCK_SETTINGS = "#nv — no block values stored in {side}, not compared"
+_NO_MODULE_CONFIGS = "#nv — no scene/Quantum configs stored in {side}, not compared"
+
+
+_REBUILD_PAPER = "A3"
+_REBUILD_DPI = 90
+_REBUILD_ORIENTATION = "landscape"
+
+
+def _settable_format(paper_format: tuple[str, int, str] | None) -> tuple[str, int, str] | None:
+    """paper_format when a plan can be set to it, else None (Comexio would get A4 or reject the DPI)."""
+    return paper_format if paper_format is not None and plan_format_settable(paper_format[0], paper_format[1]) else None
+
+
+def _rebuild_paper_format(snapshot: dict[str, Any]) -> tuple[str, int, str]:
+    """The format a plan rebuilt from a snapshot is created with.
+
+    A snapshot without a stored format (taken before paper/DPI tracking, or while the plan's
+    $Paper could not be read), or with a paper a plan cannot be set to, falls back to A3 @ 90 DPI
+    landscape — a spacious default so the rebuild cannot come out clipped; _paper_default_note
+    says so in the result.
+    """
+    return _settable_format(snapshot_paper_format(snapshot)) or (_REBUILD_PAPER, _REBUILD_DPI, _REBUILD_ORIENTATION)
+
+
+def _paper_default_note(snapshot: dict[str, Any]) -> str:
+    if (stored := snapshot_paper_format(snapshot)) is None:
+        if "paper" in snapshot:
+            return " (the backup's paper format is unreadable — default used)"
+        return " (the backup stores no paper format — default used)"
+    if _settable_format(stored) is None:
+        return f" (the backup's {format_paper_format(stored)} cannot be set on a plan — default used)"
+    return ""
+
+
+def _restore_notification_id(coordinator: ComexioCoordinator) -> str:
+    """The one notification a restore shows its progress in, replaced by its result or error."""
+    return f"comexio_function_plan_restore_{coordinator.server_id}"
+
+
+def _post_restore_aborted(hass: HomeAssistant, coordinator: ComexioCoordinator, what: str) -> None:
+    """Replace a restore's "in progress" notice when it ends without a result of its own."""
+    persistent_notification.async_create(
+        hass,
+        f"{what}. A plan may be left partially restored or created — check it in Comexio Studio before "
+        "restoring again.",
+        title=_TITLE_RESTORE_ERR,
+        notification_id=_restore_notification_id(coordinator),
+    )
 
 
 def _coerce_int(value) -> int | None:
@@ -253,6 +320,16 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
             entry["diff"]["block_settings"] = _label_block_settings_diff(settings_diff, newer, catalog, newer_maps)
         else:
             entry["diff"]["block_settings"] = [_no_block_settings_line(newer, older)]
+        entry["diff"]["module_configs"] = _module_configs_diff(newer, older, catalog, newer_maps)
+        entry["diff"]["paper_format"] = _paper_format_diff(newer, older)
+
+
+def _paper_format_diff(newer: dict, older: dict) -> list[str]:
+    """The diff line of a changed paper format/DPI/orientation ('older → newer'); empty when equal or not stored."""
+    new_format, old_format = snapshot_paper_format(newer), snapshot_paper_format(older)
+    if new_format is None or old_format is None or new_format == old_format:
+        return []
+    return [f"{format_paper_format(old_format)} → {format_paper_format(new_format)}"]
 
 
 def _no_block_settings_line(newer: dict, older: dict) -> str:
@@ -266,6 +343,25 @@ def _no_block_settings_line(newer: dict, older: dict) -> str:
     return _NO_BLOCK_SETTINGS.format(side=side)
 
 
+def _module_configs_diff(newer: dict, older: dict, catalog: dict, newer_maps: _LabelMaps) -> list[str]:
+    """Diff lines of the scene block / Quantum module configs, worded like the block settings'.
+
+    A side stored without them (before they were captured, or while Comexio's tables were not
+    readable) is named by a #nv line, unless neither plan has a scene block or Quantum module.
+    """
+    if (changes := module_configs_diff(newer, older)) is not None:
+        return _label_block_settings_diff(changes, newer, catalog, newer_maps)
+    if not (uses_module_configs(newer) or uses_module_configs(older)):
+        return []
+    if snapshot_module_configs(newer) is not None:
+        side = "the older backup"
+    elif snapshot_module_configs(older) is not None:
+        side = "this backup"
+    else:
+        side = "either backup"
+    return [_NO_MODULE_CONFIGS.format(side=side)]
+
+
 def _label_block_settings_diff(
     changes: list[tuple[str, str, str | None, str | None]], newer: dict, catalog: dict, newer_maps: _LabelMaps
 ) -> list[str]:
@@ -275,7 +371,7 @@ def _label_block_settings_diff(
     """
     elements = newer.get("elements") or {}
     return [
-        f"{resolve_element_label(elements[elem_id], catalog, *newer_maps)} (#{elem_id}): {name} "
+        f"{resolve_element_label(elements[elem_id], catalog, *newer_maps)} (#{elem_id}): {one_line(name)} "
         f"{_MISSING_VALUE if old is None else old} → {_MISSING_VALUE if new is None else new}"
         for elem_id, name, old, new in changes
     ]
@@ -312,7 +408,7 @@ async def _resolve_restore_target(
     if not raw:
         fub_id = coordinator.get_active_function_plan_fub_id()
         if fub_id is not None:
-            return fub_id, api.fub_data.get(str(fub_id), {}).get("Name"), None
+            return fub_id, function_plan_info(api.fub_data, fub_id).get("Name"), None
         return (
             None,
             None,
@@ -326,7 +422,7 @@ async def _resolve_restore_target(
 
     fub_id = _resolve_fub_id(raw, api.fub_data, hass)
     if fub_id is not None:
-        return fub_id, api.fub_data.get(str(fub_id), {}).get("Name"), None
+        return fub_id, function_plan_info(api.fub_data, fub_id).get("Name"), None
 
     raw_lower = raw.strip().lower()
     backups = await coordinator.function_plan_backup.async_list_backups()
@@ -355,19 +451,46 @@ async def _resolve_restore_target(
 def _restore_conflict_message(fub_id: int, snapshot_name: str, live_name: str | None, on_conflict: str) -> str:
     """Build the confirmation-required notification text for a plan_missing/identity_mismatch restore."""
     reason = (
-        f"Plan '{snapshot_name}' (ID {fub_id}) no longer exists."
+        f"Plan '{one_line(snapshot_name)}' (ID {fub_id}) no longer exists."
         if live_name is None
-        else f"ID {fub_id} is now used by a different plan ('{live_name}'), not '{snapshot_name}'."
+        else f"ID {fub_id} is now used by a different plan ('{one_line(live_name)}'), not '{one_line(snapshot_name)}'."
     )
     action = (
-        f"the LIVE plan '{live_name}' (ID {fub_id}) will be OVERWRITTEN"
+        f"the LIVE plan '{one_line(live_name)}' (ID {fub_id}) will be OVERWRITTEN"
         if on_conflict == "force_override" and live_name is not None
-        else f"a NEW plan named '{snapshot_name}' will be created and rebuilt from the snapshot"
+        else f"a NEW plan named '{one_line(snapshot_name)}' will be created and rebuilt from the snapshot"
     )
     return (
         f"{reason}\nWith on_conflict='{on_conflict}', {action}.\nRe-run with `confirm: true` to proceed, "
         "or change `on_conflict`."
     )
+
+
+def _error_label(exc: BaseException) -> str:
+    """An error for a notification: its type only — the message can carry the request URL, the log has it."""
+    return f"{type(exc).__name__} — details in the Home Assistant log"
+
+
+def _status_after_promotion(status: str, promoted: bool | str | None) -> str:
+    """PARTIAL when the restored snapshot could not be marked restored (promoted is then the error's type)."""
+    return "PARTIAL" if isinstance(promoted, str) and status == "OK" else status
+
+
+async def _async_promote_restored(
+    coordinator: ComexioCoordinator, kind: str, fub_id: int, plan_name: str, snapshot: dict
+) -> bool | str:
+    """async_mark_restored, or the error's type name when saving the history failed.
+
+    The plan is restored by then: a failing store write must not turn the result into
+    "failed unexpectedly" (the handler's catch-all).
+    """
+    try:
+        return await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, snapshot)
+    except Exception as exc:
+        _LOGGER.exception(
+            "Function Plan Restore: marking %s[%s] of '%s' restored failed", kind, fub_id, one_line(plan_name)
+        )
+        return type(exc).__name__
 
 
 async def _restore_plan_in_place(
@@ -389,17 +512,17 @@ async def _restore_plan_in_place(
     so both are aligned first (function_plan_update_paper) so the plan comes back exactly as it
     was, not just its wiring.
     """
-    live_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    live_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
     plan_name = snapshot.get("plan_name", live_name)
-    was_active = bool(api.fub_data.get(str(fub_id), {}).get("Active", True))
+    was_active = bool(function_plan_info(api.fub_data, fub_id).get("Active", True))
     t_start = time.monotonic()
 
     # Same notification_id for the start and final message — the "in progress" notice is
     # replaced in place by the result, mirroring the sync-progress pattern in button.py.
-    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    notif_id = _restore_notification_id(coordinator)
     persistent_notification.async_create(
         hass,
-        f"Restoring plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] — this can take up to a minute…",
+        f"Restoring plan '{one_line(plan_name)}' (ID {fub_id}) from {kind}[{slot}] — this can take up to a minute…",
         title=_TITLE_RESTORE_PROGRESS,
         notification_id=notif_id,
     )
@@ -414,6 +537,12 @@ async def _restore_plan_in_place(
         # (force_override) run_fup reassigns the element ids, so the snapshot's elements can
         # only be matched to the live ones now. Saving settings changes no element id.
         apply["block_settings"] = await _restore_block_settings(api, fub_id, snapshot, live_plan=verify["plan"])
+        apply["element_map"] = (
+            map_restored_elements(snapshot.get("elements") or {}, verify["plan"].get("elements") or {})
+            if verify["plan"]
+            else None
+        )
+        apply["module_configs"] = await restore_in_place(api, snapshot, apply["element_map"], verify["plan"])
         duration = time.monotonic() - t_start
 
         # identity_was_mismatched (force_override onto a DIFFERENT plan): that plan's elements
@@ -434,9 +563,11 @@ async def _restore_plan_in_place(
         # Skipped for identity_was_mismatched (force_override onto a DIFFERENT plan): this
         # snapshot's own (fub_id, plan_name) key no longer describes what's now live, so its
         # backup history is left exactly where it was.
-        promoted: bool | None = None  # None: not attempted (see the gate below)
+        promoted: bool | str | None = None  # None: not attempted (see the gate below)
         if content_ok and not identity_was_mismatched:
-            promoted = await coordinator.function_plan_backup.async_mark_restored(kind, fub_id, plan_name, snapshot)
+            promoted = await _async_promote_restored(coordinator, kind, fub_id, plan_name, snapshot)
+        # The plan is restored, its backup history is not: not OK, the message names the failed step.
+        status = _status_after_promotion(status, promoted)
 
         msg = _restore_build_message(
             plan_name,
@@ -455,7 +586,8 @@ async def _restore_plan_in_place(
         )
         _LOGGER.info(
             "Function Plan Restore result: fub=%s status=%s identity_was_mismatched=%s hash_match=%s "
-            "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s block_settings=%s duration=%.1fs",
+            "counts_match=%s pos_ok=%s run_ok=%s properties_changed=%s paper_ok=%s block_settings=%s module_configs=%s "
+            "duration=%.1fs",
             fub_id,
             status,
             identity_was_mismatched,
@@ -466,15 +598,16 @@ async def _restore_plan_in_place(
             apply["properties_changed"],
             apply["paper_ok"],
             apply["block_settings"],
+            apply["module_configs"].summary(),
             duration,
         )
-    except (aiohttp.ClientError, TimeoutError) as exc:
+    except TRANSPORT_ERRORS as exc:
         # Without this, a connection drop mid-restore leaves the "in progress" notification
         # above stuck forever, same gap as the copy-restore path (see _restore_plan_as_copy).
-        _LOGGER.exception("Function Plan in-place restore failed for '%s' (ID %s)", plan_name, fub_id)
+        _LOGGER.exception("Function Plan in-place restore failed for '%s' (ID %s)", one_line(plan_name), fub_id)
         persistent_notification.async_create(
             hass,
-            f"Restore of {kind}[{slot}] for plan '{plan_name}' (ID {fub_id}) failed: {exc}. "
+            f"Restore of {kind}[{slot}] for plan '{one_line(plan_name)}' (ID {fub_id}) failed ({_error_label(exc)}). "
             "The plan may be left in a partially restored state — check it in Comexio Studio.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
@@ -492,17 +625,24 @@ async def _restore_apply_snapshot(
     (the normal same-identity restore), but required when force_override targets a plan
     whose current name/paper/DPI differs from the snapshot's.
     """
-    paper = snapshot.get("paper", "A3")
-    dpi = snapshot.get("dpi", 90)
-    orientation = snapshot.get("orientation", "landscape")
-    properties_changed = (
-        api.get_fub_paper_format(fub_id) != paper
-        or api.get_fub_dpi(fub_id) != dpi
-        or api.get_fub_orientation(fub_id) != orientation
-        or live_name != plan_name
-    )
+    # A snapshot whose format was unreadable when it was taken stores none, and one a plan cannot
+    # be set to would turn into A4: keep the live plan's rather than "aligning" it to a guess.
+    live_format = api.get_fub_known_format(fub_id)
+    snapshot_format = snapshot_paper_format(snapshot)
+    target_format = _settable_format(snapshot_format) or _settable_format(live_format)
+    paper, dpi, orientation = target_format or (None, None, None)
+    properties_changed = (target_format is not None and target_format != live_format) or live_name != plan_name
     paper_ok = True
-    if properties_changed:
+    if properties_changed and target_format is None:
+        # Comexio saves the name only together with the format, and neither the backup nor the
+        # plan states one: renaming would overwrite the plan's format with a guess.
+        _LOGGER.warning(
+            "Function Plan Restore: plan %s not renamed to '%s' — its paper format is unreadable or cannot be set",
+            fub_id,
+            one_line(plan_name),
+        )
+        paper_ok = False
+    elif properties_changed:
         paper_ok = await api.function_plan_update_paper(fub_id, paper, dpi, orientation, name=plan_name)
 
     await api.function_plan_stop_fup(fub_id)
@@ -552,6 +692,11 @@ async def _restore_apply_snapshot(
         "paper": paper,
         "dpi": dpi,
         "orientation": orientation,
+        "unsettable_format": (
+            snapshot_format
+            if snapshot_format and snapshot_format != live_format and not _settable_format(snapshot_format)
+            else None
+        ),
         "properties_changed": properties_changed,
         "paper_ok": paper_ok,
         "pos_ok": pos_ok,
@@ -606,7 +751,7 @@ async def _recreate_missing_comments(api, fub_id: int, missing_comments: dict[st
         text = (elem.get("name") or "").strip() or FUNCTION_PLAN_MANAGED_PLAN_COMMENT
         x, y = elem.get("position_x", 0.0), elem.get("position_y", 0.0)
         if await api.function_plan_add_comment_element(fub_id, text, x=x, y=y) is None:
-            warnings.append(f"comment element {eid} ('{text}') failed to recreate")
+            warnings.append(f"comment element {eid} ('{one_line(text)}') failed to recreate")
         else:
             recovered += 1
     return recovered, warnings
@@ -640,7 +785,8 @@ def _restore_status(content_ok: bool, apply: dict, verify: dict) -> str:
     """Overall OK/PARTIAL/FAILED verdict for a restore (see _restore_plan_in_place)."""
     if not verify["reload_ok"]:
         return "FAILED"
-    if content_ok and apply["paper_ok"] and _block_settings_ok(apply["block_settings"]):
+    paper_restored = apply["paper_ok"] and apply.get("unsettable_format") is None
+    if content_ok and paper_restored and _block_settings_ok(apply["block_settings"]) and apply["module_configs"].ok():
         return "OK"
     if apply["run_ok"] or apply["pos_ok"] or apply["paper_ok"] or verify["counts_match"]:
         return "PARTIAL"
@@ -782,18 +928,12 @@ def _restore_build_message(
     identity_was_mismatched: bool,
     was_active: bool,
     duration: float,
-    promoted: bool | None = None,
+    promoted: bool | str | None = None,
     auto_start: bool = True,
 ) -> str:
     """Human-readable persistent_notification body for a restore result."""
     run_label, reactivation_note = _restore_run_label(apply, was_active, auto_start)
-    paper_line = ""
-    if apply["properties_changed"]:
-        paper_line = (
-            f"Aligned with snapshot: name '{plan_name}', paper {apply['paper']} @ {apply['dpi']} DPI, "
-            f"{apply['orientation']} — "
-            f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
-        )
+    paper_line = _aligned_properties_line(apply, plan_name)
     if identity_was_mismatched:
         content_line = (
             f"Content match: {ICON_SUCCESS if verify['counts_match'] else ICON_ERROR} "
@@ -812,12 +952,16 @@ def _restore_build_message(
         shown = apply["comment_warnings"][:5]
         comment_line += "\n".join(f"{ICON_WARNING} {w}" for w in shown) + "\n"
     promoted_line = ""
-    if promoted:
+    if promoted is True:
         promoted_line = f"Backup slot: promoted {kind}[{slot}] → {kind}[0] (now marked restored *)\n"
     elif promoted is False:
         promoted_line = f"Backup slot: {kind}[{slot}] not found in the backup history — not marked restored\n"
+    elif promoted is not None:
+        promoted_line = (
+            f"Backup slot: {ICON_WARNING} {kind}[{slot}] could not be marked restored ({promoted} — see log)\n"
+        )
     return (
-        f"Restore of plan '{plan_name}' (ID {fub_id}) from {kind}[{slot}] "
+        f"Restore of plan '{one_line(plan_name)}' (ID {fub_id}) from {kind}[{slot}] "
         f"({snapshot.get('captured_at')}): **{status}**\n"
         f"Snapshot: {verify['elem_count']} elements / {verify['conn_count']} connections → "
         f"now: {verify['fresh_elem']} / {verify['fresh_conn']}\n"
@@ -826,39 +970,196 @@ def _restore_build_message(
         f"run_fup: {run_label}"
         f"{reactivation_note}\n"
         f"{_block_settings_line(apply['block_settings'])}"
+        f"{module_configs_line(snapshot, apply['module_configs'])}"
         f"{comment_line}"
         f"{promoted_line}"
         f"Duration: {duration:.1f}s"
     )
 
 
-async def _rebuild_new_plan(api, new_fub_id: int, snapshot: dict) -> tuple[int, int, list[str], dict[str, Any]]:
-    """(elements, connections created, warnings, block settings result) of rebuilding a new plan."""
-    id_map, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(new_fub_id, snapshot)
+async def _rebuild_new_plan(
+    api, new_fub_id: int, snapshot: dict
+) -> tuple[dict[str, Any], int, list[str], dict[str, Any], ModuleConfigRestore]:
+    """({snapshot element id: new element id}, connections created, warnings, block settings result,
+    scene/Quantum config result) of rebuilding a new plan."""
+    module_restore = ModuleConfigRestore.for_snapshot(snapshot)
+    id_map, connections_created, warnings = await api.function_plan_rebuild_plan_from_snapshot(
+        new_fub_id, snapshot, module_restore
+    )
     block_settings = await _restore_block_settings(api, new_fub_id, snapshot, id_map)
-    return len(id_map), connections_created, warnings, block_settings
+    await check_rules(api, module_restore)
+    return id_map, connections_created, warnings, block_settings, module_restore
 
 
 def _new_plan_status(
-    snapshot: dict, elements_created: int, connections_created: int, warnings: list[str], block_settings: dict
+    snapshot: dict,
+    elements_created: int,
+    connections_created: int,
+    warnings: list[str],
+    block_settings: dict,
+    module_restore: ModuleConfigRestore,
 ) -> str:
     """OK when a restore that built a new plan recreated everything, PARTIAL otherwise."""
     structurally_complete = elements_created == len(snapshot.get("elements", {})) and connections_created == len(
         snapshot.get("connections", {})
     )
-    return "OK" if structurally_complete and not warnings and _block_settings_ok(block_settings) else "PARTIAL"
+    complete = structurally_complete and not warnings
+    return "OK" if complete and _block_settings_ok(block_settings) and module_restore.ok() else "PARTIAL"
 
 
-def _new_plan_activation_line(run_ok: bool | None, auto_start: bool) -> str:
+async def _start_new_plan(api, new_fub_id: int, plan_name: str, auto_start: bool) -> tuple[bool | None, str | None]:
+    """run_fup of a plan a restore built: (run_ok, start error label).
+
+    run_ok is None with auto_start off (create_fup leaves it inactive). A start that raises —
+    whatever the error — does not undo the build: the plan stays restored, only not started — not
+    reported as a failed restore, whose retry would build it a second time. Its error label names
+    it in the result; an unexpected error is logged with its traceback.
+    """
+    if not auto_start:
+        return None, None
+    try:
+        return await api.function_plan_run_fup(new_fub_id), None
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        _LOGGER.warning(
+            "Restored function plan '%s' (ID %s) was built, but starting it failed: %r",
+            one_line(plan_name),
+            new_fub_id,
+            exc,
+        )
+        return False, _error_label(exc)
+    except Exception as exc:  # the plan exists: any start error must leave it restored
+        _LOGGER.exception(
+            "Restored function plan '%s' (ID %s) was built, but starting it failed", one_line(plan_name), new_fub_id
+        )
+        return False, _error_label(exc)
+
+
+def _new_plan_activation_line(run_ok: bool | None, auto_start: bool, start_error: str | None = None) -> str:
     """Activation line of a restore that built a new plan (as new ID or as copy)."""
     if not auto_start:
         return f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
+    if start_error is not None:
+        return f"Activation: {ICON_WARNING} starting it failed ({start_error}) — start it in Comexio Studio"
     if run_ok:
         return f"Activation: {ICON_SUCCESS} active"
     return (
         f"Activation: {ICON_INACTIVE} not active yet (Comexio always creates new plans inactive — "
         "activate manually in Comexio Studio if needed)"
     )
+
+
+def _aligned_properties_line(apply: dict, plan_name: str) -> str:
+    """The restore result's line on aligning the live plan's name/paper with the snapshot ("" when nothing changed)."""
+    line = ""
+    if (unsettable := apply.get("unsettable_format")) is not None:
+        line = (
+            f"Paper format: {ICON_WARNING} the backup's {format_paper_format(unsettable)} cannot be set on a plan "
+            "— the plan keeps its own\n"
+        )
+    if not apply["properties_changed"]:
+        return line
+    if apply["paper"] is None:
+        return line + (
+            f"Name not aligned with snapshot ('{one_line(plan_name)}'): {ICON_ERROR} "
+            "neither the backup nor the plan states "
+            "a paper format a plan can be set to, and renaming would overwrite it — rename the plan in Comexio Studio\n"
+        )
+    return line + (
+        f"Aligned with snapshot: name '{one_line(plan_name)}', paper {apply['paper']} @ {apply['dpi']} DPI, "
+        f"{apply['orientation']} — "
+        f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
+    )
+
+
+async def _async_reload_after_restore(hass: HomeAssistant, coordinator: ComexioCoordinator) -> None:
+    """Reload so the repointed consumers (plan selector, cluster plan_map) pick up the new plan ID.
+
+    Runs as its own task after the restore, so a failure is reported here: the restore's result
+    notification already went out. Home Assistant reports a failed reload by returning False, too.
+    """
+    try:
+        if await coordinator.async_reload_entry("function plan restore"):
+            return
+        _LOGGER.error("[%s] Reload after a function plan restore failed", coordinator.server_id)
+    except Exception:
+        _LOGGER.exception("[%s] Reload after a function plan restore failed", coordinator.server_id)
+    persistent_notification.async_create(
+        hass,
+        "The integration could not be reloaded after the restore — the plan selector and clusters may "
+        "still point at the old plan ID. Reload the Comexio integration manually.",
+        title=_TITLE_RESTORE_ERR,
+    )
+
+
+async def _move_restored_plan_lineage(
+    coordinator: ComexioCoordinator, plan_name: str, old_fub_id: int, new_fub_id: int, old_id_still_live: bool
+) -> tuple[int, list[str], str | None, str | None]:
+    """Move a plan's backups and references to its new ID, each step on its own.
+
+    The plan is built by then: a failing step is logged and reported (its error type name), never
+    raised into the restore's "failed unexpectedly" handler, and never skips the other step — the
+    references must follow the plan even when its backups could not move.
+    Returns (purged snapshots, updated references, backups error, references error).
+    """
+    purged, backups_error = 0, None
+    try:
+        if old_id_still_live:
+            purged = await coordinator.function_plan_backup.async_purge_identity(old_fub_id, plan_name)
+        else:
+            await coordinator.function_plan_backup.async_rekey_fub_id(old_fub_id, new_fub_id, plan_name)
+    except Exception as exc:
+        _LOGGER.exception("Function Plan restore as new plan: backups of '%s' not moved", one_line(plan_name))
+        backups_error = type(exc).__name__
+    updated: list[str] = []
+    refs_error = None
+    try:
+        updated = await coordinator.async_repoint_function_plan_fub_id(
+            plan_name, old_fub_id, new_fub_id, old_id_still_live=old_id_still_live
+        )
+    except Exception as exc:
+        _LOGGER.exception("Function Plan restore as new plan: references to '%s' not updated", one_line(plan_name))
+        refs_error = type(exc).__name__
+    return purged, updated, backups_error, refs_error
+
+
+def _restored_references_line(
+    old_fub_id: int, updated_consumers: list[str], refs_error: str | None, old_id_still_live: bool
+) -> str:
+    """Result line of a restore as new plan: what happened to the references to the old ID."""
+    if refs_error:
+        return (
+            f"References: {ICON_WARNING} not updated — they still point at old ID {old_fub_id} "
+            f"({refs_error} — see log)."
+        )
+    if old_id_still_live:
+        # A selection by the ID alone (plan selector, unnamed watchdog pick) means the plan holding it now.
+        kept = (
+            f"another plan holds old ID {old_fub_id} now, so a selection by that ID alone "
+            "(plan selector, unnamed watchdog pick) stays with that plan."
+        )
+        if updated_consumers:
+            return f"Updated references: {', '.join(updated_consumers)}; {kept}"
+        return f"References: none moved — {kept}"
+    if updated_consumers:
+        return f"Updated references: {', '.join(updated_consumers)}"
+    return "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
+
+
+def _restored_lineage_line(
+    plan_name: str, old_fub_id: int, new_fub_id: int, old_id_still_live: bool, purged: int, lineage_error: str | None
+) -> str:
+    """Result line of a restore as new plan: what happened to the plan's backups under the old ID."""
+    if lineage_error:
+        return (
+            f"Backup lineage: {ICON_WARNING} not moved from old ID {old_fub_id} to new ID {new_fub_id} "
+            f"({lineage_error} — see log)."
+        )
+    if old_id_still_live:
+        return (
+            f"Backup lineage: {purged} old snapshot(s) for '{one_line(plan_name)}' removed from old ID {old_fub_id} "
+            f"(superseded — the plan now lives at {new_fub_id}; the old ID's OTHER plan is untouched)."
+        )
+    return f"Backup lineage: moved from old ID {old_fub_id} to new ID {new_fub_id}."
 
 
 async def _restore_plan_as_new(
@@ -883,25 +1184,21 @@ async def _restore_plan_as_new(
     plan_name = snapshot.get("plan_name", str(old_fub_id))
     t_start = time.monotonic()
 
-    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    notif_id = _restore_notification_id(coordinator)
     persistent_notification.async_create(
         hass,
-        f"Restoring plan '{plan_name}' (former ID {old_fub_id}) from {kind}[{slot}] as a new plan — "
+        f"Restoring plan '{one_line(plan_name)}' (former ID {old_fub_id}) from {kind}[{slot}] as a new plan — "
         "this can take up to a minute…",
         title=_TITLE_RESTORE_PROGRESS,
         notification_id=notif_id,
     )
 
-    # Snapshots captured before paper/DPI tracking existed (or never backfilled) fall back to
-    # A3 @ 90 DPI landscape — a spacious default so the rebuild cannot come out clipped.
-    paper = snapshot.get("paper", "A3")
-    dpi = snapshot.get("dpi", 90)
-    orientation = snapshot.get("orientation", "landscape")
+    paper, dpi, orientation = _rebuild_paper_format(snapshot)
     new_fub_id = await api.create_fup(plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
     if new_fub_id is None:
         persistent_notification.async_create(
             hass,
-            f"Could not create a replacement plan named '{plan_name}' (the name may already be in use live, "
+            f"Could not create a replacement plan named '{one_line(plan_name)}' (the name may already be in use live, "
             "or the plan was created but its ID could not be read back — see the log). "
             f"Restore of {kind}[{slot}] for the former plan {old_fub_id} was aborted.",
             title=_TITLE_RESTORE_ERR,
@@ -910,67 +1207,62 @@ async def _restore_plan_as_new(
         return
 
     try:
-        elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
+        id_map, connections_created, warnings, block_settings, module_restore = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
-        # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
-        # therefore routinely reports result=False even though the data payload IS applied — the
-        # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
-        # criterion here; the recreated/expected element+connection counts are. The structure is
-        # already built by the calls above, so auto_start=False can skip run_fup altogether.
-        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
-    except (aiohttp.ClientError, TimeoutError) as exc:
+    except TRANSPORT_ERRORS as exc:
         # Same gap as the copy-restore path closes: without this the "in progress" notification
         # above would stay forever. The backup lineage stays at the old ID — nothing was rekeyed.
-        _LOGGER.exception("Function Plan restore as new plan failed while building '%s'", plan_name)
+        _LOGGER.exception("Function Plan restore as new plan failed while building '%s'", one_line(plan_name))
         persistent_notification.async_create(
             hass,
-            f"Restore of {kind}[{slot}] for the former plan {old_fub_id} failed while building '{plan_name}' "
-            f"(new ID {new_fub_id}): {exc}. The new plan may be partially created — check Comexio Studio "
+            f"Restore of {kind}[{slot}] for the former plan {old_fub_id} failed while building '{one_line(plan_name)}' "
+            f"(new ID {new_fub_id}): {_error_label(exc)}. The new plan may be partially created — check Comexio Studio "
             "and delete it manually before restoring again.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
         )
         return
+    # create_fup always creates plans inactive (fub_active="0"); run_fup's very first call
+    # therefore routinely reports result=False even though the data payload IS applied — the
+    # same Comexio quirk documented for the in-place restore path. run_ok is NOT a success
+    # criterion here; the recreated/expected element+connection counts are.
+    run_ok, start_error = await _start_new_plan(api, new_fub_id, plan_name, auto_start)
     duration = time.monotonic() - t_start
 
-    if old_id_still_live:
-        purged = await coordinator.function_plan_backup.async_purge_identity(old_fub_id, plan_name)
-    else:
-        await coordinator.function_plan_backup.async_rekey_fub_id(old_fub_id, new_fub_id, plan_name)
-        purged = 0
-    updated_consumers = await coordinator.async_repoint_function_plan_fub_id(plan_name, old_fub_id, new_fub_id)
+    purged, updated_consumers, lineage_error, refs_error = await _move_restored_plan_lineage(
+        coordinator, plan_name, old_fub_id, new_fub_id, old_id_still_live
+    )
     if updated_consumers:
-        await coordinator.async_reload_entry("function plan restore")
+        # Scheduled, not awaited: the reload waits for this restore to release _restore_lock
+        # (restores_held_off), so awaiting it here would deadlock.
+        hass.async_create_task(_async_reload_after_restore(hass, coordinator), name="comexio_reload_after_restore")
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
-    status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
+    elements_created = len(id_map)
+    status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings, module_restore)
+    if (lineage_error or refs_error) and status == "OK":
+        status = "PARTIAL"
+    # Built: a Restore from a watchdog push judges its outcome by this, not by the plan's name.
+    coordinator.note_plan_restored_as_new(old_fub_id, plan_name, new_fub_id, complete=status == "OK")
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start)
-    consumer_line = (
-        f"Updated references: {', '.join(updated_consumers)}"
-        if updated_consumers
-        else "References: nothing pointed at the old ID (cluster plan map / plan selector) — nothing to update."
-    )
-    lineage_line = (
-        f"Backup lineage: {purged} old snapshot(s) for '{plan_name}' removed from old ID {old_fub_id} "
-        f"(superseded — the plan now lives at {new_fub_id}; the old ID's OTHER plan is untouched)."
-        if old_id_still_live
-        else f"Backup lineage: moved from old ID {old_fub_id} to new ID {new_fub_id}."
-    )
+    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
+    consumer_line = _restored_references_line(old_fub_id, updated_consumers, refs_error, old_id_still_live)
+    lineage_line = _restored_lineage_line(plan_name, old_fub_id, new_fub_id, old_id_still_live, purged, lineage_error)
 
     msg = (
-        f"Plan '{plan_name}' restored as a NEW plan (old ID {old_fub_id} → new ID {new_fub_id})\n\n"
+        f"Plan '{one_line(plan_name)}' restored as a NEW plan (old ID {old_fub_id} → new ID {new_fub_id})\n\n"
         f"Source: {kind}[{slot}], captured {captured_label}\n"
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"{_block_settings_line(block_settings)}"
-        f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
+        f"{module_configs_line(snapshot, module_restore)}"
+        f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
         f"{activation_line}\n\n"
         f"{consumer_line}\n"
         f"{lineage_line}\n\n"
@@ -1020,71 +1312,72 @@ async def _restore_plan_as_copy(
     source_name = snapshot.get("plan_name", str(source_fub_id))
     t_start = time.monotonic()
 
-    notif_id = f"comexio_function_plan_restore_{coordinator.server_id}"
+    notif_id = _restore_notification_id(coordinator)
     persistent_notification.async_create(
         hass,
-        f"Restoring {kind}[{slot}] of plan '{source_name}' as a new copy '{new_plan_name}' — "
+        f"Restoring {kind}[{slot}] of plan '{one_line(source_name)}' as a new copy '{one_line(new_plan_name)}' — "
         "this can take up to a minute…",
         title=_TITLE_RESTORE_PROGRESS,
         notification_id=notif_id,
     )
 
-    paper = snapshot.get("paper", "A3")
-    dpi = snapshot.get("dpi", 90)
-    orientation = snapshot.get("orientation", "landscape")
+    paper, dpi, orientation = _rebuild_paper_format(snapshot)
     try:
         new_fub_id = await api.create_fup(new_plan_name, paper_format=paper, dpi=dpi, orientation=orientation)
         if new_fub_id is None:
             persistent_notification.async_create(
                 hass,
-                f"Could not create plan '{new_plan_name}' (the name may already be in use live, "
+                f"Could not create plan '{one_line(new_plan_name)}' (the name may already be in use live, "
                 "or the plan was created but its ID could not be read back — see the log). "
-                f"Copy-restore of {kind}[{slot}] for '{source_name}' was aborted.",
+                f"Copy-restore of {kind}[{slot}] for '{one_line(source_name)}' was aborted.",
                 title=_TITLE_RESTORE_ERR,
                 notification_id=notif_id,
             )
             return
 
-        elements_created, connections_created, warnings, block_settings = await _rebuild_new_plan(
+        id_map, connections_created, warnings, block_settings, module_restore = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
-        # create_fup always creates plans inactive — auto_start=False just leaves that default
-        # alone instead of calling run_fup at all (no plan_data payload here: the structure was
-        # already built above via individual element/connection calls, not via run_fup).
-        run_ok = await api.function_plan_run_fup(new_fub_id) if auto_start else None
-    except (aiohttp.ClientError, TimeoutError) as exc:
+    except TRANSPORT_ERRORS as exc:
         # Without this, a connection drop mid-restore leaves the "in progress" notification
         # above stuck forever — the exception propagates past the persistent_notification calls
         # instead of replacing it, even though the restore lock is released either way.
-        _LOGGER.exception("Function Plan copy-restore failed while building '%s'", new_plan_name)
+        _LOGGER.exception("Function Plan copy-restore failed while building '%s'", one_line(new_plan_name))
         persistent_notification.async_create(
             hass,
-            f"Copy-restore of {kind}[{slot}] for '{source_name}' failed while building '{new_plan_name}': {exc}. "
+            f"Copy-restore of {kind}[{slot}] for '{one_line(source_name)}' "
+            f"failed while building '{one_line(new_plan_name)}': "
+            f"{_error_label(exc)}. "
             "The new plan may be partially created — check Comexio Studio and delete it manually if needed.",
             title=_TITLE_RESTORE_ERR,
             notification_id=notif_id,
         )
         return
+    # No plan_data payload here: the structure was already built above via individual
+    # element/connection calls, not via run_fup.
+    run_ok, start_error = await _start_new_plan(api, new_fub_id, new_plan_name, auto_start)
     duration = time.monotonic() - t_start
 
     elem_count = len(snapshot.get("elements", {}))
     conn_count = len(snapshot.get("connections", {}))
-    status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings)
+    elements_created = len(id_map)
+    status = _new_plan_status(snapshot, elements_created, connections_created, warnings, block_settings, module_restore)
 
     captured_raw = snapshot.get("captured_at")
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start)
+    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
 
     msg = (
-        f"Plan '{new_plan_name}' created as a COPY of '{source_name}' "
+        f"Plan '{one_line(new_plan_name)}' created as a COPY of '{one_line(source_name)}' "
         f"(source ID {source_fub_id} unchanged, new copy ID {new_fub_id})\n\n"
         f"Source: {kind}[{slot}], captured {captured_label}\n"
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
         f"{_block_settings_line(block_settings)}"
-        f"Paper: {paper} @ {dpi} DPI, {orientation}\n"
+        f"{module_configs_line(snapshot, module_restore)}"
+        f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
         f"{activation_line}\n\n"
         "Backup lineage: unchanged — snapshots stay with the source plan; the copy starts fresh.\n\n"
         f"Duration: {duration:.1f}s"
@@ -1100,7 +1393,7 @@ async def _restore_plan_as_copy(
         "connections=%d/%d block_settings=%s run_ok=%s auto_start=%s duration=%.1fs",
         source_fub_id,
         new_fub_id,
-        new_plan_name,
+        one_line(new_plan_name),
         status,
         elements_created,
         connections_created,
@@ -1153,7 +1446,7 @@ async def _resolve_restore_snapshot(
     ]
     persistent_notification.async_create(
         hass,
-        f"No snapshot found for plan '{plan_name}' (fub {fub_id}, kind={kind}, slot={slot}).\n"
+        f"No snapshot found for plan '{one_line(plan_name)}' (fub {fub_id}, kind={kind}, slot={slot}).\n"
         f"Available {kind} snapshots: {', '.join(available) if available else 'none'}",
         title=_TITLE_RESTORE_ERR,
     )
@@ -1199,12 +1492,12 @@ def _log_block_ids_trust(snapshot: dict[str, Any], plan_name: str, accept_unveri
     """Leave a trace when a restore runs on block ids that are not exactly known."""
     status = (block_check(snapshot) or {}).get("status")
     if accept_unverified and status == CHECK_UNVERIFIED:
-        _LOGGER.warning("Function Plan Restore of '%s': restoring unverified block ids (accepted)", plan_name)
+        _LOGGER.warning("Function Plan Restore of '%s': restoring unverified block ids (accepted)", one_line(plan_name))
     elif status == CHECK_PLAUSIBLE:
         _LOGGER.warning(
             "Function Plan Restore of '%s': block ids derived from today's catalog (backup predates the last "
             "block-id change, wiring fits) — check the restored plan",
-            plan_name,
+            one_line(plan_name),
         )
 
 
@@ -1221,7 +1514,7 @@ def _warn_firmware_differs(
     if not stored or not live or str(stored) == str(live):
         return
     message = (
-        f"The backup of '{plan_name}' was taken on Comexio firmware {stored}, Comexio now runs {live}. "
+        f"The backup of '{one_line(plan_name)}' was taken on Comexio firmware {stored}, Comexio now runs {live}. "
         "Once restored, check the plan's blocks and their values."
     )
     _LOGGER.warning("Function Plan Restore: %s", message)
@@ -1249,7 +1542,9 @@ async def _load_restorable_snapshot(
     if snapshot is None:
         return None
     if block_error := _block_ids_restore_error(snapshot, accept_unverified):
-        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", plan_name, fub_id, kind, slot, block_error)
+        _LOGGER.warning(
+            "Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", one_line(plan_name), fub_id, kind, slot, block_error
+        )
         persistent_notification.async_create(hass, block_error, title=_TITLE_RESTORE_ERR)
         return None
     _log_block_ids_trust(snapshot, plan_name, accept_unverified)
@@ -1316,7 +1611,8 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
     try:
         page = await api.get_raw_config()
     except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
-        error = f"Comexio is not reachable ({err!r}) — try again once it responds"
+        _LOGGER.warning("Function Plan Restore: the plan list could not be read: %r", err)
+        error = f"Comexio is not reachable ({_error_label(err)}) — try again once it responds"
     else:
         entry, error = _plan_list_entry(page, fub_id)
         if error is None:
@@ -1329,6 +1625,31 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
         )
         return None, None
     return None, error
+
+
+def _refuse_restore_over_returned_plan(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str
+) -> bool:
+    """True (user told) when a deleted plan's Restore finds a plan of its name back under its ID.
+
+    That Restore (watchdog push or repair) builds a new plan; it never overwrites the plan back there.
+    """
+    if not coordinator.vanished_restore_running(fub_id, plan_name):
+        return False
+    # The Restore that runs this judges its outcome by it: the plan is back, not "restore failed".
+    coordinator.note_vanished_plan_back(fub_id, plan_name)
+    _LOGGER.warning(
+        "Function Plan Restore of deleted plan '%s' (fub=%s) not run: a plan of that name is back under its ID",
+        one_line(plan_name),
+        fub_id,
+    )
+    persistent_notification.async_create(
+        hass,
+        f"'{one_line(plan_name)}' (ID {fub_id}) is back in Comexio, so it was not restored over it. "
+        "Nothing was changed.",
+        title=_TITLE_RESTORE_ERR,
+    )
+    return True
 
 
 async def _resolve_restore_conflict(
@@ -1366,7 +1687,6 @@ async def _resolve_restore_conflict(
             old_id_still_live=live_fub is not None,
             auto_start=auto_start,
         )
-        await _refresh_service_descriptions(hass)
         return True
     # force_override on an identity mismatch: fall through and deliberately
     # overwrite the plan that now occupies this fub_id.
@@ -1390,12 +1710,25 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
         return
     coordinator, api, _unused_fub_id = ctx
 
-    if coordinator._restore_lock.locked():
-        _LOGGER.warning("Function Plan Restore already in progress, ignoring concurrent request")
+    # A sync, an uninstall cleanup and a plan edit write into function plans too, and a reload closes
+    # the API session: none may overlap a restore (they refuse to start while one runs, see
+    # restores_held_off and refuse_while_plans_busy). From the check to the lock below runs no await.
+    if (
+        coordinator._restore_lock.locked()
+        or coordinator._sync_lock.locked()
+        or coordinator.in_sync
+        or coordinator.plan_edits_running
+        or coordinator.unloading
+    ):
+        _LOGGER.warning("Function Plan Restore not started — a restore, sync, cleanup, reload or plan edit is running")
         persistent_notification.async_create(
             hass,
-            "A restore is already running — please wait for it to finish before starting another one.",
+            "A restore, sync, Web-IO range check, uninstall cleanup, integration reload, function plan edit "
+            "(sort, stop, activate, connect, marker delete, bus-load cascade) or backup deletion is running — "
+            "please wait for it to finish before starting a restore.",
             title=_TITLE_RESTORE_ERR,
+            # Not the running restore's own id: that would overwrite its progress notice.
+            notification_id=f"comexio_function_plan_restore_blocked_{coordinator.server_id}",
         )
         return
 
@@ -1412,8 +1745,36 @@ async def _handle_function_plan_restore(hass: HomeAssistant, call: ServiceCall):
             # copy a half-built plan — each pushing an older entry out of the auto slots.
             with coordinator.pause_auto_backup():
                 await _run_function_plan_restore(hass, call, coordinator, api, plan_hash)
+        except asyncio.CancelledError:
+            # Home Assistant stopping or the service call cancelled: the restore ends here too.
+            _post_restore_aborted(hass, coordinator, "The restore was cancelled")
+            raise
+        except Exception as exc:
+            # The restore paths catch connection errors themselves; anything else (a closed API
+            # session, an unexpected response) would leave their "in progress" notification
+            # stuck forever and the half-built plan unreported. Re-raised so the service call
+            # fails too (HA logs it with the traceback). Only the type: the message of e.g. a
+            # response error carries the request URL, which every notification viewer would see.
+            _post_restore_aborted(
+                hass,
+                coordinator,
+                f"The restore failed unexpectedly ({_error_label(exc)})",
+            )
+            raise
         finally:
             coordinator.async_update_listeners()
+    # Outside the guard above: a failing services.yaml rewrite must not replace the restore's
+    # posted result with "failed unexpectedly" (the service call still fails and logs it).
+    await _refresh_service_descriptions(hass)
+
+
+def _restore_identity_conflict(
+    snapshot: dict[str, Any], fub_id: int, live_fub: dict[str, Any] | None
+) -> tuple[bool, str, str | None]:
+    """Whether the plan at fub_id is gone or carries another name than the snapshot's, plus both names."""
+    snapshot_name = snapshot.get("plan_name", str(fub_id))
+    live_name = live_fub.get("Name") if live_fub else None
+    return live_fub is None or live_name != snapshot_name, snapshot_name, live_name
 
 
 async def _run_function_plan_restore(
@@ -1431,22 +1792,22 @@ async def _run_function_plan_restore(
         return
 
     on_conflict = str(call.data.get("on_conflict", "new_id")).strip().lower()
-    confirm = bool(call.data.get("confirm", False))
-    as_copy = bool(call.data.get("as_copy", False))
+    confirm = service_flag(call, "confirm", False)
+    as_copy = service_flag(call, "as_copy", False)
     new_plan_name = str(call.data.get("new_plan_name", "")).strip()
-    auto_start = bool(call.data.get("auto_start", True))
-    accept_unverified = bool(call.data.get("accept_unverified_blocks", False))
+    auto_start = service_flag(call, "auto_start", True)
+    accept_unverified = service_flag(call, "accept_unverified_blocks", False)
     _LOGGER.info(
         "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s "
         "as_copy=%s new_plan_name=%s auto_start=%s accept_unverified_blocks=%s",
         fub_id,
-        plan_name,
+        one_line(plan_name),
         kind,
         slot,
         on_conflict,
         confirm,
         as_copy,
-        new_plan_name,
+        one_line(new_plan_name),
         auto_start,
         accept_unverified,
     )
@@ -1461,15 +1822,15 @@ async def _run_function_plan_restore(
         return
 
     if not await api.login():
-        persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=_TITLE_RESTORE_ERR)
+        persistent_notification.async_create(hass, login_failed_message(api), title=_TITLE_RESTORE_ERR)
         return
 
     live_fub, fetch_error = await _fetch_live_plan(api, fub_id, as_copy)
     if fetch_error:
-        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) aborted: %s", plan_name, fub_id, fetch_error)
+        _LOGGER.warning("Function Plan Restore of '%s' (fub=%s) aborted: %s", one_line(plan_name), fub_id, fetch_error)
         persistent_notification.async_create(
             hass,
-            f"Restore of '{plan_name}' aborted: {fetch_error}. Nothing was changed.",
+            f"Restore of '{one_line(plan_name)}' aborted: {fetch_error}. Nothing was changed.",
             title=_TITLE_RESTORE_ERR,
         )
         return
@@ -1481,14 +1842,13 @@ async def _run_function_plan_restore(
         # The source plan is never touched here — no conflict/identity check applies.
         warn_firmware()
         await _restore_plan_as_copy(hass, coordinator, api, fub_id, snapshot, kind, slot, new_plan_name, auto_start)
-        await _refresh_service_descriptions(hass)
         return
 
     if live_fub is not None:
         api.update_fub_cache_entry(fub_id, live_fub)  # keep the cache fresh for _restore_plan_in_place's reads
-    snapshot_name = snapshot.get("plan_name", str(fub_id))
-    live_name = live_fub.get("Name") if live_fub else None
-    conflict = live_fub is None or live_name != snapshot_name
+    conflict, snapshot_name, live_name = _restore_identity_conflict(snapshot, fub_id, live_fub)
+    if not conflict and _refuse_restore_over_returned_plan(hass, coordinator, fub_id, snapshot_name):
+        return
     # A conflict without confirm stops the restore (_resolve_restore_conflict) — no warning then.
     if confirm or not conflict:
         warn_firmware()
@@ -1522,7 +1882,6 @@ async def _run_function_plan_restore(
         identity_was_mismatched=conflict,
         auto_start=auto_start,
     )
-    await _refresh_service_descriptions(hass)
 
 
 async def _delete_one_snapshot(hass: HomeAssistant, coordinator: ComexioCoordinator, snapshot_raw: str) -> str | None:
@@ -1546,8 +1905,8 @@ async def _delete_one_snapshot(hass: HomeAssistant, coordinator: ComexioCoordina
     if deleted and not manager.plan_backups_for_identity_sync(fub_id, plan_name):
         delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
     if deleted:
-        return f"Deleted snapshot {kind}[{slot}] for plan '{plan_name}' (fub {fub_id})."
-    return f"No snapshot found at {kind}[{slot}] for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
+        return f"Deleted snapshot {kind}[{slot}] for plan '{one_line(plan_name)}' (fub {fub_id})."
+    return f"No snapshot found at {kind}[{slot}] for plan '{one_line(plan_name)}' (fub {fub_id}) — nothing deleted."
 
 
 async def _delete_plan_backups_by_fub_id(
@@ -1571,8 +1930,8 @@ async def _delete_plan_backups_by_fub_id(
     count = await coordinator.function_plan_backup.async_delete_plan_backups(fub_id, plan_name)
     delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
     if count:
-        return f"Deleted all {count} snapshot(s) for plan '{plan_name}' (fub {fub_id})."
-    return f"No stored snapshots for plan '{plan_name}' (fub {fub_id}) — nothing deleted."
+        return f"Deleted all {count} snapshot(s) for plan '{one_line(plan_name)}' (fub {fub_id})."
+    return f"No stored snapshots for plan '{one_line(plan_name)}' (fub {fub_id}) — nothing deleted."
 
 
 async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: ServiceCall):
@@ -1588,26 +1947,17 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
         return
     coordinator, _api, _unused_fub_id = ctx
 
-    if not bool(call.data.get("confirm", False)):
+    if not service_flag(call, "confirm", False):
         persistent_notification.async_create(
             hass, "Nothing deleted — 'confirm' must be enabled.", title=_TITLE_DELETE_BACKUPS_ERR
         )
         return
 
-    snapshot_raw = call.data.get("snapshot")
-    fub_id_raw = call.data.get("fub_id")
-
-    if snapshot_raw:
-        msg = await _delete_one_snapshot(hass, coordinator, snapshot_raw)
-    elif fub_id_raw not in (None, ""):
-        msg = await _delete_plan_backups_by_fub_id(hass, coordinator, fub_id_raw)
-    else:
-        count = await coordinator.function_plan_backup.async_delete_all_backups()
-        delete_all_orphaned_backup_issues(hass, coordinator.server_id)
-        msg = (
-            f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
-            "Fresh backups will be created automatically starting with the next backup cycle / next change."
-        )
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_DELETE_BACKUPS_ERR):
+        return
+    # No await since the check: a restore starting from here on refuses until the deletion ends.
+    with coordinator.plan_edit():
+        msg = await _delete_requested_backups(hass, call, coordinator)
     if msg is None:
         return
 
@@ -1617,12 +1967,51 @@ async def _handle_function_plan_delete_backups(hass: HomeAssistant, call: Servic
     persistent_notification.async_create(hass, msg, title="Function Plan Delete Backups")
 
 
+def _refuse_backup_change_while_restoring(hass: HomeAssistant, coordinator: ComexioCoordinator, title: str) -> bool:
+    """Whether a restore runs or the entry unloads — then notify and return True.
+
+    A restore moves and marks backups, and a deletion or keep decision meanwhile could be undone on
+    disk. Once the unload has waited for the running plan edits (async_wait_before_unload), a change
+    starting after it would still write the backup store while the entry is torn down.
+    """
+    if coordinator.unloading:
+        reason = "the integration is reloading or unloading"
+        msg = "The Comexio integration is reloading or unloading. Please try again once it has finished."
+    elif coordinator._restore_lock.locked():
+        reason = "a function plan restore is running"
+        msg = "A function plan restore is running — it moves and marks backups. Please try again once it has finished."
+    else:
+        return False
+    _LOGGER.warning("[%s] %s not started — %s", coordinator.server_id, title, reason)
+    persistent_notification.async_create(hass, msg, title=title)
+    return True
+
+
+async def _delete_requested_backups(
+    hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator
+) -> str | None:
+    """The deletion of _handle_function_plan_delete_backups; its result message (None: reported already)."""
+    snapshot_raw = call.data.get("snapshot")
+    fub_id_raw = call.data.get("fub_id")
+    if snapshot_raw:
+        return await _delete_one_snapshot(hass, coordinator, snapshot_raw)
+    if fub_id_raw not in (None, ""):
+        return await _delete_plan_backups_by_fub_id(hass, coordinator, fub_id_raw)
+    count = await coordinator.function_plan_backup.async_delete_all_backups()
+    delete_all_orphaned_backup_issues(hass, coordinator.server_id)
+    return (
+        f"Deleted ALL {count} stored snapshot(s) across ALL plans on this instance.\n"
+        "Fresh backups will be created automatically starting with the next backup cycle / next change."
+    )
+
+
 async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call: ServiceCall):
     """Delete backup snapshots (auto + change) of plans that no longer exist live in Comexio.
 
     Only orphaned identities (fub_id/plan_name pairs whose plan was deleted directly in
     Comexio Studio) are ever touched, and only once their newest snapshot is older than
-    the configured retention (Options → Function Plan, default 6 months) — a live plan's
+    the configured retention (Options → Function Plan, default 6 months), or of any age with
+    include_recent — a live plan's
     backups are never purged, no matter how old, and neither are kept ones. The periodic
     backup cycle never deletes; it raises an orphaned_plan_backups repair per expired plan
     instead, so this service is the bulk "delete them all" shortcut. Local storage only, no
@@ -1635,7 +2024,7 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
         return
     coordinator, _api, _unused_fub_id = ctx
 
-    if not bool(call.data.get("confirm", False)):
+    if not service_flag(call, "confirm", False):
         persistent_notification.async_create(
             hass, "Nothing purged — 'confirm' must be enabled.", title=_TITLE_PURGE_ORPHANED_BACKUPS_ERR
         )
@@ -1647,22 +2036,51 @@ async def _handle_function_plan_purge_orphaned_backups(hass: HomeAssistant, call
     retention_months = coordinator.config_entry.options.get(
         CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS, DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS
     )
-    purged = await coordinator.function_plan_backup.async_purge_orphaned(
-        live_plans, cutoff=retention_cutoff(int(retention_months))
-    )
+    include_recent = service_flag(call, "include_recent", False)
+    _LOGGER.info("Function Plan Purge Orphaned Backups: called (include_recent=%s)", include_recent)
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_PURGE_ORPHANED_BACKUPS_ERR):
+        return
+    # include_recent: every orphan, however young — its newest snapshot is older than now.
+    cutoff = dt_util.utcnow() if include_recent else retention_cutoff(int(retention_months))
+    age = "of any age" if include_recent else f"older than {retention_months} month(s)"
+    # No await since the check: a restore starting from here on refuses until the purge ends.
+    with coordinator.plan_edit():
+        purged = await coordinator.function_plan_backup.async_purge_orphaned(live_plans, cutoff=cutoff)
     for plan in purged:
         delete_orphaned_backup_issue(hass, coordinator.server_id, plan["fub_id"], plan["plan_name"])
     total = sum(p["removed"] for p in purged)
     msg = (
-        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) (older than {retention_months} month(s))."
+        f"Purged {total} snapshot(s) across {len(purged)} orphaned plan(s) ({age})."
         if purged
-        else f"No orphaned plan backups older than {retention_months} month(s) found — nothing purged."
+        else f"No orphaned plan backups {age} found — nothing purged."
     )
 
     _LOGGER.info("Function Plan Purge Orphaned Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup-summary diagnostic sensor
     await _refresh_service_descriptions(hass)
     persistent_notification.async_create(hass, msg, title="Function Plan Purge Orphaned Backups")
+
+
+async def _apply_keep_decision(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name: str, keep: bool
+) -> str:
+    """Keep (or stop keeping) a deleted plan's backups; returns the result message."""
+    manager = coordinator.function_plan_backup
+    if keep:
+        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
+        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
+        return (
+            f"Keeping the backups of deleted plan '{one_line(plan_name)}' (fub {fub_id}) — they are no longer purged."
+            if newly_kept
+            else f"The backups of deleted plan '{one_line(plan_name)}' (fub {fub_id}) are kept already — "
+            "nothing changed."
+        )
+    if await manager.async_unkeep_orphaned(fub_id, plan_name):
+        return (
+            f"No longer keeping the backups of deleted plan '{one_line(plan_name)}' (fub {fub_id}) — you are asked "
+            "about them again once the retention period has passed."
+        )
+    return f"The backups of deleted plan '{one_line(plan_name)}' (fub {fub_id}) were not kept — nothing changed."
 
 
 async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceCall):
@@ -1697,32 +2115,24 @@ async def _handle_function_plan_keep_backups(hass: HomeAssistant, call: ServiceC
     await manager.async_load()
     if not manager.plan_backups_for_identity_sync(fub_id, plan_name):
         persistent_notification.async_create(
-            hass, f"No stored backups for plan '{plan_name}' (fub {fub_id}).", title=_TITLE_KEEP_BACKUPS_ERR
+            hass, f"No stored backups for plan '{one_line(plan_name)}' (fub {fub_id}).", title=_TITLE_KEEP_BACKUPS_ERR
         )
         return
     if not is_orphaned_identity(live_plans, fub_id, plan_name):
         persistent_notification.async_create(
             hass,
-            f"Plan '{plan_name}' (fub {fub_id}) still exists in Comexio — only a deleted plan's backups can be kept.",
+            f"Plan '{one_line(plan_name)}' (fub {fub_id}) still exists in Comexio — "
+            "only a deleted plan's backups can be kept.",
             title=_TITLE_KEEP_BACKUPS_ERR,
         )
         return
 
-    if bool(call.data.get("keep", True)):
-        newly_kept = await manager.async_keep_orphaned(fub_id, plan_name)
-        delete_orphaned_backup_issue(hass, coordinator.server_id, fub_id, plan_name)
-        msg = (
-            f"Keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — they are no longer purged."
-            if newly_kept
-            else f"The backups of deleted plan '{plan_name}' (fub {fub_id}) are kept already — nothing changed."
-        )
-    elif await manager.async_unkeep_orphaned(fub_id, plan_name):
-        msg = (
-            f"No longer keeping the backups of deleted plan '{plan_name}' (fub {fub_id}) — you are asked "
-            "about them again once the retention period has passed."
-        )
-    else:
-        msg = f"The backups of deleted plan '{plan_name}' (fub {fub_id}) were not kept — nothing changed."
+    keep = service_flag(call, "keep", True)
+    if _refuse_backup_change_while_restoring(hass, coordinator, _TITLE_KEEP_BACKUPS_ERR):
+        return
+    # No await since the check: a restore starting from here on refuses until the change ends.
+    with coordinator.plan_edit():
+        msg = await _apply_keep_decision(hass, coordinator, fub_id, plan_name, keep)
 
     _LOGGER.info("Function Plan Keep Backups: %s", msg)
     coordinator.async_update_listeners()  # refresh the backup selector's orphaned-plans view
@@ -1757,8 +2167,8 @@ async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceC
     cutoff = _age_cutoff(call.data.get("max_age"))
     kind = call.data.get("kind", "all")
     order_by = call.data.get("order_by", "newest")
-    export_as_json = bool(call.data.get("export_as_json", False))
-    diff = bool(call.data.get("diff", False))
+    export_as_json = service_flag(call, "export_as_json", False)
+    diff = service_flag(call, "diff", False)
 
     backups = await coordinator.function_plan_backup.async_list_backups()
 
@@ -1776,8 +2186,8 @@ async def _handle_function_plan_list_backups(hass: HomeAssistant, call: ServiceC
         "(plan=%s name=%s slot=%s max_age=%s kind=%s order=%s diff=%s)",
         len(auto_entries),
         len(change_entries),
-        plan_raw,
-        plan_name,
+        one_line(plan_raw),
+        one_line(plan_name),
         slot,
         call.data.get("max_age"),
         kind,

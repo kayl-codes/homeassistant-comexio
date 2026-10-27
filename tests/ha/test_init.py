@@ -3,8 +3,9 @@
 import asyncio
 import time
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioAuthenticationError
 from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import CONF_PASSWORD, STATE_UNKNOWN
@@ -68,6 +69,25 @@ async def test_setup_and_unload(
     assert hass.states.get("switch.iosrv1_m1").state == "unavailable"
     assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
     api.close.assert_called_once()
+
+
+async def test_unload_without_a_coordinator_still_unloads(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A loaded entry whose coordinator is missing unloads cleanly, so the config flow's fallback reload completes."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN].pop(mock_config_entry.entry_id)
+    try:
+        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
+        assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
+        assert f"{mock_config_entry.entry_id}_webhook" not in hass.data[DOMAIN]  # the cleanup after the pop still ran
+    finally:
+        # Nothing in hass.data pointed at it any more, so the unload could not stop it: the test does.
+        coordinator.plan_watchdog.close()
+        await coordinator.async_shutdown()
 
 
 async def test_setup_keeps_every_entity_it_registers(
@@ -138,6 +158,23 @@ async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
 
     assert seen == [{1, 2}]  # plans 1 and 2 are still in config_basic.json's $Fubs
     assert coordinator._last_referenced_markers_from_snapshot is True
+
+
+async def test_a_mid_sync_reparse_sees_the_polls_unnamed_wired_markers(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Marker 5 is unnamed but wired: a sync's own parse_config (no referenced_markers) must not drop it."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    with patch.object(coordinator, "_referenced_marker_ids", return_value={"5"}):
+        await coordinator.async_refresh()
+        await hass.async_block_till_done()
+
+    polled_ids = {m["id"] for m in coordinator.data["markers"]}
+    resync = coordinator.api.parse_config(await coordinator.api.get_raw_config())
+
+    assert "5" in polled_ids
+    assert {m["id"] for m in resync["markers"]} == polled_ids
 
 
 async def test_the_reference_monitor_judges_findings_by_the_polls_plan_list(
@@ -279,11 +316,7 @@ async def test_io_entities_are_unknown_until_a_real_value_arrives(
     )  # unknown, still available
     # The real __init__ creates the IO live trackers the first poll runs on.
     assert (coordinator._io_real_value_ids, coordinator._polled_io_real_ids) == (set(), set())
-    assert (coordinator._unanswered_io_ids, coordinator._ios_without_ext_id, coordinator._conflicting_io_ids) == (
-        set(),
-        set(),
-        set(),
-    )
+    assert coordinator._unanswered_io_ids == set()
     assert coordinator._io_live_fetch_failing is True
 
     api = mock_comexio_api[0]
@@ -329,11 +362,6 @@ async def test_setup_auth_failed(
     mock_comexio_api[0].close.assert_called_once()
 
 
-@pytest.mark.xfail(
-    raises=AssertionError,
-    strict=True,
-    reason="ComexioConfigFlow has no async_step_reauth: HA aborts the reauth flow it starts",
-)
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "rejected"}])
 async def test_setup_auth_failed_offers_reauth(
     hass: HomeAssistant,
@@ -347,6 +375,55 @@ async def test_setup_auth_failed_offers_reauth(
 
     await _setup(hass, mock_config_entry)
 
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+
+@pytest.mark.logged_exception  # HA's coordinator logs the auth failure's traceback at debug level
+async def test_a_poll_whose_re_login_is_refused_offers_reauth(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Credentials changed while HA runs: the poll fails and leaves a reauth flow instead of empty data."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    api = mock_comexio_api[0]
+    data_before = coordinator.data
+    api.get_live_states.reset_mock()
+
+    async def refused_re_login() -> dict:
+        api.config_relogin_rejected = True
+        return {}
+
+    api.get_raw_config.side_effect = refused_re_login
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
+    assert coordinator.data is data_before
+    api.get_live_states.assert_not_awaited()  # the poll stopped at the refusal, nothing parsed from {}
+    assert coordinator.comexio_unreachable is False  # Comexio answered
+    flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+    assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
+
+
+@pytest.mark.logged_exception  # HA's coordinator logs the auth failure's traceback at debug level
+async def test_a_refusal_met_by_a_side_login_offers_reauth(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Review (Sourcery, #213): the preview or system info login is refused while the main session still works."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    api = mock_comexio_api[0]
+    # The real _login (the fixture stubs it) on a side client Comexio refuses: the latch the poll reads.
+    side_client = MagicMock()
+    side_client.login = AsyncMock(side_effect=ComexioAuthenticationError("no"))
+    assert await ComexioAPI._login(api, side_client, api._credentials()) is False
+    side_client.login.assert_awaited_once()
+
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+
+    assert coordinator.last_update_success is False
     flows = hass.config_entries.flow.async_progress_by_handler(DOMAIN)
     assert [flow["context"]["source"] for flow in flows] == [SOURCE_REAUTH]
 

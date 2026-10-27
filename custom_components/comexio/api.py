@@ -1,15 +1,19 @@
 # Version: 0.7.5
 import asyncio
 from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
+from datetime import timedelta
+import hashlib
 import logging
 import math
+import re
 import time
 from typing import Any, NamedTuple, NoReturn
 
 from aiocomexio import (
     ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
     ComexioClient,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
@@ -18,8 +22,12 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    PlacedModuleBlock,
     RawConfig,
+    SystemInfo,
+    WebioCommandForm,
     config as comexio_config,
+    fetch_certificate_fingerprint,
     webio as comexio_webio,
 )
 from aiocomexio.config import ParseOptions, iter_group
@@ -57,21 +65,31 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    IO_PLAN_KIND_IO,
+    LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
+    QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
+    IoPlanKind,
     category_by_fub_module_type,
     function_plan_id,
     function_plan_ids,
-    io_column_rows,
+    function_plan_info,
+    function_plans,
     io_sort_key,
     is_valid_entity_name_schema,
     knx_loopback_command_name,
+    one_line,
+    unreadable_plan_keys,
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
+from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
+from .function_plan_module_restore import ModuleConfigRestore, is_module_block, place_module_block
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -79,6 +97,7 @@ FUNCTION_PLAN_CONSTANT_TYPE = 16
 # Comexio's paper ids ($Fubs "Paper") per format aiocomexio accepts, for the plan cache after a settings save.
 _PLAN_PAPER_IDS = {"A3": "2", "A4": "3", "A5": "4"}
 _PLAN_PAPER_FALLBACK = "A4"
+_PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio raises outside it)
 # Comexio's answer (as quoted in aiocomexio's refusal message) for a plan that is not running.
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 # Comexio's editor action that stores block settings ($FubBaseConfig rows) of one element.
@@ -90,6 +109,35 @@ _LOGGER = logging.getLogger(__name__)
 def _webhook_path(server_id: str) -> str:
     """Path of HA's webhook that the Web-IO commands of this server POST to."""
     return f"/api/webhook/comexio_{server_id}"
+
+
+def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
+    """parsed_data with its Quickbus IOs back under "io", where aiocomexio's Web-IO builders expect them.
+
+    The builders tell them apart by their "quickbus" entry (own class, IO Id in the payload).
+    """
+    return {**parsed_data, "io": [*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, [])]}
+
+
+class _MismatchReportingClient(ComexioClient):
+    """ComexioClient that hands every certificate other than the pinned one to on_mismatch before raising it.
+
+    aiocomexio turns each transport failure into a ComexioError in _transport_error, so this one place sees
+    the mismatch of every request — also of the direct client calls whose callers report any ComexioError
+    as a plain failure.
+    """
+
+    def __init__(
+        self, *args: Any, on_mismatch: Callable[[ComexioCertificateMismatchError], None], **kwargs: Any
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_mismatch = on_mismatch
+
+    def _transport_error(self, what: str, err: aiohttp.ClientError | TimeoutError) -> ComexioError:
+        error = super()._transport_error(what, err)
+        if isinstance(error, ComexioCertificateMismatchError):
+            self._on_mismatch(error)
+        return error
 
 
 def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
@@ -106,7 +154,12 @@ def _raise_transport_error(err: ComexioConnectionError) -> NoReturn:
 
 
 async def _attempt[T, F](
-    what: str, call: Callable[[], Awaitable[T]], failed: F, *, transport_raises: bool = False
+    what: str,
+    call: Callable[[], Awaitable[T]],
+    failed: F,
+    *,
+    transport_raises: bool = False,
+    on_mismatch: Callable[[ComexioCertificateMismatchError], None] | None = None,
 ) -> T | F:
     """call()'s result, or `failed` after a warning naming `what` if it raised.
 
@@ -118,9 +171,17 @@ async def _attempt[T, F](
 
     transport_raises: re-raise a transport failure as aiohttp.ClientError / TimeoutError, for
     the adapters whose callers (the restore paths in services/backup.py) abort on those.
+    on_mismatch: gets a certificate other than the pinned one instead of the warning (ComexioAPI
+    hands it to the certificate_changed repair).
     """
     try:
         return await call()
+    except ComexioCertificateMismatchError as err:
+        if on_mismatch is None:
+            _LOGGER.warning("%s failed: %s", what, err)
+        else:
+            on_mismatch(err)
+        return failed
     except ComexioConnectionError as err:
         if transport_raises:
             _raise_transport_error(err)
@@ -131,6 +192,30 @@ async def _attempt[T, F](
         notes = "".join(f" ({note})" for note in getattr(err, "__notes__", ()))
         _LOGGER.warning("%s failed: %s%s", what, err, notes, exc_info=isinstance(err, TypeError))
         return failed
+
+
+# aiocomexio's error for a scene block / Quantum module placed without the created object's id.
+_PLACED_WITHOUT_REF_ID = re.compile(r"element (\d+) was placed, but the answer carries no ref_id")
+
+
+async def _module_block_placed(placing: Awaitable[PlacedModuleBlock]) -> PlacedModuleBlock:
+    """The placed block; one placed without the created object's id comes back with ref_id 0.
+
+    aiocomexio raises ComexioDataError for it, naming the element only in the message — the block
+    is on the plan then, and its caller has to remove it.
+    """
+    try:
+        return await placing
+    except ComexioDataError as err:
+        if (match := _PLACED_WITHOUT_REF_ID.search(str(err))) is None:
+            raise
+        _LOGGER.warning("%s", err)
+        return PlacedModuleBlock(int(match[1]), 0)
+
+
+def plan_format_settable(paper_format: str, dpi: int) -> bool:
+    """Whether a plan can be set to this paper and DPI (_plan_paper_and_orientation replaces any other paper)."""
+    return paper_format.upper() in _PLAN_PAPER_IDS and dpi in _PLAN_DPI_RANGE
 
 
 def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[str, str]:
@@ -146,14 +231,20 @@ def _plan_paper_and_orientation(paper_format: str, orientation: str) -> tuple[st
     return paper, "portrait" if orientation.lower() == "portrait" else "landscape"
 
 
-async def _succeeded(what: str, call: Callable[[], Awaitable[object]], *, transport_raises: bool = False) -> bool:
+async def _succeeded(
+    what: str,
+    call: Callable[[], Awaitable[object]],
+    *,
+    transport_raises: bool = False,
+    on_mismatch: Callable[[ComexioCertificateMismatchError], None] | None = None,
+) -> bool:
     """_attempt for a request without an answer worth returning: True, or False after a warning."""
 
     async def run() -> bool:
         await call()
         return True
 
-    return await _attempt(what, run, False, transport_raises=transport_raises)
+    return await _attempt(what, run, False, transport_raises=transport_raises, on_mismatch=on_mismatch)
 
 
 def _balanced_rows_per_col(n_items: int, max_rows_per_col: int) -> int:
@@ -212,7 +303,7 @@ def _reference_type(ref: Any) -> int | None:
     """An element reference's integer type (int or numeric string), or None if unreadable.
 
     A missing or malformed type must not pass as "not a marker" — the reference could still
-    point at a marker, which the force gate would then treat as unplaced.
+    point at a marker, which the placement check would then treat as unplaced.
     """
     if not isinstance(ref, dict):
         return None
@@ -230,13 +321,17 @@ def _reference_type(ref: Any) -> int | None:
 
 
 def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
-    """Marker ids referenced in one plan, or None if any element/reference is unreadable."""
+    """Marker ids referenced in one plan, or None if any element/reference is unreadable.
+
+    loadelements sends "reference" with every element; only an explicit null means "none". A
+    missing key is unreadable — it could hide a marker placement.
+    """
     elements = plan_data.get("elements") if isinstance(plan_data, dict) else None
     if not isinstance(elements, dict):
         return None
     refs: set[int] = set()
     for elem in elements.values():
-        ref = elem.get("reference") if isinstance(elem, dict) else "malformed"
+        ref = elem.get("reference", "missing") if isinstance(elem, dict) else "malformed"
         if ref is None:
             continue
         ref_type = _reference_type(ref)
@@ -252,10 +347,11 @@ def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
 
 
 def _placed_marker_ids_strict(all_plans: dict[int, dict], ignored: Iterable[int] = ()) -> set[int] | None:
-    """Fail-closed variant of _placed_marker_ids for marker_delete's force gate.
+    """Fail-closed variant of _placed_marker_ids for the KNX bridge marker reset.
 
     _placed_marker_ids silently skips unreadable references — fine for picking free ids, but
-    here a skipped reference would make a placed marker look unplaced and deletable. Any
+    here a skipped reference would make a placed marker look unused and blank it (marker_delete
+    reads plans the same way via _marker_plan_placements_strict). Any
     unreadable plan, element or marker reference returns None (placement unknown) instead.
     Plans in `ignored` are still read strictly, only their placements are not counted: an
     unreadable reference there may be a pair their own cleanup skipped and left in place.
@@ -271,8 +367,38 @@ def _placed_marker_ids_strict(all_plans: dict[int, dict], ignored: Iterable[int]
     return placed
 
 
+def _marker_plan_placements_strict(
+    all_plans: dict[int, dict], plan_names: dict[int, str]
+) -> dict[int, list[str]] | None:
+    """{marker id: names of the plans it is placed in} for marker_delete, or None if any plan is unreadable.
+
+    Same fail-closed reading as _placed_marker_ids_strict: a skipped reference would make a
+    placed marker look unplaced and deletable. The names are for the notification only — plan
+    names are not unique, so two plans of the same name are both listed.
+    """
+    placements: dict[int, list[str]] = {}
+    for fub_id in sorted(all_plans):
+        refs = _plan_marker_refs_strict(all_plans[fub_id])
+        if refs is None:
+            return None
+        for marker_id in refs:
+            placements.setdefault(marker_id, []).append(plan_names.get(fub_id) or f"#{fub_id}")
+    return placements
+
+
+def _plan_display_name(entry: Any) -> str | None:
+    """A $Fubs entry's plan name on one line (one_line), or None if it has none.
+
+    The name goes into marker_delete's log line, notification and response.
+    """
+    name = entry.get("Name") if isinstance(entry, dict) else None
+    if not isinstance(name, str):
+        return None
+    return one_line(name) or None
+
+
 _MARKER_CONFIG_UNREADABLE = "Comexio marker config could not be fetched or parsed — every id refused (see log)."
-_FORCE_IGNORED = "force ignored: not every function plan could be loaded and verified (see log)."
+_PLACEMENT_UNKNOWN = "not every function plan could be loaded and verified — every id refused (see log)."
 
 
 def _marker_category_is(record: dict[str, Any], expected: int) -> bool:
@@ -287,14 +413,14 @@ def _marker_category_is(record: dict[str, Any], expected: int) -> bool:
 
 
 def _is_api_created_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==1 (created via the admin API, not Studio)."""
+    """True if the marker record carries CategoryId==1 (admin API, or the plan editor's "new marker")."""
     return _marker_category_is(record, 1)
 
 
 def _is_studio_marker(record: dict[str, Any]) -> bool:
-    """True if the marker record carries CategoryId==0 (factory or Studio-created).
+    """True if the marker record carries CategoryId==0 (factory-provisioned or from Studio's marker list).
 
-    marker_delete's force path only applies to this known category — an unknown or malformed
+    marker_delete's force option only applies to this known category — an unknown or malformed
     CategoryId stays protected even when the marker is untitled and unplaced.
     """
     return _marker_category_is(record, 0)
@@ -312,38 +438,47 @@ def _marker_has_title(record: dict[str, Any]) -> bool:
     return not isinstance(name, str) or bool(name.strip())
 
 
-def _classify_marker_delete_ids(
-    marker_ids: list[int], records: dict[int, dict[str, Any]], placed_ids: set[int] | None
-) -> tuple[list[int], list[int]]:
-    """Split marker_ids into (deletable, protected) for the marker_delete service.
+def _marker_delete_block_reason(
+    marker_id: int, record: dict[str, Any] | None, placements: dict[int, list[str]], force: bool
+) -> str | None:
+    """Why marker_delete must not delete marker_id, or None if it may.
 
+    Placement comes first and holds for every CategoryId, force or not: deleting a placed
+    marker would leave its plan with a dangling element — and the Studio plan editor's
+    "new marker" seems to create CategoryId==1 markers just like the admin API (2026-10-16).
+    """
+    if plans := placements.get(marker_id):
+        return f"placed in function plan{'s' if len(plans) > 1 else ''} {', '.join(one_line(plan) for plan in plans)}"
+    if record is None or _is_api_created_marker(record):
+        return None
+    if not _is_studio_marker(record):
+        return f"unknown CategoryId {record.get('CategoryId')!r}"
+    if _marker_has_title(record):
+        return "CategoryId 0 marker with a title"
+    return None if force else "CategoryId 0 marker — enable 'force' for untitled ones"
+
+
+def _classify_marker_delete_ids(
+    marker_ids: list[int], records: dict[int, dict[str, Any]], placements: dict[int, list[str]], force: bool
+) -> tuple[list[int], dict[int, str]]:
+    """Split marker_ids into (deletable, {protected id: reason}) for the marker_delete service.
+
+    - Placed in any function plan (placements, from a fresh load of every plan): protected.
     - Absent from records (already deleted / never existed): deletable — delete_marker then
       reports it as the harmless "already absent" case.
-    - CategoryId==1 (created by this integration via the API): deletable.
-    - CategoryId==0 (factory or Studio-created): protected, unless force is active
-      (placed_ids is not None) AND the marker has no title AND it is not placed in any
-      function plan.
+    - CategoryId==1 (created via the admin API — this integration, or the plan editor): deletable.
+    - CategoryId==0 (factory-provisioned or from Studio's marker list): protected, unless force is on AND the marker
+      has no title.
     - Anything else (unknown/malformed CategoryId): always protected, force or not.
-    placed_ids=None means force is off — or the plans couldn't all be
-      loaded, in which case placement is unknown and nothing may pass on that basis.
     """
     deletable: list[int] = []
-    protected: list[int] = []
+    protected: dict[int, str] = {}
     for mid in marker_ids:
-        record = records.get(mid)
-        if (
-            record is None
-            or _is_api_created_marker(record)
-            or (
-                placed_ids is not None
-                and _is_studio_marker(record)
-                and not _marker_has_title(record)
-                and mid not in placed_ids
-            )
-        ):
+        reason = _marker_delete_block_reason(mid, records.get(mid), placements, force)
+        if reason is None:
             deletable.append(mid)
         else:
-            protected.append(mid)
+            protected[mid] = reason
     return deletable, protected
 
 
@@ -388,6 +523,19 @@ class KnxBridgeReset(NamedTuple):
     title: str  # "" for an unused marker, else its title without any kind suffix
     default: float = 0  # in use: its current default value, kept by the rename
     store: bool = False  # in use: its current "store in memory" flag, kept by the rename
+
+
+# The failure cause of both system info parts when Comexio presents a certificate other than the pinned one.
+SYSTEM_INFO_CERTIFICATE_CHANGED = "certificate changed"
+
+
+class SystemInfoReading(NamedTuple):
+    """One system info poll (see ComexioAPI.get_system_info): a part is None if its fetch failed, with the cause."""
+
+    info: SystemInfo | None
+    uptime: timedelta | None
+    info_error: str | None = None
+    uptime_error: str | None = None
 
 
 def _strip_marker_kind_suffixes(name: str) -> str:
@@ -492,13 +640,19 @@ def _saved_schema(conf_data: Mapping[str, Any], key: str, default: str) -> str:
 
 
 def _verified_plan_ids(fubs: dict[str, Any], source: str) -> set[int] | None:
-    """The plan ids of a plan list as ints, None after an error log if any is not numeric."""
-    try:
-        return {int(fid) for fid in fubs}
-    except (TypeError, ValueError):
-        bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
-        _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in %s — placement unknown", bad, source)
+    """The plan ids of a plan list as ints, None after an error log if an entry's plan is unknown.
+
+    Unknown: a key that is no plan id (see function_plan_id), or an entry carrying an Id other than its
+    key. An entry with no plan info still names its plan by the key, so that plan is loaded and checked.
+    """
+    if bad := [
+        fid
+        for fid, info in fubs.items()
+        if function_plan_id(fid) is None or (isinstance(info, dict) and str(info.get("Id", fid)) != str(fid))
+    ]:
+        _LOGGER.error("_load_all_plans_verified: unreadable plan entries %r in %s — placement unknown", bad, source)
         return None
+    return function_plan_ids(fubs)
 
 
 class ComexioAPI:
@@ -520,14 +674,36 @@ class ComexioAPI:
         password: str,
         api_user: str | None = None,
         api_pass: str | None = None,
+        fingerprint: str | None = None,
     ) -> None:
-        """Initialize the API class with all required credentials."""
+        """Initialize the API class with all required credentials.
+
+        With fingerprint (CONF_CERTIFICATE_FINGERPRINT) every request goes over HTTPS and checks that
+        Comexio presents that certificate; without it plain HTTP.
+        """
         self.hass: HomeAssistant = hass
         self.host: str = host
         self.username: str = username
         self.password: str = password
         self.api_user: str | None = api_user
         self.api_pass: str | None = api_pass
+        self.fingerprint: str | None = fingerprint
+        # The mismatch the last login or config fetch met: Comexio presented another certificate than
+        # the pinned one. Cleared by the next login that gets through and by every config fetch.
+        self.certificate_mismatch: ComexioCertificateMismatchError | None = None
+        # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
+        # repair comes up with the first request that meets it, not only with the next full poll.
+        self.on_certificate_mismatch: Callable[[str], None] | None = None
+        # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
+        # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
+        # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
+        self.certificate_mismatch_count = 0
+        self.last_certificate_mismatch: ComexioCertificateMismatchError | None = None
+        # The presented fingerprint last logged at ERROR: a mismatch that persists is logged once, then
+        # at debug (the repair is up). Cleared by a login or config fetch that gets through.
+        self._mismatch_logged: str | None = None
+        # Whether the handshake for the comparison with the pin failed last time (logged once per outage).
+        self._handshake_failure_logged = False
 
         # This context is vital for the Audit logic to find the configured webio_name
         self.config_entry: ConfigEntry | None = None
@@ -558,6 +734,9 @@ class ComexioAPI:
         self._logged_in_client: ComexioClient | None = None
         # Serializes full logins: two at once clear each other's cookie jar mid-login.
         self._login_lock = asyncio.Lock()
+        # Serializes every login request, main session and preview alike, so the refusal check and
+        # its update in _login see each other (taken inside _login_lock, never the other way round).
+        self._login_request_lock = asyncio.Lock()
         # Bumped by every successful full login, so a caller that waited for the lock sees
         # that another one already logged the session in again.
         self._login_generation: int = 0
@@ -582,6 +761,9 @@ class ComexioAPI:
         # from the newest config fetch; None when that fetch failed or did not carry a readable
         # table, so a backup then stores none rather than an ever older copy.
         self.block_settings: BlockSettings | None = None
+        # Scene block and Quantum module configs (see function_plan_module_configs) from the same
+        # fetch; None when it failed, a type the page did not carry readably is missing inside.
+        self.module_configs: ModuleConfigTables | None = None
         # Block settings saves Comexio confirmed so far — a config fetch during which one completed
         # may carry the table from before it and must not overwrite the cache the save updated.
         # A refused or failed save changed nothing on Comexio, so it does not count.
@@ -612,6 +794,10 @@ class ComexioAPI:
         self.io_input_types: dict[str, Any] = {}
         # Function plan + paper metadata (populated by parse_config)
         self._fub_data: dict[str, Any] = {}  # fub_id_str → {Id, Name, Paper, ...}
+        # Unnamed-but-wired marker ids the last poll parsed with (set by the coordinator). A
+        # parse_config call without its own referenced_markers (every mid-sync reload) uses
+        # them, so it sees the same markers as the poll instead of one fewer per such marker.
+        self.referenced_markers: set[str] = set()
         # Called with no arguments when set_fub_active changed a plan's cached Active flag or
         # create_fup added a plan, so the coordinator can refresh the entities showing the plans
         # (see ComexioCoordinator.__init__) — a new plan gets its run-state sensor right away.
@@ -643,6 +829,42 @@ class ComexioAPI:
         # still rebooting). Written as each call ends, with no await before its caller resumes, so
         # the caller reads its own fetch's outcome even while another fetch overlaps.
         self.config_relogin_unreachable = False
+        # Set by get_raw_config, like config_relogin_unreachable, when Comexio refused that re-login's
+        # credentials: the poll then asks the user for new ones.
+        self.config_relogin_rejected = False
+        # Every host + admin credentials Comexio refused at login (_login), as _refusal_key digests —
+        # no old password stays in memory. No login tries them again: HA asks for reauth then, and
+        # retrying from every poll would only risk a server-side lockout; new credentials (reauth
+        # reloads the entry) or a successful login with them lift it.
+        self._refused_credentials: set[str] = set()
+
+    @staticmethod
+    def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
+        """What client.login() authenticates with; the API user (Basic Auth for writes) plays no part."""
+        return credentials[:3]
+
+    def _login_outdated(self, client_credentials: tuple[str, ...]) -> bool:
+        """Whether host, admin credentials or the pinned certificate changed since client_credentials.
+
+        The API user (Basic Auth for writes) plays no part in the login, so a change of it leaves a
+        login running with the old client valid.
+        """
+        login_part = (*self._admin_login_part(client_credentials), client_credentials[-1])
+        return login_part != (*self._login_credentials(), self.fingerprint or "")
+
+    def _login_credentials(self) -> tuple[str, ...]:
+        """The host and admin credentials currently configured."""
+        return self._admin_login_part(self._credentials())
+
+    @staticmethod
+    def _refusal_key(credentials: tuple[str, ...]) -> str:
+        """A digest of host + admin credentials: tells them apart without keeping the password."""
+        return hashlib.sha256("\0".join(credentials).encode()).hexdigest()
+
+    @property
+    def credentials_refused(self) -> bool:
+        """Whether Comexio refused the current admin credentials at the last login that tried them."""
+        return self._refusal_key(self._login_credentials()) in self._refused_credentials
 
     def _build_session_kwargs(self) -> dict[str, Any]:
         """Session kwargs shared by the main session and the preview session (own cookie jar each)."""
@@ -654,25 +876,29 @@ class ComexioAPI:
         Returns None if the login fails — the caller falls back to the main session for that
         one poll tick rather than blocking the preview on a retry loop; the next tick tries
         the dedicated session again from scratch (a fresh session, since a stale/rejected
-        cookie jar wouldn't fix itself).
+        cookie jar wouldn't fix itself) — unless Comexio refused the credentials: those are
+        not tried again until they change (see _refused_credentials).
         """
         self._drop_outdated_preview_session()
         if self._preview_session is not None:
             return self._preview_session
+        if self.credentials_refused:
+            return None  # _login would not try them anyway; no warning on every preview tick
         async with self._preview_session_lock:
             # Re-check: another tick may have finished creating the session while this
-            # one was waiting for the lock — and the settings may have changed since.
+            # one was waiting for the lock — and the settings may have changed since,
+            # or a login meanwhile had them refused.
             self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
-            if self._closed:
+            if self._closed or self.credentials_refused:
                 return None
             session = async_create_clientsession(self.hass, **self._build_session_kwargs())
             credentials = self._credentials()
             client = self._new_client(session)
             login_ok = False
             try:
-                login_ok = await self._login(client)
+                login_ok = await self._login(client, credentials)
             finally:
                 # Any non-success path (failed login, close() or new connection settings during
                 # the await above, or _login() raising) must not leave an authenticated session
@@ -680,11 +906,11 @@ class ComexioAPI:
                 settings_changed = credentials != self._credentials()
                 if not login_ok or self._closed or settings_changed:
                     session.detach()
-            if not login_ok:
-                _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
-                return None
             if settings_changed:
                 _LOGGER.info("Connection settings changed during the preview login — opening a new session next poll")
+                return None
+            if not login_ok:
+                _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
                 return None
             if self._closed:
                 return None
@@ -694,18 +920,49 @@ class ComexioAPI:
             return session
 
     def _credentials(self) -> tuple[str, ...]:
-        return (self.host, self.username, self.password, self.api_user or "", self.api_pass or "")
+        return (
+            self.host,
+            self.username,
+            self.password,
+            self.api_user or "",
+            self.api_pass or "",
+            self.fingerprint or "",
+        )
 
     def _new_client(self, session: aiohttp.ClientSession) -> ComexioClient:
-        host, username, password, api_user, api_pass = self._credentials()
-        return ComexioClient(host, username, password, session=session, api_username=api_user, api_password=api_pass)
+        credentials = self._credentials()
+        host, username, password, api_user, api_pass, fingerprint = credentials
+        return _MismatchReportingClient(
+            host,
+            username,
+            password,
+            session=session,
+            api_username=api_user,
+            api_password=api_pass,
+            fingerprint=fingerprint or None,
+            on_mismatch=lambda err: self._client_met_certificate_mismatch(err, credentials),
+        )
+
+    def _client_met_certificate_mismatch(
+        self, err: ComexioCertificateMismatchError, client_credentials: tuple[str, ...]
+    ) -> None:
+        """A request of a client built with client_credentials met another certificate than its pin.
+
+        The caller logs the failed request; this only keeps the mismatch and raises the repair. A client
+        whose settings a reconfigure replaced checked an old pin, so its mismatch names nothing in force.
+        """
+        if self._login_outdated(client_credentials):
+            _LOGGER.debug("A request with replaced connection settings met another certificate: %s", err)
+            return
+        self._keep_certificate_mismatch(err)
 
     @property
     def client(self) -> ComexioClient:
         """The aiocomexio client on the main session.
 
-        Rebuilt whenever host or credentials change — the coordinator's reconfigure path
-        assigns new values to host / username / password / api_user / api_pass and logs in again.
+        Rebuilt whenever host, credentials or the pinned fingerprint change — the coordinator's
+        reconfigure path assigns new values to host / username / password / api_user / api_pass /
+        fingerprint and logs in again.
         A preview session that logged in with other settings is dropped as well — its client and
         cookie belong to the old ones — so ensure_preview_session opens a new one on the next poll.
         """
@@ -723,12 +980,6 @@ class ComexioAPI:
         self._preview_session.detach()
         self._preview_session = None
         self._preview_client = None
-
-    @property
-    def _base_url(self) -> str:
-        """Return the base URL for the Comexio IO-Server."""
-        # The IO-Server is reached on the local network over plain HTTP; HTTPS would be a new feature.
-        return f"http://{self.host}"  # NOSONAR
 
     @property
     def fub_data(self) -> dict[str, Any]:
@@ -826,8 +1077,8 @@ class ComexioAPI:
         changed = False
         for fub_id, running in states.items():
             key = str(fub_id)
-            fub = self._fub_data.get(key)
-            if not isinstance(fub, dict) or self.get_fub_active(fub_id) is running:
+            fub = function_plan_info(self._fub_data, key)
+            if not fub or self.get_fub_active(fub_id) is running:
                 continue
             self._fub_data[key] = {**fub, "Active": int(running)}
             changed = True
@@ -869,8 +1120,9 @@ class ComexioAPI:
           broken rather than logged out, that login fails and reports "connection" itself.
 
         Returns False on failure and sets last_login_error to "rejected" (credentials refused
-        — setup asks for reauth) or "connection" (server unreachable or answering garbage —
-        setup retries).
+        — setup asks for reauth), "certificate" (another certificate than the pinned one, see
+        certificate_mismatch — setup raises the certificate_changed repair) or "connection" (server
+        unreachable or answering garbage — setup retries).
         """
         client = self.client
         if client is self._logged_in_client:
@@ -891,39 +1143,148 @@ class ComexioAPI:
                 _LOGGER.debug("Comexio admin session has expired, logging in again")
         return await self._full_login()
 
-    async def _full_login(self) -> bool:
+    async def _full_login(self, seen_generation: int | None = None) -> bool:
         """Full RSA login of the main session's client, one at a time.
 
         A caller that had to wait for a concurrent full login takes over its success instead of
-        logging in again (which would clear the jar of the session just logged in).
+        logging in again (which would clear the jar of the session just logged in). A caller that
+        passes the _login_generation it saw before its failed request also takes over a login that
+        finished between that request and this call.
         """
-        generation = self._login_generation
+        generation = self._login_generation if seen_generation is None else seen_generation
         async with self._login_lock:
             client = self.client
             if self._login_generation != generation and client is self._logged_in_client:
                 return True
-            if not await self._login(client):
+            if not await self._login(client, self._client_credentials):
                 self._logged_in_client = None
                 return False
             self._logged_in_client = client
             self._login_generation += 1
             return True
 
-    async def _login(self, client: ComexioClient) -> bool:
-        """client.login() mapped onto login()'s bool / last_login_error contract."""
+    async def _login(self, client: ComexioClient, client_credentials: tuple[str, ...]) -> bool:
+        """client.login() mapped onto login()'s bool / last_login_error contract.
+
+        client_credentials are the settings the client was built with (_credentials()); a refusal or
+        success counts for them. Credentials Comexio refused are not sent again (see
+        _refused_credentials): the call fails as "rejected" without a request. All login requests run
+        one at a time, so a caller that waited for a refused login sees the refusal and does not
+        repeat it. Settings replaced by a reconfigure (the pinned certificate included, see
+        _login_outdated) are outdated: a login still waiting with them is not sent, and one answered
+        after they were replaced reports no outcome for the new ones: not "rejected" (the caller would
+        ask for reauth although they were never tried), not a changed certificate (the repair would
+        name a certificate checked against a pin no longer in force) and not success (the caller would
+        mark the old client logged in and go on with the new, logged-out one). All report "connection"
+        instead, so the caller simply tries again with the new settings. A refusal still counts for
+        the credentials themselves, and after a change of only the pin it stays "rejected": the pin is
+        the transport, Comexio refused these very credentials whichever certificate it showed.
+        """
+        credentials = self._admin_login_part(client_credentials)
+        refusal_key = self._refusal_key(credentials)
+        async with self._login_request_lock:
+            if self._login_outdated(client_credentials):
+                _LOGGER.debug("Not logging in to Comexio: the connection settings changed while this login waited")
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            if refusal_key in self._refused_credentials:
+                _LOGGER.debug("Not logging in to Comexio: it refused these credentials, waiting for reauth")
+                self.last_login_error = LOGIN_ERROR_REJECTED
+                return False
+            try:
+                await client.login()
+            except ComexioAuthenticationError as err:
+                _LOGGER.debug("Comexio login rejected: %s", err)
+                self._refused_credentials.add(refusal_key)
+                outdated = credentials != self._login_credentials()
+                self.last_login_error = LOGIN_ERROR_CONNECTION if outdated else LOGIN_ERROR_REJECTED
+                return False
+            except ComexioCertificateMismatchError as err:
+                if self._login_outdated(client_credentials):
+                    _LOGGER.debug("Comexio login with replaced connection settings met another certificate: %s", err)
+                    self.last_login_error = LOGIN_ERROR_CONNECTION
+                    return False
+                self._note_certificate_mismatch(err, "Comexio login refused")
+                self.last_login_error = LOGIN_ERROR_CERTIFICATE
+                return False
+            except ComexioError as err:
+                _LOGGER.warning("Comexio login failed: %s", err)
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            _LOGGER.info("Successfully logged into Comexio Admin interface")
+            self._refused_credentials.discard(refusal_key)
+            if self._login_outdated(client_credentials):
+                _LOGGER.debug("Comexio login succeeded with replaced connection settings — not using it")
+                self.last_login_error = LOGIN_ERROR_CONNECTION
+                return False
+            self.last_login_error = None
+            self.certificate_mismatch = None
+            self._mismatch_logged = None
+            return True
+
+    def _note_certificate_mismatch(
+        self, err: ComexioCertificateMismatchError, what: str, *, quiet: bool = False
+    ) -> None:
+        """Log that `what` failed for the mismatch, keep it (certificate_mismatch), hand it to on_certificate_mismatch.
+
+        Logged at ERROR once per presented certificate, then at debug — the repair is up; quiet (the fast
+        bus-load poll) always logs at debug.
+        """
+        if quiet or err.actual == self._mismatch_logged:
+            _LOGGER.debug("%s, the certificate changed: %s", what, err)
+        else:
+            _LOGGER.error("%s, the certificate changed: %s", what, err)
+            self._mismatch_logged = err.actual
+        self._keep_certificate_mismatch(err)
+
+    def _keep_certificate_mismatch(self, err: ComexioCertificateMismatchError) -> None:
+        """Keep the mismatch (certificate_mismatch, certificate_mismatch_count), hand it to on_certificate_mismatch."""
+        self.certificate_mismatch = self.last_certificate_mismatch = err
+        self.certificate_mismatch_count += 1
+        if self.on_certificate_mismatch is not None:
+            self.on_certificate_mismatch(err.actual)
+
+    async def _attempt[T, F](
+        self, what: str, call: Callable[[], Awaitable[T]], failed: F, *, transport_raises: bool = False
+    ) -> T | F:
+        """Module _attempt; a changed certificate raises the certificate_changed repair right away."""
+        return await _attempt(
+            what,
+            call,
+            failed,
+            transport_raises=transport_raises,
+            on_mismatch=lambda err: self._note_certificate_mismatch(err, f"{what} refused"),
+        )
+
+    async def _succeeded(
+        self, what: str, call: Callable[[], Awaitable[object]], *, transport_raises: bool = False
+    ) -> bool:
+        """Module _succeeded; a changed certificate raises the certificate_changed repair right away."""
+        return await _succeeded(
+            what,
+            call,
+            transport_raises=transport_raises,
+            on_mismatch=lambda err: self._note_certificate_mismatch(err, f"{what} refused"),
+        )
+
+    async def fetch_replaced_fingerprint(self) -> str | None:
+        """The fingerprint Comexio presents now if it is not the pinned one, else None.
+
+        None as well when nothing is pinned or the handshake fails. For a host name with several
+        addresses aiohttp reports a foreign certificate as a connection error (see
+        ComexioCertificateMismatchError); a fresh handshake tells the two apart.
+        """
+        if self.fingerprint is None:
+            return None
         try:
-            await client.login()
-        except ComexioAuthenticationError as err:
-            _LOGGER.debug("Comexio login rejected: %s", err)
-            self.last_login_error = "rejected"
-            return False
-        except ComexioError as err:
-            _LOGGER.warning("Comexio login failed: %s", err)
-            self.last_login_error = LOGIN_ERROR_CONNECTION
-            return False
-        _LOGGER.info("Successfully logged into Comexio Admin interface")
-        self.last_login_error = None
-        return True
+            current = await fetch_certificate_fingerprint(self.host)
+        except (ComexioError, ValueError) as err:
+            log = _LOGGER.debug if self._handshake_failure_logged else _LOGGER.info
+            log("Comexio certificate could not be read for the comparison with the pin: %s", err)
+            self._handshake_failure_logged = True
+            return None
+        self._handshake_failure_logged = False
+        return None if current == self.fingerprint else current
 
     async def get_raw_config(self) -> dict[str, Any]:
         """The function module page's config objects ($FubModules, $Fubs, ...), keyed without "$".
@@ -933,7 +1294,8 @@ class ComexioAPI:
         on every coordinator poll, so the main session heals itself here. Returns {} if the
         server answered but the scrape failed (HTTP error status, failed re-login, no parseable
         $FubModules) — callers check for FubModules. A transport failure raises
-        aiohttp.ClientError / TimeoutError.
+        aiohttp.ClientError / TimeoutError. Another certificate than the pinned one returns {} as well
+        and sets certificate_mismatch; every fetch starts with it cleared, so it names this fetch's cause.
 
         Overlapping fetches: only a fetch started after the last applied one updates io_types,
         comexio_version and block_settings. An older one finishing last returns the newest page any
@@ -946,7 +1308,8 @@ class ComexioAPI:
         saves_before = self._block_settings_saves_confirmed
         self._config_fetches_started += 1
         generation = self._config_fetches_started
-        unreachable = False
+        unreachable = rejected = False
+        self.certificate_mismatch = None
         try:
             try:
                 raw = await self.client.get_raw_config()
@@ -955,18 +1318,25 @@ class ComexioAPI:
                 if not await self._full_login():
                     _LOGGER.error("Re-login to Comexio failed (%s)", self.last_login_error)
                     unreachable = self.last_login_error == LOGIN_ERROR_CONNECTION
+                    rejected = self.last_login_error == LOGIN_ERROR_REJECTED
                     self._drop_block_settings(generation)
                     return {}
                 raw = await self.client.get_raw_config()
         except ComexioConnectionError as err:
             self._drop_block_settings(generation)
             _raise_transport_error(err)
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "Comexio configuration not fetched")
+            self._drop_block_settings(generation)
+            return {}
         except ComexioError as err:
             _LOGGER.error("Failed to fetch the Comexio configuration: %s", err)
             self._drop_block_settings(generation)
             return {}
         finally:
             self.config_relogin_unreachable = unreachable
+            self.config_relogin_rejected = rejected
+        self._mismatch_logged = None
         return self._finish_config_fetch(raw, generation, saves_before, run_state_mark)
 
     def _finish_config_fetch(
@@ -1000,20 +1370,22 @@ class ComexioAPI:
         return True
 
     def _drop_block_settings(self, generation: int) -> None:
-        """A failed fetch drops the block settings — unless a newer fetch already applied its own.
+        """A failed fetch drops the block settings and module configs — unless a newer fetch already applied its own.
 
         The newest outcome wins also as a failure: an older fetch finishing afterwards with a valid
         page is discarded entirely (io_types and comexio_version too); the next poll catches up.
         """
         if self._claim_config_fetch(generation, None):
             self.block_settings = None
+            self.module_configs = None
 
     def _apply_config_page(self, raw: RawConfig, saves_before: int) -> None:
-        """Take io_types, comexio_version and the block settings from a fetched config page."""
+        """Take io_types, comexio_version, the module configs and the block settings from a fetched config page."""
         self.io_types = raw.io_types
         self.io_input_types = raw.io_input_types
         if raw.comexio_version:
             self.comexio_version = raw.comexio_version
+        self.module_configs = parse_module_config_tables(raw.variables)
         block_settings = parse_block_settings(raw.variables.get("FubBaseConfig"))
         if self._block_settings_saves_confirmed != saves_before:
             # The page may predate the save; the cache already holds the saved values — or stays
@@ -1054,6 +1426,9 @@ class ComexioAPI:
 
         try:
             result = await self.client.get_knx_dpt_catalog()
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "KNX DPT catalog not fetched")
+            return self._knx_dpt_catalog or {}
         except ComexioError as err:
             _LOGGER.warning("Failed to fetch KNX DPT catalog, keeping the last known-good one: %s", err)
             return self._knx_dpt_catalog or {}
@@ -1097,6 +1472,10 @@ class ComexioAPI:
         """
         try:
             states = await self.client.get_live_states(marker_count, knx_max_id)
+        except ComexioCertificateMismatchError as err:
+            # A poll: raises the repair, logged once per presented certificate.
+            self._note_certificate_mismatch(err, "Live states not fetched")
+            return None, None
         except ComexioError as err:
             _LOGGER.error("Live states fetch failed: %s", err)
             return None, None
@@ -1111,7 +1490,7 @@ class ComexioAPI:
         failure is logged at DEBUG only and its cause kept in io_live_fetch_error — the coordinator
         reports it with the server context, once per outage. A request aiocomexio refuses as
         contradictory (ValueError, e.g. one IO id under two extensions) is such a failure too, not a
-        reason to fail the whole poll; the coordinator leaves such IOs out of the request, so a
+        reason to fail the whole poll; parse_config already leaves such IOs out, so a
         ValueError here points to a bug — its cause names it in that same warning.
         """
         try:
@@ -1221,6 +1600,7 @@ class ComexioAPI:
         caused since then over the older Active flags in conf; the mark get_raw_config()
         remembered for conf counts instead if it is later or run_state_mark is missing. A conf
         from an older fetch than the cached plan list leaves the plan and paper caches alone.
+        referenced_markers=None falls back to self.referenced_markers (the last poll's set).
         """
         # Cache function plan + paper metadata for later use (e.g. auto canvas-format detection).
         # aiocomexio decodes each page variable on its own: a config whose $Fubs/$Paper did not
@@ -1245,14 +1625,20 @@ class ComexioAPI:
                 schema_knx=schema_knx,
             ),
             live_states=live_states,
-            referenced_markers=referenced_markers,
+            referenced_markers=self.referenced_markers if referenced_markers is None else referenced_markers,
             knx_live_states=knx_live_states,
             knx_dpt_catalog=knx_dpt_catalog,
         )
+        # Quickbus IOs (Multitouch gestures, motion sensors, ...) move to their own key: every IO code
+        # path keys an IO by ext_name + identifier, which their G1/TL1/R repeat per device (see
+        # QUICKBUS_IO_DATA_KEY). io_all keeps them for plan labels.
+        data[QUICKBUS_IO_DATA_KEY] = [io for io in data["io"] if io.get("quickbus")]
+        data["io"] = [io for io in data["io"] if not io.get("quickbus")]
         _LOGGER.info(
-            "Audit: %d Markers, %d IOs, %d KNX, %d Webhooks in Comexio for %s",
+            "Audit: %d Markers, %d IOs, %d Quickbus IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
             len(data["io"]),
+            len(data[QUICKBUS_IO_DATA_KEY]),
             len(data["knx"]),
             len(data["webio_commands"]),
             webio_name,
@@ -1293,50 +1679,77 @@ class ComexioAPI:
 
     def get_fub_paper_format(self, fub_id: int) -> str:
         """Return the paper format name (e.g. 'A4') for a function plan, defaulting to 'A4'."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         paper_id = str(fub.get("Paper", ""))
         paper = self._paper_data.get(paper_id, {})
         return str(paper.get("Name", "A4"))
 
     def get_fub_dpi(self, fub_id: int) -> int:
         """Return the configured resolution (DPI) for a function plan, defaulting to 90."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         return int(fub.get("Resolution", self._CANVAS_REF_RES))
 
     def get_fub_orientation(self, fub_id: int) -> str:
         """Return 'portrait' or 'landscape' for a function plan, defaulting to 'landscape'."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
+
+    def get_fub_known_format(self, fub_id: int) -> tuple[str, int, str] | None:
+        """(paper, dpi, orientation) as Comexio states them, None when any part is not known.
+
+        Unlike the getters above, no default stands in for a missing value: a backup compares
+        and stores this, and a default (an undecoded $Paper read as A4) would count as a change.
+        """
+        fub = function_plan_info(self._fub_data, fub_id)
+        if fub.get("Resolution") is None or fub.get("Orientation") is None:
+            return None
+        paper = self._paper_data.get(str(fub.get("Paper", "")), {}).get("Name")
+        if not paper:
+            return None
+        try:
+            dpi, orient_id = int(fub["Resolution"]), int(fub["Orientation"])
+        except (TypeError, ValueError):
+            return None
+        if orient_id not in (0, 1):
+            return None
+        return str(paper), dpi, "portrait" if orient_id == 1 else "landscape"
 
     def get_fub_active(self, fub_id: int) -> bool | None:
         """Return a function plan's active flag, or None if the plan is not known live."""
-        fub = self._fub_data.get(str(fub_id))
-        return None if fub is None else bool(int(fub.get("Active") or 0))
+        fub = function_plan_info(self._fub_data, fub_id)
+        return bool(int(fub.get("Active") or 0)) if fub else None
 
     def get_fub_canvas_bounds(
-        self, fub_id: int, paper_name: str | None = None, orientation: str | None = None
+        self,
+        fub_id: int,
+        paper_name: str | None = None,
+        orientation: str | None = None,
+        resolution: int | None = None,
     ) -> tuple[float, float]:
         """Return estimated (x_max, y_max) canvas bounds for a function plan.
 
         Scales proportionally from the A4-landscape-90-DPI reference (870×720).
-        DPI (Resolution) is always taken from $Fubs plan data.
-        paper_name overrides the format (A2/A3/A4/A5); None = read from $Fubs/$Paper.
+        resolution overrides the DPI (a backup's own); None = read from $Fubs.
+        paper_name overrides the format by name (a backup's): A2/A3/A4/A5 from the built-in table, any
+        other from the $Paper entry of that name, else the reference size; None = read from $Fubs/$Paper.
         orientation overrides as "landscape"/"portrait" — needed for a plan that was just
         created and is not in the cached $Fubs data yet; None = read from $Fubs, where
         0 = landscape (long side → X), 1 = portrait (long side → Y).
         """
-        fub = self._fub_data.get(str(fub_id), {})
-        res = int(fub.get("Resolution", self._CANVAS_REF_RES))
+        fub = function_plan_info(self._fub_data, fub_id)
+        res = int(fub.get("Resolution", self._CANVAS_REF_RES)) if resolution is None else resolution
         if orientation is None:
             orient_id = int(fub.get("Orientation", 0))
         else:
             orient_id = 1 if orientation.lower() == "portrait" else 0
 
+        named = next((p for p in self._paper_data.values() if p.get("Name") == paper_name), None)
         if paper_name and paper_name in self._PAPER_MM_BY_NAME:
             mm_long, mm_short = self._PAPER_MM_BY_NAME[paper_name]
         else:
-            paper_id = str(fub.get("Paper", ""))
-            paper = self._paper_data.get(paper_id, {})
+            # A backup's paper outside the table is sized from $Paper by name, never by the live plan's —
+            # not there either: the reference size.
+            paper = (named or {}) if paper_name else self._paper_data.get(str(fub.get("Paper", "")), {})
             mm_long = paper.get("MMX", self._CANVAS_REF_MM_LONG)
             mm_short = paper.get("MMY", self._CANVAS_REF_MM_SHORT)
 
@@ -1418,7 +1831,7 @@ class ComexioAPI:
     async def delete_fup(self, fub_id: int) -> bool:
         """Delete an entire function plan (not just elements within it); False if that failed."""
         _LOGGER.info("delete_fup: deleting Function Plan fub_id=%s", fub_id)
-        deleted = await _succeeded(
+        deleted = await self._succeeded(
             f"Deleting function plan {fub_id}", lambda: self.client.delete_function_plan(int(fub_id))
         )
         if deleted:
@@ -1470,7 +1883,9 @@ class ComexioAPI:
         for it would silently strip that combination back to the auth-less POST shape,
         reproducing the exact 401 Unauthorized bug the Phase 7 field combination fixes.
         """
-        _LOGGER.info("Applying command: %s (Update: %s)", cmd_payload.get("Name"), existing_cmd_id is not None)
+        _LOGGER.info(
+            "Applying command: %s (Update: %s)", one_line(cmd_payload.get("Name")), existing_cmd_id is not None
+        )
         try:
             await self.client.save_webio_command(
                 device_id,
@@ -1481,47 +1896,51 @@ class ComexioAPI:
             )
         except (ComexioError, ValueError) as err:
             # ValueError: a command id that is no number, rejected before anything is sent.
-            _LOGGER.warning("Saving Web-IO command %s failed: %s", cmd_payload.get("Name"), err)
+            _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
         return True
 
-    async def get_webio_command_range(
-        self, cmd_id: str | int, device_id: str | int
-    ) -> tuple[float | None, float | None]:
+    async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
 
         The bulk config scrape ($FubModules["10"], see aiocomexio.config._add_webhook_command) never returns
-        Min/Max for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
+        these fields for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
         edit form is the only reliable source. Used by the nightly range check (see
-        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against
-        WEBIO_MARKER_ANALOG_MIN/MAX. Returns (None, None) on a fetch failure or a form without
-        min/max fields; a single missing or non-numeric field comes back as None.
+        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against WEBIO_MARKER_ANALOG_MIN/MAX.
+        Returns None on a fetch failure or a form without min/max fields; a single missing or
+        unreadable field comes back as None.
         """
         try:
-            return await self.client.get_webio_command_range(cmd_id, device_id)
+            return await self.client.get_webio_command_form(cmd_id, device_id)
         except ComexioError as err:
-            _LOGGER.warning("Reading the range of Web-IO command %s failed: %s", cmd_id, err)
-            return None, None
+            _LOGGER.warning("Reading the form of Web-IO command %s failed: %s", cmd_id, err)
+            return None
 
     def build_webio_commands(
         self,
         server_id: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> list[dict[str, Any]]:
         """Build the list of Web-IO command dicts for the given parsed configuration.
 
-        webio_class restricts the result to one Web-IO class ("marker"/"io"/"knx"), for the
+        webio_class restricts the result to one Web-IO class ("marker"/"io"/"knx"/"quickbus"), for the
         bulk class-upload path (generate_webio_json); None returns all (delta-sync payload
         lookup, where the destination device is chosen separately per command).
         ignored_marker_ids / ignored_knx_ids exclude items the user configured as ignored —
         they have no HA entity, so they need no Web-IO command pushing values back via webhook.
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
+        Every command keeps the builder's default protocol (HTTP) whatever the webhook address: Comexio
+        picks HTTP or HTTPS from the device address itself, so an address change never rewrites commands.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id), parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id),
+            _with_quickbus_ios(parsed_data),
+            webio_class,
+            ignored_marker_ids,
+            ignored_knx_ids,
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -1544,18 +1963,24 @@ class ComexioAPI:
         webio_name: str,
         parsed_data: dict[str, Any],
         webio_class: WebioClass | None = None,
-        ignored_marker_ids: set[int] | None = None,
-        ignored_knx_ids: set[int] | None = None,
+        ignored_marker_ids: AbstractSet[int] | None = None,
+        ignored_knx_ids: AbstractSet[int] | None = None,
     ) -> str:
         """Generate the upload-ready JSON string for the Comexio Web-IO importer.
 
         webio_name here is already the class-specific name (see const.webio_class_name) —
-        callers append the ' [M]'/' [IO]'/' [KNX]' suffix before calling this.
+        callers append the ' [M]'/' [IO]'/' [KNX]'/' [QB]' suffix before calling this.
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
-        exclude ignored items.
+        exclude ignored items. Every command keeps the builder's default protocol (HTTP), see
+        build_webio_commands.
         """
         return comexio_webio.generate_webio_json(
-            _webhook_path(server_id), webio_name, parsed_data, webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id),
+            webio_name,
+            _with_quickbus_ios(parsed_data),
+            webio_class,
+            ignored_marker_ids,
+            ignored_knx_ids,
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
@@ -1597,7 +2022,7 @@ class ComexioAPI:
         try:
             await self.client.create_webio_device(name, base_id, ha_address, username=username, password=password)
         except ComexioError as err:
-            _LOGGER.warning("Creating Web-IO device %r failed: %s", name, err)
+            _LOGGER.warning("Creating Web-IO device %r failed: %s", one_line(name), err)
             return False
         return True
 
@@ -1744,7 +2169,7 @@ class ComexioAPI:
         Returns the fubElementId assigned by the server, or None on failure; a transport failure
         raises aiohttp.ClientError / TimeoutError.
         """
-        return await _attempt(
+        return await self._attempt(
             f"function_plan_add_element (fub={fub_id}, ref={ref_id}, type={element_type})",
             lambda: self.client.add_function_plan_element(
                 int(fub_id), int(ref_id), int(element_type), x=float(x), y=float(y), connection=connection
@@ -1793,7 +2218,7 @@ class ComexioAPI:
         # connection is exactly the corrupting case existing_conn_id exists to prevent.
         mode = "new" if existing_conn_id is None else f"update(id={existing_conn_id})"
         dst_ids = [dst for dst, _pos, _inv in outputs]
-        return await _attempt(
+        return await self._attempt(
             f"function_plan_save_connection (fub={fub_id}, {input_elem_id}→{dst_ids}, mode={mode})",
             lambda: self.client.save_function_plan_connection(
                 int(fub_id),
@@ -1818,7 +2243,7 @@ class ComexioAPI:
         if not positions:
             return True
         _LOGGER.info("function_plan_save_elements_pos: repositioning %d elements", len(positions))
-        return await _succeeded(
+        return await self._succeeded(
             f"Repositioning {len(positions)} function plan element(s)",
             lambda: self.client.move_function_plan_elements(
                 [(int(elem_id), float(x), float(y)) for elem_id, x, y in positions]
@@ -1847,7 +2272,7 @@ class ComexioAPI:
             if str(answer.get("saved")) != "1":
                 raise ComexioRequestRejectedError(f"{what} was not confirmed: {answer!r:.200}")
 
-        saved = await _succeeded(what, save, transport_raises=True)
+        saved = await self._succeeded(what, save, transport_raises=True)
         if saved:
             self._block_settings_saves_confirmed += 1
             if self.block_settings is not None:
@@ -1855,6 +2280,67 @@ class ComexioAPI:
                     {str(name): str(value) for name, value in settings.items()}
                 )
         return saved
+
+    async def function_plan_add_scene_block(self, fub_id: int, x: float, y: float) -> PlacedModuleBlock | None:
+        """Place a new scene block (Comexio's default scene, no pins yet) on a plan.
+
+        Returns its element id and the new scene's id, or None after a warning; a transport
+        failure raises aiohttp.ClientError / TimeoutError. A block placed without a usable scene id
+        in the answer comes back with ref_id 0, so the caller can remove it.
+        """
+        return await _attempt(
+            f"Placing a scene block on function plan {fub_id}",
+            lambda: _module_block_placed(self.client.add_function_plan_scene(int(fub_id), x=float(x), y=float(y))),
+            None,
+            transport_raises=True,
+        )
+
+    async def function_plan_add_quantum_module(
+        self, fub_id: int, type_id: int, *, central: bool, x: float, y: float
+    ) -> PlacedModuleBlock | None:
+        """Place a new Quantum module of type_id (central: the type's central module) with the type's defaults.
+
+        Returns its element id and the new module's id, or None after a warning; a transport
+        failure raises aiohttp.ClientError / TimeoutError. A module placed without a usable module id
+        in the answer comes back with ref_id 0, so the caller can remove it.
+        """
+        return await _attempt(
+            f"Placing a Quantum module of type {type_id} (central={central}) on function plan {fub_id}",
+            lambda: _module_block_placed(
+                self.client.add_function_plan_quantum_module(
+                    int(fub_id), int(type_id), central=central, x=float(x), y=float(y)
+                )
+            ),
+            None,
+            transport_raises=True,
+        )
+
+    async def function_plan_save_scene(self, scene_id: int, config: Mapping[str, Any]) -> bool:
+        """Replace a scene's whole config; True once Comexio confirms, False after a warning.
+
+        A transport failure raises aiohttp.ClientError / TimeoutError.
+        """
+        return await _succeeded(
+            f"Saving the config of scene {scene_id}",
+            lambda: self.client.save_function_plan_scene(int(scene_id), config),
+            transport_raises=True,
+        )
+
+    async def function_plan_save_quantum_settings(
+        self, element_id: int, module_id: int, settings: Mapping[str, str], *, central: bool, name: str | None
+    ) -> bool:
+        """Replace a Quantum module's whole setting set (and a single module's name).
+
+        True once Comexio confirms, False after a warning; a transport failure raises
+        aiohttp.ClientError / TimeoutError.
+        """
+        return await _succeeded(
+            f"Saving the settings of Quantum module {module_id} (element {element_id})",
+            lambda: self.client.save_function_plan_quantum_settings(
+                int(element_id), int(module_id), settings, central=central, name=name
+            ),
+            transport_raises=True,
+        )
 
     async def function_plan_delete_elements(self, elem_ids: list[int]) -> bool:
         """Delete elements from a function plan (removes elements + their connections).
@@ -1865,7 +2351,7 @@ class ComexioAPI:
         if not elem_ids:
             return True
         _LOGGER.info("function_plan_delete_elements: deleting %d element(s): %s", len(elem_ids), elem_ids)
-        return await _succeeded(
+        return await self._succeeded(
             f"Deleting function plan elements {elem_ids}",
             lambda: self.client.delete_function_plan_elements([int(elem_id) for elem_id in elem_ids]),
         )
@@ -1886,7 +2372,7 @@ class ComexioAPI:
         - None: the request itself failed (HTTP error, unparsable or non-object answer,
           transport error, timeout) — a real failure, must NOT be reported as "already absent".
         """
-        result = await _attempt(
+        result = await self._attempt(
             f"Deleting marker M{marker_id}", lambda: self.client.delete_marker(int(marker_id)), None
         )
         _LOGGER.info("delete_marker: marker_id=%s result=%s", marker_id, result)
@@ -1894,63 +2380,69 @@ class ComexioAPI:
 
     async def get_marker_delete_eligibility(
         self, marker_ids: list[int], force: bool = False
-    ) -> tuple[list[int], list[int], set[int], str | None]:
-        """Split marker_ids into (deletable, protected, known_ids, gate_error) via a fresh config lookup.
+    ) -> tuple[list[int], dict[int, str], dict[int, Any], str | None]:
+        """Split marker_ids into (deletable, protected, categories, gate_error) via a fresh config lookup.
 
-        Safety gate for marker_delete: by default only markers this integration created itself
-        via the API carry CategoryId==1 and may be deleted. CategoryId==0 covers both
-        factory-provisioned markers (M1 "System rebooted", M2 "TRUE", M3 "FALSE") and anything
-        a human created via Comexio Studio — protected. With force=True a CategoryId==0 marker
-        becomes deletable too, but only if it has no title AND is not placed in any function
-        plan (checked against freshly loaded plans — see _classify_marker_delete_ids). If not
-        every plan can be loaded, force grants nothing: placement would be unknown.
+        Safety gate for marker_delete. Every plan is loaded first, force or not: a marker placed
+        in any function plan is never deleted. Of the unplaced ones, markers created via the
+        admin API or with the plan editor's "new marker" carry CategoryId==1 and may be deleted.
+        CategoryId==0 covers both factory-provisioned markers (M1 "System rebooted", M2 "TRUE",
+        M3 "FALSE") and markers from Comexio Studio's marker list — protected; force=True opens
+        them only when they have no title. See _classify_marker_delete_ids.
 
         Protected ids no longer abort the batch — the caller deletes the deletable ones and
-        reports the protected ones. A marker_id absent from the current config entirely is
-        deletable (delete_marker then reports it as "already absent").
+        reports the protected ones, `protected` maps each to its reason. A marker_id absent from
+        the current config entirely is deletable (delete_marker then reports it as "already absent").
 
-        A config fetch or parse failure (see _parse_marker_records) refuses every requested id
-        rather than defaulting them all to deletable — a blind failure must never silently open
-        this gate for an irreversible action.
+        A config fetch or parse failure (see _parse_marker_records), or a plan that cannot be
+        loaded and read, refuses every requested id rather than defaulting them to deletable — a
+        blind failure must never silently open this gate for an irreversible action.
 
-        The third return value, `known_ids`, is the set of ids actually found in this lookup —
-        the caller uses it to tell a delete_marker "False" result for a confirmed-absent id
-        (harmless) apart from one for an id we just saw present (suspicious). The fourth,
-        `gate_error`, names a load failure that made the gate stricter than requested (config
-        unreadable, or force ignored because the plans couldn't be verified) — None otherwise,
-        so the caller can tell that apart from genuine protection.
+        `categories` maps every id found in this lookup to its raw CategoryId — the caller logs
+        it and uses its keys to tell a delete_marker "False" result for a confirmed-absent id
+        (harmless) apart from one for an id we just saw present (suspicious). `gate_error` names
+        the load failure that refused every id — None otherwise, so the caller can tell that
+        apart from genuine protection.
         """
         try:
             conf = await self.get_raw_config()
-        except (aiohttp.ClientError, TimeoutError):
+        except (aiohttp.ClientError, TimeoutError, ComexioConnectionError):
+            # get_raw_config re-raises a ComexioConnectionError itself when its cause is neither
+            # of the other two — it must refuse every id here too, not escape the gate.
             _LOGGER.exception("get_marker_delete_eligibility: config fetch failed — refusing all ids")
-            return [], list(marker_ids), set(), _MARKER_CONFIG_UNREADABLE
+            return [], dict.fromkeys(marker_ids, _MARKER_CONFIG_UNREADABLE), {}, _MARKER_CONFIG_UNREADABLE
         records = self._parse_marker_records(conf)
         if records is None:
-            return [], list(marker_ids), set(), _MARKER_CONFIG_UNREADABLE
-        placed_ids = await self._placed_marker_ids_for_force(conf) if force else None
-        gate_error = _FORCE_IGNORED if force and placed_ids is None else None
-        deletable, protected = _classify_marker_delete_ids(marker_ids, records, placed_ids)
-        return deletable, protected, set(records), gate_error
+            return [], dict.fromkeys(marker_ids, _MARKER_CONFIG_UNREADABLE), {}, _MARKER_CONFIG_UNREADABLE
+        categories = {mid: record.get("CategoryId") for mid, record in records.items()}
+        placements = await self._marker_plan_placements(conf)
+        if placements is None:
+            return [], dict.fromkeys(marker_ids, _PLACEMENT_UNKNOWN), categories, _PLACEMENT_UNKNOWN
+        deletable, protected = _classify_marker_delete_ids(marker_ids, records, placements, force)
+        return deletable, protected, categories, None
 
-    async def _placed_marker_ids_for_force(self, conf: dict) -> set[int] | None:
-        """Marker ids placed in any function plan, from a fresh load of EVERY plan, or None.
+    async def _marker_plan_placements(self, conf: dict) -> dict[int, list[str]] | None:
+        """{marker id: plan names} from a fresh load of EVERY plan, or None (refuse every id).
 
-        None (force grants nothing) whenever the plan list or any single plan can't be loaded —
-        a missing plan would make the markers placed in it look unplaced.
+        None whenever the plan list or any single plan can't be loaded or read — a missing plan
+        would make the markers placed in it look unplaced.
         """
         fubs = conf.get("Fubs")
         if not isinstance(fubs, dict):
-            _LOGGER.error("get_marker_delete_eligibility: no plan list in config — force ignored")
+            _LOGGER.error("get_marker_delete_eligibility: no plan list in config — refusing all ids")
             return None
-        all_plans = await self._load_all_plans_verified(fubs, strict=True)
+        all_plans = await self._load_all_plans_verified(fubs, strict=True, fail_on_bulk_error=True)
         if all_plans is None:
-            _LOGGER.error("get_marker_delete_eligibility: not every plan could be loaded — force ignored")
+            _LOGGER.error("get_marker_delete_eligibility: not every plan could be loaded — refusing all ids")
             return None
-        placed = _placed_marker_ids_strict(all_plans)
-        if placed is None:
-            _LOGGER.error("get_marker_delete_eligibility: unreadable marker reference in a plan — force ignored")
-        return placed
+        names = {
+            fid: _plan_display_name(fubs.get(str(fid))) or _plan_display_name(self._fub_data.get(str(fid)))
+            for fid in all_plans
+        }
+        placements = _marker_plan_placements_strict(all_plans, {fid: n for fid, n in names.items() if n})
+        if placements is None:
+            _LOGGER.error("get_marker_delete_eligibility: unreadable marker reference in a plan — refusing all ids")
+        return placements
 
     @staticmethod
     def _marker_group_items(group: Any) -> list[Any] | None:
@@ -2155,7 +2647,7 @@ class ComexioAPI:
                 return None
             return True
 
-        return await _attempt(what, stop, False)
+        return await self._attempt(what, stop, False)
 
     async def function_plan_add_comment_element(
         self,
@@ -2169,7 +2661,7 @@ class ComexioAPI:
         Returns the fubElementId assigned by the server, or None on failure. A failed width
         update is only logged — the comment itself is placed.
         """
-        elem_id = await _attempt(
+        elem_id = await self._attempt(
             f"Placing a comment on function plan {fub_id}",
             lambda: self.client.add_function_plan_comment(int(fub_id), text, x=float(x), y=float(y)),
             None,
@@ -2193,7 +2685,7 @@ class ComexioAPI:
         Returns the fubElementId assigned by the server, or None on failure; a transport failure
         raises aiohttp.ClientError / TimeoutError.
         """
-        return await _attempt(
+        return await self._attempt(
             f"Placing a constant on function plan {fub_id}",
             lambda: self.client.add_function_plan_constant(int(fub_id), str(value), x=float(x), y=float(y)),
             None,
@@ -2202,7 +2694,7 @@ class ComexioAPI:
 
     async def _function_plan_set_comment_width(self, elem_id: int, text: str, width: int = 5) -> bool:
         """Set a comment element's text width via savefupcommentelement (5 = 'Sehr Breit')."""
-        return await _succeeded(
+        return await self._succeeded(
             f"Setting the width of comment element {elem_id}",
             lambda: self.client.save_function_plan_comment(int(elem_id), text, width=width),
         )
@@ -2230,7 +2722,7 @@ class ComexioAPI:
         once more (_find_created_plan); None then means the plan may exist without an id.
         """
         paper, orient = _plan_paper_and_orientation(paper_format, orientation)
-        known_ids = set(self._fub_data)
+        known_ids = {str(fid) for fid in self._fub_data}
 
         async def create() -> CreatedFunctionPlan | None:
             try:
@@ -2241,10 +2733,10 @@ class ComexioAPI:
                 _LOGGER.warning("create_fup: %s — looking the plan up by name once more", err)
                 return await self._find_created_plan(plan_name, known_ids)
 
-        created = await _attempt(f"Creating function plan {plan_name!r}", create, None)
+        created = await self._attempt(f"Creating function plan {one_line(plan_name)!r}", create, None)
         if created is None:
             return None
-        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", plan_name, created.fub_id)
+        _LOGGER.info("create_fup: plan '%s' created, fub_id=%s", one_line(plan_name), created.fub_id)
         self._fub_data[str(created.fub_id)] = created.fubs_entry
         self._created_fubs[str(created.fub_id)] = (created.fubs_entry, self._config_fetches_started)
         if self.run_state_listener is not None:
@@ -2268,18 +2760,22 @@ class ComexioAPI:
                 if fubs is not None
                 else "reading the config failed (see the error above)"
             )
+        # Readable entries only: an entry carrying an Id other than its key may be another plan.
+        listing = dict(iter_group(fubs))
+        if bad_keys := unreadable_plan_keys(listing):
+            reason += f"; the unreadable plan list entries {bad_keys!r} are skipped"
         matches = [
-            (fid, info)
-            for fid, info in iter_group(fubs)
-            if fid.isdigit() and fid not in known_ids and isinstance(info, dict) and info.get("Name") == plan_name
+            (fub_id, info)
+            for fub_id, info in function_plans(listing)
+            if str(fub_id) not in known_ids and info.get("Name") == plan_name
         ]
         if len(matches) == 1:
-            fid, info = matches[0]
-            return CreatedFunctionPlan(int(fid), info)
+            fub_id, info = matches[0]
+            return CreatedFunctionPlan(fub_id, info)
         _LOGGER.error(
             "create_fup: plan '%s' was created in Comexio, but its id is still unknown (%s) — "
             "it shows up with the next poll; do not create it again",
-            plan_name,
+            one_line(plan_name),
             reason,
         )
         return None
@@ -2304,13 +2800,13 @@ class ComexioAPI:
         create-time default) rather than preserved — a cosmetic Comexio Studio setting this
         integration doesn't otherwise manage.
         """
-        fub = self._fub_data.get(str(fub_id))
-        if fub is None:
+        fub = function_plan_info(self._fub_data, fub_id)
+        if not fub:
             _LOGGER.error("function_plan_update_paper: fub_id=%s not found in live data", fub_id)
             return False
 
         paper, orient = _plan_paper_and_orientation(paper_format, orientation)
-        if not await _succeeded(
+        if not await self._succeeded(
             f"Saving settings of function plan {fub_id}",
             lambda: self.client.update_function_plan(
                 int(fub_id),
@@ -2337,7 +2833,7 @@ class ComexioAPI:
             paper,
             dpi,
             orient,
-            name,
+            one_line(name),
         )
         return True
 
@@ -2357,7 +2853,7 @@ class ComexioAPI:
 
         Returns the new marker's Id, or None on failure.
         """
-        marker_id = await _attempt(
+        marker_id = await self._attempt(
             f"Creating a {'digital' if binary else 'analog'} marker",
             lambda: self.client.create_marker(binary=binary),
             None,
@@ -2380,12 +2876,12 @@ class ComexioAPI:
 
         Returns True on success; False if the name is taken or the save was not confirmed.
         """
-        if not await _succeeded(
+        if not await self._succeeded(
             f"Renaming marker M{marker_id}",
             lambda: self.client.rename_marker(int(marker_id), name, binary=binary, default=default, store_memory=store),
         ):
             return False
-        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, name, binary)
+        _LOGGER.info("rename_marker: M%s renamed to '%s' (binary=%s)", marker_id, one_line(name), binary)
         return True
 
     async def rename_knx_object(self, k_id: str | int, name: str) -> bool:
@@ -2398,9 +2894,11 @@ class ComexioAPI:
 
         Returns True on success; False if the name is taken or the save was not confirmed.
         """
-        if not await _succeeded(f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(int(k_id), name)):
+        if not await self._succeeded(
+            f"Renaming KNX object K{k_id}", lambda: self.client.rename_knx_object(int(k_id), name)
+        ):
             return False
-        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, name)
+        _LOGGER.info("rename_knx_object: K%s renamed to '%s'", k_id, one_line(name))
         return True
 
     @staticmethod
@@ -2527,7 +3025,9 @@ class ComexioAPI:
         placed_ids = _placed_marker_ids(all_plans, ref_type)
         return sorted(candidate_ids - placed_ids)
 
-    async def _load_all_plans_verified(self, fubs: dict[str, Any], strict: bool = False) -> dict[int, dict] | None:
+    async def _load_all_plans_verified(
+        self, fubs: dict[str, Any], strict: bool = False, fail_on_bulk_error: bool = False
+    ) -> dict[int, dict] | None:
         """Elements/connections of EVERY plan in fubs (a fresh $Fubs), or None if any is missing.
 
         Placement checks that decide whether a bridge marker may be renamed or blanked need
@@ -2540,6 +3040,9 @@ class ComexioAPI:
         are no plans at all. strict is passed on to both loaders (see function_plan_load_elements).
         A non-numeric plan id also returns None — checked in fubs before the cache is replaced,
         so a malformed $Fubs neither crashes the caller nor ends up in self._fub_data.
+        fail_on_bulk_error=True returns None as soon as the bulk request fails, instead of loading
+        every plan one by one — for a caller that refuses anyway when a plan is missing, so a
+        Comexio outage does not hold it through one timeout per plan.
         """
         if (fub_ids := _verified_plan_ids(fubs, "$Fubs")) is None:
             return None
@@ -2549,7 +3052,11 @@ class ComexioAPI:
         fub_ids |= cached_ids
         if not fub_ids:
             return {}
-        plans = await self.function_plan_load_all_plans(strict=strict)
+        try:
+            plans = await self.function_plan_load_all_plans(strict=strict, raise_errors=fail_on_bulk_error)
+        except ComexioError:
+            _LOGGER.exception("_load_all_plans_verified: bulk plan load failed — placement unknown")
+            return None
         for fid in sorted(fub_ids - set(plans)):
             data = await self.function_plan_load_elements(fid, strict=strict)
             if data is None:
@@ -2577,7 +3084,7 @@ class ComexioAPI:
         plans deleted moments ago). Returns (blanked ids, normalized ids, failed ids, in-use
         ids left alone because their values were unreadable, error) — error is set, and nothing
         is touched, when the config, any plan or any marker reference in a plan cannot be read
-        (fail closed, as marker_delete's force gate): a marker wired into it would look unused
+        (fail closed, as marker_delete's placement check): a marker wired into it would look unused
         and lose its default value and store flag along with its title.
         progress_cb(done, total) is called after every marker (one HTTP round trip each).
         """
@@ -2769,17 +3276,19 @@ class ComexioAPI:
         else:
             marker_id = await self.create_marker(binary)
             if marker_id is None:
-                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, k_title)
+                _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, one_line(k_title))
                 return None
 
         # A new, free (blank) or unwired marker: its old default/store flag must not carry over.
         if not await self.rename_marker(marker_id, title, binary, default=0, store=False):
             _LOGGER.error(
-                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, title, k_id
+                "create_knx_bridge_marker: rename_marker failed for M%s -> '%s' (K%s)", marker_id, one_line(title), k_id
             )
             return None
 
-        _LOGGER.info("create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, title, k_id, binary)
+        _LOGGER.info(
+            "create_knx_bridge_marker: M%s '%s' created for K%s (binary=%s)", marker_id, one_line(title), k_id, binary
+        )
         return marker_id, title
 
     async def wire_knx_bridge_pair(
@@ -4242,12 +4751,14 @@ class ComexioAPI:
         expected_cmd_name = f"HA {source['name']}"
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
-            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+            _LOGGER.warning(
+                "function_plan_add_source_pairs: %s — Web-IO '%s' not found", label, one_line(expected_cmd_name)
+            )
+            return f"{label}: Web-IO '{one_line(expected_cmd_name)}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
-            return f"{label}: no webIoId for '{expected_cmd_name}'"
+            return f"{label}: no webIoId for '{one_line(expected_cmd_name)}'"
 
         conn_type = "binary" if source["type"] == "digital" else "analog"
         return await self._function_plan_wire_ref_pair(
@@ -4550,26 +5061,42 @@ class ComexioAPI:
         identifiers: list[str],
         column_index: int = 0,
         progress_cb: Callable[[int, int], None] | None = None,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
+        row_offset: int = 0,
+        stacked_rows: Mapping[str, int] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Add IO (type=1) + Web-IO (type=10) element pairs for one extension column.
+        """Add IO (type=1) + Web-IO (type=10) element pairs for one column (extension / Quickbus device).
 
+        ext_name: the column's member — an extension, or a Quickbus device for kind QUICKBUS.
         identifiers: the IOs to wire in this run. Row slots derive from ALL of the
-        extension's HA-relevant IOs (io_column_rows), so a pair retrofitted later lands
+        member's HA-relevant IOs (kind.column_blocks), so a pair retrofitted later lands
         exactly in the slot the initial layout reserved for it — IO plans therefore never
         need a sort pass. Should a column outgrow the canvas anyway, it wraps into a
         sub-column right next to it as a defensive fallback (the plan-creation side is
         expected to pick a canvas tall enough to avoid this).
+        column_index / row_offset: the member's origin in the plan (Quickbus devices stack within
+        a column, see const.io_plan_member_origins).
+        stacked_rows: {member: rows} of this member and every one before it in the plan, as the
+        origin was computed from them. A count the fresh config no longer has adds nothing: the
+        origin would put the new pairs onto other pairs' slots.
         Returns (added_identifiers, error_messages).
         """
 
+        wanted = set(identifiers)
+
         def _expected_names(data: dict) -> set[str]:
-            ext_idents = {io["identifier"] for io in data.get("io", []) if io["ext_name"] == ext_name}
-            return {f"HA IO {ext_name} {ident}" for ident in identifiers if ident in ext_idents}
+            return {kind.command_name(io) for io in kind.member_ios(data, ext_name) if io["identifier"] in wanted}
 
         fresh_data = await self._reload_config_until_commands_ready(_expected_names)
+        if stacked_rows and (
+            changed := [member for member, need in stacked_rows.items() if kind.rows_needed(fresh_data, member) != need]
+        ):
+            labels = ", ".join(one_line(kind.member_label(fresh_data, member)) for member in changed)
+            label = one_line(kind.member_label(fresh_data, ext_name))
+            return [], [f"{label}: not wired — the IO count of {labels} changed since the last poll"]
         webio_commands = fresh_data.get("webio_commands", {})
-        ext_ios = {io["identifier"]: io for io in fresh_data.get("io", []) if io["ext_name"] == ext_name}
-        rows = io_column_rows(list(ext_ios))
+        ext_ios = {io["identifier"]: io for io in kind.member_ios(fresh_data, ext_name)}
+        rows, _headers = kind.column_blocks(ext_name, list(ext_ios.values()))
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
@@ -4589,8 +5116,9 @@ class ComexioAPI:
                 webio_commands,
                 existing_by_ref,
                 conn_endpoints,
-                (rows.get(ident, 0), column_index, rows_per_col),
+                (row_offset + rows.get(ident, 0), column_index, rows_per_col),
                 plan_data,
+                kind,
             )
             if err is None:
                 added.append(ident)
@@ -4612,6 +5140,7 @@ class ComexioAPI:
         conn_endpoints: list[set[int]],
         slot: tuple[int, int, int],
         plan_data: dict | None = None,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
     ) -> str | None:
         """Add one IO+Web-IO pair at its deterministic slot=(row, column_index, rows_per_col).
 
@@ -4623,20 +5152,22 @@ class ComexioAPI:
         identical Marker/KNX path — function_plan_add_source_pairs/_function_plan_add_single_pair
         — already threaded it through).
         """
-        label = f"{ext_name} {ident}"
         io_entry = ext_ios.get(ident)
+        label = f"{one_line(kind.member_display(io_entry) if io_entry else kind.member_fallback(ext_name))} {ident}"
         if not io_entry:
             return f"{label}: not found in fresh config"
 
-        expected_cmd_name = f"HA IO {ext_name} {ident}"
+        expected_cmd_name = kind.command_name(io_entry)
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
-            _LOGGER.warning("function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, expected_cmd_name)
-            return f"{label}: Web-IO '{expected_cmd_name}' not found after config reload"
+            _LOGGER.warning(
+                "function_plan_add_io_pairs: %s — Web-IO '%s' not found", label, one_line(expected_cmd_name)
+            )
+            return f"{label}: Web-IO '{one_line(expected_cmd_name)}' not found after config reload"
 
         web_ref_id = webio_cmd.get("webIoId")
         if web_ref_id is None:
-            return f"{label}: no webIoId for '{expected_cmd_name}'"
+            return f"{label}: no webIoId for '{one_line(expected_cmd_name)}'"
 
         try:
             io_ref_id = int(io_entry["id"])
@@ -4657,13 +5188,15 @@ class ComexioAPI:
         )
 
     async def function_plan_rebuild_plan_from_snapshot(
-        self, fub_id: int, snapshot: dict[str, Any]
+        self, fub_id: int, snapshot: dict[str, Any], module_restore: ModuleConfigRestore | None = None
     ) -> tuple[dict[str, int], int, list[str]]:
         """Recreate every element and connection from a snapshot on a freshly created (empty) plan.
 
         Snapshot element IDs are plan-local and meaningless on a new plan: pass 1 (re)creates
         every element regardless of type (Marker, WebIO, IO, any catalog function block,
-        Comment, Constant), building an old-id -> new-id map; pass 2 redraws every connection
+        Comment, Constant, scene block, Quantum module), building an old-id -> new-id map; a scene
+        block or Quantum module gets its stored config in pass 1 already (place_module_block, which
+        reports into module_restore), as a scene block's pins come from it; pass 2 redraws every connection
         using that map with its original port positions/polarity (see
         function_plan_catalog.py for why Constants need special handling: their value lives
         in the element's own "name" field, ref_id is always 0).
@@ -4674,7 +5207,9 @@ class ComexioAPI:
         elements = snapshot.get("elements", {})
         connections = snapshot.get("connections", {})
 
-        id_map, warnings = await self._rebuild_all_elements(fub_id, elements)
+        if module_restore is None:
+            module_restore = ModuleConfigRestore.for_snapshot(snapshot)
+        id_map, warnings = await self._rebuild_all_elements(fub_id, elements, module_restore)
         connections_created = 0
         for conn_id, conn in connections.items():
             c_delta, conn_warnings = await self._rebuild_one_connection(fub_id, conn_id, conn, id_map)
@@ -4690,7 +5225,9 @@ class ComexioAPI:
         )
         return id_map, connections_created, warnings
 
-    async def _rebuild_all_elements(self, fub_id: int, elements: dict[str, Any]) -> tuple[dict[str, int], list[str]]:
+    async def _rebuild_all_elements(
+        self, fub_id: int, elements: dict[str, Any], module_restore: ModuleConfigRestore
+    ) -> tuple[dict[str, int], list[str]]:
         """(Re)create every snapshot element on a fresh plan. Returns ({old_id: new_id}, warnings)."""
         id_map: dict[str, int] = {}
         warnings: list[str] = []
@@ -4704,6 +5241,8 @@ class ComexioAPI:
                 new_id = await self.function_plan_add_comment_element(fub_id, text, x=x, y=y)
             elif elem_type == FUNCTION_PLAN_CONSTANT_TYPE:
                 new_id = await self.function_plan_add_constant_element(fub_id, elem.get("name", "0"), x=x, y=y)
+            elif is_module_block(elem_type):
+                new_id = await place_module_block(self, fub_id, str(old_id), elem, module_restore)
             else:
                 new_id = await self.function_plan_add_element(
                     fub_id=fub_id, ref_id=ref_id, element_type=elem_type, x=x, y=y
@@ -4767,14 +5306,12 @@ class ComexioAPI:
     def function_plan_name(self, fub_id: int) -> str:
         """Display name of a Function Plan for logging/reporting; falls back to the id.
 
-        Tolerates a malformed $Fubs entry (key no plain number, metadata no dict): callers run inside
-        the backup cycle, which a name lookup must not abort. Keys count as in function_plan_ids.
+        Tolerates a malformed $Fubs entry (see function_plan_info): callers run inside the backup
+        cycle, which a name lookup must not abort.
         """
         wanted = function_plan_id(fub_id)
-        meta = next(
-            (fd for fid, fd in self._fub_data.items() if wanted is not None and function_plan_id(fid) == wanted), None
-        )
-        return str((meta.get("Name") if isinstance(meta, dict) else None) or fub_id)
+        meta = function_plan_info(self._fub_data, wanted) if wanted is not None else {}
+        return str(meta.get("Name") or fub_id)
 
     @staticmethod
     def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:
@@ -4877,7 +5414,7 @@ class ComexioAPI:
         if stopped is False:
             _LOGGER.warning(
                 "_delete_plan_elements_and_restart: plan '%s' (fub=%s) could not be stopped, cleanup skipped",
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             return {
@@ -4913,7 +5450,7 @@ class ComexioAPI:
             "_delete_plan_elements_and_restart: deleted %d elements, webio_cmd_ids=%s (plan '%s' %s)",
             len(elem_ids_to_delete),
             webio_cmd_ids,
-            plan_name,
+            one_line(plan_name),
             restart_note,
         )
         return {
@@ -4944,8 +5481,11 @@ class ComexioAPI:
                 return False
             else:
                 await self.client.set_io_value(ext, identifier, value)
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
+            return False
         except (ComexioError, ValueError) as err:
-            # ValueError: a target id that is no number, rejected before anything is sent.
+            # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
             return False
         return True
@@ -4959,9 +5499,66 @@ class ComexioAPI:
         """
         try:
             return await self.client.get_bus_workload()
+        except ComexioCertificateMismatchError as err:
+            # The fast poll: the first request to meet a changed certificate between full polls.
+            self._note_certificate_mismatch(err, "Bus workload not fetched", quiet=True)
+            return {}
         except ComexioError as err:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
+
+    async def get_system_info(self) -> SystemInfoReading:
+        """System info (free storage, time server settings) and uptime, each with the cause if its fetch failed.
+
+        Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
+        failures and warns with the cause — so they are logged at debug level here. A lapsed admin
+        session is logged in again once per call, like the config poll does: this poll runs more
+        often, and its readings would otherwise go unknown until the next config poll.
+        """
+        # This call's one re-login, shared by both fetches: None when it worked, else the failure cause.
+        relogin: list[str | None] = []
+        try:
+            # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
+            info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)  # noqa: PLW0108
+            uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)  # noqa: PLW0108
+        except ComexioCertificateMismatchError as err:
+            # Raises the repair; the other fetch would only meet the same certificate.
+            self._note_certificate_mismatch(err, "System info not fetched")
+            return SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+        return SystemInfoReading(info, uptime, info_error, uptime_error)
+
+    async def _system_info_part[T](
+        self, fetch: Callable[[], Awaitable[T]], relogin: list[str | None]
+    ) -> tuple[T | None, str | None]:
+        """fetch()'s result, or None and the failure cause.
+
+        A lapsed session is logged in again once per relogin — not with credentials Comexio refused
+        (see _login): then the cause is "re-login failed (rejected)" without a request.
+        """
+        generation = self._login_generation
+        try:
+            try:
+                return await fetch(), None
+            except ComexioAuthenticationError:
+                if not relogin:
+                    _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
+                    relogin.append(self._relogin_failure(await self._full_login(generation)))
+                if relogin[0] is not None:
+                    return None, relogin[0]
+                return await fetch(), None
+        except ComexioCertificateMismatchError:
+            raise  # get_system_info raises the repair
+        except ComexioError as err:
+            _LOGGER.debug("System info fetch failed: %s", err)
+            return None, str(err) or type(err).__name__
+
+    def _relogin_failure(self, logged_in: bool) -> str | None:
+        """The system info cause of a re-login that just returned, read before another login can change it."""
+        if logged_in:
+            return None
+        if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
+            return SYSTEM_INFO_CERTIFICATE_CHANGED  # _full_login raised the repair
+        return f"re-login failed ({self.last_login_error})"
 
     async def system_emergency_reboot(self) -> bool:
         """Trigger an IMMEDIATE, unconfirmed full Comexio system reboot.

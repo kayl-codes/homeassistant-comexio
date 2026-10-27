@@ -30,6 +30,10 @@ integration manages. There is nothing to configure.
 - A new snapshot pushes the oldest one of its type out. Nothing else ever deletes the
   backups of a plan that still exists, no matter how old they are.
 - Moving elements without changing the wiring does not create an auto backup.
+- Besides the plan itself, a snapshot keeps the settings of its blocks and the configs of its
+  scene blocks and Quantum modules (scenes, settings, rules). Comexio stores these outside
+  the plan; changing them creates a new auto backup, and the `diff` option of
+  **Function Plan List Backups** shows what changed.
 - The snapshots are stored in Home Assistant's `.storage` folder, so every Home Assistant
   backup contains them too.
 
@@ -64,6 +68,8 @@ back to Comexio: structure, element positions and the paper/DPI setting of the c
   restore creates a **new plan** (`on_conflict: new_id`). With `confirm: true` and
   `on_conflict: force_override` it overwrites the plan that holds the ID now.
 - In the plan card's **Orphaned plans** view, **Restore** always creates a new plan.
+- Scene block and Quantum module configs are **not written back yet**. The restore message
+  names the affected elements, so you can check them in Comexio.
 
 ## 4. Backups of deleted plans
 
@@ -101,7 +107,9 @@ To delete backups without waiting for a repair:
 - **Function Plan Delete Backups** deletes one snapshot, all snapshots of one plan, or
   every stored backup (requires `confirm`). Kept plans can be deleted this way too.
 - **Function Plan Purge Orphaned Backups** deletes the backups of every deleted plan past
-  the retention period at once, except the ones you kept (requires `confirm`).
+  the retention period at once, except the ones you kept (requires `confirm`). With
+  `include_recent` (default off) it also deletes the backups of deleted plans still inside
+  the retention period; kept plans and live plans stay untouched either way.
 
 ## 5. Related actions and entities
 
@@ -111,7 +119,7 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_list_backups` | List snapshots as a service response, filterable and sortable, optionally with a diff. |
 | `comexio.function_plan_visualize` | Render a live plan or a snapshot as SVG or text. |
 | `comexio.function_plan_delete_backups` | Delete one snapshot, one plan's snapshots, or all. |
-| `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans. |
+| `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans (`include_recent: true`: of any age). |
 | `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
 | `sensor` **Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
 | `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted or renamed plans, the plans as attributes. |
@@ -150,6 +158,11 @@ verwalteten. Einzustellen gibt es nichts.
 - Ein neuer Snapshot verdrängt den ältesten seines Typs. Sonst löscht nichts die Backups
   eines noch existierenden Plans, egal wie alt sie sind.
 - Elemente nur zu verschieben, ohne die Verdrahtung zu ändern, erzeugt kein Auto-Backup.
+- Neben dem Plan selbst enthält ein Snapshot die Einstellungen seiner Bausteine und die
+  Konfiguration seiner Szenen-Bausteine und Quantum-Module (Szenen, Einstellungen, Regeln).
+  Comexio speichert diese außerhalb des Plans; eine Änderung daran erzeugt ein neues
+  Auto-Backup, und die Option `diff` von **Function Plan List Backups** zeigt, was sich
+  geändert hat.
 - Die Snapshots liegen im `.storage`-Ordner von Home Assistant und sind damit in jedem
   Home-Assistant-Backup enthalten.
 
@@ -189,6 +202,9 @@ der Zeichenfläche.
   jetzt belegt.
 - In der Ansicht **Orphaned plans** der Plan-Karte legt **Restore** immer einen neuen Plan
   an.
+- Die Konfiguration von Szenen-Bausteinen und Quantum-Modulen wird **noch nicht
+  zurückgeschrieben**. Die Restore-Meldung nennt die betroffenen Elemente, damit man sie in
+  Comexio prüfen kann.
 
 ## 4. Backups gelöschter Pläne
 
@@ -231,7 +247,9 @@ Backups löschen, ohne auf eine Meldung zu warten:
 - **Function Plan Delete Backups** löscht einen Snapshot, alle Snapshots eines Plans oder
   sämtliche Backups (erfordert `confirm`). Auch behaltene Pläne lassen sich so löschen.
 - **Function Plan Purge Orphaned Backups** löscht auf einmal die Backups aller gelöschten
-  Pläne, deren Frist abgelaufen ist, außer den behaltenen (erfordert `confirm`).
+  Pläne, deren Frist abgelaufen ist, außer den behaltenen (erfordert `confirm`). Mit
+  `include_recent` (standardmäßig aus) löscht sie auch die Backups gelöschter Pläne, deren
+  Frist noch läuft; behaltene und noch vorhandene Pläne bleiben in jedem Fall unberührt.
 
 ## 5. Zugehörige Aktionen und Entitäten
 
@@ -241,7 +259,7 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_list_backups` | Snapshots als Service-Response auflisten, filter- und sortierbar, optional mit Diff. |
 | `comexio.function_plan_visualize` | Live-Plan oder Snapshot als SVG oder Text darstellen. |
 | `comexio.function_plan_delete_backups` | Einen Snapshot, die Snapshots eines Plans oder alle löschen. |
-| `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen. |
+| `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen (`include_recent: true`: jeden Alters). |
 | `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
 | `sensor` **Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
 | `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter oder umbenannter Pläne, die Pläne als Attribute. |

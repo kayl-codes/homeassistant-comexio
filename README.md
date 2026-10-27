@@ -46,6 +46,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `switch` | Digital Outputs (Q) & Markers | Switches physical relays (classified as outlets) and digital markers. |
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
 | `sensor` / `binary_sensor` | Read-Only Markers (`[RO]`) | Analog/digital markers tagged `[RO]` are exposed as read-only sensors instead of writable `number`/`switch` entities. |
+| `sensor` / `binary_sensor` | Quickbus devices (multitouch, motion detectors, ...) | Every IO of a Quickbus device (gestures, buttons, brightness, LED channels, ...) as a read-only entity on its own HA device (`<instance> QB - <device>`, connected via its host extension). The devices picked under **Quickbus devices managed as QB cluster plans** (options; all devices until you change it) get their Web-IO commands in the class `<name> [QB]`, wired into managed function plans `<prefix> - QB [<device id>,...]` — devices stack in a column (one blank row apart) while they fit, a plan has as many columns as the pairs-per-plan setting allows (50/100/150 → 1/2/3), audited and repaired like the IO cluster plans. A device not picked gets no Web-IO command and reports no value; with no device picked there is no `[QB]` class either. On by default (**Create entities for Quickbus devices**); read-only: the Comexio API refuses writes to Quickbus IOs — to drive a Quickbus input from HA, wire a marker to it in Comexio. |
 | `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX Objects (opt-in) | See the **[KNX Objects guide](KNX.md)** — automatic unit/device-class detection, dimmer/blind (`cover`/`light`) support, and DPT-based classification. |
 | `button` | Trigger Markers (`[TRIG]` / `[TP]`) | One-shot "virtual button" entity for trigger-tagged markers; the marker resets itself via a dedicated, auto-managed `HA - TRIGGER` function plan. |
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
@@ -58,10 +59,14 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `switch` (config) | Integration | `Plan Auto-Start (HA plans)` / `(user plans)` (Function plans device) — start a stopped watched plan again on their own. |
 | `sensor` (diagnostic) | Integration | `Bus Workload` — internal Comexio bus/CPU load in %, polled independently every 10 s. |
 | `binary_sensor` (diagnostic) | Integration | `SD Card Present` — whether the Comexio server currently reports an SD card. |
+| `sensor` (diagnostic) | Integration | `Free storage` — free space of the Comexio's internal storage in %, polled every 5 min. |
+| `sensor` (diagnostic) | Integration | `Last boot` — when the Comexio system last started (from its uptime), polled every 5 min. |
+| `sensor` (diagnostic) | Integration | `Connection` — states `https`, `http`, `certificate_changed`, shown as `HTTPS` (encrypted, the pinned certificate), `HTTP` (Comexio serves no HTTPS: not encrypted) or `Certificate changed` (Comexio presents another certificate than the pinned one; nothing is sent until you decide in the repair). The pinned and, while the repair is open, the presented certificate's SHA-256 fingerprint as state attributes. Unavailable while the integration is not loaded — for example after a restart that met a changed certificate. See [Encrypted Connection](#-encrypted-connection-https). |
+| `binary_sensor` (diagnostic, problem) | Integration | `Time server setting` — on while Comexio does not set its clock from a time server (disabled or no server entered); a wrong clock breaks timers and schedules in the function plans. Off only means a server is configured, not that Comexio reaches it. |
 | `update` (diagnostic) | Integration | `Firmware` — one per extension module plus the IO-Server base, showing installed/available firmware version. Read-only (no install action). |
-| `button` (diagnostic) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
-| `button` (diagnostic) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
-| `button` (diagnostic, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
+| `button` (configuration) | Integration | `Web-IO Range Check` — manually triggers the nightly analog Min/Max range guard on demand. |
+| `button` (configuration) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
+| `button` (configuration, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX / Quickbus part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
 
 ## 🚀 Installation
 
@@ -92,9 +97,11 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 
 > [!TIP]
 > **Changing connection details later:** If your Comexio IP address or passwords change, you do **not** need to re-add the integration. Open *Settings → Devices & Services → Comexio → ⋮ → Reconfigure* and update host, username, and passwords directly. Leave password fields blank to keep the existing password.
+>
+> **Admin password changed in Comexio:** If Comexio rejects the stored admin credentials of an existing entry — when the integration starts or on a poll — Home Assistant shows a *Re-authenticate Comexio* prompt under *Settings → Devices & Services*. Enter the current username and password there. Until then, the configuration poll stops and the integration does not try the rejected credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and asks for reauth again if Comexio still refuses them. While you are first adding the integration, rejected credentials show an error in the setup form instead.
 
 > [!NOTE]
-> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, notifications, and cover detection keywords.
+> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, and cover detection keywords.
 
 📖 **[Full configuration guide with screenshots →](CONFIGURATION.md)**
 
@@ -159,7 +166,7 @@ Comexio can check every extension module on the local bus for available firmware
 
 Results show up as one `update.*` entity per extension module (in that extension's device) plus one for the IO-Server base itself, each reporting installed/available firmware version through HA's standard `update` entity (visible in the Settings → *Updates available* overview). These are read-only — Comexio's install trigger isn't wired up, so use the Comexio admin UI to actually apply an update once one is found.
 
-A diagnostic **"Check Firmware Now"** button forces the check on demand, bypassing the version gate (but not the underlying risk — the same brief output interruption Comexio warns about applies). Use it to test the `update.*` entities right away instead of waiting for both a version change and the nightly window.
+A configuration **"Check Firmware Now"** button forces the check on demand, bypassing the version gate (but not the underlying risk — the same brief output interruption Comexio warns about applies). Use it to test the `update.*` entities right away instead of waiting for both a version change and the nightly window.
 
 ## 🧩 Function Plan Management (Logikplan)
 
@@ -176,17 +183,19 @@ The integration can manage Comexio **function plans** directly from Home Assista
 | `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Deletes one snapshot, all snapshots of a plan, or every stored backup — or, for purge, the snapshots of deleted plans past the retention period (kept ones excepted). |
 | `comexio.function_plan_search` | Finds which plans contain elements matching a text query (same wildcard syntax as the preview card's search bar). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimental:* flags likely wiring mistakes, and lays a plan out by signal-flow topology instead of its physical position. |
-| `comexio.marker_delete` | Permanently deletes Markers this integration created itself (e.g. leftover KNX bridge markers). Factory-provisioned and Studio-created Markers are protected regardless of ID — they are skipped and listed as `protected`, the rest is still deleted. With `force: true`, protected Markers are deleted too if they have no name and are not placed in any function plan. Accepts a single ID, a comma-separated list, or a `from-to` range; requires `confirm: true`. |
+| `comexio.marker_delete` | Permanently deletes Markers with CategoryId 1 — created via the admin API (e.g. leftover KNX bridge markers) or with the Studio plan editor's "new marker". Markers placed in a function plan are never deleted — remove them from the plan first; if any plan cannot be read, nothing is deleted. An unplaced CategoryId 1 Marker is deleted without `force`, including one made in the plan editor. CategoryId 0 Markers (factory-provisioned or from Studio's marker list) are protected regardless of ID. Protected Markers are skipped and listed as `protected` with their reason, the rest is still deleted. With `force: true`, unplaced CategoryId 0 Markers are deleted too if they have no name. Accepts a single ID, a comma-separated list, or a `from-to` range; requires `confirm: true`. |
 
 ### Function plan watchdog
 
 HA's markers, IOs, KNX objects and triggers only work while the function plans the integration manages run in Comexio. Their run state is read about every 60 s (more often while the plan card is open), so a plan stopped in Comexio Studio is noticed without a webhook. When a watched plan does not run:
 
-- a **repair** offers to start it right away, and the **Managed Plans Problem** sensor turns on;
+- a **repair** offers to start it right away, and the **Managed Plans Problem** sensor turns on. The repair can also **ignore** the stop: repair and push go away while the plan stays watched (the sensor stays on), and its next stop after it has run again is reported anew. For a user plan it can also **stop watching** it;
 - the notify services set in the options (**Function plan watchdog: push to**) get a push with a **Start plan** button, which disappears again once the plan runs;
 - with **Plan Auto-Start (HA plans)** on (the default), the integration starts it again on its own. If the start is refused, or the plan stops again within 10 minutes, that counts as a failed attempt: after **2 failed attempts** (a refused start is retried at most once a minute) Auto-Start gives up on the plan — most likely the plan itself has an error — and raises a **Check function plan** repair plus an alarm push. The repair shows when the last attempt failed and when the watchdog last checked. Auto-Start resumes for that plan once it is seen running again (e.g. after you fixed it and started it from the repair or the push).
 
 User plans that should always run can be added in the options (**Function plan watchdog: also watch user plans**). They get the same repair, sensor and push; **Plan Auto-Start (user plans)** is off by default. A plan HA itself just stopped (sort, connect, restore, bus-load cascade) is not judged for 5 minutes. After Comexio was unreachable (a failed setup attempt, poll or run-state fetch, or an emergency reboot by the bus-load watchdog) the watchdog neither reports nor starts stopped plans until it answers again and for 10 minutes from the first successful read — a rebooting Comexio starts its plans itself; a plan seen running still clears its report.
+
+A picked user plan Comexio no longer has under its ID and name raises a repair and an alarm push. If its ID now holds another plan — the plan was renamed, or deleted and Comexio gave its ID to a new plan — both name that plan, and the repair offers to **watch it instead**. A plan renamed with its content unchanged (same ID, same content as its last backup) is followed on its own, watched or not: its backups continue under the new name instead of turning into orphaned backups, and a watchdog pick takes the new name — no alarm, no repair. The repair offers **take over the rename** only when that failed. A rename together with a content change is not recognised as one.
 
 📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
@@ -211,10 +220,32 @@ Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities 
 
 📖 **[KNX Objects guide →](KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
 
+## 🔒 Encrypted Connection (HTTPS)
+
+When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's certificate: at setup, and for existing entries at their next start. Comexio signs its certificate itself, so instead of a certificate authority the integration remembers its SHA-256 fingerprint (trust on first use) and announces the switch in a notification. The fingerprint is the SHA-256 value Comexio's admin page lists under its certificate hashes. Without HTTPS the connection stays on plain HTTP — unencrypted, including the admin login — and every start tries the switch again. *Reconfigure* shows which of the two is in use, and the pinned fingerprint.
+
+A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. The integration then sends nothing more to Comexio and raises a repair that shows the pinned and the new fingerprint; only when you confirm it there is the new certificate pinned. The notify services set under **Function plan watchdog: push to** get an urgent push for it (iOS: critical alert, Android: alarm stream — both through Do Not Disturb) that opens the repairs; it is removed from the phone once the repair is done; a notify service not reachable yet (for example right after a restart) is retried at the next check. A certificate that changes is never accepted automatically, not even when the server's serial number matches: reading it would need a login, which would hand the admin credentials to whoever answers in Comexio's place.
+
+*Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
+
+The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded; after a restart that met a changed certificate the integration does not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.iosrv1_connection
+    from: https
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio connection"
+      message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
+```
+
 ## 🐛 Troubleshooting
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
-- **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu.
+- **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu. To push over HTTPS (e.g. to a reverse proxy), pick *External HA URL* or *Custom address* under **Webhook address** in the settings, see [CONFIGURATION.md](CONFIGURATION.md#3-settings).
 - **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
 - **KNX analog values above ~1,000,000 get rounded/corrupted:** See the [KNX Objects guide](KNX.md#9-known-limitations) — this is a Comexio firmware bug, not an integration issue.
 - **"Entity IDs not following the Comexio scheme" after updating:** Entities created before v0.11.0 keep their old, name-based entity IDs. The Repair issue (or the **Fix Entity IDs** button) renames them to the stable scheme; history and statistics move along. Automations, scripts and dashboards are **not** rewritten — the Repair issue shows how many automations/scripts still use the old IDs, so update those afterwards. You can also ignore the issue and keep the old IDs.
@@ -278,6 +309,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `switch` | Digitale Ausgänge (Q) & Merker | Schaltet physische Relais (als Steckdose/Outlet klassifiziert) und digitale Merker. |
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
 | `sensor` / `binary_sensor` | Nur-Lese-Merker (`[RO]`) | Analoge/digitale Merker mit `[RO]`-Tag werden als reine Nur-Lese-Sensoren statt als beschreibbare `number`/`switch`-Entitäten bereitgestellt. |
+| `sensor` / `binary_sensor` | Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) | Jeder IO eines Quickbus-Geräts (Gesten, Taster, Helligkeit, LED-Kanäle, ...) als Nur-Lese-Entität an einem eigenen HA-Gerät (`<Instanz> QB - <Gerät>`, verbunden über seine Host-Extension). Die unter **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** (Optionen; bis zur ersten Änderung alle Geräte) gewählten Geräte erhalten ihre Web-IO-Befehle in der Klasse `<Name> [QB]`, verdrahtet in verwaltete Logikpläne `<Präfix> - QB [<Geräte-ID>,...]` — Geräte stapeln sich in einer Spalte (mit einer Leerzeile Abstand), solange sie hineinpassen; ein Plan hat so viele Spalten, wie die Einstellung Paare pro Plan erlaubt (50/100/150 → 1/2/3), mit Audit und Reparatur wie bei den IO-Cluster-Plänen. Ein nicht gewähltes Gerät erhält keinen Web-IO-Befehl und meldet keine Werte; ist kein Gerät gewählt, entfällt auch die Klasse `[QB]`. Standardmäßig an (**Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) als Entitäten anlegen**); nur lesend: die Comexio-API lehnt Schreibzugriffe auf Quickbus-IOs ab — um einen Quickbus-Eingang aus HA zu steuern, in Comexio einen Merker daran verdrahten. |
 | `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX-Objekte (Opt-in) | Siehe die **[Anleitung KNX-Objekte](KNX.md#-deutsch)** — automatische Einheiten-/Device-Class-Erkennung, Dimmer-/Jalousie-Unterstützung (`cover`/`light`) und DPT-basierte Klassifizierung. |
 | `button` | Trigger-Merker (`[TRIG]` / `[TP]`) | Einmalig auslösende „virtuelle Taster"-Entität für Trigger-markierte Merker; der Merker setzt sich selbst über einen dediziert automatisch verwalteten `HA - TRIGGER`-Funktionsplan zurück. |
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
@@ -290,10 +322,14 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `switch` (Konfiguration) | Integration | `Plan Auto-Start (HA-Pläne)` / `(User-Pläne)` (Gerät „Function plans“) — starten einen gestoppten überwachten Plan selbst wieder. |
 | `sensor` (Diagnose) | Integration | `Bus Workload` — interne Comexio Bus-/CPU-Auslastung in %, unabhängig alle 10 s abgefragt. |
 | `binary_sensor` (Diagnose) | Integration | `SD Card Present` — ob der Comexio-Server aktuell eine SD-Karte meldet. |
+| `sensor` (Diagnose) | Integration | `Freier Speicher` — freier Platz im internen Speicher des Comexio in %, alle 5 min abgefragt. |
+| `sensor` (Diagnose) | Integration | `Letzter Start` — wann das Comexio-System zuletzt gestartet ist (aus seiner Laufzeit), alle 5 min abgefragt. |
+| `sensor` (Diagnose) | Integration | `Verbindung` — Zustände `https`, `http`, `certificate_changed`, angezeigt als `HTTPS` (verschlüsselt, das gepinnte Zertifikat), `HTTP` (Comexio bietet kein HTTPS an: unverschlüsselt) oder `Zertifikat geändert` (Comexio zeigt ein anderes als das gepinnte Zertifikat; bis du in der Reparatur entscheidest, wird nichts gesendet). Der gepinnte und, solange die Reparatur offen ist, der angebotene SHA-256-Fingerabdruck als Attribute. Nicht verfügbar, solange die Integration nicht geladen ist — etwa nach einem Neustart, der auf ein geändertes Zertifikat traf. Siehe [Verschlüsselte Verbindung](#-verschlüsselte-verbindung-https). |
+| `binary_sensor` (Diagnose, Problem) | Integration | `Zeitserver-Setting` — an, solange Comexio seine Uhr nicht von einem Zeitserver stellt (deaktiviert oder kein Server eingetragen); eine falsche Uhr bringt Zeitglieder und Zeitpläne in den Logikplänen durcheinander. Aus heißt nur, dass ein Server eingetragen ist, nicht dass Comexio ihn erreicht. |
 | `update` (Diagnose) | Integration | `Firmware` — je eine pro Erweiterungsmodul plus für den IO-Server-Grundbaustein, zeigt installierte/verfügbare Firmware-Version. Reine Anzeige (kein Install-Button). |
-| `button` (Diagnose) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
-| `button` (Diagnose) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |
-| `button` (Diagnose, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
+| `button` (Konfiguration) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
+| `button` (Konfiguration) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |
+| `button` (Konfiguration, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-/Quickbus-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
 
 ## 🚀 Installation
 
@@ -321,9 +357,11 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 
 > [!TIP]
 > **Verbindungsdaten nachträglich ändern:** Wenn sich IP-Adresse oder Passwörter ändern, musst du die Integration **nicht** neu einrichten. Öffne die Integration unter *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu konfigurieren* und passe Host, Benutzername und Passwörter direkt an. Felder für Passwörter leer lassen bedeutet "bestehendes Passwort beibehalten".
+>
+> **Admin-Passwort in Comexio geändert:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten einer bestehenden Integration ab — beim Start der Integration oder bei einer Abfrage —, zeigt Home Assistant unter *Einstellungen → Geräte & Dienste* die Aufforderung *Comexio erneut anmelden*. Dort den aktuellen Benutzernamen und das Passwort eingeben. Bis dahin ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und fordert erneut zur Anmeldung auf, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 > [!NOTE]
-> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Benachrichtigungen und Rollladen-Schlüsselwörter.
+> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen und Rollladen-Schlüsselwörter.
 
 📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](CONFIGURATION.md)**
 
@@ -391,7 +429,7 @@ Comexio kann jedes Erweiterungsmodul am lokalen Bus auf verfügbare Firmware-Upd
 
 Die Ergebnisse erscheinen als je eine `update.*`-Entität pro Erweiterungsmodul (im jeweiligen Erweiterungs-Device) sowie eine für den IO-Server-Grundbaustein selbst, jeweils mit installierter/verfügbarer Firmware-Version über die HA-Standard-`update`-Entität (sichtbar in *Einstellungen → Verfügbare Updates*). Diese sind reine Anzeige — der Install-Aufruf von Comexio ist nicht angebunden, ein gefundenes Update wird weiterhin über die Comexio-Admin-Oberfläche eingespielt.
 
-Ein Diagnose-Button **„Firmware jetzt prüfen“** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nachtfenster zu warten.
+Ein Konfigurations-Button **„Firmware jetzt prüfen“** erzwingt die Prüfung sofort, unabhängig vom Versions-Gate (das zugrunde liegende Risiko bleibt aber bestehen — dieselbe kurze Ausgangs-Unterbrechung, vor der Comexio warnt). Damit lassen sich die `update.*`-Entitäten sofort testen, statt auf Versionswechsel und Nachtfenster zu warten.
 
 ## 🧩 Funktionsplan-Verwaltung (Logikplan)
 
@@ -408,17 +446,19 @@ Die Integration kann Comexio-**Funktionspläne** direkt aus Home Assistant verwa
 | `comexio.function_plan_delete_backups` / `..._purge_orphaned_backups` | Löscht einen Snapshot, alle Snapshots eines Plans oder sämtliche Backups — bzw. beim Purge die Snapshots gelöschter Pläne nach Ablauf der Aufbewahrung (außer behaltenen). |
 | `comexio.function_plan_search` | Findet Pläne mit Elementen, die zu einem Suchtext passen (gleiche Platzhalter-Syntax wie die Suchleiste der Vorschau-Karte). |
 | `comexio.function_plan_analyze` / `..._flow_diagram` | *Experimentell:* markiert wahrscheinliche Verdrahtungsfehler bzw. ordnet einen Plan nach Signalfluss statt nach physischer Position an. |
-| `comexio.marker_delete` | Löscht dauerhaft Merker, die die Integration selbst angelegt hat (z. B. übrig gebliebene KNX-Brücken-Merker). Werksseitige und in Comexio Studio angelegte Merker sind unabhängig von der ID geschützt — sie werden übersprungen und als `protected` gemeldet, der Rest wird trotzdem gelöscht. Mit `force: true` werden auch geschützte Merker gelöscht, sofern sie keinen Namen haben und in keinem Logikplan platziert sind. Akzeptiert eine einzelne ID, eine Komma-Liste oder einen Bereich `von-bis`; erfordert `confirm: true`. |
+| `comexio.marker_delete` | Löscht dauerhaft Merker mit CategoryId 1 — angelegt über die Admin-API (z. B. übrig gebliebene KNX-Brücken-Merker) oder per „Neuer Merker“ im Planeditor von Comexio Studio. Merker, die in einem Logikplan platziert sind, werden nie gelöscht — erst aus dem Plan entfernen; lässt sich ein Plan nicht lesen, wird nichts gelöscht. Ein nicht platzierter Merker mit CategoryId 1 wird ohne `force` gelöscht, auch wenn er im Planeditor entstand. Merker mit CategoryId 0 (werksseitig oder aus der Merkerliste von Studio) sind unabhängig von der ID geschützt. Geschützte Merker werden übersprungen und mit Grund als `protected` gemeldet, der Rest wird trotzdem gelöscht. Mit `force: true` werden auch nicht platzierte Merker mit CategoryId 0 gelöscht, sofern sie keinen Namen haben. Akzeptiert eine einzelne ID, eine Komma-Liste oder einen Bereich `von-bis`; erfordert `confirm: true`. |
 
 ### Logikplan-Watchdog
 
 Merker, IOs, KNX-Objekte und Trigger von HA funktionieren nur, solange die von der Integration verwalteten Logikpläne in Comexio laufen. Ihr Laufzustand wird etwa alle 60 s gelesen (bei offener Plan-Karte öfter), sodass auch ein in Comexio Studio gestoppter Plan ohne Webhook auffällt. Läuft ein überwachter Plan nicht:
 
-- bietet eine **Reparaturmeldung** an, ihn sofort zu starten, und der Sensor **Problem verwaltete Pläne** geht an;
+- bietet eine **Reparaturmeldung** an, ihn sofort zu starten, und der Sensor **Problem verwaltete Pläne** geht an. Die Reparaturmeldung kann den Stopp auch **ignorieren**: Meldung und Push verschwinden, der Plan bleibt überwacht (der Sensor bleibt an), und sein nächster Stopp, nachdem er wieder lief, wird neu gemeldet. Bei einem User-Plan kann sie ihn auch **aus der Überwachung nehmen**;
 - die in den Optionen eingetragenen Benachrichtigungsdienste (**Logikplan-Watchdog: Push an**) bekommen eine Push-Meldung mit einem Knopf **Plan starten**, die wieder verschwindet, sobald der Plan läuft;
 - ist **Plan Auto-Start (HA-Pläne)** an (Standard), startet die Integration ihn selbst wieder. Wird der Start abgelehnt oder stoppt der Plan innerhalb von 10 Minuten erneut, zählt das als Fehlversuch: Nach **2 Fehlversuchen** (ein abgelehnter Start wird höchstens einmal pro Minute wiederholt) gibt Auto-Start den Plan auf — vermutlich steckt ein Fehler im Plan — und meldet per Reparaturmeldung **Logikplan prüfen** plus Alarm-Push. Die Reparaturmeldung zeigt, wann der letzte Fehlversuch war und wann der Watchdog zuletzt geprüft hat. Auto-Start greift für den Plan erst wieder, wenn er einmal als laufend erkannt wurde (z. B. nachdem du ihn korrigiert und über die Reparaturmeldung oder den Push gestartet hast).
 
 Eigene Pläne, die immer laufen sollen, lassen sich in den Optionen hinzufügen (**Logikplan-Watchdog: zusätzlich überwachte Pläne**). Sie bekommen dieselbe Reparaturmeldung, denselben Sensor und Push; **Plan Auto-Start (User-Pläne)** ist standardmäßig aus. Einen Plan, den HA selbst gerade gestoppt hat (Sortieren, Verdrahten, Restore, Buslast-Kaskade), bewertet der Watchdog 5 Minuten lang nicht. War Comexio nicht erreichbar (fehlgeschlagener Setup-Versuch, fehlgeschlagener Abruf der Konfiguration oder der Laufzustände, oder Notfall-Neustart durch den Buslast-Watchdog), meldet und startet der Watchdog keine gestoppten Pläne, bis Comexio wieder antwortet, und danach ab dem ersten erfolgreichen Abruf noch 10 Minuten lang — ein neu startender Comexio startet seine Pläne selbst; ein wieder laufender Plan hebt seine Meldung trotzdem auf.
+
+Findet Comexio einen gewählten User-Plan unter seiner ID und seinem Namen nicht mehr, gibt es eine Reparaturmeldung und einen Alarm-Push. Trägt seine ID inzwischen einen anderen Plan — der Plan wurde umbenannt, oder er wurde gelöscht und Comexio hat seine ID neu vergeben —, nennen beide diesen Plan, und die Reparaturmeldung bietet an, **stattdessen ihn zu überwachen**. Ein umbenannter Plan mit unverändertem Inhalt (gleiche ID, gleicher Inhalt wie sein letztes Backup) wird von selbst übernommen, überwacht oder nicht: Seine Backups laufen unter dem neuen Namen weiter, statt zu verwaisten Backups zu werden, und eine Watchdog-Auswahl übernimmt den neuen Namen — kein Alarm, keine Reparaturmeldung. **Umbenennung übernehmen** bietet die Reparaturmeldung nur an, wenn das fehlschlug. Eine Umbenennung zusammen mit einer Inhaltsänderung wird nicht als solche erkannt.
 
 📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
@@ -443,10 +483,32 @@ Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs a
 
 📖 **[Anleitung KNX-Objekte →](KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
 
+## 🔒 Verschlüsselte Verbindung (HTTPS)
+
+Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat des Comexio: bei der Einrichtung, bestehende Einträge beim nächsten Start. Comexio signiert sein Zertifikat selbst, darum merkt sich die Integration statt einer Zertifizierungsstelle dessen SHA-256-Fingerabdruck (Trust on First Use) und meldet die Umstellung in einer Benachrichtigung. Der Fingerabdruck ist der SHA-256-Wert, den die Admin-Seite des Comexio unter seinen Zertifikats-Hashes anzeigt. Ohne HTTPS bleibt die Verbindung auf HTTP — unverschlüsselt, auch der Admin-Login — und jeder Start versucht die Umstellung erneut. *Neu konfigurieren* zeigt, welche der beiden genutzt wird, und den gepinnten Fingerabdruck.
+
+Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Die Integration sendet dann nichts mehr an Comexio und legt eine Reparatur an, die den gepinnten und den neuen Fingerabdruck zeigt; erst wenn du dort bestätigst, wird das neue Zertifikat gepinnt. Die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste bekommen dazu einen dringenden Push (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“), der die Reparaturen öffnet; er verschwindet vom Handy, sobald die Reparatur erledigt ist; ein noch nicht erreichbarer Dienst (etwa direkt nach einem Neustart) wird bei der nächsten Prüfung erneut versucht. Ein geändertes Zertifikat wird auch dann nie automatisch übernommen, wenn die Seriennummer des Servers passt: Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten an den, der an Comexios Stelle antwortet.
+
+*Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Vor deiner Bestätigung wird nichts gesendet — auch nicht der Login-Test.
+
+Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist; nach einem Neustart, der auf ein geändertes Zertifikat traf, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
+
+```yaml
+triggers:
+  - trigger: state
+    entity_id: sensor.iosrv1_connection
+    from: https
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio-Verbindung"
+      message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
+```
+
 ## 🐛 Fehlerbehebung (Troubleshooting)
 
 - **"Web-IO Gerät ist blockiert (in use)":** Du versuchst, einen *Full Sync* zu machen, aber das Web-IO Gerät ist in Comexio bereits in einem Logikplan verbunden. Die Integration erkennt das und fällt automatisch und sicher auf den *Delta-Sync* zurück, um nur die Einzelbefehle zu patchen.
-- **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten.
+- **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten. Für einen Push über HTTPS (z. B. an einen Reverse-Proxy) wähle in den Einstellungen unter **Webhook-Adresse** *Externe HA-URL* oder *Eigene Adresse*, siehe [CONFIGURATION.md](CONFIGURATION.md#3-einstellungen).
 - **Extension-Entitäten erscheinen nach Wiederherstellung nicht:** Lade die Integration über *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden* neu. Der Coordinator erkennt das Modul als online und legt alle Entitäten neu an.
 - **KNX-Analogwerte oberhalb von ca. 1.000.000 werden gerundet/verfälscht:** Siehe die [Anleitung KNX-Objekte](KNX.md#9-bekannte-einschränkungen) — das ist ein Comexio-Firmware-Bug, kein Integrations-Problem.
 - **„Entity-IDs entsprechen nicht dem Comexio-Schema" nach dem Update:** Vor v0.11.0 angelegte Entitäten behalten ihre alten, namensbasierten Entity-IDs. Das Reparatur-Issue (oder der Button **Entity-IDs korrigieren**) benennt sie auf das stabile Schema um; Verlauf und Statistiken ziehen mit um. Automationen, Skripte und Dashboards werden **nicht** umgeschrieben — das Reparatur-Issue zeigt, wie viele Automationen/Skripte noch die alten IDs verwenden, diese danach anpassen. Das Issue kann auch ignoriert werden, dann bleiben die alten IDs.

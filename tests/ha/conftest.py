@@ -1,17 +1,19 @@
 """Fixtures for the Home Assistant integration tests (pytest-homeassistant-custom-component)."""
 
 from collections.abc import Generator
+from datetime import timedelta
 import inspect
 from pathlib import Path
 import shutil
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioConnectionError, SystemInfo, TimeServerSettings
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio import api as api_module
-from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.api import ComexioAPI, SystemInfoReading
 from custom_components.comexio.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -105,6 +107,14 @@ def api_returns() -> dict[str, Any]:
         "get_io_live_states": {},
         # The real bulk load returns a dict, never None — even when it fails or there is no plan.
         "function_plan_load_all_plans": {},
+        # Never None either: each part's failure is its own None plus the cause.
+        "get_system_info": SystemInfoReading(
+            SystemInfo(free_storage_percent=42.0, time_server=TimeServerSettings(True, "pool.ntp.org", 86400)),
+            timedelta(days=3),
+        ),
+        # An unreadable form, as the real method returns it. The nightly range check (04:20 test time) runs in any
+        # test whose loaded entry spans that minute; it counts the command as not checked.
+        "get_webio_command_form": None,
     }
 
 
@@ -115,7 +125,24 @@ def api_attributes() -> dict[str, Any]:
 
 
 @pytest.fixture
-def mock_comexio_api(api_returns: dict[str, Any], api_attributes: dict[str, Any]) -> Generator[list[ComexioAPI]]:
+def certificate_handshake() -> Generator[AsyncMock]:
+    """The bare TLS handshake reading Comexio's certificate fingerprint; by default Comexio serves no HTTPS.
+
+    A test sets return_value (a fingerprint) or side_effect on it before the setup or flow.
+    """
+    handshake = AsyncMock(name="fetch_certificate_fingerprint", side_effect=ComexioConnectionError("no HTTPS"))
+    with (
+        patch("custom_components.comexio.certificate.fetch_certificate_fingerprint", handshake),
+        patch("custom_components.comexio.repairs.fetch_certificate_fingerprint", handshake),
+        patch("custom_components.comexio.api.fetch_certificate_fingerprint", handshake),
+    ):
+        yield handshake
+
+
+@pytest.fixture
+def mock_comexio_api(
+    api_returns: dict[str, Any], api_attributes: dict[str, Any], certificate_handshake: AsyncMock
+) -> Generator[list[ComexioAPI]]:
     """The one place the HA tests construct a ComexioAPI; yields every instance created.
 
     Pure parsing (parse_config) stays real and runs on the synthetic fixtures; every coroutine
@@ -149,9 +176,10 @@ def mock_comexio_api(api_returns: dict[str, Any], api_attributes: dict[str, Any]
         return api
 
     with (
-        patch("custom_components.comexio.ComexioAPI", side_effect=_factory),
+        patch("custom_components.comexio.certificate.ComexioAPI", side_effect=_factory),
         patch("custom_components.comexio.config_flow.ComexioAPI", side_effect=_factory),
-        # DNS is disabled in tests; the resolver's own logic has unit tests (test_ha_address.py).
-        patch("custom_components.comexio.ha_address.HaAddressResolver.async_get", return_value=HA_ADDRESS),
+        # DNS and sockets are disabled in tests; the resolver's own logic has unit tests (test_ha_address.py).
+        # Patched below async_target, so the address mode around the search still runs for real.
+        patch("custom_components.comexio.ha_address.HaAddressResolver._async_get", return_value=HA_ADDRESS),
     ):
         yield created

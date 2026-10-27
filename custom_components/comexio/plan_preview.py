@@ -13,8 +13,8 @@ from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from .const import DOMAIN
-from .function_plan_backup import format_backup_label
+from .const import DOMAIN, function_plan_info, one_line
+from .function_plan_backup import format_backup_label, snapshot_paper_format
 from .function_plan_block_settings import snapshot_block_settings
 
 if TYPE_CHECKING:
@@ -60,7 +60,7 @@ async def _async_render_orphaned(coordinator: ComexioCoordinator) -> None:
     )
     if url is None:
         raise HomeAssistantError(
-            f"The backup {choice['kind']}[{choice['slot']}] of deleted plan '{choice['plan_name']}' "
+            f"The backup {choice['kind']}[{choice['slot']}] of deleted plan '{one_line(choice['plan_name'])}' "
             "could not be shown — it was deleted meanwhile or another preview took over."
         )
 
@@ -77,14 +77,14 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
     fub_id = coordinator.get_active_function_plan_fub_id()
     if fub_id is None:
         raise HomeAssistantError("No plan is selected for the preview.")
-    plan_name = api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
+    plan_name = function_plan_info(api.fub_data, fub_id).get("Name", str(fub_id))
 
     backup_choice = _active_backup_choice(coordinator, fub_id, plan_name)
     if backup_choice is not None:
         kind, slot = backup_choice
         snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
         if snapshot is None:
-            raise HomeAssistantError(f"The backup {kind}[{slot}] of plan '{plan_name}' was not found.")
+            raise HomeAssistantError(f"The backup {kind}[{slot}] of plan '{one_line(plan_name)}' was not found.")
         await coordinator.async_generate_plan_preview(
             fub_id,
             plan_name,
@@ -93,12 +93,13 @@ async def async_render_selected_preview(coordinator: ComexioCoordinator) -> None
             f"snapshot:{kind}:{slot}",
             snapshot.get("labels"),
             snapshot_block_settings(snapshot),
+            snapshot_paper_format(snapshot),
         )
         return
 
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
-        raise HomeAssistantError(f"The plan '{plan_name}' (ID {fub_id}) could not be loaded from Comexio.")
+        raise HomeAssistantError(f"The plan '{one_line(plan_name)}' (ID {fub_id}) could not be loaded from Comexio.")
     await coordinator.async_generate_plan_preview(
         fub_id, plan_name, plan_data.get("elements", {}), plan_data.get("connections", {}), "live"
     )

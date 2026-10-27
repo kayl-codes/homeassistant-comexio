@@ -292,7 +292,8 @@ function_plan_purge_orphaned_backups:
   description: >
     Deletes backup snapshots (auto and change) of plans that no longer exist live in Comexio
     (deleted directly in Comexio Studio) and whose newest snapshot is older than the
-    configured retention period (Options → Function Plan, default 6 months). A live plan's
+    configured retention period (Options → Function Plan, default 6 months), or of any age with
+    "Include recent orphans". A live plan's
     backups are never touched, no matter how old, and neither are backups you chose to keep in
     the "Backups of deleted plan" repair. Without this action nothing is deleted automatically:
     each expired plan raises that repair instead. Requires "confirm".
@@ -308,6 +309,15 @@ function_plan_purge_orphaned_backups:
       name: Confirm purge
       description: "Must be enabled — otherwise nothing is purged."
       required: true
+      default: false
+      selector:
+        boolean:
+    include_recent:
+      name: Include recent orphans
+      description: >
+        Also purge the backups of deleted plans whose newest snapshot is younger than the
+        retention period. Kept backups stay protected. Off by default.
+      required: false
       default: false
       selector:
         boolean:
@@ -344,7 +354,7 @@ function_plan_keep_backups:
 
 function_plan_list_backups:
   name: Function Plan List Backups
-  description: Returns stored function plan backup snapshots (plan, type, slot, timestamp, operation; if recorded also restored_at, comexio_version, paper/dpi/orientation and block_setting_count) as a service response. All filters are optional and can be combined.
+  description: Returns stored function plan backup snapshots (plan, type, slot, timestamp, operation; if recorded also restored_at, comexio_version, paper/dpi/orientation, block_setting_count and module_config_count) as a service response. All filters are optional and can be combined.
   fields:
     config_entry:
       name: Comexio instance
@@ -415,7 +425,7 @@ function_plan_list_backups:
         boolean:
     diff:
       name: Include diff vs. predecessor (optional)
-      description: "If enabled, each snapshot (except the oldest known one of its plan/type) gets a 'diff' field showing added/removed markers, IOs and connections, plus changed block settings (shutter times, dimmer settings, hidden input values, extended view; only when both snapshots captured them), compared to the previous snapshot of the SAME type (auto vs. auto, change vs. change). Disabled by default to keep the normal response compact."
+      description: "If enabled, each snapshot (except the oldest known one of its plan/type) gets a 'diff' field showing added/removed markers, IOs and connections, plus changed block settings (shutter times, dimmer settings, hidden input values, extended view; only when both snapshots captured them), changed scene-block and Quantum-module configs (scenes, settings, rules; only when both snapshots captured them) and a changed paper format, DPI or orientation, compared to the previous snapshot of the SAME type (auto vs. auto, change vs. change). Disabled by default to keep the normal response compact."
       required: false
       default: false
       selector:
@@ -674,18 +684,21 @@ function_plan_preview_stop:
 marker_delete:
   name: Marker Delete
   description: >
-    Permanently deletes one or more Markers directly on the Comexio server (not just from
-    a function plan's canvas — the Marker itself, including any wiring to it). Only markers
-    this integration created itself (e.g. KNX bridge markers) are deleted — factory and
-    Studio-created markers are protected: they are skipped and listed as "protected", the
-    remaining ids are still deleted. With "force", protected markers are deleted too if they
-    have no name and are not placed in any function plan. A marker id that does not (or no
-    longer) exist is silently skipped, not reported as an error — a genuine request failure
-    (e.g. session drop) is still reported, never mistaken for that. Limited to 200 markers
-    per call. Requires "confirm" — without it, nothing is deleted. The response lists the ids
-    per outcome (deleted/skipped/protected/failed); "protected_reason" says why ids were
-    protected, and "error" is only set when the call failed or the check ran stricter than
-    requested (e.g. force ignored because not every function plan could be verified).
+    Permanently deletes one or more Markers directly on the Comexio server (from Comexio's
+    marker list, not a function plan element). Markers placed in a function plan are never
+    deleted — remove them from the plan first; every function plan is loaded before each call,
+    and if one cannot be read, nothing is deleted. Of the unplaced markers, those with
+    CategoryId 1 are deleted — created via the admin API (e.g. KNX bridge markers) or with the
+    Studio plan editor's "new marker"; CategoryId 0 markers (factory-provisioned or from
+    Studio's marker list) are protected. Protected markers are skipped and listed as
+    "protected" with their reason, the remaining ids are still deleted. With "force", unplaced
+    CategoryId 0 markers are deleted too if they have no name. A marker id that does not (or no longer) exist is
+    silently skipped, not reported as an error — a genuine request failure (e.g. session
+    drop) is still reported, never mistaken for that. Limited to 200 markers per call.
+    Requires "confirm" — without it, nothing is deleted. The response lists the ids per
+    outcome (deleted/skipped/protected/failed); "protected_reasons" says per id why it was
+    protected ("protected_reason" in one line), and "error" is only set when the call failed
+    or the check could not run (config or a function plan unreadable — every id refused).
   fields:
     config_entry:
       name: Comexio instance
@@ -709,7 +722,7 @@ marker_delete:
         boolean:
     force:
       name: Force (untitled, unplaced markers)
-      description: "Also delete factory/Studio-created markers — but only those without a name that are not placed in any function plan."
+      description: "Also delete CategoryId 0 markers (factory or from Studio's marker list) — but only those without a name. Markers placed in a function plan stay protected even with force."
       required: false
       default: false
       selector:

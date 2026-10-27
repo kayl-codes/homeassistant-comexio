@@ -63,10 +63,11 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | **Create marker entities** | Enable/disable Marker import. |
 | **Create IO entities** | Enable/disable IO import. |
 | **Polling interval** | Dropdown (1 – 1440 min). Prefer longer intervals — live values arrive via webhook. |
+| **Webhook address** | Where Comexio pushes live values. *Automatic*: HA's local address. *External HA URL*: host and port of the external URL from HA's network settings (`https` without a port means 443). *Custom address*: a URL entered in a second step (`http(s)://host[:port]`, no path). With an external or custom address the push leaves your network and goes over the internet. A plain `http://` address is therefore only accepted inside the local network (private IPs, single-label names, local domains such as `fritz.box` or `.local`); elsewhere use `https://`. If the external URL is missing or unusable, the integration falls back to the automatic address, logs a warning, and the Repair issue says that its fix writes the automatic address. After a change the Repair issue offers **Update HA Server Address (IP:Port)**, which rewrites only the address of the Web-IO devices. The Web-IO commands stay unchanged on HTTP, also for an `https://` address: Comexio picks HTTP or HTTPS itself. |
 | **Show sync notifications** | Display pop-up progress messages during WebIO sync. |
 | **Ignore Web-IO warnings** | Suppress the Repair issue when the Web-IO class is out of sync. |
 | **Show offline extension entities** | Show entities of offline modules as *Unavailable* instead of hiding them. |
-| **Cover detection keywords** | Comma-separated keywords to classify IOs as covers (e.g. `blind, shutter, roller`). |
+| **Cover detection keywords** | Comma-separated keywords; an analog marker whose name contains one becomes a 0–100 % number/sensor (default `rollo, jalousie, blind, markise, awning`). A marker name with `temp`, `setpoint`, `°C` or the word `Grad` becomes a °C temperature (−273 to 10,000); a bare `Soll` does not. |
 
 ---
 
@@ -77,6 +78,8 @@ Open via **⋮ → Reconfigure** on the integration entry. Allows updating host,
 <img src="docs/assets/ui/2_integration_reconf-1_en.png" width="320">
 
 > **Tip:** Leave password fields blank to keep the existing password. The integration runs a connection test before saving and reloads automatically on success.
+
+> **Rejected credentials:** If Comexio refuses the stored admin credentials (when the integration starts or on a poll), HA starts a *Re-authenticate Comexio* flow instead — enter the current username and password there. Until the credentials are updated, the configuration poll stops and the integration does not try the refused credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and starts the reauth flow again if Comexio still refuses them. While the integration is first being added, refused credentials show an error in the setup form instead.
 
 ---
 
@@ -191,10 +194,11 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | **Merker als Entitäten anlegen** | Merker-Import aktivieren/deaktivieren. |
 | **Ein- und Ausgänge anlegen** | IO-Import aktivieren/deaktivieren. |
 | **Abfrageintervall** | Dropdown (1 – 1440 min). Längere Intervalle bevorzugen — Live-Werte kommen per Webhook. |
+| **Webhook-Adresse** | Wohin Comexio die Live-Werte pusht. *Automatisch*: die lokale Adresse von HA. *Externe HA-URL*: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (`https` ohne Port bedeutet 443). *Eigene Adresse*: eine URL, die in einem zweiten Schritt eingegeben wird (`http(s)://host[:port]`, ohne Pfad). Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Eine reine `http://`-Adresse wird deshalb nur im lokalen Netz akzeptiert (private IPs, Namen ohne Punkt, lokale Domains wie `fritz.box` oder `.local`); sonst `https://` verwenden. Fehlt die externe URL oder ist sie nicht nutzbar, weicht die Integration auf die automatische Adresse aus, schreibt eine Warnung ins Log, und das Reparatur-Issue sagt, dass seine Korrektur die automatische Adresse schreibt. Nach einer Änderung bietet das Reparatur-Issue **HA Server-Adresse (IP:Port) aktualisieren** an; das schreibt nur die Adresse der Web-IO-Geräte neu. Die Web-IO-Befehle bleiben unverändert auf HTTP, auch bei einer `https://`-Adresse: Comexio wählt HTTP oder HTTPS selbst. |
 | **Fortschritts-Popups anzeigen** | Fortschrittsmeldungen während des WebIO-Syncs anzeigen. |
 | **Web-IO-Warnung ignorieren** | Reparatur-Issue unterdrücken, wenn die Web-IO-Klasse nicht synchron ist. |
 | **Offline-Extensions anzeigen** | Entitäten offline gegangener Module als *Nicht verfügbar* anzeigen statt ausblenden. |
-| **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste zur Klassifizierung von IOs als Abdeckungen (z. B. `rollo, jalousie, blind`). |
+| **Schlüsselwörter Rollladen-Erkennung** | Kommaseparierte Liste; ein analoger Merker, dessen Name eines davon enthält, wird zur 0–100-%-Zahl bzw. zum %-Sensor (Standard `rollo, jalousie, blind, markise, awning`). Ein Merkername mit `temp`, `setpoint`, `°C` oder dem Wort `Grad` wird zur °C-Temperatur (−273 bis 10 000); ein bloßes `Soll` reicht dafür nicht. |
 
 ---
 
@@ -205,6 +209,8 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 <img src="docs/assets/ui/2_integration_reconf-1_de.png" width="320">
 
 > **Tipp:** Passwortfelder leer lassen bedeutet "bestehendes Passwort beibehalten". Die Integration führt vor dem Speichern einen Verbindungstest durch und lädt sich bei Erfolg automatisch neu.
+
+> **Abgelehnte Zugangsdaten:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten ab (beim Start der Integration oder bei einer Abfrage), startet HA stattdessen den Ablauf *Comexio erneut anmelden* — dort den aktuellen Benutzernamen und das Passwort eingeben. Bis die Zugangsdaten aktualisiert sind, ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und startet erneut den Ablauf *Comexio erneut anmelden*, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 ---
 

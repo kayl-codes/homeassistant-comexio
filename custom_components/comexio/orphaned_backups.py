@@ -15,7 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT
+from .const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT, function_plan_info, one_line_values
 from .function_plan_backup import FunctionPlanBackupManager
 
 ISSUE_ORPHANED_PLAN_BACKUPS = "orphaned_plan_backups"
@@ -64,7 +64,7 @@ def delete_all_orphaned_backup_issues(hass: HomeAssistant, server_id: str) -> No
 def repair_placeholders(issue_data: dict[str, Any]) -> dict[str, str]:
     """description_placeholders for the fix flow, rebuilt from the issue's data."""
     keys = ("plan_name", "fub_id", "count", "newest", "months", "current_plan")
-    return {**{key: str(issue_data.get(key, "?")) for key in keys}, "docs_url": BACKUPS_DOC_URL}
+    return {**one_line_values({key: issue_data.get(key, "?") for key in keys}), "docs_url": BACKUPS_DOC_URL}
 
 
 def format_captured_at(captured_at: str | None) -> str:
@@ -105,7 +105,7 @@ async def async_audit_orphaned_backups(
             "months": str(retention_months),
             # A plan renamed in Comexio looks exactly like a deleted one whose ID was reused;
             # naming the plan that holds the ID now lets the user tell the two apart.
-            "current_plan": str(fub_data.get(str(fub_id), {}).get("Name") or NO_CURRENT_PLAN),
+            "current_plan": str(function_plan_info(fub_data, fub_id).get("Name") or NO_CURRENT_PLAN),
         }
         ir.async_create_issue(
             hass,
@@ -114,7 +114,7 @@ async def async_audit_orphaned_backups(
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_ORPHANED_PLAN_BACKUPS,
-            translation_placeholders=details,
+            translation_placeholders=one_line_values(details),
             learn_more_url=BACKUPS_DOC_URL,
             # The fix flow gets only this data, not the placeholders — it renders the same text.
             data={"entry_id": entry_id, **details},

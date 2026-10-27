@@ -223,7 +223,7 @@ def test_reset_markers_touch_nothing_when_a_plan_is_missing(comexio_api: Comexio
 
 
 def test_reset_markers_touch_nothing_when_a_marker_reference_is_unreadable(comexio_api: ComexioAPI) -> None:
-    """Fail closed like marker_delete's force gate: a skipped reference would blank a placed marker."""
+    """Fail closed like marker_delete's placement check: a skipped reference would blank a placed marker."""
     markers = {"20": {"Id": 20, "Name": "Switch A [K1]", "Type": 1, "DefaultValue": 1, "Store": 1}}
     comexio_api.get_raw_config = AsyncMock(return_value={"FubModules": {"2": markers}, "Fubs": {"1": {}}})
     broken = {"elements": {"1": {"reference": {"type": 2, "ref_id": "broken"}}}, "connections": {}}

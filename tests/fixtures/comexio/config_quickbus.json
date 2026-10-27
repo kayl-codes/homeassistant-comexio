@@ -1,0 +1,43 @@
+{
+  "FubModules": {
+    "1": {
+      "1": {
+        "extension": {"Name": "BASE", "Identifier": "1000-2000-3000"},
+        "inoutput": {
+          "11": {"Id": 11, "Identifier": "I1", "Description": "Taster Flur", "InOutputTypeId": 1, "Active": 1, "IntIsOutput": 0},
+          "46": {"Id": 46, "Identifier": "TL1", "Description": "Onboard Temperatur", "InOutputTypeId": 12, "Active": 0, "IntIsOutput": 0},
+          "201": {"Id": 201, "Identifier": "G1", "Description": "", "InOutputTypeId": 134, "Active": 1, "IntIsOutput": 0},
+          "202": {"Id": 202, "Identifier": "G18", "Description": "Licht Flur", "InOutputTypeId": 134, "Active": 1, "IntIsOutput": 0},
+          "203": {"Id": 203, "Identifier": "TL1", "Description": "", "InOutputTypeId": 12, "Active": 1, "IntIsOutput": 0},
+          "204": {"Id": 204, "Identifier": "R", "Description": "", "InOutputTypeId": 111, "Active": 1, "IntIsOutput": 1},
+          "211": {"Id": 211, "Identifier": "G1", "Description": "", "InOutputTypeId": 134, "Active": 1, "IntIsOutput": 0},
+          "212": {"Id": 212, "Identifier": "G18", "Description": "", "InOutputTypeId": 134, "Active": 0, "IntIsOutput": 0},
+          "213": {"Id": 213, "Identifier": "TL1", "Description": "", "InOutputTypeId": 12, "Active": 1, "IntIsOutput": 0}
+        },
+        "lowcan": {
+          "1": {"Id": 1, "Name": "MT Flur", "Identifier": "2400-1200-9000", "BaseTypeId": 1, "TypeId": 21, "Location": "extension-1", "Mode": 2, "Pos": 1, "FupId": 0},
+          "2": {"Id": 2, "Name": "MT Bad", "Identifier": "", "BaseTypeId": 1, "TypeId": 21, "Location": "extension-1", "Mode": 2, "Pos": 1, "FupId": 0}
+        },
+        "mapping": {
+          "wireless": [],
+          "lowcan": {"201": 1, "202": 1, "203": 1, "204": 1, "211": 2, "212": 2, "213": 2}
+        }
+      },
+      "2": {
+        "extension": {"Name": "Multibridge A6", "Identifier": "8600-1000-2000"},
+        "inoutput": {
+          "301": {"Id": 301, "Identifier": "PIR1", "Description": "", "InOutputTypeId": 126, "Active": 1, "IntIsOutput": 0},
+          "302": {"Id": 302, "Identifier": "TL1", "Description": "", "InOutputTypeId": 12, "Active": 1, "IntIsOutput": 0}
+        },
+        "lowcan": {
+          "3": {"Id": 3, "Name": "BM Diele", "Identifier": "", "BaseTypeId": 1, "TypeId": 22, "Location": "extension-2", "Mode": 2, "Pos": 1, "FupId": 0}
+        },
+        "mapping": {"wireless": [], "lowcan": {"301": 3, "302": "3"}}
+      }
+    }
+  },
+  "WebDevices": {
+    "30": {"Name": "HomeAssistant [IO]", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 7},
+    "31": {"Name": "HomeAssistant [QB]", "Ip": "192.168.1.20:8123", "WebDeviceBaseId": 8}
+  }
+}

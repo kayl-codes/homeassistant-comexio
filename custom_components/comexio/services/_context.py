@@ -13,13 +13,21 @@ from typing import Any
 
 from homeassistant.components import persistent_notification
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import ServiceValidationError
+import homeassistant.helpers.config_validation as cv
+import voluptuous as vol
 
 from ..const import (
+    CERTIFICATE_CHANGED_MSG,
     DOMAIN,
-    FUNCTION_PLAN_LAYOUT_COLUMN_WIDTH as _LAYOUT_COLUMN_WIDTH,
-    FUNCTION_PLAN_LAYOUT_X_MARKER as _LAYOUT_X_MARKER,
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
+    LOGIN_ERROR_CERTIFICATE,
+    canvas_columns,
+    function_plan_info,
+    function_plans,
+    one_line,
+    unreadable_plan_keys,
 )
 from ..coordinator import ComexioCoordinator
 
@@ -31,19 +39,54 @@ _NO_INSTANCE_MSG = (
     "Please try again in a moment."
 )
 _LOGIN_FAILED_MSG = "Comexio admin login failed."
+
+
+def login_failed_message(api) -> str:
+    """What a service tells the user about a failed admin login; names a changed certificate."""
+    return CERTIFICATE_CHANGED_MSG if api.last_login_error == LOGIN_ERROR_CERTIFICATE else _LOGIN_FAILED_MSG
+
+
 NO_PLAN_SELECTED_MSG = (
     "No plan selected — the 'Plan' selector is empty or shows 'Orphaned plans'. "
     "Please specify the plan (fub_id) explicitly."
 )
 _INSTANCE_NOT_FOUND_LOG = "Comexio instance %s not found in hass.data"
 _INSTANCE_NOT_FOUND_MSG = "Comexio instance `{}` not found (not loaded, or wrong `config_entry`)."
+RESTORE_RUNNING_MSG = (
+    "A function plan restore is running — please wait for it to finish. It rewrites the plan, so a change "
+    "made now could be lost or mixed into the restored plan."
+)
+SYNC_RUNNING_MSG = (
+    "A sync, Web-IO range check, uninstall cleanup or integration reload is running — please wait for it to "
+    "finish. It writes into the function plans too, so a change made now could be lost or mixed into its writes."
+)
+PLAN_EDIT_RUNNING_MSG = (
+    "Another function plan change (sort, connect, start/stop, marker deletion, backup deletion or a bus-load "
+    "restart) is running — please wait for it to finish. Changes run one at a time: two at once could load the "
+    "same plan, and the later save would undo the other change."
+)
 
 _PLAN_LABEL_ID_RE = re.compile(r"\(ID (\d+)\)\s*$")
 
 
+def service_flag(call: ServiceCall, key: str, default: bool) -> bool:
+    """A boolean service field read as HA reads it ("false", "off", 0 → False); anything else is refused.
+
+    bool() would read the string "false" as True — for a deleting option that deletes what was spared.
+    """
+    value = call.data.get(key, default)
+    try:
+        return cv.boolean(value)
+    except vol.Invalid as err:
+        raise ServiceValidationError(f"'{key}' must be true or false, not {value!r}.") from err
+
+
 def format_plan_label(name: str, fub_id) -> str:
-    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id()."""
-    return f"{name} (ID {fub_id})"
+    """Format a plan's select-option label as "<name> (ID <fub_id>)", parseable by _resolve_fub_id().
+
+    The name is shown on one line; the label is read back only through its "(ID <n>)" suffix.
+    """
+    return f"{one_line(name)} (ID {fub_id})"
 
 
 def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
@@ -62,9 +105,31 @@ def _resolve_fub_id(fub_id_input: str, fub_data: dict, hass=None) -> int | None:
         return int(stripped)
     except ValueError:
         name_lower = stripped.lower()
-        for fid, fub in fub_data.items():
-            if fub.get("Name", "").lower() == name_lower:
-                return int(fid)
+        for fid, fub in function_plans(fub_data):
+            if str(fub.get("Name", "")).lower() == name_lower:
+                return fid
+    return None
+
+
+def _unreadable_plan_entry_msg(fub_id: int, fub_data: dict, *, live_plan: bool) -> str | None:
+    """Refusal text when fub_id's plan list entry is unreadable: its name and run state are unknown.
+
+    live_plan: the service acts on the plan in Comexio, so a plan not readably listed while the list
+    holds unreadable entries (one of them may be this plan) is refused too. Backup services leave it
+    out: a deleted plan's backups stay reachable.
+    """
+    if function_plan_info(fub_data, fub_id):
+        return None
+    if str(fub_id) in fub_data:
+        return (
+            f"The plan list entry of plan ID {fub_id} is unreadable "
+            f"({one_line(repr(fub_data[str(fub_id)]))}); not acting on it."
+        )
+    if live_plan and (bad_keys := unreadable_plan_keys(fub_data)):
+        return (
+            f"Plan ID {fub_id} is not readable in the plan list, which has unreadable entries "
+            f"({one_line(', '.join(bad_keys))}); not acting on it."
+        )
     return None
 
 
@@ -72,9 +137,14 @@ def _available_plans_str(fub_data: dict) -> str:
     """Return human-readable list of available plans from fub_data."""
     if not fub_data:
         return "no plans loaded — reload the integration"
-    return ", ".join(
-        f"'{fub.get('Name', '?')}' (ID {fid})" for fid, fub in sorted(fub_data.items(), key=lambda x: int(x[0]))
+    plans = ", ".join(
+        f"'{one_line(fub.get('Name', '?'))}' (ID {fid})"
+        for fid, fub in sorted(function_plans(fub_data), key=lambda x: x[0])
     )
+    # A plan behind an unreadable entry is not listed: say so, or the list reads as complete.
+    if skipped := len(unreadable_plan_keys(fub_data)):
+        plans = f"{plans} (+{skipped} unreadable plan list entries)".lstrip()
+    return plans
 
 
 def _resolve_coordinator(
@@ -163,9 +233,12 @@ async def _async_get_service_context(
                 title=error_title,
             )
             return None
+        if unreadable := _unreadable_plan_entry_msg(fub_id, api.fub_data, live_plan=False):
+            persistent_notification.async_create(hass, unreadable, title=error_title)
+            return None
 
     if do_login and not await api.login():
-        persistent_notification.async_create(hass, _LOGIN_FAILED_MSG, title=error_title)
+        persistent_notification.async_create(hass, login_failed_message(api), title=error_title)
         return None
 
     return coordinator, api, fub_id
@@ -194,7 +267,7 @@ async def _resolve_backup_identity(
         return identities[0][0], None
     if not identities:
         return None, f"No stored backups for plan {fub_id}."
-    names = ", ".join(f"'{name}'" for name, _ in identities)
+    names = ", ".join(f"'{one_line(name)}'" for name, _ in identities)
     return (
         None,
         (
@@ -222,14 +295,45 @@ def _parse_snapshot_field(raw: str) -> tuple[int, str, int, str | None] | None:
         return None
 
 
-def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: str) -> tuple[Any, Any, int] | None:
+def refuse_while_plans_busy(hass: HomeAssistant, coordinator: ComexioCoordinator, error_title: str) -> bool:
+    """Whether a restore, a sync / range check / uninstall cleanup / reload (they hold _sync_lock) or
+    another plan edit (see coordinator.plan_edit) runs.
+
+    Then notify and return True: the caller must not edit a plan. All of them rewrite function
+    plans, and a reload closes the API session.
+    """
+    # Sync first: a reload holds _restore_lock too (restores_held_off), and is no restore.
+    if coordinator._sync_lock.locked() or coordinator.in_sync or coordinator.unloading:
+        msg = SYNC_RUNNING_MSG
+    elif coordinator._restore_lock.locked():
+        msg = RESTORE_RUNNING_MSG
+    elif coordinator.plan_edits_running:
+        msg = PLAN_EDIT_RUNNING_MSG
+    else:
+        return False
+    _LOGGER.warning(
+        "[%s] %s not started — a restore, sync, cleanup, reload or another function plan edit is running",
+        coordinator.server_id,
+        error_title,
+    )
+    persistent_notification.async_create(hass, msg, title=error_title)
+    return True
+
+
+def _resolve_function_plan(
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
+) -> tuple[Any, Any, int] | None:
     """Resolve (coordinator, api, fub_id) for a function plan service call — without logging in.
 
     Handles config_entry auto-resolution (when only one Comexio instance exists) and fub_id
     resolution via `_resolve_fub_id`, notifying the user and returning None on any failure.
+    edits_plan (the default): refuse while a restore runs — it rewrites the plan this call would
+    change, and the two would mix or one would silently lose its change.
     """
     coordinator = _resolve_coordinator(hass, call, error_title)
     if coordinator is None:
+        return None
+    if edits_plan and refuse_while_plans_busy(hass, coordinator, error_title):
         return None
 
     api = coordinator.api
@@ -246,6 +350,9 @@ def _resolve_function_plan(hass: HomeAssistant, call: ServiceCall, error_title: 
             title=error_title,
         )
         return None
+    if unreadable := _unreadable_plan_entry_msg(fub_id, api.fub_data, live_plan=True):
+        persistent_notification.async_create(hass, unreadable, title=error_title)
+        return None
 
     return coordinator, api, fub_id
 
@@ -259,14 +366,21 @@ async def _ensure_comexio_login(hass: HomeAssistant, api, error_title: str) -> b
 
 
 async def _resolve_function_plan_context(
-    hass: HomeAssistant, call: ServiceCall, error_title: str
+    hass: HomeAssistant, call: ServiceCall, error_title: str, *, edits_plan: bool = True
 ) -> tuple[Any, Any, int] | None:
-    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in."""
-    ctx = _resolve_function_plan(hass, call, error_title)
+    """Resolve (coordinator, api, fub_id) for a function plan service call and ensure the admin session is logged in.
+
+    edits_plan: the caller must enter coordinator.plan_edit() right after this returns, with no
+    await in between — the last restore check runs here, the mark keeps a restore out after it.
+    """
+    ctx = _resolve_function_plan(hass, call, error_title, edits_plan=edits_plan)
     if ctx is None:
         return None
-    _coordinator, api, _fub_id = ctx
+    coordinator, api, _fub_id = ctx
     if not await _ensure_comexio_login(hass, api, error_title):
+        return None
+    # Again after the login round-trip: a restore may have started meanwhile.
+    if edits_plan and refuse_while_plans_busy(hass, coordinator, error_title):
         return None
     return ctx
 
@@ -299,5 +413,5 @@ def _get_canvas_grid_dims(
         x_max, y_max = api.get_fub_canvas_bounds(fub_id)
 
     rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / row_step))
-    max_cols = max(1, round((x_max - _LAYOUT_X_MARKER) / _LAYOUT_COLUMN_WIDTH))
+    max_cols = canvas_columns(x_max)
     return canvas_label, x_max, y_max, rows_per_col, max_cols

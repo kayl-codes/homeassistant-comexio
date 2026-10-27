@@ -19,10 +19,10 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from ..const import DOMAIN, MarkerKind, webio_class_name
+from ..const import DOMAIN, MarkerKind, function_plans, one_line, unreadable_plan_keys, webio_class_name
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
-from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator
+from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator, service_flag
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -229,8 +229,8 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
 
         # Only classes the user opted into — an opted-out category (e.g. KNX, default off) has
         # no HA entities, so uploading its (empty) Web-IO base would just leave an orphan class
-        # on the Comexio server.
-        sync_classes = coordinator.active_webio_classes
+        # on the Comexio server. The same for the Quickbus class while the server has no Quickbus IO.
+        sync_classes = coordinator.required_webio_classes
 
         if not do_upload:
             preview_parts = []
@@ -239,7 +239,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
                 web_io_json = api.generate_webio_json(
                     server_id,
                     class_name,
-                    coordinator.data,
+                    coordinator.webio_source_data(),
                     webio_class=cls,
                     ignored_marker_ids=coordinator.ignored_marker_ids,
                     ignored_knx_ids=coordinator.ignored_knx_ids,
@@ -256,7 +256,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
             web_io_json = api.generate_webio_json(
                 server_id,
                 class_name,
-                coordinator.data,
+                coordinator.webio_source_data(),
                 webio_class=cls,
                 ignored_marker_ids=coordinator.ignored_marker_ids,
                 ignored_knx_ids=coordinator.ignored_knx_ids,
@@ -285,7 +285,7 @@ async def _handle_function_plan_debug_session(hass: HomeAssistant, call: Service
     if ctx is None:
         return
     coordinator, _api, _fub_id = ctx
-    active = bool(call.data.get("open"))
+    active = service_flag(call, "open", False)
     _LOGGER.debug("Function Plan Debug Session: open=%s", active)
     coordinator.set_debug_session_active(active)
 
@@ -449,7 +449,7 @@ async def _handle_function_plan_preview_stop(hass: HomeAssistant, call: ServiceC
 async def _search_plan_labels(
     coordinator: ComexioCoordinator,
     api: Any,
-    fid: str,
+    fid: int,
     fub: dict,
     catalog: dict,
     markers_by_id: dict,
@@ -468,13 +468,13 @@ async def _search_plan_labels(
     # takes ~11s against the embedded Comexio server, which processes requests
     # serially regardless of client-side concurrency. Only plans missing from the
     # snapshot (e.g. right after startup) are fetched live.
-    plan_data = coordinator.function_plan_plans.get(int(fid))
+    plan_data = coordinator.function_plan_plans.get(fid)
     if plan_data is None:
         if login_state["ok"] is None:
             login_state["ok"] = await api.login()
-        plan_data = await api.function_plan_load_elements(int(fid)) if login_state["ok"] else None
+        plan_data = await api.function_plan_load_elements(fid) if login_state["ok"] else None
     if not plan_data:
-        return None, f"{fub.get('Name', '?')} (fub {fid})"
+        return None, f"{one_line(fub.get('Name', '?'))} (fub {fid})"
     hits: set[str] = set()
     for elem in plan_data.get("elements", {}).values():
         # Comments carry multi-line text — flatten like the text visualization does.
@@ -494,7 +494,7 @@ def _build_search_notification_lines(
     max_shown = 15  # a broad wildcard can match hundreds of labels — keep the notification readable
     lines: list[str] = []
     for res in results:
-        lines.append(f"**{res['plan_name']}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
+        lines.append(f"**{one_line(res['plan_name'])}** (fub {res['fub_id']}) — {len(res['matches'])} match(es):")
         lines += [f"- {label}" for label in res["matches"][:max_shown]]
         if len(res["matches"]) > max_shown:
             lines.append(f"- … and {len(res['matches']) - max_shown} more (full list in the service response)")
@@ -508,7 +508,7 @@ def _build_search_notification_lines(
     if failed:
         lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
     if selector_set:
-        lines.append(f"\nSingle plan hit — the 'Plan' selector was set to **{results[0]['plan_name']}**.")
+        lines.append(f"\nSingle plan hit — the 'Plan' selector was set to **{one_line(results[0]['plan_name'])}**.")
     elif len(results) == 1:
         lines.append("\nSingle plan hit, but the 'Plan' selector could not be updated — pass fub_id explicitly.")
     lines.append(f"\nDuration: {duration:.1f}s")
@@ -541,9 +541,10 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
     knx_by_id = coordinator.function_plan_knx_label_map()
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
-    plans = sorted(api.fub_data.items(), key=lambda kv: int(kv[0]))
+    plans = sorted(function_plans(api.fub_data), key=lambda kv: kv[0])
     results: list[dict] = []
-    failed: list[str] = []
+    # A plan list entry the search cannot read is not searched: report it, never a complete search.
+    failed: list[str] = [f"unreadable plan list entry '{one_line(key)}'" for key in unreadable_plan_keys(api.fub_data)]
     total_hits = 0
     login_state: dict[str, bool | None] = {"ok": None}  # lazy, at most one login attempt
     for fid, fub in plans:
@@ -565,7 +566,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
             continue
         if hits:
             total_hits += len(hits)
-            results.append({"fub_id": int(fid), "plan_name": fub.get("Name", "?"), "matches": hits})
+            results.append({"fub_id": fid, "plan_name": fub.get("Name", "?"), "matches": hits})
 
     duration = time.monotonic() - t_start
     # An unambiguous hit selects the plan right away (user wish): the next call

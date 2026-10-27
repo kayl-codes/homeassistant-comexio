@@ -10,22 +10,35 @@ Two independent stores per server:
 Comexio provides no modification timestamps for plans, so every snapshot carries
 the capture timestamp instead. Every snapshot also freezes the stable keys of the block ids it
 uses, so it stays readable after Comexio shifted those ids (function_plan_block_keys), and the
-block settings of its elements, which Comexio keeps outside the plan (function_plan_block_settings).
+block settings of its elements and the configs of its scene blocks and Quantum modules, which Comexio
+keeps outside the plan (function_plan_block_settings, function_plan_module_configs).
 Snapshots live under .storage/ and are therefore included in Home Assistant's own backups.
 """
 
-from collections.abc import Callable, Mapping
+import asyncio
+from collections.abc import Awaitable, Callable, Mapping
+import contextlib
 from datetime import datetime, timedelta
+import functools
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Concatenate
 
 from aiocomexio.function_plan import plan_hash, referenced_label_metadata
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, FUNCTION_PLAN_AUTO_BACKUP_SLOTS, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS, TIMESTAMP_DISPLAY_FORMAT
+from .const import (
+    DOMAIN,
+    FUNCTION_PLAN_AUTO_BACKUP_SLOTS,
+    FUNCTION_PLAN_CHANGE_BACKUP_SLOTS,
+    TIMESTAMP_DISPLAY_FORMAT,
+    distinct_one_line,
+    function_plan_info,
+    one_line,
+    unreadable_plan_keys,
+)
 from .function_plan_block_keys import (
     NO_FUB_BASE,
     SNAPSHOT_KEYS,
@@ -43,6 +56,13 @@ from .function_plan_block_settings import (
     plan_block_settings,
     snapshot_block_settings,
 )
+from .function_plan_module_configs import (
+    SNAPSHOT_MODULE_CONFIGS,
+    ModuleConfigs,
+    module_configs_changed,
+    plan_module_configs,
+    snapshot_module_configs,
+)
 
 if TYPE_CHECKING:
     from .function_plan_catalog import FunctionPlanCatalogManager
@@ -53,6 +73,9 @@ STORAGE_VERSION = 1
 
 # Snapshot key: Comexio's firmware version at capture time (ComexioAPI.comexio_version).
 SNAPSHOT_COMEXIO_VERSION = "comexio_version"
+# Set on a snapshot whose paper format was unreadable when it was taken — unlike a snapshot from
+# before the format was tracked, it never gets a later format backfilled as its own.
+SNAPSHOT_PAPER_UNKNOWN = "paper_unknown"
 
 # Fallback used when backfilling snapshots captured before paper/DPI tracking existed and
 # the plan can no longer be matched live (deleted or reassigned) — a spacious default so a
@@ -62,30 +85,146 @@ _FALLBACK_DPI = 90
 _FALLBACK_ORIENTATION = "landscape"
 
 
+class PlanBackupsNotMovedError(Exception):
+    """Taking a rename over failed to move the plan's backups (coordinator.async_watch_id_holder); nothing changed."""
+
+
 def _backfill_identity_group(
     identities: dict[str, list[dict[str, Any]]],
     live_name: str | None,
     live_format: tuple[str, int, str] | None,
-) -> int:
+) -> list[dict[str, Any]]:
     """Fill in missing paper/dpi/orientation on every snapshot under one fub_id key.
 
     Paper format is the same for every snapshot of a given plan_name (see
     async_backfill_paper_metadata), so it's resolved once per plan_name bucket rather than
-    once per snapshot. Returns the number of snapshots filled in.
+    once per snapshot. Returns the snapshots filled in.
     """
-    filled = 0
+    filled: list[dict[str, Any]] = []
     for plan_name, history in identities.items():
-        is_live_identity = live_format is not None and live_name is not None and plan_name == live_name
+        is_live_identity = live_name is not None and plan_name == live_name
+        if is_live_identity and live_format is None:
+            continue  # its format is unreadable this cycle: left for a later one
         fallback = (_FALLBACK_PAPER, _FALLBACK_DPI, _FALLBACK_ORIENTATION)
-        paper, dpi, orientation = live_format if is_live_identity else fallback
+        paper, dpi, orientation = live_format if is_live_identity and live_format else fallback
         for snap in history:
-            if "paper" in snap:
+            if "paper" in snap or snap.get(SNAPSHOT_PAPER_UNKNOWN):
                 continue
             snap["paper"] = paper
             snap["dpi"] = dpi
             snap["orientation"] = orientation
-            filled += 1
+            filled.append(snap)
     return filled
+
+
+def _copy_keys(data: dict[str, Any], keys: tuple[str, ...]) -> dict[str, dict[str, Any] | None]:
+    """The identity maps under these fub_id keys (None: absent), copied deep enough to put them back."""
+    return {key: ({name: list(h) for name, h in data[key].items()} if key in data else None) for key in keys}
+
+
+def _serialized[**P, R](
+    method: Callable[Concatenate["FunctionPlanBackupManager", P], Awaitable[R]],
+) -> Callable[Concatenate["FunctionPlanBackupManager", P], Awaitable[R]]:
+    """Run a backup-store write under the manager's write lock, one at a time.
+
+    The writes await their saves: overlapping, a deletion could land between another write's
+    change and its save, and a failed save's put-back (_put_back, the roll-backs) would restore
+    a whole fub_id bucket over a change made meanwhile — deleted backups would come back or a
+    new one would be lost. Never call one serialized method from another (the lock is not
+    reentrant): a serialized method that needs another's work calls its unserialized helper
+    (e.g. async_purge_orphaned → _async_delete_plan_backups).
+    """
+
+    @functools.wraps(method)
+    async def wrapper(self: "FunctionPlanBackupManager", *args: P.args, **kwargs: P.kwargs) -> R:
+        async with self._write_lock:
+            return await method(self, *args, **kwargs)
+
+    return wrapper
+
+
+# (store, its data, the keys _copy_keys copied before the change)
+_StoreSave = tuple[Any, dict[str, Any], dict[str, dict[str, Any] | None]]
+
+
+def _put_back(data: dict[str, Any], before: dict[str, dict[str, Any] | None]) -> None:
+    """Put the keys copied by _copy_keys back as they were."""
+    for key, identities in before.items():
+        if identities is None:
+            data.pop(key, None)
+        else:
+            data[key] = identities
+
+
+async def _async_save_all_or_put_back(saves: list[_StoreSave]) -> None:
+    """Save every store, or none: on a failure put all keys back, re-save the stores already saved, raise.
+
+    A lineage move spans the auto and the change store: saved in one only, the plan's backups
+    would sit under two IDs. Re-saving the stores already written takes their change back on
+    disk too; when that fails as well it is logged — memory then holds the state before the move.
+    A cancelled save is put back as well: memory left moved would hide the old lineage from a retry. Its
+    interrupted store is re-saved too, as its write may still land. The re-saves finish despite a second
+    cancel (_async_finish_despite_cancel).
+    """
+    saved: list[_StoreSave] = []
+    try:
+        for save in saves:
+            await save[0].async_save(save[1])
+            saved.append(save)
+    except (Exception, asyncio.CancelledError) as err:
+        for _store, data, before in saves:
+            _put_back(data, before)
+        if isinstance(err, asyncio.CancelledError):
+            saved = saves[: len(saved) + 1]
+        try:
+            await _async_finish_despite_cancel(asyncio.ensure_future(_async_save_put_back(saved)))
+        except asyncio.CancelledError:
+            if not isinstance(err, asyncio.CancelledError):
+                # The cancel propagates instead: the failure behind the put-back would leave no trace.
+                _LOGGER.error("Function Plan backup: a lineage move failed (%r), then was cancelled", err)
+            raise
+        raise
+
+
+async def _async_finish_despite_cancel(task: asyncio.Future[None]) -> None:
+    """Wait for task to end even when cancelled meanwhile; then re-raise the first cancel.
+
+    The caller holds the write lock (see _serialized) until the task ends: a later write must not overlap it.
+    """
+    try:
+        await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            with contextlib.suppress(asyncio.CancelledError):  # a further cancel: the first one is raised
+                await asyncio.shield(task)
+        raise
+
+
+async def _async_save_put_back(saved: list[_StoreSave]) -> None:
+    """Write the put-back stores to disk; a store that fails is logged, the others are still written."""
+    for store, data, _before in saved:
+        try:
+            await store.async_save(data)
+        except Exception:
+            # Memory holds the state before the move; this store's next save writes it to disk.
+            _LOGGER.exception(
+                "Function Plan backup: a store could not be put back on disk after a failed lineage move — "
+                "until its next save it keeps the moved lineage there"
+            )
+
+
+async def _async_save_backfill_or_take_back(store: Any, data: dict[str, Any], filled: list[dict[str, Any]]) -> None:
+    """Save a backfill; on failure remove what it filled in, then raise.
+
+    Kept in memory, the filled snapshots would count as done: no later cycle would save them again.
+    """
+    try:
+        await store.async_save(data)
+    except Exception:
+        for snap in filled:
+            for key in ("paper", "dpi", "orientation"):
+                snap.pop(key, None)
+        raise
 
 
 def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> dict[str, Any]:
@@ -107,6 +246,9 @@ def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> 
     if (settings := snapshot_block_settings(snap)) is not None:
         # How many block values the snapshot carries — the diff only shows the ones that changed.
         entry["block_setting_count"] = sum(len(values) for values in settings.values())
+    if (configs := snapshot_module_configs(snap)) is not None:
+        # How many scene blocks / Quantum modules the snapshot stores a config for.
+        entry["module_config_count"] = len(configs)
     return entry
 
 
@@ -127,7 +269,7 @@ def _newer_timestamp(a: str | None, b: str | None) -> str | None:
         return b
     if b is None:
         return a
-    return a if a > b else b
+    return max(a, b)
 
 
 def is_orphaned_identity(fub_data: dict[str, Any] | None, fub_id: int, plan_name: str) -> bool:
@@ -138,7 +280,7 @@ def is_orphaned_identity(fub_data: dict[str, Any] | None, fub_id: int, plan_name
     makes every identity orphaned. A fub_id that now carries a different name counts as
     orphaned (ID reused).
     """
-    return fub_data is not None and fub_data.get(str(fub_id), {}).get("Name") != plan_name
+    return fub_data is not None and function_plan_info(fub_data, fub_id).get("Name") != plan_name
 
 
 def _newest_orphaned_in_store(
@@ -197,6 +339,84 @@ def _plan_settings(
     if block_settings is None:
         return None
     return plan_block_settings(block_settings, plan_data.get("elements") or {})
+
+
+def _plan_module_configs(
+    module_configs: Mapping[str, Mapping[str, Any]] | None, plan_data: dict[str, Any]
+) -> ModuleConfigs | None:
+    """The scene block / Quantum module configs of one plan, None when they could not be read."""
+    if module_configs is None:
+        return None
+    return plan_module_configs(module_configs, plan_data.get("elements") or {})
+
+
+def snapshot_paper_format(snapshot: Mapping[str, Any]) -> tuple[str, int, str] | None:
+    """A snapshot's stored (paper, dpi, orientation), or None when it was captured without them.
+
+    A malformed stored value (a damaged or hand-edited backup) counts as not stored either.
+    """
+    if not snapshot.get("paper"):
+        return None
+    try:
+        dpi = int(snapshot.get("dpi", _FALLBACK_DPI))
+    except (TypeError, ValueError):
+        return None
+    orientation = snapshot.get("orientation", _FALLBACK_ORIENTATION)
+    if orientation not in ("portrait", "landscape"):
+        return None
+    return str(snapshot["paper"]), dpi, orientation
+
+
+def format_paper_format(paper_format: tuple[str, int, str]) -> str:
+    """'A4 @ 90 DPI, landscape' — how the backup diff names a paper format."""
+    paper, dpi, orientation = paper_format
+    return f"{paper} @ {dpi} DPI, {orientation}"
+
+
+def _paper_format_changed(previous: Mapping[str, Any], current: tuple[Any, Any, Any]) -> bool:
+    """Whether today's paper/DPI/orientation differ from the ones the previous snapshot stored.
+
+    Not read this poll (None) never counts as a change, nor does a previous snapshot from before
+    the format was tracked — but one taken while it was unreadable, or storing a malformed one,
+    does, so the readable format gets stored.
+    """
+    if None in current:
+        return False
+    if (stored := snapshot_paper_format(previous)) is None:
+        return bool(previous.get(SNAPSHOT_PAPER_UNKNOWN)) or "paper" in previous
+    return stored != (str(current[0]), int(current[1]), str(current[2]))
+
+
+def _auto_backup_plan_name(fub_data: dict[str, Any], key: str, list_unreadable: bool) -> str | None:
+    """The name plan key is backed up under (its ID when unlisted), None while its entry is or may be unreadable.
+
+    An unreadable entry would store the plan under the bogus identity (id, "id"); the poll warns about it.
+    """
+    if key not in fub_data and not list_unreadable:
+        return key
+    if info := function_plan_info(fub_data, key):
+        return info.get("Name", key)
+    _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data.get(key))
+    return None
+
+
+def _auto_backup_reason(
+    history: list[dict[str, Any]],
+    new_hash: str,
+    plan_settings: Mapping[str, Any] | None,
+    paper_format: tuple[Any, Any, Any],
+    plan_configs: ModuleConfigs | None = None,
+) -> str | None:
+    """Why a plan needs a new auto backup ('wiring', 'block settings', ...), None when it does not."""
+    if not history or history[0].get("hash") != new_hash:
+        return "wiring"
+    if block_settings_changed(history[0], plan_settings):
+        return "block settings"
+    if module_configs_changed(history[0], plan_configs):
+        return "module configs"
+    if _paper_format_changed(history[0], paper_format):
+        return "paper format"
+    return None
 
 
 def retention_cutoff(months: int) -> datetime:
@@ -259,7 +479,8 @@ _ORPHAN_SNAPSHOT_INDENT = "\u00a0" * 4
 
 def _orphan_plan_label(orphan: dict[str, Any]) -> str:
     count = len(orphan["backups"])
-    return f"{orphan['plan_name']} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
+    shown = distinct_one_line(orphan["plan_name"])
+    return f"{shown} (ID {orphan['fub_id']}) — {count} backup{'' if count == 1 else 's'}"
 
 
 def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
@@ -267,10 +488,13 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
 
     One plan row per orphaned identity (see FunctionPlanBackupManager.orphaned_plans_sync),
     followed by its indented snapshot rows. choice carries the identity plus the kind/slot to
-    show; a plan row shows the plan's newest snapshot. Shared by select.py (options) and
+    show and that snapshot's captured_at — slots are list positions that shift after a delete,
+    the capture time names the snapshot itself (comexio-plan-card.js compares it with the preview
+    image's). A plan row shows the plan's newest snapshot. Shared by select.py (options) and
     button.py (resolving the chosen label back), like format_backup_label. Labels must be
     unique select options, but two plans changed in the same minute share a snapshot row
-    label — a repeat gets its plan appended.
+    label — a repeat gets its plan appended. Names that differ only in line breaks or spacing
+    are told apart by distinct_one_line, which labels each raw name the same on every rebuild.
     """
     rows: list[tuple[str, dict[str, Any]]] = []
     seen: set[str] = set()
@@ -278,15 +502,18 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
         identity = {"fub_id": orphan["fub_id"], "plan_name": orphan["plan_name"], "kept": orphan["kept"]}
         backups = orphan["backups"]
         newest = max(backups, key=lambda entry: entry.get("captured_at") or "")
-        plan_choice = {**identity, "kind": newest["kind"], "slot": newest["slot"], "plan_row": True}
-        rows.append((_orphan_plan_label(orphan), plan_choice))
+        rows.append((_orphan_plan_label(orphan), {**identity, **_orphan_snapshot_ref(newest), "plan_row": True}))
         for entry in backups:
             label = f"{_ORPHAN_SNAPSHOT_INDENT}{format_backup_label(entry)}"
             if label in seen:
-                label += f" · {orphan['plan_name']} (ID {orphan['fub_id']})"
+                label += f" · {distinct_one_line(orphan['plan_name'])} (ID {orphan['fub_id']})"
             seen.add(label)
-            rows.append((label, {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False}))
+            rows.append((label, {**identity, **_orphan_snapshot_ref(entry), "plan_row": False}))
     return rows
+
+
+def _orphan_snapshot_ref(entry: dict[str, Any]) -> dict[str, Any]:
+    return {"kind": entry["kind"], "slot": entry["slot"], "captured_at": entry.get("captured_at")}
 
 
 def summarize_orphaned_backups(orphans: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
@@ -323,6 +550,11 @@ class FunctionPlanBackupManager:
         # by hand (or un-kept in the plan card).
         self._kept_store: Store = Store(hass, STORAGE_VERSION, f"{DOMAIN}_function_plan_backup_kept_{server_id}")
         self._kept: set[tuple[int, str]] = set()
+        # Serializes every write to the three stores (see _serialized).
+        self._write_lock = asyncio.Lock()
+        # Serializes the first load: a reader loading alongside a writer could otherwise assign its
+        # older disk copy over the snapshot the writer just added, and the next save would drop it.
+        self._load_lock = asyncio.Lock()
         # Lazy-loaded caches: {fub_id_str: {plan_name: [snapshot, ...]}} — newest first per identity.
         # fub_id alone is not a stable identity (Comexio reuses IDs after deletion), so rotation
         # and lookups are always scoped to the (fub_id, plan_name) pair, never to fub_id alone.
@@ -353,6 +585,11 @@ class FunctionPlanBackupManager:
     async def _async_ensure_loaded(self) -> None:
         if self._loaded:
             return
+        async with self._load_lock:
+            if not self._loaded:  # a caller waiting on the lock finds the caches loaded meanwhile
+                await self._async_load_stores()
+
+    async def _async_load_stores(self) -> None:
         self._auto_data = await self._auto_store.async_load() or {}
         if self._migrate_legacy_shape(self._auto_data):
             await self._auto_store.async_save(self._auto_data)
@@ -395,6 +632,23 @@ class FunctionPlanBackupManager:
             self._kept.discard((fub_id, plan_name))
             await self._async_save_kept()
 
+    async def _async_forget_kept_after_move(self, fub_id: int, plan_name: str) -> None:
+        """_async_forget_kept_if_gone after a rekey/purge whose backups are saved by then.
+
+        A failing keep-store save is logged, never raised: the caller would report the backups as
+        not moved although they were. The keep decision stays dropped in memory, so the next
+        keep-store save writes it.
+        """
+        try:
+            await self._async_forget_kept_if_gone(fub_id, plan_name)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] Function Plan backup: keep decision for '%s' (fub=%s) not saved as dropped",
+                self._server_id,
+                one_line(plan_name),
+                fub_id,
+            )
+
     @staticmethod
     def _build_snapshot(
         plan_data: dict[str, Any],
@@ -406,6 +660,7 @@ class FunctionPlanBackupManager:
         comexio_version: str | None = None,
         label_metadata: dict[str, dict[str, str]] | None = None,
         block_settings: dict[str, dict[str, str]] | None = None,
+        module_configs: ModuleConfigs | None = None,
     ) -> dict[str, Any]:
         snapshot = {
             "hash": plan_hash(plan_data),
@@ -418,6 +673,8 @@ class FunctionPlanBackupManager:
             snapshot["operation"] = operation
         if paper is not None:
             snapshot["paper"] = paper
+        else:
+            snapshot[SNAPSHOT_PAPER_UNKNOWN] = True
         if dpi is not None:
             snapshot["dpi"] = dpi
         if orientation is not None:
@@ -427,6 +684,9 @@ class FunctionPlanBackupManager:
         if block_settings is not None:
             # None: the settings could not be read, so the snapshot does not claim to have none.
             snapshot[SNAPSHOT_BLOCK_SETTINGS] = block_settings
+        if module_configs is not None:
+            # None: not read, as for the block settings.
+            snapshot[SNAPSHOT_MODULE_CONFIGS] = module_configs
         if comexio_version is not None:
             # Comexio's own firmware/frontend version at capture time (ComexioAPI.comexio_version,
             # e.g. "11.0.2") — lets a restore warn that this snapshot predates a firmware
@@ -434,6 +694,7 @@ class FunctionPlanBackupManager:
             snapshot[SNAPSHOT_COMEXIO_VERSION] = comexio_version
         return snapshot
 
+    @_serialized
     async def async_auto_backup(
         self,
         plans: dict[int, dict[str, Any]],
@@ -445,8 +706,9 @@ class FunctionPlanBackupManager:
         ios_by_id: dict[str, Any] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
         held_back: Callable[[], bool] | None = None,
+        module_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
-        """Rotate in snapshots for all plans whose wiring or block settings changed since the last auto backup.
+        """Rotate in snapshots for all plans whose wiring, block settings, module configs or paper format changed.
 
         plan_format: optional {fub_id_str: (paper, dpi, orientation)} so the snapshot can
         record the canvas settings needed to recreate the plan identically on restore.
@@ -455,6 +717,7 @@ class FunctionPlanBackupManager:
         referenced_label_metadata.
         block_settings: every element's block settings (ComexioAPI.block_settings); None when they
         could not be read, so only a changed wiring makes a new snapshot then.
+        module_configs: the scene block / Quantum module tables (ComexioAPI.module_configs), None alike.
         held_back: asked once more right before the history changes (after the awaits below); True
         stores nothing — a restore started meanwhile (see ComexioCoordinator.pause_auto_backup).
         Returns one {fub_id, plan_name, captured_at} entry per plan that produced a new
@@ -468,16 +731,21 @@ class FunctionPlanBackupManager:
             _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore started meanwhile", self._server_id)
             return []
         changed_identities: list[dict[str, Any]] = []
+        rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]] = []
+        # Any unreadable entry may be an unlisted plan's ("08" for 8): its name is unknown then.
+        list_unreadable = bool(unreadable_plan_keys(fub_data))
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
+            if (plan_name := _auto_backup_plan_name(fub_data, key, list_unreadable)) is None:
+                continue
             new_hash = plan_hash(plan_data)
-            plan_name = fub_data.get(key, {}).get("Name", key)
             history = self._auto_data.setdefault(key, {}).setdefault(plan_name, [])
             plan_settings = _plan_settings(block_settings, plan_data)
-            wiring_changed = not history or history[0].get("hash") != new_hash
-            if not wiring_changed and not block_settings_changed(history[0], plan_settings):
-                continue
+            plan_configs = _plan_module_configs(module_configs, plan_data)
             paper, dpi, orientation = (plan_format or {}).get(key, (None, None, None))
+            reason = _auto_backup_reason(history, new_hash, plan_settings, (paper, dpi, orientation), plan_configs)
+            if reason is None:
+                continue
             label_metadata = referenced_label_metadata(
                 plan_data, markers_by_id or {}, webio_by_id or {}, ios_by_id or {}
             )
@@ -490,8 +758,10 @@ class FunctionPlanBackupManager:
                 comexio_version=comexio_version,
                 label_metadata=label_metadata,
                 block_settings=plan_settings,
+                module_configs=plan_configs,
             )
             _freeze_block_keys(snapshot, fub_base)
+            rollback.append((history, list(history), snapshot))
             history.insert(0, snapshot)
             del history[FUNCTION_PLAN_AUTO_BACKUP_SLOTS:]
             changed_identities.append(
@@ -500,16 +770,36 @@ class FunctionPlanBackupManager:
             _LOGGER.info(
                 "[%s] Function Plan auto backup: plan '%s' (fub=%s) changed (%s) — %d/%d slot(s) used",
                 self._server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
-                "wiring" if wiring_changed else "block settings",
+                reason,
                 len(history),
                 FUNCTION_PLAN_AUTO_BACKUP_SLOTS,
             )
         if changed_identities:
-            await self._auto_store.async_save(self._auto_data)
+            await self._async_save_auto_or_roll_back(rollback)
         return changed_identities
 
+    async def _async_save_auto_or_roll_back(
+        self, rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]]
+    ) -> None:
+        """Save the auto backups; on failure put each changed history back as it was, then raise.
+
+        Kept in memory, an unsaved snapshot would be what the next cycle compares against: the
+        change it records would never be backed up again (until a restart or another change).
+        A history changed meanwhile (e.g. a restore promoting a slot during the save) is left
+        alone rather than overwritten with the copy taken before — also when the restore promoted
+        the inserted snapshot itself (it then carries restored_at and is the restore's, not ours).
+        """
+        try:
+            await self._auto_store.async_save(self._auto_data)
+        except Exception:
+            for history, before, inserted in rollback:
+                if history and history[0] is inserted and "restored_at" not in inserted:
+                    history[:] = before
+            raise
+
+    @_serialized
     async def async_change_backup(
         self,
         fub_id: int,
@@ -524,11 +814,12 @@ class FunctionPlanBackupManager:
         webio_by_id: dict[str, Any] | None = None,
         ios_by_id: dict[str, Any] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
+        module_configs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         """Rotate in a pre-mutation snapshot for one plan (call BEFORE HA modifies it).
 
         markers_by_id/webio_by_id/ios_by_id: live label maps at capture time — see
-        async_auto_backup / referenced_label_metadata. block_settings: see async_auto_backup.
+        async_auto_backup / referenced_label_metadata. block_settings / module_configs: see async_auto_backup.
         """
         await self._async_ensure_loaded()
         history = self._change_data.setdefault(str(fub_id), {}).setdefault(plan_name, [])
@@ -543,6 +834,7 @@ class FunctionPlanBackupManager:
             comexio_version,
             label_metadata,
             _plan_settings(block_settings, plan_data),
+            _plan_module_configs(module_configs, plan_data),
         )
         _freeze_block_keys(snapshot, await self._async_fub_base())
         history.insert(0, snapshot)
@@ -551,38 +843,63 @@ class FunctionPlanBackupManager:
         _LOGGER.info(
             "[%s] Function Plan pre-change backup: plan '%s' (fub=%s), operation '%s' — %d/%d slot(s) used",
             self._server_id,
-            plan_name,
+            one_line(plan_name),
             fub_id,
             operation,
             len(history),
             FUNCTION_PLAN_CHANGE_BACKUP_SLOTS,
         )
 
+    @_serialized
     async def async_backfill_paper_metadata(
         self,
         fub_data: dict[str, Any],
         plan_format: dict[str, tuple[str, int, str]],
+        held_back: Callable[[], bool] | None = None,
     ) -> int:
         """Add paper/dpi/orientation to snapshots stored before this was tracked (idempotent).
 
-        Matches a snapshot to its live plan by fub_id + plan_name (Comexio has never been
-        observed to let a plan's paper/DPI/orientation change after creation, so the current
-        live value is authoritative for still-existing plans). No match (plan deleted or its
-        ID reused by a different plan) falls back to A3 @ 90 DPI landscape. Snapshots that
-        already carry a "paper" key are left untouched, so this is safe to call on every
-        backup cycle. Returns the number of snapshots filled in.
+        Matches a snapshot to its live plan by fub_id + plan_name and stamps the live format — a
+        best guess only: a plan's paper/DPI/orientation can change (seen live 2026-10-13), and
+        before that was backed up on its own a legacy snapshot may predate such a change. No
+        match (plan deleted or its ID reused by a different plan) falls back to A3 @ 90 DPI
+        landscape; the snapshots of a live plan whose format is unreadable this cycle are left for a
+        later one (older names under its ID still get the fallback). Snapshots that
+        already carry a "paper" key, or were taken while the format was unreadable
+        (SNAPSHOT_PAPER_UNKNOWN), are left untouched, so this is safe to call on every backup
+        cycle. held_back: asked after loading, right before the snapshots change; True fills in
+        nothing — a restore since plan_format was read may have changed the format (see
+        ComexioCoordinator.pause_auto_backup). Returns the number of snapshots filled in.
         """
         await self._async_ensure_loaded()
+        if held_back is not None and held_back():
+            _LOGGER.debug("[%s] Function Plan paper/DPI backfill skipped: a restore ran meanwhile", self._server_id)
+            return 0
+        if bad_keys := unreadable_plan_keys(fub_data):
+            # An unreadable entry may be any backed-up plan: it would read as deleted and get the fallback.
+            _LOGGER.debug(
+                "[%s] Function Plan paper/DPI backfill skipped: plan list entries %r are unreadable",
+                self._server_id,
+                bad_keys,
+            )
+            return 0
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
-            group_filled = 0
+            group_filled: list[dict[str, Any]] = []
             for key, identities in data.items():
-                live_name = fub_data.get(key, {}).get("Name")
+                live_name = function_plan_info(fub_data, key).get("Name")
                 live_format = plan_format.get(key)
+                if live_name is not None and live_format is None:
+                    _LOGGER.debug(
+                        "[%s] Function Plan backup: paper metadata backfill for plan %s deferred — "
+                        "its paper format is not readable",
+                        self._server_id,
+                        key,
+                    )
                 group_filled += _backfill_identity_group(identities, live_name, live_format)
             if group_filled:
-                await store.async_save(data)
-            filled += group_filled
+                await _async_save_backfill_or_take_back(store, data, group_filled)
+            filled += len(group_filled)
         if filled:
             _LOGGER.info(
                 "[%s] Function Plan backup: backfilled paper/DPI metadata on %d snapshot(s)", self._server_id, filled
@@ -598,6 +915,7 @@ class FunctionPlanBackupManager:
         fub_base, _changed_at = await self._async_catalog_state()
         return fub_base
 
+    @_serialized
     async def async_backfill_block_keys(self) -> dict[str, int]:
         """Add block keys to snapshots stored before they were captured (idempotent).
 
@@ -626,6 +944,7 @@ class FunctionPlanBackupManager:
             )
         return filled
 
+    @_serialized
     async def async_rekey_fub_id(self, old_fub_id: int, new_fub_id: int, plan_name: str) -> int:
         """Move one identity's stored backup history from old_fub_id to new_fub_id.
 
@@ -638,38 +957,74 @@ class FunctionPlanBackupManager:
         auto-backup), re-sorts newest first, and truncates back to the normal slot limits.
         A no-op if old_fub_id has no history for plan_name. Returns the number moved.
         """
-        await self._async_ensure_loaded()
-        old_key, new_key = str(old_fub_id), str(new_fub_id)
-        moved = 0
-        for data, store, limit in (
-            (self._auto_data, self._auto_store, FUNCTION_PLAN_AUTO_BACKUP_SLOTS),
-            (self._change_data, self._change_store, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS),
-        ):
-            old_identities = data.get(old_key)
-            old_history = old_identities.pop(plan_name, None) if old_identities else None
-            if old_identities is not None and not old_identities:
-                data.pop(old_key, None)
-            if not old_history:
-                continue
-            new_identities = data.setdefault(new_key, {})
-            combined = new_identities.get(plan_name, []) + old_history
-            combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
-            new_identities[plan_name] = combined[:limit]
-            moved += len(old_history)
-            await store.async_save(data)
-        # The restored plan is live again under new_fub_id, so the keep decision is not carried over.
-        await self._async_forget_kept_if_gone(old_fub_id, plan_name)
+        moved = await self._async_move_identity((old_fub_id, plan_name), (new_fub_id, plan_name))
         if moved:
             _LOGGER.info(
                 "[%s] Function Plan backup: rekeyed %d snapshot(s) of '%s' from fub=%s to fub=%s",
                 self._server_id,
                 moved,
-                plan_name,
+                one_line(plan_name),
                 old_fub_id,
                 new_fub_id,
             )
         return moved
 
+    @_serialized
+    async def async_rename_identity(self, fub_id: int, old_name: str, new_name: str) -> int:
+        """Move one identity's stored backup history from old_name to new_name under the same fub_id.
+
+        For a plan renamed in Comexio (confirmed by the user): its history goes on under the new name
+        instead of being left as an orphaned chain. Combines with the history already captured under
+        the new name (its first auto backup after the rename) as async_rekey_fub_id does. Each moved snapshot
+        takes the new plan_name: listings and restores name the plan as it is called now. Returns the number moved.
+        """
+        moved = await self._async_move_identity((fub_id, old_name), (fub_id, new_name))
+        if moved:
+            _LOGGER.info(
+                "[%s] Function Plan backup: moved %d snapshot(s) of fub=%s from '%s' to its new name '%s'",
+                self._server_id,
+                moved,
+                fub_id,
+                one_line(old_name),
+                one_line(new_name),
+            )
+        return moved
+
+    async def _async_move_identity(self, old: tuple[int, str], new: tuple[int, str]) -> int:
+        """Merge identity old's auto and change history into new's (newest first, slot limits); the number moved.
+
+        Called under the write lock (see _serialized). Saved all or nothing (_async_save_all_or_put_back).
+        The keep decision of old is dropped: its plan is live again under new.
+        """
+        await self._async_ensure_loaded()
+        (old_fub_id, old_name), (new_fub_id, new_name) = old, new
+        old_key, new_key = str(old_fub_id), str(new_fub_id)
+        moved = 0
+        saves: list[_StoreSave] = []
+        for data, store, limit in (
+            (self._auto_data, self._auto_store, FUNCTION_PLAN_AUTO_BACKUP_SLOTS),
+            (self._change_data, self._change_store, FUNCTION_PLAN_CHANGE_BACKUP_SLOTS),
+        ):
+            # Copied before the pop: with old_key == new_key the copy must still hold the old history.
+            before = _copy_keys(data, (old_key, new_key))
+            old_identities = data.get(old_key)
+            old_history = old_identities.pop(old_name, None) if old_identities else None
+            if old_identities is not None and not old_identities:
+                data.pop(old_key, None)
+            if not old_history:
+                continue
+            new_identities = data.setdefault(new_key, {})
+            # Renamed copies: the put-back on a failed save restores the originals from before.
+            combined = new_identities.get(new_name, []) + [{**snap, "plan_name": new_name} for snap in old_history]
+            combined.sort(key=lambda s: s.get("captured_at") or "", reverse=True)
+            new_identities[new_name] = combined[:limit]
+            saves.append((store, data, before))
+            moved += len(old_history)
+        await _async_save_all_or_put_back(saves)
+        await self._async_forget_kept_after_move(old_fub_id, old_name)
+        return moved
+
+    @_serialized
     async def async_purge_identity(self, fub_id: int, plan_name: str) -> int:
         """Remove only the plan_name bucket at fub_id (auto + change).
 
@@ -683,25 +1038,30 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         key = str(fub_id)
         removed = 0
+        saves: list[_StoreSave] = []
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
             identities = data.get(key)
             if not identities or plan_name not in identities:
                 continue
-            removed += len(identities.pop(plan_name))
+            before = _copy_keys(data, (key,))
+            purged = identities.pop(plan_name)
             if not identities:
                 data.pop(key, None)
-            await store.async_save(data)
-        await self._async_forget_kept_if_gone(fub_id, plan_name)
+            saves.append((store, data, before))
+            removed += len(purged)
+        await _async_save_all_or_put_back(saves)
+        await self._async_forget_kept_after_move(fub_id, plan_name)
         if removed:
             _LOGGER.info(
                 "[%s] Function Plan backup: purged %d superseded snapshot(s) of '%s' at old fub=%s",
                 self._server_id,
                 removed,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
         return removed
 
+    @_serialized
     async def async_mark_restored(self, kind: str, fub_id: int, plan_name: str, snapshot: Mapping[str, Any]) -> bool:
         """Promote a just-restored snapshot to slot 0 of its own kind-array and flag it.
 
@@ -734,25 +1094,36 @@ class FunctionPlanBackupManager:
                 "backup history (deleted, rotated out or without capture time) — not marked restored",
                 self._server_id,
                 kind,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
                 captured_at,
             )
             return False
+        before, previous_mark = list(history), history[slot].get("restored_at")
         snap = history.pop(slot)
         snap["restored_at"] = dt_util.utcnow().isoformat()
         history.insert(0, snap)
-        await store.async_save(data)
+        try:
+            await store.async_save(data)
+        except Exception:
+            # Unsaved, the promotion must not stay in memory: the caller reports it as not done.
+            history[:] = before
+            if previous_mark is None:
+                snap.pop("restored_at", None)
+            else:
+                snap["restored_at"] = previous_mark
+            raise
         _LOGGER.info(
             "[%s] Function Plan backup: promoted %s[%d] of '%s' (fub=%s) to slot 0 after restore",
             self._server_id,
             kind,
             slot,
-            plan_name,
+            one_line(plan_name),
             fub_id,
         )
         return True
 
+    @_serialized
     async def async_delete_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int) -> bool:
         """Delete a single stored snapshot (one slot of one plan identity/kind). Returns True if removed."""
         await self._async_ensure_loaded()
@@ -776,12 +1147,17 @@ class FunctionPlanBackupManager:
             kind,
             slot,
             fub_id,
-            plan_name,
+            one_line(plan_name),
         )
         return True
 
+    @_serialized
     async def async_delete_plan_backups(self, fub_id: int, plan_name: str) -> int:
         """Delete ALL stored snapshots (auto + change) for one plan identity. Returns the number removed."""
+        return await self._async_delete_plan_backups(fub_id, plan_name)
+
+    async def _async_delete_plan_backups(self, fub_id: int, plan_name: str) -> int:
+        """async_delete_plan_backups without taking the write lock — for a caller already holding it."""
         await self._async_ensure_loaded()
         key = str(fub_id)
         removed = 0
@@ -800,10 +1176,11 @@ class FunctionPlanBackupManager:
                 self._server_id,
                 removed,
                 fub_id,
-                plan_name,
+                one_line(plan_name),
             )
         return removed
 
+    @_serialized
     async def async_delete_all_backups(self) -> int:
         """Delete every stored snapshot for every plan (auto + change). Returns the number removed."""
         await self._async_ensure_loaded()
@@ -830,7 +1207,7 @@ class FunctionPlanBackupManager:
 
         Shape: {"auto": [...], "change": [...]} with entries
         {fub_id, plan_name, captured_at, hash, operation?, restored_at?, paper?, dpi?, orientation?,
-        comexio_version?, block_setting_count?, slot}.
+        comexio_version?, block_setting_count?, module_config_count?, slot}.
         slot is scoped per (fub_id, plan_name) identity, not per raw fub_id.
         """
         await self._async_ensure_loaded()
@@ -888,6 +1265,7 @@ class FunctionPlanBackupManager:
                 expired.append((fub_id, plan_name, newest))
         return expired
 
+    @_serialized
     async def async_expired_orphans(
         self, fub_data: dict[str, Any] | None, cutoff: datetime
     ) -> list[dict[str, Any]] | None:
@@ -914,6 +1292,7 @@ class FunctionPlanBackupManager:
             for fub_id, name, newest in self._expired_orphans(fub_data, cutoff)
         ]
 
+    @_serialized
     async def async_keep_orphaned(self, fub_id: int, plan_name: str) -> bool:
         """Keep an orphaned identity's snapshots for good: no repair, no purge, only manual deletion.
 
@@ -928,10 +1307,11 @@ class FunctionPlanBackupManager:
             "[%s] Function Plan backup: keeping the backups of deleted plan fub=%s ('%s')",
             self._server_id,
             fub_id,
-            plan_name,
+            one_line(plan_name),
         )
         return True
 
+    @_serialized
     async def async_unkeep_orphaned(self, fub_id: int, plan_name: str) -> bool:
         """Take back a keep decision (plan card's orphaned-plans view). True if one was stored.
 
@@ -947,7 +1327,7 @@ class FunctionPlanBackupManager:
             "[%s] Function Plan backup: no longer keeping the backups of deleted plan fub=%s ('%s')",
             self._server_id,
             fub_id,
-            plan_name,
+            one_line(plan_name),
         )
         return True
 
@@ -967,12 +1347,14 @@ class FunctionPlanBackupManager:
         orphans.sort(key=lambda orphan: (orphan["plan_name"].lower(), orphan["fub_id"]))
         return orphans
 
+    @_serialized
     async def async_purge_orphaned(self, fub_data: dict[str, Any] | None, cutoff: datetime) -> list[dict[str, Any]]:
         """Delete all snapshots (auto + change) of every orphaned identity older than cutoff.
 
         Only the manual function_plan_purge_orphaned_backups service calls this; the periodic
         backup cycle raises a repair per identity instead (see orphaned_backups.py). A live
-        plan's backups are never touched, no matter how old, and neither are kept ones.
+        plan's backups are never touched, no matter how old, and neither are kept ones — the
+        whole purge holds the write lock, so a keep decision cannot slip in between.
         Returns one {fub_id, plan_name, removed, captured_at} entry per identity actually purged.
         """
         await self._async_ensure_loaded()
@@ -982,7 +1364,7 @@ class FunctionPlanBackupManager:
             return []
         purged: list[dict[str, Any]] = []
         for fub_id, plan_name, newest in self._expired_orphans(fub_data, cutoff):
-            if removed := await self.async_delete_plan_backups(fub_id, plan_name):
+            if removed := await self._async_delete_plan_backups(fub_id, plan_name):
                 purged.append({"fub_id": fub_id, "plan_name": plan_name, "removed": removed, "captured_at": newest})
         return purged
 
@@ -1008,6 +1390,11 @@ class FunctionPlanBackupManager:
                         referenced.add(str(ref.get("ref_id")))
         return referenced
 
+    def plan_names_for_fub_id_sync(self, fub_id: int) -> set[str]:
+        """The plan names the auto and change snapshots of fub_id are kept under (cache-only)."""
+        key = str(fub_id)
+        return {name for data in (self._auto_data, self._change_data) for name in (data or {}).get(key, {})}
+
     def plan_backups_for_identity_sync(self, fub_id: int, plan_name: str) -> list[dict[str, Any]]:
         """Return auto+change snapshot metadata for one plan identity, newest first per kind.
 
@@ -1027,6 +1414,12 @@ class FunctionPlanBackupManager:
                     entry["restored_at"] = snap["restored_at"]
                 entries.append(entry)
         return entries
+
+    def newest_auto_hash_sync(self, fub_id: int, plan_name: str) -> str | None:
+        """The plan_hash of an identity's newest auto backup (cache-only); None without one."""
+        snapshot = self._stored_snapshot("auto", fub_id, plan_name, 0)
+        value = None if snapshot is None else snapshot.get("hash")
+        return value if isinstance(value, str) and value else None
 
     def summary(self) -> dict[str, Any]:
         """Return a sync summary from the caches (zeros before the first async_load)."""
@@ -1061,6 +1454,11 @@ class FunctionPlanBackupManager:
         """A stored snapshot's block settings (cache-only); None without the snapshot or its settings."""
         snapshot = self._stored_snapshot(kind, fub_id, plan_name, slot)
         return None if snapshot is None else snapshot_block_settings(snapshot)
+
+    def paper_format_sync(self, kind: str, fub_id: int, plan_name: str, slot: int) -> tuple[str, int, str] | None:
+        """A stored snapshot's (paper, dpi, orientation) (cache-only); None without the snapshot or its format."""
+        snapshot = self._stored_snapshot(kind, fub_id, plan_name, slot)
+        return None if snapshot is None else snapshot_paper_format(snapshot)
 
     def block_check_sync(self, kind: str, fub_id: int, plan_name: str, slot: int) -> dict[str, Any] | None:
         """function_plan_block_keys.block_check of a stored snapshot, from the caches (for the backup selector).

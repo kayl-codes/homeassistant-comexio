@@ -1,34 +1,42 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Set as AbstractSet
 import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import html
 import logging
 import math
 import pathlib
 import re
-import socket
 import time
 from typing import Any
 import uuid
 
-from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError, ComexioError
-from aiocomexio.function_plan import build_source_id_translation, render_plan_svg, snapshot_label_maps
+from aiocomexio import (
+    ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
+    ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+)
+from aiocomexio.function_plan import build_source_id_translation, plan_hash, render_plan_svg, snapshot_label_maps
+from aiocomexio.webio import quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Event, HomeAssistant, State, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import ConfigEntryAuthFailed, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_call_later, async_track_time_change, async_track_time_interval
 from homeassistant.helpers.storage import Store
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
 
 from .api import ComexioAPI
+from .certificate import async_clear_certificate_changed, async_report_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
     CLEANUP_SCOPE_KNX,
@@ -62,12 +70,12 @@ from .const import (
     CONF_API_USERNAME,
     CONF_BUS_WATCHDOG_AUTO_REBOOT,
     CONF_BUS_WATCHDOG_ENABLED,
+    CONF_CERTIFICATE_FINGERPRINT,
     CONF_COVER_KEYWORDS,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     CONF_FUNCTION_PLAN_FUB_ID,
-    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
@@ -81,6 +89,8 @@ from .const import (
     CONF_SERVER_ID,
     CONF_STATISTICS_CLEANUP_IGNORED,
     CONF_USERNAME,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -106,12 +116,18 @@ from .const import (
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS,
+    FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
     FUNCTION_PLAN_RUN_STATE_POLL_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC,
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    FUNCTION_PLAN_UNLOAD_POLL_SEC,
+    FUNCTION_PLAN_UNLOAD_WAIT_SEC,
+    FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC,
     FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
+    FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC,
     FUNCTION_PLAN_WATCHDOG_HA_STOP_GRACE_SEC,
     ICON_ADD,
     ICON_DELETE,
@@ -120,13 +136,22 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    IO_PLAN_KIND_IO,
+    IO_PLAN_KIND_QUICKBUS,
+    IO_PLAN_KINDS,
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     LOGIN_ERROR_CONNECTION,
+    LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
+    PLAN_FAILURE_AFTER_GONE_MEMBER,
+    PLAN_FAILURE_NOT_RESOLVED,
+    PLAN_FAILURE_OFF_CANVAS,
+    PLAN_FAILURE_UNREADABLE_PLAN_LIST,
     PLAN_TRANSITION_STARTING,
     PREVIEW_CARD_ALIVE_SEC,
+    QUICKBUS_IO_DATA_KEY,
     RANGE_CHECK_CHECKED,
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_EXCLUDED,
@@ -136,57 +161,111 @@ from .const import (
     SOURCE_CATEGORIES,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+    SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
+    WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
+    WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
+    WEBIO_CLASS_QUICKBUS,
     WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     WEBIO_RANGE_CHECK_HOUR,
     WEBIO_RANGE_CHECK_MINUTE,
+    IoPlanKind,
     MarkerKind,
     SourceCategory,
     WebioClass,
     active_webio_classes,
     bus_load_signal,
+    canvas_columns,
     category_by_fub_module_type,
     classify_audit_key,
     entity_id_migration_target,
-    expand_ignored_marker_ids,
+    extension_device_name,
+    format_ignored_ids,
+    function_plan_id,
     function_plan_ids,
+    function_plan_info,
+    function_plans,
     fw_update_signal,
+    ignored_id_in_ranges,
     import_disabled_issue_id,
+    invalid_ignored_tokens,
     io_audit_key,
-    io_column_rows,
+    io_plan_columns,
+    io_plan_gap_item,
+    io_plan_item_member,
+    io_plan_kind_of,
+    io_plan_label,
+    io_plan_member_origins,
+    io_plan_overflow,
+    io_plan_shifted,
+    one_line,
+    parse_ignored_ids,
+    parse_keyword_list,
     parse_watchdog_user_plan_pick,
     plan_watch_signal,
+    quickbus_device_id,
+    quickbus_device_label,
+    repointed_watchdog_user_plan_picks,
+    required_webio_classes,
+    selected_quickbus_devices,
     snap_to_grid,
     source_audit_key,
     source_category,
+    split_ignored_ids,
+    system_info_signal,
     trigger_pair_categories,
+    unreadable_plan_keys,
+    watchdog_user_plan_pick,
     webio_class_label,
     webio_class_name,
+    webio_quickbus_ios,
 )
-from .function_plan_backup import FunctionPlanBackupManager, build_orphaned_backup_options, retention_cutoff
+from .function_plan_backup import (
+    FunctionPlanBackupManager,
+    PlanBackupsNotMovedError,
+    build_orphaned_backup_options,
+    retention_cutoff,
+    snapshot_paper_format,
+)
 from .function_plan_block_settings import expand_autohide_blocks, snapshot_block_settings
 from .function_plan_catalog import FunctionPlanCatalogManager
-from .ha_address import HaAddressResolver, webio_device_hint
+from .ha_address import (
+    HaAddressResolver,
+    WebhookTarget,
+    host_of,
+    is_loopback_address,
+    webio_device_hints,
+)
 from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
     legacy_statistic_prefixes,
     stable_statistic_id_pattern,
 )
-from .plan_watchdog import ManagedPlanWatchdog, parse_start_action
+from .plan_watchdog import (
+    ACTION_RESTORE,
+    ACTION_START,
+    ManagedPlanWatchdog,
+    parse_plan_action,
+    unnamed_plan_label,
+    vanished_plan_token,
+)
 from .reference_monitor import ReferenceCatalogMonitor
+from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
 
 _LOGGER = logging.getLogger(__name__)
 
 _IMPORT_IOS_KEY = "import_ios"
+_IMPORT_QUICKBUS_KEY = "import_quickbus"
 
 # Errors that mean Comexio could not be reached at all (not: answered with an error or odd data).
 UNREACHABLE_ERRORS = (ComexioConnectionError, aiohttp.ClientError, TimeoutError)
@@ -212,6 +291,16 @@ _PAPER_NAME_BY_ID = {"2": "A3", "3": "A4", "4": "A5"}
 # e.g. by function_plan_add_source_pairs, never gets mirrored back into this cache). For the same
 # reason _function_plan_snapshot_complete() counts a seeded entry as a missing plan.
 _SEEDED_EMPTY_PLAN_MARKER = "_seeded_empty"
+# Audit buckets and mismatch keys derived from the function plans (see _carry_over_plan_audit).
+_PLAN_AUDIT_BUCKETS = (
+    "function_plan_missing",
+    "function_plan_dangling",
+    "function_plan_trigger_missing",
+    "function_plan_trigger_orphan",
+    "knx_bridge_missing",
+    "knx_bridge_loopback_missing",
+)
+_PLAN_AUDIT_KEY_PREFIXES = ("function_plan_", "knx_bridge_")
 
 _UNINSTALL_CLEANUP_LOG = "[%s] Uninstall cleanup: %s"
 
@@ -245,6 +334,10 @@ _SUN_ATTR_BY_FREQ = {
 }
 
 
+def _unknown_run_state(_fub_id: int) -> None:
+    """A watchdog run-state reader for a check without a fresh read: every plan's state is unknown."""
+
+
 def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
     """Pre-format sun.sun's next-occurrence attributes for the plan-preview tooltip.
 
@@ -266,6 +359,24 @@ def _build_sun_times(hass: HomeAssistant) -> dict[str, str]:
 
 # Title suffix of a preview rendered from a deleted plan's backup (German, like "[aktiv]").
 _ORPHANED_PREVIEW_TITLE_SUFFIX = "[verwaist]"
+
+
+# The root tag only: at the start, after an optional XML declaration (a comment or DOCTYPE before it
+# is not expected from render_plan_svg and leaves the SVG unstamped instead of stamping a wrong tag).
+_SVG_ROOT_TAG_RE = re.compile(r"\A\s*(?:<\?xml[^>]*\?>\s*)?<svg(?=[\s/>])")
+
+
+def stamp_preview_identity(svg_content: str, source: str, captured_at: str | None) -> str:
+    """The SVG with its render's source (and snapshot capture time) on the root element.
+
+    comexio-plan-card.js trusts the identity the image entity reports only for an image naming the
+    same render: the image URL always serves the newest render, which can land before the entity
+    state announcing it. Returned unchanged when the root tag is not found.
+    """
+    attributes = f' data-comexio-source="{html.escape(source)}"'
+    if captured_at:
+        attributes += f' data-comexio-captured-at="{html.escape(captured_at)}"'
+    return _SVG_ROOT_TAG_RE.sub(lambda match: match.group(0) + attributes, svg_content, count=1)
 
 
 def _write_preview_svg(path: pathlib.Path, svg_content: str) -> None:
@@ -303,6 +414,16 @@ def _plan_ref_ids(elements: dict[str, Any]) -> tuple[set[str], set[str], set[str
     return marker_ids, io_ids, knx_ids
 
 
+def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str]:
+    """ref_ids of the `source_type` (marker "2" / IO "1" / KNX "11") elements in one plan."""
+    ids: set[str] = set()
+    for elem in (plan_data.get("elements") or {}).values():
+        ref = elem.get("reference") or {}
+        if str(ref.get("type")) == source_type:
+            ids.add(str(ref.get("ref_id")))
+    return ids
+
+
 def _count_by_ref(by_ref: dict[int, list[int]]) -> int:
     """Total id count across all source categories of a per-ref_type trigger-audit map."""
     return sum(len(ids) for ids in by_ref.values())
@@ -318,7 +439,12 @@ def _format_by_ref(by_ref: dict[int, list[int]]) -> str:
 
 
 def _io_label(io: Mapping[str, Any]) -> str:
-    """An IO as the user knows it from Comexio: "<extension> <identifier>" (e.g. "BASE AI1")."""
+    """An IO as the user knows it from Comexio: "<extension> <identifier>" (e.g. "BASE AI1").
+
+    A Quickbus IO's identifier repeats on every device of its extension, so it names its device: "QB3 MT1 G1".
+    """
+    if quickbus := io.get("quickbus"):
+        return f"{quickbus_device_label(quickbus_device_id(io), quickbus.get('name'))} {io['identifier']}"
     return f"{io['ext_name']} {io['identifier']}"
 
 
@@ -327,32 +453,14 @@ def _io_labels(ios_by_id: Mapping[str, Mapping[str, Any]], io_ids: Iterable[str]
     return ", ".join(sorted(_io_label(ios_by_id[io_id]) for io_id in io_ids))
 
 
-def _has_usable_ext_id(io: Mapping[str, Any]) -> bool:
-    """Whether the IO's extension id is a plain non-negative integer the IO live request can carry.
-
-    ASCII decimal digits only, as aiocomexio accepts them: "²" passes isdigit and "٣" isdecimal,
-    but aiocomexio refuses both.
-    """
-    ext_id = str(io["ext_id"])
-    return ext_id.isascii() and ext_id.isdecimal()
-
-
-def _io_live_requests(ios: Iterable[Mapping[str, Any]]) -> tuple[list[tuple[int, str]], set[str]]:
-    """(extension id, IO id) of every IO whose live value to ask for, and the IO ids left out as conflicting.
+def _io_live_requests(ios: Iterable[Mapping[str, Any]]) -> list[tuple[int, str]]:
+    """(extension id, IO id) of every IO whose live value to ask for.
 
     Only IOs on online extensions: an offline extension cannot answer, its IOs keep their last
-    known value. An IO whose extension id is no integer is left out (logged by the coordinator,
-    see _track_ios_without_ext_id). An IO id under two different extension ids (e.g. two IOs
-    without "Id", both "None") is left out entirely: aiocomexio refuses such a request as a
-    whole, which would cost every IO its live value (logged, see _track_conflicting_ios).
+    known value. parse_config already leaves out extensions with a malformed id and IO ids that
+    repeat, so every pair is one aiocomexio accepts.
     """
-    candidates = [io for io in ios if not io.get("offline") and _has_usable_ext_id(io)]
-    ext_ids_by_io: dict[str, set[int]] = {}
-    for io in candidates:
-        ext_ids_by_io.setdefault(io["id"], set()).add(int(io["ext_id"]))
-    conflicting = {io_id for io_id, ext_ids in ext_ids_by_io.items() if len(ext_ids) > 1}
-    requests = [(int(io["ext_id"]), io["id"]) for io in candidates if io["id"] not in conflicting]
-    return requests, conflicting
+    return [(int(io["ext_id"]), io["id"]) for io in ios if not io.get("offline")]
 
 
 def _live_io_number(raw: Any) -> float | None:
@@ -395,6 +503,21 @@ def _apply_io_live_values(
     return real_ids
 
 
+def _readable_plan_ids(raw_config: Mapping[str, Any]) -> set[int] | None:
+    """Plan ids of a config page's plan list ($Fubs), None when it was not read or holds an unreadable entry.
+
+    aiocomexio decodes each page variable on its own, so $FubModules alone does not prove $Fubs
+    was read; an empty plan list still decodes to a dict. A list with an entry function_plans
+    skips counts as unread too: the skipped entry may be a plan, which must not read as deleted.
+    """
+    if not isinstance(fubs := raw_config.get("Fubs"), dict):
+        return None
+    if bad_keys := unreadable_plan_keys(fubs):
+        _LOGGER.debug("$Fubs entries %r are no readable plan — plan list counts as unread", bad_keys)
+        return None
+    return function_plan_ids(fubs)
+
+
 def _source_max_ids(raw_config: dict[str, Any]) -> tuple[int, int]:
     """Highest marker id and highest KNX object id in a raw config (0 if there are none)."""
     marker_data = raw_config.get("FubModules", {}).get("2", {})
@@ -428,16 +551,27 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
     import_markers = conf.get("import_markers", True)
     import_ios = conf.get(_IMPORT_IOS_KEY, True)
     import_knx = conf.get("import_knx", False)
+    import_quickbus = conf.get(_IMPORT_QUICKBUS_KEY, True)
+    io_all = parsed_data.get("io_all", [])
+    if not import_ios:
+        # io_all labels plan elements: imported Quickbus IOs keep theirs without the physical IOs.
+        io_all = [io for io in io_all if import_quickbus and io.get("quickbus")]
     return {
         "markers": parsed_data["markers"] if import_markers else [],
         "io": parsed_data["io"] if import_ios else [],
-        "io_all": parsed_data.get("io_all", []) if import_ios else [],
+        "io_all": io_all,
         "knx": parsed_data.get("knx", []) if import_knx else [],
+        QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
         "webio_commands": parsed_data.get("webio_commands", {}),
         "webio_names": parsed_data.get("webio_names", {}),
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
     }
+
+
+def _ignore_list_prefix_chars(category: SourceCategory) -> str:
+    """The letter prefixes an ID in the category's ignore-list may carry, e.g. "Mm"."""
+    return category.audit_key_prefix + category.audit_key_prefix.lower()
 
 
 def _fallback_audit_key(full_name: str) -> str:
@@ -457,6 +591,22 @@ def _fallback_audit_key(full_name: str) -> str:
     return full_name
 
 
+def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
+    """("QB<device id>", identifier) of a Quickbus command name "HA QB<device id> <device name> <identifier>".
+
+    The device name in the middle may contain spaces and may have been renamed in Comexio; the
+    device id and the identifier (G1, TL1, ...) at both ends still pin the IO.
+    """
+    parts = full_name.split(" ")
+    if (
+        len(parts) < 4
+        or parts[0] != "HA"
+        or not parts[1].startswith(SOURCE_CATEGORIES[WebioClass.QUICKBUS].audit_key_prefix)
+    ):
+        return None
+    return parts[1], parts[-1]
+
+
 def _build_com_audit_map(
     com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -469,11 +619,17 @@ def _build_com_audit_map(
     to the positional heuristic, purely for grouping.
     """
     name_to_key = {info["name"]: key for key, info in ha_map.items()}
+    # A renamed Quickbus device changes its command names but not the device id + identifier:
+    # grouped under the IO's key, the audit reports a rename that keeps the command (and the
+    # user's wiring of its webIoId) instead of an orphan to delete plus a new command.
+    quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
     com_map: dict[str, list[dict[str, Any]]] = {}
     for full_name, info in com_commands.items():
         key = name_to_key.get(full_name, full_name)
         if key == full_name:
-            key = _fallback_audit_key(full_name)
+            ref = _quickbus_command_ref(full_name)
+            key = quickbus_ref_to_key.get(ref) if ref else None
+            key = key or _fallback_audit_key(full_name)
         com_map.setdefault(key, []).append(
             {
                 "name": full_name,
@@ -528,34 +684,35 @@ def _log_audit_items(icon: str, label: str, items: list[dict[str, Any]]) -> None
     """One audit summary category: its count, then one line per item."""
     _LOGGER.info("%s %s (%d):", icon, label, len(items))
     for item in items:
-        _LOGGER.info("   -> %s", item["name"])
+        _LOGGER.info("   -> %s", one_line(item["name"]))
 
 
-async def _device_ip_mismatch(hass: HomeAssistant, ha_address: str, com_ip: str | None, com_dev_id: str | None) -> bool:
-    """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address."""
-    if not (com_dev_id and com_ip and com_ip != ha_address):
+async def _device_ip_mismatch(
+    resolver: HaAddressResolver, ha_address: str, com_ip: str | None, com_dev_id: str | None
+) -> bool:
+    """Whether a Web-IO device's recorded IP/port has drifted from this HA instance's current address.
+
+    Never for a loopback ha_address (the resolver's last resort, already warned about): the sync
+    would refuse to write it, so the repair could only offer a fix that cannot work.
+    """
+    if not (com_dev_id and com_ip and com_ip != ha_address) or is_loopback_address(ha_address):
         return False
     try:
-        ha_host, ha_port = ha_address.rsplit(":", 1)
-        com_host, com_port = com_ip.rsplit(":", 1)
-
-        if ha_port != com_port:
-            # Textual deviation detected, check DNS resolution
-            return True
-
-        # Ports are identical, compare resolved IPs
-        def resolve(name: str) -> str:
-            try:
-                return socket.gethostbyname(name)
-            except OSError:
-                return name
-
-        ha_ip = await hass.async_add_executor_job(resolve, ha_host)
-        com_resolved_ip = await hass.async_add_executor_job(resolve, com_host)
-        return ha_ip != com_resolved_ip
-    except ValueError:
-        # Fallback on unexpected format
+        ha_port = ha_address.rsplit(":", 1)[1]
+        com_port = com_ip.rsplit(":", 1)[1]
+    except IndexError:
+        return True  # no port: unexpected format
+    if ha_port != com_port:
         return True
+    # Same port: the same host when the two share an address (IPv4 or IPv6); a host that does not
+    # resolve (no valid hostname, no such name, no answer) only matches itself. The lookups are the
+    # resolver's (shared, bounded), so a stored name without answer differs from ha_address only when
+    # the resolver confirmed another address — then that one is the right one to write.
+    ha_host, com_host = host_of(ha_address) or "", host_of(com_ip) or ""
+    ha_ips, com_ips = await asyncio.gather(resolver.async_addresses(ha_host), resolver.async_addresses(com_host))
+    if ha_ips and com_ips:
+        return not ha_ips & com_ips
+    return ha_host.lower() != com_host.lower()
 
 
 BRIDGE_MARKERS_WAIT_FOR_TRIGGER_PLAN = "trigger plan still holds KNX pairs — bridge markers left for the re-run"
@@ -585,6 +742,14 @@ def _marker_reset_progress(report: Callable[[str], None], step: str) -> Callable
     return _cb
 
 
+EMPTY_PLAN_HASH = plan_hash({})
+
+
+def plan_has_elements(plan_data: Mapping[str, Any] | None) -> bool:
+    """Whether a loaded plan holds any element: empty plans all hash the same, so they prove no rename."""
+    return bool(plan_data and plan_data.get("elements"))
+
+
 async def webio_still_present(lookup: Callable[[str], Awaitable[Any]], name: str) -> str | None:
     """None once lookup(name) finds no Web-IO device/class of that name, else why a delete is unconfirmed."""
     try:
@@ -597,6 +762,7 @@ async def webio_still_present(lookup: Callable[[str], Awaitable[Any]], name: str
 # Details of a plan-cleanup step that did not complete, as (plan name, detail) in the
 # "failures" lists of unwire_webio_commands / delete_dangling_plan_elements.
 PLAN_LOAD_FAILED = "could not be loaded, cleanup skipped"
+PLAN_ENTRY_UNREADABLE = "plan list entry unreadable, cleanup skipped"
 PLAN_DELETE_FAILED = "element deletion failed"
 PLAN_CMD_NOT_FOUND = "Web-IO command not found, not deleted"
 
@@ -632,6 +798,21 @@ def _append_cleanup_outcome(outcome: dict[str, Any], result: dict, fub_id: int) 
             outcome[key].append(value)
 
 
+def _outdated_push_outcome(name: str, *, stopped: bool, current: bool) -> str:
+    """What becomes of a push sent before the update whose ID's plan is watched (logged with the ignored action)."""
+    if not stopped:
+        return f"{one_line(name)} runs, so it is taken off the phone"
+    if current:
+        return f"it is replaced by one for {one_line(name)}"
+    return f"{one_line(name)} was renamed since the last check, which pushes its alarm next"
+
+
+def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
+    """The name the last check gave a bare-ID pick's deleted plan; unnamed_plan_label unless just one."""
+    names = {name for vanished_id, name in previous if vanished_id == fub_id}
+    return next(iter(names)) if len(names) == 1 else unnamed_plan_label(fub_id)
+
+
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
@@ -645,13 +826,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         self.api: ComexioAPI = api
         self.api.config_entry = entry
+        self.api.on_certificate_mismatch = self._report_certificate_changed
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
-        self.ha_address = HaAddressResolver(hass)
+        conf = {**entry.data, **entry.options}
+        self.ha_address = HaAddressResolver(
+            hass, conf.get(CONF_WEBHOOK_ADDRESS_MODE, WEBHOOK_ADDRESS_AUTO), conf.get(CONF_WEBHOOK_URL)
+        )
         self._function_plan_backup_lock: asyncio.Lock = asyncio.Lock()
         self.last_changed_plans: list[dict[str, Any]] = []
         # Backup cycles in a row whose bulk load failed (see _track_bulk_load_result).
@@ -665,9 +850,47 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Restores running now, and a counter bumped by each one: the auto backup holds back
         # while one runs or ran during its cycle (see pause_auto_backup).
         self._auto_backup_pauses = 0
+        # Plan-editing service calls (sort, stop, activate, connect, marker delete) and bus-load
+        # cascades running right now — a restore refuses to start meanwhile (see plan_edit); set
+        # while none runs, so a reload can wait for the last one (see async_wait_for_plan_edits).
+        self._plan_edits_running = 0
+        self._plan_edits_done = asyncio.Event()
+        self._plan_edits_done.set()
+        # Set while async_reload_entry holds the restores off (restores_held_off): its unload must not wait again.
+        self._restores_held_for_reload = False
+        # Set once the entry unloads (async_wait_before_unload): no restore, plan edit or plan start begins
+        # any more, as the API session closes under it. Reset by async_unload_entry if the unload fails.
+        self.unloading = False
+        # (fub_id, name) of the vanished plans whose Restore runs or waits now (async_restore_vanished_plan).
+        self._vanished_restores: set[tuple[int, str]] = set()
+        # One vanished-plan Restore at a time: each reads the outcome its own restore noted (_restored_as_new).
+        self._vanished_restore_lock = asyncio.Lock()
+        # (old fub_id, plan name) → new fub_id of each restore-as-new that built its plan (note_plan_restored_as_new).
+        self._restored_as_new: dict[tuple[int, str], tuple[int, bool]] = {}
+        # (old fub_id, plan name) of a vanished-plan Restore the restore action refused: the plan is back.
+        self._vanished_plans_back: set[tuple[int, str]] = set()
         self._auto_backup_pause_generation = 0
         # Set once the watchdog logged that it waits for the first full plan list (see async_watch_managed_plans).
         self._plan_watch_deferred = False
+        # (fub_id, vanished name, ID holder) the watchdog compared by content and found no rename: not loaded again.
+        self._rename_checked: set[tuple[int, str, str]] = set()
+        # (fub_id, old name, new name, what failed) of a rename follow-up: its traceback is logged once.
+        self._rename_follow_failed: set[tuple[int, str, str, str]] = set()
+        # (fub_id, vanished name, ID holder) whose rename comparison failed: warned once, then logged at debug.
+        self._rename_compare_warned: set[tuple[int, str, str]] = set()
+        # (fub_id, vanished name, ID holder) whose rename check raised unexpectedly: its traceback is logged once.
+        self._rename_check_error_logged: set[tuple[int, str, str]] = set()
+        # (fub_id, old name) of a followed rename whose backups did not move yet -> the name its pick took. The
+        # backup cycle moves them on (_rename_sources). In memory only: after a restart only content unchanged
+        # since the rename finds them again, else they stay listed as orphaned backups.
+        self._rename_move_pending: dict[tuple[int, str], str] = {}
+        # One watchdog check at a time: an older one resuming after a newer one would sync stale vanished plans.
+        self._plan_watch_check_lock = asyncio.Lock()
+        # Set while the watchdog cannot load the backups: their load error is logged once per outage.
+        self._plan_watch_backups_unloadable = False
+        # fub_id → (plan_scrape_generation, time.monotonic()) when a watched plan first read as stopped:
+        # judged only once a plan list read after that tells a stopped plan from a deleted one.
+        self._plan_stop_unverified: dict[int, tuple[int, float]] = {}
         # Bulk snapshot of every live plan's elements/connections, refreshed each backup
         # cycle — lets function_plan_search answer instantly instead of a fresh ~11s
         # live fetch per plan (Comexio serializes requests server-side regardless of
@@ -704,16 +927,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # The ids that got a real value in this poll's _async_apply_io_live_states, committed by
         # _merge_polled_states once their value lands in io_states.
         self._polled_io_real_ids: set[str] = set()
-        # Requested IOs without a usable live answer, IOs left out of the request for an unusable
-        # extension id or a conflicting IO id, and whether the last IO live fetch failed as a
+        # Requested IOs without a usable live answer, and whether the last IO live fetch failed as a
         # whole, as of the last poll — logged on change only.
         self._unanswered_io_ids: set[str] = set()
-        self._ios_without_ext_id: set[str] = set()
-        self._conflicting_io_ids: set[str] = set()
         self._io_live_fetch_failing = False
         self.knx_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
+        # Quickbus IOs repeat their identifier per device, so the webhook addresses them by IO Id
+        self._quickbus_index: dict[str, dict[str, Any]] = {}
         self.audit_ignored: bool = False
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
@@ -734,6 +956,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_progress_pct: int | None = None
         self.sync_current_step: str | None = None
         self.last_audit_results: dict[str, Any] = {}
+        # The last plan-derived audit findings of a readable plan list (buckets None: none yet), kept
+        # while the plan list is unreadable. Own attributes: a reload or a missing class empties
+        # last_audit_results.
+        self._plan_audit_buckets: dict[str, Any] | None = None
+        self._plan_audit_mismatches: set[str] = set()
         # (webio_class value, source id) tuples — markers and KNX objects share a numeric id
         # namespace, so the category tag keeps the cleanup button routing them apart.
         self._cleanup_entity_ids: list[tuple[str, int]] = []
@@ -885,6 +1112,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.bus_workload: int | None = None
         self.bus_sd_card: bool | None = None
         self._bus_load_fail_streak = 0
+        # Free storage, time server settings, boot time (see async_start_system_info_poll).
+        self.system_info = SystemInfoState()
+        self._system_info_task: asyncio.Task[None] | None = None
         # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
         # into api.fub_data's Active flags; the api reports the changes HA itself causes
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
@@ -919,6 +1149,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Full polls in a row that read the config page but no plan list ($Fubs); api.parse_config
         # keeps the cached plans then (see FUNCTION_PLAN_LIST_UNREAD_THRESHOLD).
         self._plan_list_unread_polls = 0
+        self._reported_unreadable_plan_keys: list[str] = []
         self._plan_run_state_last_fetch: float = 0.0
         # Set while a run-state fetch is in flight: a slow answer must not overlap the next preview
         # tick or timer tick, whose newer answer an older one finishing last would overwrite.
@@ -955,15 +1186,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
         self._full_poll_running = True
+        mismatches_before = self.api.certificate_mismatch_count
         try:
             data = await self._async_fetch_and_audit()
         except UNREACHABLE_ERRORS:
             self.note_comexio_unreachable()
+            # A foreign certificate on a host name with several addresses arrives as a connection error.
+            if (actual := await self.api.fetch_replaced_fingerprint()) is not None:
+                self._report_certificate_changed(actual)
             raise
         finally:
             self._full_poll_running = False
         if self._last_poll_scraped:
             self._note_comexio_reachable()
+            # A request of this poll (or one alongside it) that met another certificate keeps its repair,
+            # also when a login or config fetch alongside it cleared certificate_mismatch since.
+            if self.api.certificate_mismatch is None and self.api.certificate_mismatch_count == mismatches_before:
+                self._clear_certificate_changed()
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
         if self._polled_plan_ids is not None:
@@ -988,12 +1227,28 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     "[%s] Plan list ($Fubs) readable again after %s polls", self.server_id, self._plan_list_unread_polls
                 )
             self._plan_list_unread_polls = 0
+            self._reported_unreadable_plan_keys = []
             return
         # A skipped poll (sync running) or a failed page fetch read nothing at all — no plan list to miss.
         if not self._last_poll_scraped:
             return
         self._plan_list_unread_polls += 1
-        if self._plan_list_unread_polls == 1:
+        # Warned whenever the unreadable entries change, also after the list was already unread for another reason.
+        if bad_keys := unreadable_plan_keys(self.api.fub_data):
+            if bad_keys == self._reported_unreadable_plan_keys:
+                return
+            self._reported_unreadable_plan_keys = bad_keys
+            _LOGGER.warning(
+                "[%s] Plan list ($Fubs) has entries %r that are no readable plan, so it counts as unread until "
+                "they are fixed in Comexio: deleted plans are not judged, the function plan watchdog pauses "
+                "(no auto-start), the Web-IO/KNX wiring audit pauses, ignored-source leftovers in HA's plans "
+                "behind those entries are reported but not cleaned up, no managed plan is created, those entries "
+                "get no backup, and the run-state sensors turn unavailable after %s such polls",
+                self.server_id,
+                bad_keys,
+                FUNCTION_PLAN_LIST_UNREAD_THRESHOLD,
+            )
+        elif self._plan_list_unread_polls == 1:
             _LOGGER.warning(
                 "[%s] Config poll brought no readable plan list ($Fubs); keeping the last known plans. Plans "
                 "created or deleted in Comexio are not picked up meanwhile, and the run-state sensors turn "
@@ -1020,17 +1275,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         try:
             return await self._async_poll_and_audit()
+        except (UpdateFailed, ConfigEntryAuthFailed):
+            raise  # No fault of the poll: a changed certificate or refused re-login was reported where it was found.
         except Exception as e:
             _LOGGER.exception("[%s] Data fetch failed: %s", self.server_id, e)
             raise
 
     async def _async_poll_and_audit(self) -> dict[str, Any]:
         """Fetch and merge the config, then audit it against Comexio's Web-IO side."""
-        conf = {**self.config_entry.data, **self.config_entry.options}
+        # Taken with conf: the ignore-list audit detects any options save after this point by identity.
+        options_at_poll = self.config_entry.options
+        conf = {**self.config_entry.data, **options_at_poll}
 
         # Precompute cover keywords once per update
-        kw_str = str(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
-        self.cover_keywords = [kw.strip().lower() for kw in kw_str.split(",") if kw.strip()]
+        self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
 
         raw_config, parsed_data, knx_live_states = await self._async_fetch_parsed_config(conf)
         # Unfiltered per-category counts — parsed_data carries every category regardless of
@@ -1065,7 +1323,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         # Rebuild O(1) lookup index for webhook IO updates
         self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
-        self._track_offline_extensions(final_data["io"])
+        self._quickbus_index = {str(io["id"]): io for io in final_data[QUICKBUS_IO_DATA_KEY]}
+        # Quickbus IOs carry their host extension's offline flag — an extension with only Quickbus IOs
+        # (or import_ios off) must still be tracked, or its Quickbus entities stay available.
+        self._track_offline_extensions([*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]])
         self._update_entity_id_mismatch_issue(conf)
 
         # --- ORPHANED STATISTICS DETECTION ---
@@ -1076,8 +1337,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # rather than overwriting, so neither category's contribution clobbers the other's.
         self._cleanup_entity_ids = []
         self._cleanup_function_plan_count = 0
-        await self.async_check_ignored_markers(conf, final_data)
-        await self.async_check_ignored_knx(conf, final_data)
+        await self.async_check_ignored_markers(conf, final_data, options_at_poll)
+        # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
+        # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
+        await self.async_check_ignored_knx(conf, final_data, options_at_poll)
 
         # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
         if await self._async_audit_webio(conf, final_data, parsed_data):
@@ -1087,6 +1350,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.available_source_counts = source_counts
         return final_data
 
+    def _fail_poll_on_certificate_mismatch(self, mismatches_before: int) -> None:
+        """Raise UpdateFailed when a request of this poll met another certificate than the pinned one.
+
+        mismatches_before: api.certificate_mismatch_count right before the config fetch. A mismatch counted since
+        then fails the poll also when a login alongside cleared api.certificate_mismatch meanwhile.
+        """
+        mismatch = self.api.certificate_mismatch
+        if self.api.certificate_mismatch_count != mismatches_before:
+            mismatch = self.api.last_certificate_mismatch
+        if mismatch is not None:
+            # Nothing more goes out to a server that is not the pinned one; the repair asks the user.
+            self._report_certificate_changed(mismatch.actual)
+            raise UpdateFailed(f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}")
+
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
@@ -1095,18 +1372,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Fetch current raw configuration from the Comexio API. A plan HA starts or stops
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
+        mismatches_before = self.api.certificate_mismatch_count
         raw_config = await self.api.get_raw_config()
+        self._fail_poll_on_certificate_mismatch(mismatches_before)
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
             self.note_comexio_unreachable()
-        # aiocomexio decodes each page variable on its own, so $FubModules alone does not
-        # prove $Fubs was read; an empty plan list still decodes to a dict.
-        if isinstance(fubs := raw_config.get("Fubs"), dict):
-            self._polled_plan_ids = function_plan_ids(fubs)
+        if self.api.config_relogin_rejected or self.api.credentials_refused:
+            # Changed credentials: HA starts the reauth flow and stops polling until it updates the entry.
+            # credentials_refused also covers a refusal the preview or system info login met first,
+            # while the main session still works.
+            raise ConfigEntryAuthFailed(f"Comexio at {self.api.host} rejected the stored credentials")
+        self._polled_plan_ids = _readable_plan_ids(raw_config)
 
         live_states, knx_live_states = await self.api.get_live_states(*_source_max_ids(raw_config))
         if live_states is None:
+            # Kept values must not pass as current ones while another certificate answers.
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
             # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
             # known values instead of letting parse_config default every item to 0/off.
             _LOGGER.warning("[%s] Live states fetch failed; keeping last known values", self.server_id)
@@ -1122,11 +1405,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if referenced_markers is None:
             referenced_markers = await self.function_plan_backup.async_referenced_marker_ids()
         self._last_referenced_marker_ids = referenced_markers
+        self.api.referenced_markers = referenced_markers
         # Only fetched when KNX import is enabled — an extra HTTP round-trip nobody without
         # KNX objects needs. get_knx_dpt_catalog() never raises (own contract, {} on
         # failure), so an unreachable/failed fetch just leaves every KNX analog item on its
         # generic fallback range rather than failing this whole poll.
-        knx_dpt_catalog = await self.api.get_knx_dpt_catalog() if import_knx else None
+        knx_dpt_catalog = None
+        if import_knx:
+            knx_dpt_catalog = await self.api.get_knx_dpt_catalog()
+            # The catalog keeps its last known-good value; nothing more goes out to this server.
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
         if import_knx and knx_dpt_catalog:
             await self._maybe_persist_knx_dpt_catalog()
         parsed_data = self.api.parse_config(
@@ -1137,10 +1425,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             knx_dpt_catalog,
             run_state_mark=run_state_mark,
         )
-        if conf.get(_IMPORT_IOS_KEY, True):
-            await self._async_apply_io_live_states(parsed_data["io"])
+        if conf.get(_IMPORT_IOS_KEY, True) or conf.get(_IMPORT_QUICKBUS_KEY, True):
+            # Quickbus IOs share io_states with the physical IOs, so their poll value is a placeholder too.
+            imported = _imported_data(parsed_data, conf)
+            await self._async_apply_io_live_states([*imported["io"], *imported[QUICKBUS_IO_DATA_KEY]])
         else:
-            # IO import off: nobody shows these IOs, so no Comexio round-trip and no warnings for them.
+            # IO and Quickbus import off: nobody shows these IOs, so no Comexio round-trip and no warnings for them.
             self._reset_io_live_tracking()
         return raw_config, parsed_data, knx_live_states
 
@@ -1148,8 +1438,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Forget what the IO live path logged, so a re-enabled IO import reports afresh."""
         self._polled_io_real_ids = set()
         self._unanswered_io_ids = set()
-        self._ios_without_ext_id = set()
-        self._conflicting_io_ids = set()
         self._io_live_fetch_failing = False
 
     async def _async_apply_io_live_states(self, ios: list[dict[str, Any]]) -> None:
@@ -1160,9 +1448,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # after the blip.
             self._polled_io_real_ids = set()
             return
-        self._track_ios_without_ext_id(ios)
-        requests, conflicting = _io_live_requests(ios)
-        self._track_conflicting_ios(ios, conflicting)
+        requests = _io_live_requests(ios)
         io_live_states = await self.api.get_io_live_states(requests)
         # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
         known = {io_id: value for io_id, value in self.io_states.items() if io_id in self._io_real_value_ids}
@@ -1172,7 +1458,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if self._io_live_fetch_failing:
                 _LOGGER.info("[%s] IO live states fetch works again", self.server_id)
                 self._io_live_fetch_failing = False
-            # Only answers to what was asked count: a value for a conflicting id could belong to either IO.
+            # Only answers to what was asked count: an offline extension's IO keeps its last known value.
             requested = {io_id for _ext_id, io_id in requests}
             io_live_states = {io_id: value for io_id, value in io_live_states.items() if io_id in requested}
             self._track_unanswered_ios(ios, requested, io_live_states)
@@ -1191,32 +1477,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.api.io_live_fetch_error or "unknown",
         )
         self._io_live_fetch_failing = True
-
-    def _track_conflicting_ios(self, ios: list[dict[str, Any]], conflicting: set[str]) -> None:
-        """Warn when IO ids appear that sit under two extensions and so get no live value; quiet while unchanged."""
-        if new := conflicting - self._conflicting_io_ids:
-            _LOGGER.warning(
-                "[%s] No live value requested for IOs %s: each IO id appears under several extensions",
-                self.server_id,
-                ", ".join(sorted(f"{_io_label(io)} (id {io['id']})" for io in ios if io["id"] in new)),
-            )
-        self._conflicting_io_ids = conflicting
-
-    def _track_ios_without_ext_id(self, ios: list[dict[str, Any]]) -> None:
-        """Warn once when IOs of an online extension get left out of the live request for a non-integer extension id.
-
-        A changed set warns again, an unchanged one stays quiet: the scrape repeats the same ids on
-        every poll, and a warning each time would bury everything else.
-        """
-        skipped = {io["id"]: io for io in ios if not io.get("offline") and not _has_usable_ext_id(io)}
-        if new := skipped.keys() - self._ios_without_ext_id:
-            _LOGGER.warning(
-                "[%s] No live value requested for IOs %s: their extension id is no integer (%s)",
-                self.server_id,
-                _io_labels(skipped, new),
-                ", ".join(sorted({str(skipped[io_id]["ext_id"]) for io_id in new})),
-            )
-        self._ios_without_ext_id = set(skipped)
 
     def _track_unanswered_ios(
         self, ios: list[dict[str, Any]], requested: set[str], live_values: Mapping[str, Any]
@@ -1251,7 +1511,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 self.marker_states[m["id"]] = m["value"]
 
-        for io in final_data["io"]:
+        for io in (*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]):
             if io["id"] in self._webhook_updated_io_ids:
                 io["value"] = self.io_states.get(io["id"], io["value"])
                 continue
@@ -1269,14 +1529,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         since-deleted KNX object or IO would otherwise linger forever and be inherited by a
         different one that later reuses the same numeric id (for IOs also its real-value mark,
         #175). Keyed off parsed_data (not final_data) so the caches stay correct even while
-        import_knx / import_ios is off, and gated on a non-empty scrape (get_raw_config returns
+        import_knx / import_ios / import_quickbus is off, and gated on a non-empty scrape (get_raw_config returns
         {} on a transient HTTP failure — pruning then would wipe every cached value over a blip).
         """
         if not raw_config.get("FubModules"):
             return
         known_knx_ids = {k["id"] for k in parsed_data.get("knx", [])}
         self.knx_states = {kid: v for kid, v in self.knx_states.items() if kid in known_knx_ids}
-        known_io_ids = {io["id"] for io in parsed_data.get("io", [])}
+        # Quickbus IOs (QUICKBUS_IO_DATA_KEY) keep their values in io_states as well.
+        known_io_ids = {io["id"] for io in (*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, []))}
         self.io_states = {io_id: v for io_id, v in self.io_states.items() if io_id in known_io_ids}
         self._io_real_value_ids &= known_io_ids
 
@@ -1349,23 +1610,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
         webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
         self._update_import_disabled_issues(conf, disabled_commands, webio_devices, marker_titles)
-        if self._report_missing_webio_classes(conf, webio_devices):
+        if self._report_missing_webio_classes(conf, webio_devices, final_data):
             return False
 
         # Reset internal failure flag when the audit is successful
         self.last_audit_failed = False
 
+        # The address a device already stores is kept while it still points to this host (#177),
+        # so a fresh resolver after a restart needs at most one lookup instead of a search.
+        ha_address = (await self.async_webhook_target(webio_devices)).address
+        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
+        address_fallback = self.ha_address.fallback_reason
+
         # Prepare payload map for future delta updates via button/repairs
         payload_map = {
             cmd["Name"]: cmd
             for cmd in self.api.build_webio_commands(
-                self.server_id, final_data, None, self.ignored_marker_ids, self.ignored_knx_ids
+                self.server_id, self.webio_source_data(final_data), None, self.ignored_marker_ids, self.ignored_knx_ids
             )
         }
 
-        # The name a device already carries bounds the search, so a fresh resolver after a
-        # restart does not look up the KNOWN_DOMAINS behind the name Comexio already stores.
-        ha_address = await self.ha_address.async_get(hint=webio_device_hint(webio_devices))
         webio_device_audit = await self._async_audit_webio_devices(webio_devices, ha_address)
         ip_mismatch = any(v["ip_mismatch"] for v in webio_device_audit.values())
 
@@ -1382,25 +1646,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Offline extensions are exempt from the wiring check: their hardware is not
         # present, so wiring their IOs is pointless. Once the extension comes back
         # online the next poll flags any remaining gaps again.
-        managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
-        managed_io_exts -= self.offline_extensions or set()
-        wired = self._audit_wired_pairs(has_active_plan, managed_io_exts)
-        wired_knx_webio_pairs = wired[2]
+        managed_io_groups = self.managed_io_groups(final_data)
+        # Whether this audit's plan checks waited for unloaded plans. The flag spans cycles (only the
+        # backup cycle clears it), so it is cleared just around these synchronous checks and restored.
+        recheck_pending = self._lp_missing_recheck_pending
+        self._lp_missing_recheck_pending = False
+        try:
+            wired = self._audit_wired_pairs(has_active_plan, managed_io_groups)
+            wired_knx_webio_pairs = wired[2]
 
-        mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
-        found = self._compare_audit_maps(
-            ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_exts, mismatches
-        )
-        dangling_items = self._function_plan_dangling_items(
-            final_data, wired, has_active_plan, managed_io_exts, mismatches
-        )
-        trigger_missing_by_ref, trigger_orphan_by_ref = self._audit_trigger_constructs(final_data, mismatches)
+            mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
+            found = self._compare_audit_maps(
+                ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_groups, mismatches
+            )
+            dangling_items = self._function_plan_dangling_items(
+                final_data, wired, has_active_plan, managed_io_groups, mismatches
+            )
+            trigger_missing_by_ref, trigger_orphan_by_ref = self._audit_trigger_constructs(final_data, mismatches)
 
-        # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
-        # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
-        knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
-            has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
-        )
+            # KNX write path (Entwurf A "Merker-Brücke") audit, incl. Phase 7's API-Loopback
+            # fan-out check — see _audit_knx_bridge_items's own docstring for the full rationale.
+            knx_bridge_missing_items, knx_bridge_loopback_missing_items = self._audit_knx_bridge_items(
+                has_active_plan, final_data["knx"], ha_map, wired_knx_webio_pairs, mismatches
+            )
+            plan_checks_deferred = self._lp_missing_recheck_pending
+        finally:
+            self._lp_missing_recheck_pending = recheck_pending or self._lp_missing_recheck_pending
 
         # DPT1.x classification for digital KNX objects with no [RO]/[TRIG]/[K<id>] suffix
         # yet (real ETS imports never carry Comexio's own naming convention) — see
@@ -1409,13 +1680,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self._auto_suffix_unambiguous_knx(final_data["knx"])
             self._audit_knx_dpt_ambiguous(final_data["knx"])
 
-        self.last_audit_results = {
+        results = {
             "type": found["type"],
             "missing": found["missing"],
             "rename": found["rename"],
             "orphan": found["orphan"],
             "ip_mismatch": ip_mismatch,
             "ha_address": ha_address,
+            "address_fallback": address_fallback,
             "webio_devices": webio_device_audit,
             "cleanup_entities": self._cleanup_entity_ids,
             "cleanup_function_plan_count": self._cleanup_function_plan_count,
@@ -1426,14 +1698,48 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "knx_bridge_missing": knx_bridge_missing_items,
             "knx_bridge_loopback_missing": knx_bridge_loopback_missing_items,
         }
+        plan_audit_known = self._carry_over_plan_audit(results, mismatches, plan_checks_deferred)
+        self.last_audit_results = results
 
         # Include pending entity cleanups (ignored markers/KNX with remaining HA entities) in mismatches
         for cls_val, mid in self._cleanup_entity_ids:
             mismatches.add(f"cleanup_entity_{cls_val}_{mid}")
 
-        self._log_audit_summary(mismatches)
-        self._update_sync_mismatch_issue(mismatches, ha_map, com_map, io_meta_by_key)
+        if plan_audit_known or mismatches:
+            self._log_audit_summary(mismatches, plan_audit_known=plan_audit_known)
+        # Unknown plan findings: the open repair keeps its own (see _update_sync_mismatch_issue).
+        self._update_sync_mismatch_issue(mismatches, ha_map, com_map, io_meta_by_key, plan_audit_known=plan_audit_known)
         return True
+
+    def _carry_over_plan_audit(self, results: dict[str, Any], mismatches: set[str], plan_checks_deferred: bool) -> bool:
+        """Keep the last plan-derived findings while the plan list has unreadable entries.
+
+        The plan-derived checks are deferred then (unknown, not "in sync"): their fresh empty result
+        would clear an open repair and log the installation as in sync. False when the plan findings
+        are unknown: the list is unreadable and no readable one was fully audited since setup.
+        """
+        if not unreadable_plan_keys(self.api.fub_data):
+            # A check waiting for unloaded plans judged nothing: keep what is known.
+            if not plan_checks_deferred:
+                self._plan_audit_buckets = {bucket: results[bucket] for bucket in _PLAN_AUDIT_BUCKETS}
+                self._plan_audit_mismatches = {key for key in mismatches if key.startswith(_PLAN_AUDIT_KEY_PREFIXES)}
+            return True
+        mismatches.difference_update({key for key in mismatches if key.startswith(_PLAN_AUDIT_KEY_PREFIXES)})
+        if self._plan_audit_buckets is None:
+            return False
+        results.update(self._plan_audit_buckets)
+        mismatches.update(self._plan_audit_mismatches)
+        return True
+
+    def _open_plan_findings(self) -> tuple[dict[str, Any], Any]:
+        """The plan-derived counts and missing-wiring detail of the open sync_mismatch repair ({} / None: none)."""
+        issue = ir.async_get(self.hass).async_get_issue(DOMAIN, f"sync_mismatch_{self.server_id}")
+        if issue is None or issue.translation_key != "sync_mismatch":
+            return {}, None
+        data = issue.data or {}
+        counts = data.get("counts", {})
+        keys = (*_PLAN_AUDIT_BUCKETS, "function_plan_missing_eta_sec")
+        return {key: counts[key] for key in keys if key in counts}, data.get("function_plan_missing_detail")
 
     def _build_ha_audit_map(
         self, final_data: dict[str, Any]
@@ -1471,6 +1777,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # api.py provides 'is_binary'; the audit type ('digital'/'analog') derives from it.
             mapped_type = "digital" if io.get("is_binary") else "analog"
             ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
+            io_meta_by_key[key] = io
+        # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); their io_meta entry
+        # feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).
+        quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
+        for io in webio_quickbus_ios(self.config_entry.options, final_data):
+            key = source_audit_key(quickbus_cat, io["id"])
+            ha_map[key] = {
+                "name": quickbus_command_name(io),
+                "type": "digital" if io.get("is_binary") else "analog",
+            }
             io_meta_by_key[key] = io
         return ha_map, io_meta_by_key
 
@@ -1602,7 +1918,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             {int(cat.fub_module_type) for cat in trigger_pair_categories()},
         )
 
-    def _report_missing_webio_classes(self, conf: dict[str, Any], webio_devices: dict[str, Any]) -> bool:
+    def _report_missing_webio_classes(
+        self, conf: dict[str, Any], webio_devices: dict[str, Any], final_data: dict[str, Any]
+    ) -> bool:
         """Raise a repair issue if a Web-IO class is entirely missing on the server; True if one is.
 
         Checked directly against the resolved device_id (not "com_map empty") so a half-missing
@@ -1611,9 +1929,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Only classes the user has opted into (import_conf_key) count as "missing" — an
         opted-out category (e.g. KNX by default) has no Web-IO device on the server by design,
         and flagging that as missing would wipe last_audit_results on every poll (see
-        active_webio_classes docstring).
+        active_webio_classes docstring), and the Quickbus class only with a Quickbus IO
+        (required_webio_classes), and no class without a wanted command (_webio_classes_with_commands).
         """
-        missing_classes = [cls for cls in active_webio_classes(conf) if not webio_devices.get(cls, {}).get("device_id")]
+        without_device = [
+            cls for cls in required_webio_classes(conf, final_data) if not webio_devices.get(cls, {}).get("device_id")
+        ]
+        missing_classes = list(self._webio_classes_with_commands(without_device, final_data))
         if not missing_classes:
             return False
         self.last_audit_results = {}
@@ -1641,7 +1963,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
     ) -> dict[str, dict[str, Any]]:
         """IP/Port Audit, checked independently per Web-IO class.
 
-        Marker and IO devices can in theory drift out of sync with each other.
+        Marker and IO devices can in theory drift out of sync with each other. Only the device
+        address is audited: the commands keep HTTP whatever the address (see api.build_webio_commands).
         """
         webio_device_audit: dict[str, dict[str, Any]] = {}
         for cls in WEBIO_CLASSES:
@@ -1651,7 +1974,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "base_id": dev.get("base_id"),
                 "device_ip": dev.get("device_ip"),
                 "ip_mismatch": await _device_ip_mismatch(
-                    self.hass, ha_address, dev.get("device_ip"), dev.get("device_id")
+                    self.ha_address, ha_address, dev.get("device_ip"), dev.get("device_id")
                 ),
             }
         return webio_device_audit
@@ -1663,7 +1986,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         payload_map: dict[str, Any],
         wired_pairs: tuple[Any, ...],
         io_meta_by_key: dict[str, dict[str, Any]],
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
     ) -> dict[str, list[dict[str, Any]]]:
         """Missing, renamed, type-mismatched, unwired and orphaned Web-IO commands, by audit category."""
@@ -1683,7 +2006,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     payload_map,
                     wired_pairs,
                     io_meta_by_key.get(key),
-                    managed_io_exts,
+                    managed_io_groups,
                     found,
                     mismatches,
                 )
@@ -1708,7 +2031,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         payload_map: dict[str, Any],
         wired_pairs: tuple[Any, ...],
         io_meta: dict[str, Any] | None,
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
         found: dict[str, list[dict[str, Any]]],
         mismatches: set[str],
     ) -> None:
@@ -1731,7 +2054,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Function Plan gap: command exists but is not wired directly to its
             # marker (M-keys) / IO (IO_-keys of managed extensions)
             if gap_item := self._function_plan_gap_item(
-                key, ha["name"], best_match, wired_pairs, io_meta, managed_io_exts
+                key, ha["name"], best_match, wired_pairs, io_meta, managed_io_groups
             ):
                 found["function_plan_missing"].append(gap_item)
                 mismatches.add(f"function_plan_missing_{key}")
@@ -1746,7 +2069,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         final_data: dict[str, Any],
         wired: tuple[Any, ...],
         has_active_plan: bool,
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
     ) -> list[dict[str, Any]]:
         """Function Plan debris: source elements left in a managed plan without their Web-IO counterpart.
@@ -1769,17 +2092,54 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for rid in self._dangling_source_ids("11", wired_knx, connected_knx):
                 items.append({"name": knx_by_id.get(rid, f"K{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_KNX})
                 mismatches.add(f"function_plan_dangling_K{rid}")
-        if managed_io_exts:
-            # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
-            # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
-            # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
-            io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
-            for rid in self._dangling_source_ids("1", wired_io, connected_io):
-                io = io_by_id.get(rid)
-                name = f"{io['ext_name']} {io['identifier']}" if io else f"IO#{rid}"
-                items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
-                mismatches.add(f"function_plan_dangling_IO{rid}")
+        if managed_io_groups:
+            items.extend(self._dangling_io_items(final_data, wired_io, connected_io, managed_io_groups, mismatches))
         return items
+
+    def _dangling_io_items(
+        self,
+        final_data: dict[str, Any],
+        wired_io: set[tuple[str, str]] | None,
+        connected_io: set[str] | None,
+        managed_io_groups: set[tuple[str, str]],
+        mismatches: set[str],
+    ) -> list[dict[str, Any]]:
+        """IO part of _function_plan_dangling_items: debris of every IO plan kind with a managed member."""
+        # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
+        # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
+        # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
+        io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
+        managed_kinds = {label for label, _member in managed_io_groups}
+        items: list[dict[str, Any]] = []
+        for rid, fub_ids in self._dangling_source_ids("1", wired_io, connected_io).items():
+            io = io_by_id.get(rid)
+            kind = self._dangling_io_kind(io, fub_ids)
+            if kind.label not in managed_kinds:
+                # Its kind has no managed member: no sync pass of its class would remove it.
+                _LOGGER.debug(
+                    "[%s] Dangling IO%s in plans %s not reported: no %s member is managed",
+                    self.server_id,
+                    rid,
+                    fub_ids,
+                    kind.label,
+                )
+                continue
+            name = io_plan_label(io) if io else f"IO#{rid}"
+            # The class whose sync pass removes the debris: a Quickbus IO's commands live in the
+            # Quickbus class, which may be synced while the IO class is opted out.
+            cls = WEBIO_CLASS_QUICKBUS if kind is IO_PLAN_KIND_QUICKBUS else WEBIO_CLASS_IO
+            items.append({"name": name, "ref_id": rid, "webio_class": cls})
+            mismatches.add(f"function_plan_dangling_IO{rid}")
+        return items
+
+    def _dangling_io_kind(self, io: Mapping[str, Any] | None, fub_ids: list[int]) -> IoPlanKind:
+        """Kind of a dangling IO element: from the IO itself, else (IO gone) from the plan it sits in."""
+        if io:
+            return IO_PLAN_KIND_QUICKBUS if io.get("quickbus") else IO_PLAN_KIND_IO
+        in_qb_plan = any(
+            (plan := self.managed_column_plan(fub_id)) and plan[0] is IO_PLAN_KIND_QUICKBUS for fub_id in fub_ids
+        )
+        return IO_PLAN_KIND_QUICKBUS if in_qb_plan else IO_PLAN_KIND_IO
 
     def _audit_trigger_constructs(
         self, final_data: dict[str, Any], mismatches: set[str]
@@ -1805,7 +2165,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 mismatches.update(f"function_plan_trigger_{kind}_{prefix}{mid}" for mid in ids)
         return missing_by_ref, orphan_by_ref
 
-    def _log_audit_summary(self, mismatches: set[str]) -> None:
+    def _log_audit_summary(self, mismatches: set[str], *, plan_audit_known: bool = True) -> None:
         """AUDIT SUMMARY LOGGING of last_audit_results — only when the result changed since the last poll."""
         if not mismatches:
             if self.last_summary_hash is not None:
@@ -1831,6 +2191,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.last_summary_hash = current_summary_content
         self._last_logged_mismatches = mismatch_keys
         self._log_audit_details(len(mismatches))
+        if not plan_audit_known:
+            _LOGGER.warning(
+                "[%s] Function plan findings unknown: the plan list has unreadable entries, so the plan "
+                "counts above are not judged",
+                self.server_id,
+            )
 
     def _log_audit_details(self, mismatch_count: int) -> None:
         """The consolidated warning plus the per-category audit summary of last_audit_results."""
@@ -1919,9 +2285,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ha_map: dict[str, dict[str, Any]],
         com_map: dict[str, list[dict[str, Any]]],
         io_meta_by_key: dict[str, dict[str, Any]],
+        *,
+        plan_audit_known: bool = True,
     ) -> None:
-        """Manage the sync_mismatch repair issue in the Home Assistant UI from last_audit_results."""
-        if not mismatches:
+        """Manage the sync_mismatch repair issue in the Home Assistant UI from last_audit_results.
+
+        plan_audit_known False: the plan findings are unknown, so the open repair's are kept, not zeroed.
+        """
+        open_counts, open_detail = ({}, None) if plan_audit_known else self._open_plan_findings()
+        if not mismatches and not any(open_counts.get(bucket) for bucket in _PLAN_AUDIT_BUCKETS):
             ir.async_delete_issue(self.hass, DOMAIN, f"sync_mismatch_{self.server_id}")
             return
         audit = self.last_audit_results
@@ -1943,6 +2315,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "knx_bridge_loopback_missing": len(audit["knx_bridge_loopback_missing"]),
             "all": len(mismatches),
         }
+        missing_detail = self._function_plan_missing_detail(audit["function_plan_missing"], ha_map, io_meta_by_key)
+        if open_counts:
+            issue_data_counts.update(open_counts)
+            missing_detail = open_detail
         ir.async_create_issue(
             self.hass,
             DOMAIN,
@@ -1963,9 +2339,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             data={
                 "entry_id": self.config_entry.entry_id,
                 "counts": issue_data_counts,
-                "function_plan_missing_detail": self._function_plan_missing_detail(
-                    audit["function_plan_missing"], ha_map, io_meta_by_key
-                ),
+                "function_plan_missing_detail": missing_detail,
+                # The address "update_ip" writes, and why it is the automatic one although the options name an
+                # external/custom URL (a webhook_url_error key; None when the mode's own URL is used).
+                "ha_address": audit.get("ha_address"),
+                "address_fallback": audit.get("address_fallback"),
             },
         )
 
@@ -2018,6 +2396,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.last_changed_plans = []
             pause_generation = self._auto_backup_pause_generation
             requested = function_plan_ids(self.api.fub_data)
+            names_at_load = self._existing_plan_names(requested)
             load_error: str | None = None
             # Reset after the try, not in a finally: the cycle timeout's handler must still see it set.
             self._bulk_load_pending = True
@@ -2062,9 +2441,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 # the snapshot async_mark_restored promotes. The next cycle catches up.
                 _LOGGER.debug("[%s] Function Plan auto backup skipped: a restore ran meanwhile", self.server_id)
             else:
-                await self._async_auto_backup_plans(plans, fub_data, plan_format, pause_generation)
+                steady = self._plans_named_as_at_load(plans, names_at_load)
+                await self._async_follow_plan_renames(
+                    steady, fub_data, lambda: self._auto_backup_held_back(pause_generation)
+                )
+                await self._async_auto_backup_plans(steady, fub_data, plan_format, pause_generation)
             try:
-                await self.function_plan_backup.async_backfill_paper_metadata(fub_data, plan_format)
+                # A restore since the format was read may have changed it: backfill next cycle.
+                await self.function_plan_backup.async_backfill_paper_metadata(
+                    fub_data, plan_format, held_back=lambda: self._auto_backup_held_back(pause_generation)
+                )
             except Exception:
                 _LOGGER.exception("[%s] Function Plan paper/DPI backfill failed", self.server_id)
             try:
@@ -2094,12 +2480,246 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 webio_by_id=webio_by_id,
                 ios_by_id=ios_by_id,
                 block_settings=self.api.block_settings,
+                module_configs=self.api.module_configs,
                 # Asked again after the store's awaits: a restore may start in between.
                 held_back=lambda: self._auto_backup_held_back(pause_generation),
             )
             await self._async_refresh_service_descriptions()
         except Exception:
             _LOGGER.exception("[%s] Function Plan auto backup failed", self.server_id)
+
+    async def _async_follow_plan_renames(
+        self, plans: dict[int, dict], fub_data: dict, held_back: Callable[[], bool]
+    ) -> None:
+        """Follow every plan renamed in Comexio: same ID, its old name gone, its content its old name's last backup.
+
+        The old name's backups move to the new name and a watchdog pick follows (_async_follow_rename), instead
+        of an orphaned chain beside a new one. Equal content on the same ID is taken as one plan's history, also
+        for a plan deleted and rebuilt identically (merging those chains loses nothing). Called before the auto
+        backup: the followed chain already holds the plan's content, so no duplicate snapshot takes a slot.
+        held_back: a restore started meanwhile; the next cycle follows the rest. A rename whose backups did not
+        move before (_rename_move_pending) is followed again, see _rename_sources.
+        """
+        if not isinstance(fub_data, dict):
+            _LOGGER.debug("[%s] Function Plan rename check skipped: no plan list", self.server_id)
+            return
+        self._forget_stale_rename_state(plans, fub_data)
+        for fub_id, plan_data in plans.items():
+            if held_back():
+                return
+            try:
+                # An unreadable entry ("07", or an Id other than its key) names no plan of this ID.
+                live_name = function_plan_info(fub_data, fub_id).get("Name")
+                if not live_name:
+                    continue
+                for old_name in self._rename_sources(fub_id, live_name, plan_data):
+                    if held_back():
+                        return
+                    await self._async_follow_rename(fub_id, old_name, live_name)
+            except Exception:
+                # One plan's failure leaves the others' renames and the auto backup running.
+                _LOGGER.exception("[%s] Function Plan rename check of ID %s failed", self.server_id, fub_id)
+
+    def _plans_named_as_at_load(self, plans: dict[int, dict], names_at_load: dict[int, str]) -> dict[int, dict]:
+        """The loaded plans still named as before their load; the others wait for the next backup cycle.
+
+        Renamed or reused meanwhile, a plan's loaded content and its current name may belong to different
+        plans: matched against the old name's backups, the content would move them to a stranger, and its
+        auto backup would store it under the stranger's name.
+        """
+        names_now = self._existing_plan_names(plans)
+        steady = {fub_id: plan for fub_id, plan in plans.items() if names_now.get(fub_id) == names_at_load.get(fub_id)}
+        if skipped := sorted(plans.keys() - steady.keys()):
+            _LOGGER.debug(
+                "[%s] Function Plan IDs %s were renamed during the bulk load: backed up next cycle",
+                self.server_id,
+                skipped,
+            )
+        return steady
+
+    def _forget_stale_rename_state(self, plans: dict[int, dict], fub_data: dict) -> None:
+        """Forget rename failures no longer pending (renamed again, plan gone) and noted moves of deleted plans."""
+        # A failure noted for a rename no longer pending logs afresh next time.
+        live = {(fub_id, fub.get("Name")) for fub_id in plans if (fub := function_plan_info(fub_data, fub_id))}
+        self._rename_follow_failed = {key for key in self._rename_follow_failed if (key[0], key[2]) in live}
+        # An empty plan list decides nothing, nor one with an unreadable entry: it may be the plan ("05" for 5).
+        if fub_data and not unreadable_plan_keys(fub_data):
+            for fub_id, old_name in [key for key in self._rename_move_pending if str(key[0]) not in fub_data]:
+                self._drop_rename_move_pending(fub_id, old_name, "the plan is gone from Comexio")
+
+    def _rename_sources(self, fub_id: int, live_name: str, plan_data: dict | None) -> list[str]:
+        """The former names whose backups move to live_name: renamed by content, and earlier moves not done.
+
+        A noted move (_rename_move_pending) follows without comparing content only while the ID holds the name
+        its pick took (unless HA manages the old name on that ID), or its old name again (only the pick goes
+        back): the plan may have been edited since. Under any other name its content must match as for any
+        rename; otherwise the ID may hold another plan by now and the backups stay with the old name, listed
+        as orphaned backups.
+        """
+        sources = (
+            set(self._renamed_from(fub_id, live_name, plan_hash(plan_data))) if plan_has_elements(plan_data) else set()
+        )
+        # Collected first: dropping an entry changes _rename_move_pending.
+        noted = [
+            (old_name, pick_name)
+            for (pending_id, old_name), pick_name in self._rename_move_pending.items()
+            if pending_id == fub_id and old_name not in sources
+        ]
+        for old_name, pick_name in noted:
+            if live_name == old_name or (live_name == pick_name and not self._managed_under(fub_id, old_name)):
+                sources.add(old_name)
+            elif live_name == pick_name:
+                self._drop_rename_move_pending(fub_id, old_name, f"HA manages '{one_line(old_name)}' on that ID")
+            else:
+                reason = f"ID {fub_id} holds '{one_line(live_name)}' with other content by now"
+                self._drop_rename_move_pending(fub_id, old_name, reason)
+        return sorted(sources)
+
+    def _drop_rename_move_pending(self, fub_id: int, old_name: str, reason: str) -> None:
+        """Give up a noted backup move: its backups stay with old_name (orphaned backups), warned once."""
+        pick_name = self._rename_move_pending.pop((fub_id, old_name), None)
+        if pick_name is None:
+            return
+        _LOGGER.warning(
+            "[%s] The backups of function plan '%s' (ID %s) no longer follow its rename to '%s' (%s); they stay "
+            "listed as orphaned backups",
+            self.server_id,
+            one_line(old_name),
+            fub_id,
+            one_line(pick_name),
+            reason,
+        )
+
+    def _managed_under(self, fub_id: int, name: str) -> bool:
+        """Whether HA manages plan fub_id under name (plan_map)."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        return isinstance(raw_map, dict) and str(raw_map.get(name)) == str(fub_id)
+
+    def _renamed_from(self, fub_id: int, live_name: str, current_hash: str) -> list[str]:
+        """The former names of plan fub_id: backed up under that ID, newest auto backup holding current_hash.
+
+        A name HA manages the plan under (plan_map) is left out: HA's own plans are renamed only by HA, and
+        the managed-plan audit reports one renamed in Comexio.
+        """
+        backups = self.function_plan_backup
+        matches = [
+            old_name
+            for old_name in sorted(backups.plan_names_for_fub_id_sync(fub_id) - {live_name})
+            if backups.newest_auto_hash_sync(fub_id, old_name) == current_hash
+        ]
+        return [old_name for old_name in matches if not self._managed_under(fub_id, old_name)]
+
+    def _backups_move_refused(self) -> bool:
+        """Whether a sync, reload, restore or plan edit runs — no backups move meanwhile (refuse_while_plans_busy)."""
+        return (
+            self._sync_lock.locked()
+            or self.in_sync
+            or self.unloading
+            or self._restore_lock.locked()
+            or self.plan_edits_running
+        )
+
+    async def _async_follow_rename(self, fub_id: int, old_name: str, new_name: str) -> bool | None:
+        """Swap plan old_name's watchdog pick to new_name, its rename, and move its backups along.
+
+        True when followed; False when the ID no longer holds new_name; None to try again later: a sync,
+        restore or plan edit runs, or the pick swap or the move failed. The pick swaps first and is never put
+        back: a failed swap moves nothing; a failed or cancelled move is noted (_rename_move_pending) and the
+        backup cycle moves the backups on (_rename_sources), the pick along. new_name equal to old_name
+        (renamed back before the move) only takes the pick back. Runs as a plan edit, so no restore moves the
+        same backups meanwhile.
+        """
+        attempt = (fub_id, old_name, new_name)
+        if self._backups_move_refused():
+            _LOGGER.debug(
+                "[%s] Rename of ID %s to '%s' waits: plans are busy", self.server_id, fub_id, one_line(new_name)
+            )
+            return None
+        if self._existing_plan_names([fub_id]).get(fub_id) != new_name:
+            self._forget_rename_follow_failed(attempt)
+            return False
+        pick_name = self._followed_pick_name(fub_id, old_name)
+        swapped = pick_name not in (None, new_name)
+        with self.plan_edit():
+            if swapped:
+                try:
+                    self._swap_watch_pick(fub_id, pick_name, new_name)
+                except Exception:
+                    self._log_rename_follow_failed(attempt, "its watchdog pick could not take the new name")
+                    return None
+            moved = await self._async_move_renamed_backups(attempt)
+        if moved is None:
+            return None
+        self._rename_move_pending.pop((fub_id, old_name), None)
+        self._forget_rename_follow_failed(attempt)
+        _LOGGER.info(
+            "[%s] Function plan '%s' (ID %s) was renamed to '%s' in Comexio: %d backup(s)%s follow",
+            self.server_id,
+            one_line(old_name),
+            fub_id,
+            one_line(new_name),
+            moved,
+            " and its watchdog pick" if swapped else "",
+        )
+        return True
+
+    async def _async_move_renamed_backups(self, attempt: tuple[int, str, str]) -> int | None:
+        """Move a renamed plan's backups; None when that failed (noted for the backup cycle, logged)."""
+        fub_id, old_name, new_name = attempt
+        if old_name == new_name:
+            return 0
+        try:
+            return await self.function_plan_backup.async_rename_identity(fub_id, old_name, new_name)
+        except asyncio.CancelledError:
+            self._rename_move_pending[(fub_id, old_name)] = new_name
+            _LOGGER.warning(
+                "[%s] Moving the backups of renamed function plan '%s' (ID %s) to '%s' was cancelled; the next "
+                "backup cycle tries again",
+                self.server_id,
+                one_line(old_name),
+                fub_id,
+                one_line(new_name),
+            )
+            raise
+        except Exception:
+            self._rename_move_pending[(fub_id, old_name)] = new_name
+            self._log_rename_follow_failed(attempt, "moving its backups failed; the next backup cycle tries again")
+            return None
+
+    def _followed_pick_name(self, fub_id: int, old_name: str) -> str | None:
+        """The watchdog pick a rename of old_name carries along: old_name, or the name an earlier follow gave it."""
+        for name in (old_name, self._rename_move_pending.get((fub_id, old_name))):
+            if name is not None and self._pick_present(fub_id, name):
+                return name
+        return None
+
+    def _log_rename_follow_failed(self, attempt: tuple[int, str, str], what: str) -> None:
+        """Log a failed rename follow-up: retried every check and cycle, its traceback once per kind, then debug."""
+        fub_id, old_name, new_name = attempt
+        key = (*attempt, what)
+        if key in self._rename_follow_failed:
+            _LOGGER.debug(
+                "[%s] Following the rename of '%s' (ID %s) to '%s' failed again: %s",
+                self.server_id,
+                one_line(old_name),
+                fub_id,
+                one_line(new_name),
+                what,
+            )
+            return
+        self._rename_follow_failed.add(key)
+        _LOGGER.exception(
+            "[%s] Function plan '%s' (ID %s) was renamed to '%s', but %s",
+            self.server_id,
+            one_line(old_name),
+            fub_id,
+            one_line(new_name),
+            what,
+        )
+
+    def _forget_rename_follow_failed(self, attempt: tuple[int, str, str]) -> None:
+        """A rename follow-up came to an end: a later failure of the same rename logs its traceback again."""
+        self._rename_follow_failed = {key for key in self._rename_follow_failed if key[:3] != attempt}
 
     @contextlib.contextmanager
     def pause_auto_backup(self) -> Iterator[None]:
@@ -2114,6 +2734,102 @@ class ComexioCoordinator(DataUpdateCoordinator):
             yield
         finally:
             self._auto_backup_pauses -= 1
+
+    @contextlib.contextmanager
+    def plan_edit(self) -> Iterator[None]:
+        """Mark a plan edit as running until it ends — a restore, sync, uninstall cleanup, bus-load
+        cascade or another plan edit refuses to start meanwhile, and a reload waits for it.
+
+        Entered right after the edit's last refuse_while_plans_busy check, with no await in
+        between: one of those starting after that check sees the mark, so they never overlap.
+        """
+        self._plan_edits_running += 1
+        self._plan_edits_done.clear()
+        try:
+            yield
+        finally:
+            self._plan_edits_running -= 1
+            if not self._plan_edits_running:
+                self._plan_edits_done.set()
+
+    @property
+    def plan_edits_running(self) -> bool:
+        """Whether a plan edit (see plan_edit) is running."""
+        return self._plan_edits_running > 0
+
+    async def async_wait_for_plan_edits(self) -> None:
+        """Wait until no plan edit runs — a reload closes the API session under the edit's requests.
+
+        Awaited with _sync_lock held, so no plan edit or bus-load cascade starts meanwhile.
+        """
+        if self._plan_edits_running:
+            _LOGGER.info("[%s] Reload waits for the running function plan edit to finish", self.server_id)
+            await self._plan_edits_done.wait()
+
+    @contextlib.asynccontextmanager
+    async def restores_held_off(self) -> AsyncIterator[None]:
+        """Wait for a running function plan restore, then keep new ones out — around a reload.
+
+        A reload tears the coordinator down and closes the API session, so one landing mid-restore
+        kills the restore's remaining Comexio requests ("Session is closed", seen live 2026-10-13
+        when a sync finished during a copy-restore: the copy was left half built). A restore
+        started meanwhile is rejected as already running instead of starting against the
+        coordinator being torn down. Lock order: callers that hold _sync_lock take this after it;
+        a restore never waits for _sync_lock while it holds _restore_lock (see its reload).
+        """
+        if self._restore_lock.locked():
+            _LOGGER.info("[%s] Reload waits for the running function plan restore to finish", self.server_id)
+            if self.in_sync and not (self.sync_error or self.sync_failed_writes):
+                self.sync_progress_text = "Waiting for the running function plan restore before reloading…"
+                self.async_update_listeners()
+        async with self._restore_lock:
+            self._restores_held_for_reload = True
+            try:
+                yield
+            finally:
+                self._restores_held_for_reload = False
+
+    async def async_wait_before_unload(self) -> None:
+        """Let a running sync, function plan restore and plan edits finish before the entry unloads.
+
+        For a reload that bypasses async_reload_entry — HA's own "Reload" in the UI, or an
+        options save by HA itself: unloading closes the API session, and a restore cut off there
+        leaves a half-built plan ("Session is closed", seen live 2026-10-14: an empty copy); a
+        sync cut off there leaves its Web-IO writes half done. A reload through
+        async_reload_entry already waited and holds the restores off, so it skips this. Bounded
+        by FUNCTION_PLAN_UNLOAD_WAIT_SEC: an unload that never ends would block HA.
+
+        It watches the locks instead of queueing for them: a reload through async_reload_entry
+        (or a sync's closing one) queued first would get the lock next and then wait for HA's
+        setup lock, which this unload holds; both would wait for each other until the timeout.
+        Once such a reload holds the restores off, the sync or restore is over and this unload
+        goes ahead. From here on no sync, restore, plan edit or plan start begins (unloading):
+        one starting after the wait would lose the session mid-way.
+        """
+        self.unloading = True
+        if self._restores_held_for_reload:
+            return
+        try:
+            async with asyncio.timeout(FUNCTION_PLAN_UNLOAD_WAIT_SEC):
+                if self._unload_must_wait():
+                    _LOGGER.info(
+                        "[%s] Unload waits for the running sync or function plan restore to finish", self.server_id
+                    )
+                while self._unload_must_wait():
+                    await asyncio.sleep(FUNCTION_PLAN_UNLOAD_POLL_SEC)
+                await self.async_wait_for_plan_edits()
+        except TimeoutError:
+            _LOGGER.warning(
+                "[%s] Unloading although a sync, function plan restore or plan edit still runs after %s s; it may "
+                "be left unfinished — check the Web-IO sync status and the plan in Comexio Studio",
+                self.server_id,
+                FUNCTION_PLAN_UNLOAD_WAIT_SEC,
+            )
+
+    def _unload_must_wait(self) -> bool:
+        """Whether a sync (or cleanup) or a restore runs that no reload holding the restores off has ended yet."""
+        busy = self.in_sync or self._sync_lock.locked() or self._restore_lock.locked()
+        return busy and not self._restores_held_for_reload
 
     def _auto_backup_held_back(self, generation: int) -> bool:
         """Whether a restore runs now or ran since the backup cycle read `generation`."""
@@ -2163,7 +2879,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._plan_omit_streaks = {fid: self._plan_omit_streaks.get(fid, 0) + 1 for fid in omitted}
         # Rendered, not as ids: a reported plan renamed meanwhile updates the notification too.
         names = ", ".join(
-            f"'{self.api.function_plan_name(fid)}' ({fid})"
+            f"'{one_line(self.api.function_plan_name(fid))}' ({fid})"
             for fid, streak in sorted(self._plan_omit_streaks.items())
             if streak >= FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD
         )
@@ -2228,14 +2944,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await refresh()
 
     def _current_plan_format(self, fub_data: dict) -> dict[str, tuple[str, int, str]]:
-        """Return {fub_id_str: (paper, dpi, orientation)} for every plan currently in fub_data."""
+        """Return {fub_id_str: (paper, dpi, orientation)} for every plan in fub_data whose format is known.
+
+        A plan whose format was not readable (e.g. $Paper did not decode) is left out: the
+        backups then neither store a guessed format nor take the guess for a format change.
+        """
         return {
-            key: (
-                self.api.get_fub_paper_format(int(key)),
-                self.api.get_fub_dpi(int(key)),
-                self.api.get_fub_orientation(int(key)),
-            )
+            key: fmt
             for key in fub_data
+            if (fub_id := function_plan_id(key)) is not None
+            and (fmt := self.api.get_fub_known_format(fub_id)) is not None
         }
 
     async def async_function_plan_change_backup(
@@ -2249,10 +2967,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if not plan_data:
                 _LOGGER.warning("[%s] Pre-change backup skipped: plan %s could not be loaded", self.server_id, fub_id)
                 return
-            plan_name = self.api.fub_data.get(str(fub_id), {}).get("Name", str(fub_id))
-            paper = self.api.get_fub_paper_format(fub_id)
-            dpi = self.api.get_fub_dpi(fub_id)
-            orientation = self.api.get_fub_orientation(fub_id)
+            # Unreadable, or not readably listed while the list has unreadable entries (one may be this plan).
+            if not function_plan_info(self.api.fub_data, fub_id) and (
+                str(fub_id) in self.api.fub_data or unreadable_plan_keys(self.api.fub_data)
+            ):
+                _LOGGER.warning(
+                    "[%s] Pre-change backup skipped: the plan list entry of plan %s is unreadable",
+                    self.server_id,
+                    fub_id,
+                )
+                return
+            plan_name = function_plan_info(self.api.fub_data, fub_id).get("Name", str(fub_id))
+            # Unknown stays unstored (None) rather than a guessed A4 a restore would then rebuild.
+            paper, dpi, orientation = self.api.get_fub_known_format(fub_id) or (None, None, None)
             markers_by_id, webio_by_id, ios_by_id = self.function_plan_label_maps()
             await self.function_plan_backup.async_change_backup(
                 fub_id,
@@ -2267,6 +2994,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 webio_by_id=webio_by_id,
                 ios_by_id=ios_by_id,
                 block_settings=self.api.block_settings,
+                module_configs=self.api.module_configs,
             )
             await self._async_refresh_service_descriptions()
         except Exception:
@@ -2297,7 +3025,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         if match := _PLAN_LABEL_ID_SUFFIX_RE.search(lp_state.state):
             return int(match.group(1))
-        return next((int(fid) for fid, fi in self.api.fub_data.items() if fi.get("Name") == lp_state.state), None)
+        return next((fid for fid, fi in function_plans(self.api.fub_data) if fi.get("Name") == lp_state.state), None)
 
     def orphaned_plans_view_active(self) -> bool:
         """Whether the 'Plan' selector shows the orphaned-plans view."""
@@ -2516,7 +3244,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         return {str(k["id"]): k for k in (self.data or {}).get("knx", [])}
 
-    async def async_repoint_function_plan_fub_id(self, plan_name: str, old_fub_id: int, new_fub_id: int) -> list[str]:
+    async def async_repoint_function_plan_fub_id(
+        self, plan_name: str, old_fub_id: int, new_fub_id: int, *, old_id_still_live: bool = False
+    ) -> list[str]:
         """Point any config that references old_fub_id by name at the plan's new fub_id.
 
         Called after a restore-as-new gives a deleted/reassigned plan a fresh fub_id.
@@ -2525,19 +3255,43 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan is otherwise silently dropped from cluster management, or leaves the selector
         pointing at a fub_id that no longer exists.
         Returns a list of human-readable descriptions of what was updated, for the
-        restore service's response message.
+        restore service's response message. old_id_still_live: another plan holds old_fub_id now,
+        so a bare-ID watchdog pick stays with it (see repointed_watchdog_user_plan_picks).
         """
         updated: list[str] = []
         new_options = dict(self.config_entry.options)
         plan_map = new_options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         if plan_map.get(plan_name) == old_fub_id:
             new_options[CONF_FUNCTION_PLAN_PLAN_MAP] = {**plan_map, plan_name: new_fub_id}
-            updated.append(f"cluster plan map entry '{plan_name}' → fub_id {new_fub_id}")
+            updated.append(f"cluster plan map entry '{one_line(plan_name)}' → fub_id {new_fub_id}")
         if str(new_options.get(CONF_FUNCTION_PLAN_FUB_ID)) == str(old_fub_id):
-            new_options[CONF_FUNCTION_PLAN_FUB_ID] = new_fub_id
-            updated.append(f"selected function plan → fub_id {new_fub_id}")
+            if old_id_still_live:
+                # A bare-ID selection whose ID another plan holds now stays with that plan, like a bare-ID pick.
+                _LOGGER.info(
+                    "[%s] Selected function plan stays on fub_id %s: another plan holds it now, '%s' is fub_id %s",
+                    self.server_id,
+                    old_fub_id,
+                    one_line(plan_name),
+                    new_fub_id,
+                )
+            else:
+                new_options[CONF_FUNCTION_PLAN_FUB_ID] = new_fub_id
+                updated.append(f"selected function plan → fub_id {new_fub_id}")
+        dismiss_alarm = False
+        if (
+            picks := repointed_watchdog_user_plan_picks(
+                new_options, plan_name, old_fub_id, new_fub_id, old_id_still_live=old_id_still_live
+            )
+        ) is not None:
+            new_options[CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS] = picks
+            updated.append(f"function plan watchdog pick '{one_line(plan_name)}' → fub_id {new_fub_id}")
+            dismiss_alarm = (old_fub_id, plan_name) in (self.plan_watchdog.vanished or ())
         if updated:
+            # Written before any await: options saved meanwhile would be overwritten by this snapshot.
             self.request_options_update_without_reload(new_options)
+        if dismiss_alarm:
+            # The reload that follows forgets which pushes are out: the old alarm would stay on the phone.
+            await self.plan_watchdog.async_dismiss_push(old_fub_id, plan_name)
         return updated
 
     def _parsed_webio_devices(self) -> dict[str, Any]:
@@ -2560,7 +3314,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "[%s] Uninstall cleanup: skipping plan %r with invalid fub_id %r",
                     self.server_id,
-                    plan_name,
+                    one_line(plan_name),
                     fub_id,
                 )
                 failed_plans.append(plan_name)
@@ -2985,6 +3739,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source: str,
         label_metadata: dict[str, dict[str, str]] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
+        paper_format: tuple[str, int, str] | None = None,
     ) -> str:
         """Render elements/connections (live plan or backup snapshot) to a preview SVG file.
 
@@ -3008,11 +3763,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         extended views the render shows; a live render always uses the last polled ones.
         Kept in the preview cache with the frozen elements, so a re-render never picks up
         another backup's settings after the slots rotated.
+
+        paper_format: a snapshot's stored (paper, dpi, orientation) (snapshot_paper_format), which
+        its title and canvas show; None for a live render, or for a snapshot captured without them,
+        which is sized like the live plan but names no format. Cached like block_settings.
         """
         cache_generation_before = self._preview_cache_generation
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(label_metadata)
         catalog = await self.function_plan_catalog.async_get_catalog()
-        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id)
+        title_suffix, canvas = self._build_preview_title_and_canvas(fub_id, paper_format, source == "live")
         sun_times = _build_sun_times(self.hass)
         # A plan switch invalidates the previous plan's connection-id values BEFORE this
         # render — otherwise one frame could color wires from an unrelated plan whose
@@ -3061,7 +3820,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             else:
                 kind, slot = _parse_snapshot_source(source)
                 self._update_snapshot_preview_cache(
-                    fub_id, plan_name, elements, connections, kind, slot, label_metadata, block_settings, live_id_map
+                    fub_id,
+                    plan_name,
+                    elements,
+                    connections,
+                    kind,
+                    slot,
+                    label_metadata,
+                    block_settings,
+                    live_id_map,
+                    paper_format,
                 )
         else:
             _LOGGER.debug(
@@ -3072,6 +3840,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # postponing the periodic poll, like the webhook pushes (see _async_publish_pushed_value).
         self.async_update_listeners()
         return url
+
+    def snapshot_paper_format_for_source(self, fub_id: int, plan_name: str, source: str) -> tuple[str, int, str] | None:
+        """The stored paper format of a 'snapshot:<kind>:<slot>' preview source; None for "live".
+
+        Same caveat as snapshot_block_settings_for_source: only right after reading that snapshot.
+        """
+        if source == "live":
+            return None
+        kind, slot = _parse_snapshot_source(source)
+        return self.function_plan_backup.paper_format_sync(kind, fub_id, plan_name, slot)
 
     def snapshot_block_settings_for_source(
         self, fub_id: int, plan_name: str, source: str
@@ -3086,10 +3864,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kind, slot = _parse_snapshot_source(source)
         return self.function_plan_backup.block_settings_sync(kind, fub_id, plan_name, slot)
 
-    async def _async_publish_plan_preview(self, fub_id: int, plan_name: str, source: str, svg_content: str) -> str:
-        """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL."""
+    async def _async_publish_plan_preview(
+        self, fub_id: int, plan_name: str, source: str, svg_content: str, captured_at: str | None = None
+    ) -> str:
+        """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL.
+
+        captured_at: the rendered snapshot's capture time (orphaned-plans view only; see
+        image.ComexioPlanPreviewImage.extra_state_attributes).
+        """
         filename = f"comexio_{self.server_id}_plan_preview.svg"
         file_path = pathlib.Path(self.hass.config.path("www", filename))
+        stamped = stamp_preview_identity(svg_content, source, captured_at)
+        if stamped == svg_content:
+            # Shown anyway; the plan card then never trusts its identity and keeps warning before a delete.
+            _LOGGER.warning(
+                "[%s] Plan preview of '%s' (%s) has no <svg> root tag to name its render on",
+                self.server_id,
+                one_line(plan_name),
+                source,
+            )
+        svg_content = stamped
         await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
 
         self.last_plan_preview_svg = svg_content
@@ -3097,6 +3891,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "fub_id": fub_id,
             "plan_name": plan_name,
             "source": source,
+            "captured_at": captured_at,
             "generated_at": dt_util.utcnow().isoformat(),
         }
         return f"/local/{filename}"
@@ -3107,8 +3902,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Only a poll's $Fubs read is complete (see scraped_plan_ids): before it the cache is empty
         or holds just plans HA itself created or looked up, and judging by it would show every
         other backed-up plan as deleted. After it an empty cache means no plan is left in Comexio.
+        None as well while the cache holds an entry function_plans skips (see unreadable_plan_keys).
         """
-        return None if self.scraped_plan_ids is None else self.api.fub_data
+        if self.scraped_plan_ids is None or unreadable_plan_keys(self.api.fub_data):
+            return None
+        return self.api.fub_data
 
     def orphaned_backup_options(self) -> list[tuple[str, dict[str, Any]]]:
         """(label, choice) rows of the backup selector's orphaned-plans view (cache-only)."""
@@ -3136,7 +3934,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         if label is None:
             _LOGGER.warning(
-                "[%s] Orphaned plan preview: no backups left for '%s' (fub=%s)", self.server_id, plan_name, fub_id
+                "[%s] Orphaned plan preview: no backups left for '%s' (fub=%s)",
+                self.server_id,
+                one_line(plan_name),
+                fub_id,
             )
             return False
         registry = er.async_get(self.hass)
@@ -3155,19 +3956,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.warning("[%s] Orphaned plan preview: could not switch the plan selectors: %s", self.server_id, err)
             return False
         # A disabled or unavailable select is skipped by the service call without an error.
-        backup_state = self.hass.states.get(backup_eid)
-        if not self.orphaned_plans_view_active() or backup_state is None or backup_state.state != label:
+        if not self._orphan_label_selected(backup_eid, label):
             _LOGGER.warning(
                 "[%s] Orphaned plan preview: the plan selectors did not switch (disabled or unavailable?)",
                 self.server_id,
             )
             return False
-        choice = self.orphaned_backup_choice(label)
-        if choice is None:
-            _LOGGER.warning("[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, plan_name)
-            return False
-        url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
+        # In turn with the selection follows (plan_preview) and the other loads, so a slower render of an
+        # earlier pick cannot publish after a newer one; as the newest request it supersedes the follow
+        # its own selector switch queued. Selection and choice are read again under the lock: another
+        # pick while it waited is left to its own follow, and a delete shifts the slots.
+        async with self.preview_follow_lock:
+            if not self._orphan_label_selected(backup_eid, label):
+                _LOGGER.info(
+                    "[%s] Orphaned plan preview of '%s' skipped: another selection was made meanwhile",
+                    self.server_id,
+                    one_line(plan_name),
+                )
+                return False
+            choice = self.orphaned_backup_choice(label)
+            if choice is None:
+                _LOGGER.warning(
+                    "[%s] Orphaned plan preview: '%s' was deleted meanwhile", self.server_id, one_line(plan_name)
+                )
+                return False
+            self.preview_follow_generation += 1
+            url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
         return url is not None
+
+    def _orphan_label_selected(self, backup_eid: str, label: str) -> bool:
+        """True while the 'Plan' selector shows the orphaned-plans view and the backup selector this label."""
+        backup_state = self.hass.states.get(backup_eid)
+        return self.orphaned_plans_view_active() and backup_state is not None and backup_state.state == label
 
     async def async_generate_orphaned_plan_preview(
         self, fub_id: int, plan_name: str, kind: str, slot: int
@@ -3190,7 +4010,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 kind,
                 slot,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             return None
@@ -3199,6 +4019,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         render_elements, render_catalog = expand_autohide_blocks(
             snapshot.get("elements") or {}, catalog, snapshot_block_settings(snapshot)
         )
+        format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, snapshot_paper_format(snapshot))
         svg_content = render_plan_svg(
             render_elements,
             snapshot.get("connections") or {},
@@ -3207,9 +4028,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             webio_by_id,
             ios_by_id,
             plan_name,
-            _ORPHANED_PREVIEW_TITLE_SUFFIX,
+            f"{_ORPHANED_PREVIEW_TITLE_SUFFIX} {format_suffix}".rstrip(),
             _build_sun_times(self.hass),
-            canvas=None,
+            canvas=canvas,
             connection_values=None,
             knx_by_id=self.function_plan_knx_label_map(),
             plan_id=str(fub_id),
@@ -3218,7 +4039,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # A newer render (another plan picked meanwhile) owns the preview now.
             _LOGGER.debug("[%s] Orphaned plan preview skipped: a newer preview was armed meanwhile", self.server_id)
             return None
-        url = await self._async_publish_plan_preview(fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content)
+        # captured_at from the snapshot read above, before any await: it names what was rendered,
+        # even when a delete shifted the slots meanwhile.
+        url = await self._async_publish_plan_preview(
+            fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content, captured_at=snapshot.get("captured_at")
+        )
         self.async_update_listeners()
         return url
 
@@ -3267,22 +4092,40 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label_maps = snapshot_label_maps(label_metadata, *label_maps)
         return label_maps
 
-    def _build_preview_title_and_canvas(self, fub_id: int) -> tuple[str, Any]:
+    def _build_preview_title_and_canvas(
+        self, fub_id: int, paper_format: tuple[str, int, str] | None = None, live: bool = True
+    ) -> tuple[str, Any]:
         """Build the Studio-style title suffix (state + paper/DPI) and canvas bounds for a live plan.
 
         Title suffix carries the plan's live state + paper/DPI (Studio-style header info),
-        rendered at half the plan-name size. Read from the live fub data — for snapshots
-        of deleted plans it stays empty.
+        rendered at half the plan-name size. The state is read from the live fub data — a backup
+        of a plan that is gone shows only its stored format (nothing without one). paper_format:
+        a backup's own format, shown instead of the live one (the plan may have been switched to
+        another paper since). live=False without one: a backup whose format is not known — sized
+        like the live plan, but the title names no format it cannot vouch for.
         """
         if (active := self.api.get_fub_active(fub_id)) is None:
-            return "", None
-        paper = self.api.get_fub_paper_format(fub_id)
-        dpi = self.api.get_fub_dpi(fub_id)
-        title_suffix = f"[{'aktiv' if active else 'inaktiv'}] [{paper} | {dpi}dpi]"
+            return self._snapshot_format_title_and_canvas(fub_id, paper_format)
+        state = f"[{'aktiv' if active else 'inaktiv'}]"
+        if paper_format is not None:
+            format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, paper_format)
+            return f"{state} {format_suffix}", canvas
         # Paper-sized viewBox: same relative element scale for every plan of this paper
         # format instead of blowing a nearly empty plan up to full card width.
         canvas = self.api.get_fub_canvas_bounds(fub_id)
-        return title_suffix, canvas
+        if not live:
+            return state, canvas
+        return f"{state} [{self.api.get_fub_paper_format(fub_id)} | {self.api.get_fub_dpi(fub_id)}dpi]", canvas
+
+    def _snapshot_format_title_and_canvas(
+        self, fub_id: int, paper_format: tuple[str, int, str] | None
+    ) -> tuple[str, Any]:
+        """Title suffix "[paper | dpi]" and canvas bounds of a backup's own format; ("", None) without one."""
+        if paper_format is None:
+            return "", None
+        paper, dpi, orientation = paper_format
+        canvas = self.api.get_fub_canvas_bounds(fub_id, paper_name=paper, orientation=orientation, resolution=dpi)
+        return f"[{paper} | {dpi}dpi]", canvas
 
     def _update_live_preview_cache(
         self,
@@ -3305,6 +4148,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "snapshot_source": None,
             "label_metadata": None,
             "block_settings": None,
+            "paper_format": None,
             "live_id_map": None,
         }
         self._preview_cache_generation += 1
@@ -3324,10 +4168,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         label_metadata: dict[str, dict[str, str]] | None,
         block_settings: Mapping[str, Mapping[str, str]] | None,
         live_id_map: dict[str, str] | None,
+        paper_format: tuple[str, int, str] | None = None,
     ) -> None:
         """Arm the preview cache for a frozen backup snapshot (wiring stays put, values stay live).
 
-        label_metadata / block_settings: the snapshot's own, frozen with its wiring.
+        label_metadata / block_settings / paper_format: the snapshot's own, frozen with its wiring.
 
         live_id_map: this snapshot's element-id -> live-plan element-id translation (see
         build_source_id_translation), reused as-is by subsequent refreshes of the SAME
@@ -3348,6 +4193,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "snapshot_source": source,
             "label_metadata": label_metadata,
             "block_settings": block_settings,
+            "paper_format": paper_format,
             "live_id_map": live_id_map,
         }
         self._preview_cache_generation += 1
@@ -3397,6 +4243,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 cache["snapshot_source"] or "live",
                 cache["label_metadata"],
                 cache["block_settings"],
+                cache["paper_format"],
             )
 
     async def _async_refresh_plan_preview(self, _now: Any) -> None:
@@ -3686,7 +4533,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "[%s] Connection-value poll fub=%s plan=%s -> %s",
             self.server_id,
             cache["fub_id"],
-            cache["plan_name"],
+            one_line(cache["plan_name"]),
             connection_values,
         )
         try:
@@ -3714,6 +4561,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (e.g. an in-progress async_generate_plan_preview) could commit its cache after
         # HA has already moved on, one of the disarm paths missed by the original fix (#77).
         self._disarm_preview_cache()
+        if self._system_info_task is not None:
+            self._system_info_task.cancel()
+            # Wait until it has stopped: async_unload_entry closes the API session right after.
+            # asyncio.wait does not raise, so a cancellation of this shutdown itself still propagates.
+            await asyncio.wait([self._system_info_task])
         await super().async_shutdown()
 
     def _fire_plan_system_event(self, message: str) -> None:
@@ -3775,7 +4627,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     m["value"] = value
                     label = m.get("name") or label
                     break
-        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "marker", label, value, previous)
+        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "marker", one_line(label), value, previous)
         self._async_publish_pushed_value()
         self._fire_plan_event("marker", marker_id_str, label, value)
         self.schedule_plan_preview_refresh()
@@ -3792,7 +4644,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     k["value"] = value
                     label = k.get("name") or label
                     break
-        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "knx", label, value, previous)
+        _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "knx", one_line(label), value, previous)
         self._async_publish_pushed_value()
         self._fire_plan_event("knx", knx_id_str, label, value)
         self.schedule_plan_preview_refresh()
@@ -3814,10 +4666,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
             io["value"] = value
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
             label = io.get("name") or f"{ext_name} {identifier}"
-            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", label, value, previous)
+            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, ext_name, identifier, value)
+            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), identifier, value)
+        self._async_publish_pushed_value()
+        self.schedule_plan_preview_refresh()
+
+    def update_quickbus_io(self, io_id: str | int, value: float | int | str) -> None:
+        """Webhook push for an IO of a Quickbus device, addressed by its unique IO Id."""
+        io_id_str = str(io_id)
+        if io := self._quickbus_index.get(io_id_str):
+            previous = self.io_states.get(io["id"])
+            self.io_states[io["id"]] = value
+            self._io_real_value_ids.add(io["id"])
+            io["value"] = value
+            self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+            label = io.get("name") or io_id_str
+            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "quickbus", one_line(label), value, previous)
+            self._fire_plan_event("io", io_id_str, label, value)
+        else:
+            _LOGGER.warning(WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG, one_line(io_id_str), value)
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
@@ -3941,7 +4810,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             dev_reg.async_update_device(
                 old_device.id,
                 new_identifiers={(DOMAIN, f"{server_slug}_{new_name}".lower())},
-                name=f"{self.server_id} {new_name}",
+                name=extension_device_name(self.server_id, new_name),
             )
 
         # Keep the firmware cache under the new name so update.* doesn't briefly show
@@ -4004,7 +4873,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Fires once a day at WEBIO_RANGE_CHECK_HOUR:WEBIO_RANGE_CHECK_MINUTE. The bulk config
         scrape ($FubModules["10"]) never returns Min/Max for HA's own Web-IO commands (see
-        api.get_webio_command_range), so drift can only be detected by reading each analog
+        api.get_webio_command_form), so drift can only be detected by reading each analog
         command's edit form individually — one HTTP GET per command. That cost is why this
         runs on its own nightly schedule instead of piggybacking on the regular poll audit
         or the manual sync button.
@@ -4029,40 +4898,41 @@ class ComexioCoordinator(DataUpdateCoordinator):
         kept separate so a run where every fix fails can't misreport as a clean success.
         """
         device_id = device.get("device_id")
-        live_min, live_max = await self.api.get_webio_command_range(cmd_id, device_id)
-        if live_min is None or live_max is None:
+        form = await self.api.get_webio_command_form(cmd_id, device_id)
+        if form is None or form.min is None or form.max is None:
             result[RANGE_CHECK_FAILED] += 1
             return
         result[RANGE_CHECK_CHECKED] += 1
-        if live_min == target["Min"] and live_max == target["Max"]:
+        if form.min == target["Min"] and form.max == target["Max"]:
             return
 
         if await self.api.save_single_command(device.get("base_id"), device_id, target, existing_cmd_id=cmd_id):
             result[RANGE_CHECK_FIXED] += 1
             _LOGGER.warning(
                 "Web-IO command '%s' Min/Max drifted (%s/%s -> %s/%s); corrected.",
-                name,
-                live_min,
-                live_max,
+                one_line(name),
+                form.min,
+                form.max,
                 target["Min"],
                 target["Max"],
             )
         else:
             result[RANGE_CHECK_CORRECTION_FAILED] += 1
-            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", name)
+            _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", one_line(name))
 
     async def _async_webio_range_check_tick(self, _now: datetime | None = None) -> dict[str, int]:
         """Check and correct analog Web-IO command Min/Max drift against the target range.
 
         For every analog Web-IO command, compares its live Min/Max (read via
-        api.get_webio_command_range) against the target build_webio_commands would create
+        api.get_webio_command_form) against the target build_webio_commands would create
         today — WEBIO_MARKER_ANALOG_MIN/MAX for markers, the authentic IO type range for
         physical IOs — and rewrites it via api.save_single_command on a mismatch. Returns a
         {"checked": n, "fixed": n, "failed": n, "correction_failed": n, "excluded": n,
         "skipped": 0|1} summary; shared by the nightly schedule and the manual force trigger.
         "skipped" is 1 (with the other counters left at 0) when no data is loaded yet, or while
         a sync is in progress — save_single_command would otherwise race the sync button's
-        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — so
+        delta/full-recreate writes against the same Web-IO devices (see _sync_lock / R4) — or a
+        function plan restore (sync and restore exclude each other, the range check counts as a sync) — so
         callers can tell "skipped" apart from a genuine clean run that found nothing to fix.
         "excluded" counts commands that were never read at all because they couldn't be matched
         to a target (naming mismatch, stale command) or are missing an id/device — kept separate
@@ -4080,8 +4950,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self.data:
             result[RANGE_CHECK_SKIPPED] = 1
             return result
-        if self._sync_lock.locked():
-            _LOGGER.warning("[%s] Sync in progress, skipping Web-IO range check", self.server_id)
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
+            )
             result[RANGE_CHECK_SKIPPED] = 1
             return result
 
@@ -4091,7 +4963,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             target_by_name = {
                 cmd["Name"]: cmd
                 for cmd in self.api.build_webio_commands(
-                    self.server_id, self.data, None, self.ignored_marker_ids, self.ignored_knx_ids
+                    self.server_id, self.webio_source_data(), None, self.ignored_marker_ids, self.ignored_knx_ids
                 )
             }
 
@@ -4104,14 +4976,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 if target is None or not cmd_id or not device.get("device_id"):
                     result[RANGE_CHECK_EXCLUDED] += 1
                     _LOGGER.warning(
-                        "Web-IO command '%s' excluded from range check (no matching target/id/device)", name
+                        "Web-IO command '%s' excluded from range check (no matching target/id/device)", one_line(name)
                     )
                     continue
                 try:
                     await self._async_check_one_webio_range(name, cmd_id, device, target, result)
                 except Exception:
                     result[RANGE_CHECK_FAILED] += 1
-                    _LOGGER.exception("Unexpected error checking Web-IO command '%s' range", name)
+                    _LOGGER.exception("Unexpected error checking Web-IO command '%s' range", one_line(name))
 
         _LOGGER.info(
             "[%s] Web-IO range check: %d checked, %d fixed, %d failed to read, %d correction failed, %d excluded",
@@ -4139,6 +5011,46 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return async_track_time_interval(
             self.hass, self._async_bus_load_tick, timedelta(seconds=BUS_LOAD_POLL_INTERVAL_SEC)
         )
+
+    def async_start_system_info_poll(self):
+        """Start the system info poll (free storage, time server, uptime); returns the cancel callback.
+
+        Fires one immediate tick, like async_start_bus_load_poll, so the readings are there right after setup.
+        """
+        self._async_schedule_system_info_tick()
+        return async_track_time_interval(
+            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+        )
+
+    @callback
+    def _async_schedule_system_info_tick(self, _now: datetime | None = None) -> None:
+        """Start a system info poll, unless one still runs or the entry unloads.
+
+        One poll at a time, so an older one never overwrites a newer one's readings; async_shutdown
+        cancels the running one before the API session closes under it.
+        """
+        if self.unloading:
+            return
+        if self._system_info_task is not None and not self._system_info_task.done():
+            _LOGGER.debug("[%s] System info poll still running, skipping this tick", self.server_id)
+            return
+        self._system_info_task = self.hass.async_create_task(
+            self._async_system_info_tick(), name=f"comexio_{self.server_id}_system_info_tick"
+        )
+
+    async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
+        """Fetch the system info and uptime into self.system_info and notify its entities."""
+        reading = await self.api.get_system_info()
+        causes = {PART_SYSTEM_INFO: reading.info_error, PART_UPTIME: reading.uptime_error}
+        for part in self.system_info.apply(reading.info, reading.uptime, dt_util.utcnow()):
+            _LOGGER.warning(
+                "[%s] System info poll failed %s times in a row, %s reset to unknown: %s",
+                self.server_id,
+                SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
+                part,
+                causes[part],
+            )
+        async_dispatcher_send(self.hass, system_info_signal(self.server_id))
 
     def async_start_plan_run_state_poll(self):
         """Start the function plan run-state poll; returns the cancel callback.
@@ -4197,12 +5109,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         (plan_run_states_available). The endpoint's failure is logged once per outage, not per poll.
         """
         fub_ids = sorted(function_plan_ids(self.api.fub_data))
-        if not fub_ids or self._plan_run_state_fetching or self._plan_run_state_poll_blocked():
+        if self._plan_run_state_fetching or self._plan_run_state_poll_blocked():
+            return
+        if not fub_ids:
+            # No run state to fetch, but a watched plan deleted last still gets its vanished repair and push.
+            await self._async_watch_plans_and_refresh()
             return
         self._plan_run_state_last_fetch = time.monotonic()
         run_state_mark = self.api.run_state_mark()
         cache_epoch = self.api.fub_cache_epoch()
         self._plan_run_state_fetching = True
+        fetch_failed = False
         try:
             states = await self.api.get_function_plan_run_states(fub_ids, session=session)
             if not states:
@@ -4213,9 +5130,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if isinstance(err, UNREACHABLE_ERRORS):
                 self.note_comexio_unreachable()
             await self._async_plan_run_state_fetch_failed(err, session)
-            return
+            fetch_failed = True
         finally:
             self._plan_run_state_fetching = False
+        if fetch_failed:
+            # The full polls may still read the plan list: a watched plan deleted meanwhile gets its vanished
+            # repair and push. No plan is judged on the last known run states: the clock-based steps (existence
+            # check, retry gap, boot grace) would run on an old reading as if it were new.
+            await self._async_watch_plans_and_refresh(run_states_read=False)
+            return
         # Only the fetch's own outage recovers here; an unread plan list ends with the next full poll.
         was_unavailable = self._plan_run_state_stale_count >= FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD
         if self._plan_run_state_fail_streak:
@@ -4234,6 +5157,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
 
+    async def _async_watch_plans_and_refresh(self, *, run_states_read: bool = True) -> None:
+        """Run a watchdog check and refresh the entities when its stopped set changed."""
+        if await self.async_watch_managed_plans(run_states_read=run_states_read):
+            self.async_update_listeners()
+
     def _existing_plan_names(self, raw_ids: Iterable[Any]) -> dict[int, str]:
         """fub_id → name of those of raw_ids (ints or digit strings) Comexio still has."""
         plans: dict[int, str] = {}
@@ -4242,8 +5170,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 fub_id = int(value)
             except (TypeError, ValueError):
                 continue
-            fub = self.api.fub_data.get(str(fub_id))
-            if isinstance(fub, dict):
+            if fub := function_plan_info(self.api.fub_data, fub_id):
                 plans[fub_id] = str(fub.get("Name") or fub_id)
         return plans
 
@@ -4287,35 +5214,36 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
 
     def _unresolved_plan_identities(self) -> frozenset[tuple[int, str]]:
-        """(fub_id, name) of the plan_map entries and named user picks Comexio no longer has under that name.
+        """(fub_id, name) of the plan_map entries Comexio no longer has under that name.
 
+        The user picks are not among them: such a pick raises its own repair (_vanished_user_plans).
         Empty without a live plan list: a failed fetch, or a cache holding only the plans HA itself
         created or looked up, must not read as every other plan gone. Once a poll read an empty
-        plan list, every entry is unresolved (#140).
+        plan list, every entry is unresolved (#140). An ID another entry still resolves is not
+        unresolved: HA renamed the plan itself (a cluster join) and the old name is merely left over
+        until the next sync prunes it — the watchdog keeps watching the plan under its new name.
         """
         if self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
         identities = [(str(fub_id), name) for name, fub_id in raw_map.items()] if isinstance(raw_map, dict) else []
-        if isinstance(raw_picks, list):
-            picks = (parse_watchdog_user_plan_pick(value) for value in raw_picks)
-            identities += [(str(pick[0]), pick[1]) for pick in picks if pick is not None and pick[1] is not None]
         live = self._existing_plan_names(fub_id for fub_id, _ in identities if fub_id.isdigit())
+        resolved = {fub_id for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) == name}
         return frozenset(
-            (int(fub_id), name) for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) != name
+            (int(fub_id), name)
+            for fub_id, name in identities
+            if fub_id.isdigit() and fub_id not in resolved and live.get(int(fub_id)) != name
         )
 
     def _warn_unresolved_watch_picks(self) -> None:
-        """Warn once per pick that drops out of the watchdog because its ID no longer carries its name."""
+        """Warn once per HA plan that drops out of the watchdog because its ID no longer carries its name."""
         unresolved = self._unresolved_plan_identities()
         for fub_id, name in sorted(unresolved - self._unresolved_watch_picks):
             _LOGGER.warning(
-                "[%s] The function plan watchdog no longer watches '%s' (ID %s): Comexio has no plan of that name "
-                "under this ID any more (renamed, deleted, or the ID reused for another plan). A renamed user plan "
-                "can be picked again in the options",
+                "[%s] The function plan watchdog no longer watches HA's plan '%s' (ID %s): Comexio has no plan of "
+                "that name under this ID any more (renamed, deleted, or the ID reused for another plan)",
                 self.server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
         self._unresolved_watch_picks = unresolved
@@ -4328,40 +5256,291 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         return self.api.get_fub_active(fub_id)
 
-    @property
-    def managed_plan_start_blocked(self) -> bool:
-        """Whether a sync, repair, restore, full poll or bus-load cascade runs — no plan is started meanwhile."""
+    def _watchdog_verified_run_state(self, fub_id: int) -> bool | None:
+        """_watchdog_run_state, but a watched plan newly read as stopped stays None until its existence is checked.
+
+        Comexio answers a deleted plan's run state like a stopped one's: reported straight away,
+        a plan deleted in Comexio Studio raised a "not running" alarm with a "Start plan" action
+        and a doomed auto-start (seen live 2026-10-14). So the first "stopped" asks for a full
+        poll, which re-reads the plan list; a plan still listed after it is stopped, a deleted
+        one drops out of the watched plans. A poll that brings no plan list must not silence the
+        watchdog: after FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC the plan is judged anyway.
+        """
+        state = self._watchdog_run_state(fub_id)
+        if state is not False or fub_id in (self.plan_watchdog.stopped or {}):
+            self._plan_stop_unverified.pop(fub_id, None)
+            return state
+        if (seen := self._plan_stop_unverified.get(fub_id)) is None:
+            self._plan_stop_unverified[fub_id] = (self.plan_scrape_generation, time.monotonic())
+            _LOGGER.info(
+                "[%s] Function plan %s reads as not running; re-reading the plan list before reporting it",
+                self.server_id,
+                fub_id,
+            )
+            self.hass.async_create_background_task(
+                self.async_request_refresh(), name=f"{DOMAIN}_{self.server_id}_plan_existence_check"
+            )
+            return None
+        generation, since = seen
+        if (
+            self.plan_scrape_generation > generation
+            or time.monotonic() - since >= FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC
+        ):
+            return False
+        return None
+
+    def _vanished_user_plans(self) -> set[tuple[int, str]]:
+        """(fub_id, name) of the user picks Comexio no longer has under their ID and name.
+
+        Deleted, or (a named pick) its ID now carries another name: renamed and deleted-then-reused
+        look alike, so both raise the same repair, which names the ID's current plan (vanished_id_holders).
+        By ID and name: a reused ID can belong to two deleted picks ("47:X", "47:Y"). Only with a
+        live plan list (see _unresolved_plan_identities). A bare-ID pick (saved before names were)
+        watches whatever plan holds its ID; gone, it takes the name its backups carry, unless a named
+        pick of the same ID names it. A pick the plan_map holds under the same ID and name is left out:
+        that plan is HA's own. The ID alone proves nothing — a stale entry of another plan on a reused
+        ID must not hide a deleted user plan.
+        """
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if self.live_plan_list() is None or not isinstance(raw_picks, list):
+            return set()
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            raw_map = {}
+        picks = [pick for value in raw_picks if (pick := parse_watchdog_user_plan_pick(value)) is not None]
+        named_ids = {fub_id for fub_id, name in picks if name is not None}
+        vanished: set[tuple[int, str]] = set()
+        live = self._existing_plan_names(fub_id for fub_id, name in picks if name is not None)
+        for fub_id, name in picks:
+            if self._user_pick_not_vanished(fub_id, name, live, named_ids):
+                continue
+            plan_name = name if name is not None else self._backed_up_plan_name(fub_id)
+            if str(raw_map.get(plan_name)) != str(fub_id):  # else HA's own plan
+                vanished.add((fub_id, plan_name))
+        return vanished
+
+    def _user_pick_not_vanished(self, fub_id: int, name: str | None, live: dict[int, str], named_ids: set[int]) -> bool:
+        """Whether pick (fub_id, name) still finds its plan, or (a bare ID) a named pick of its ID speaks for it."""
+        if name is None:
+            return str(fub_id) in self.api.fub_data or fub_id in named_ids
+        return live.get(fub_id) == name
+
+    def vanished_id_holders(self, vanished: Iterable[tuple[int, str]]) -> dict[int, str]:
+        """fub_id → name of the plan now holding the ID of a vanished pick: renamed, or the ID reused."""
+        return self._existing_plan_names(fub_id for fub_id, _ in vanished)
+
+    def plan_rename_suspected(self, fub_id: int, old_name: str, new_name: str) -> bool:
+        """Whether plan new_name on fub_id looks like old_name renamed: their newest auto backups hash the same.
+
+        A hint only (cache-only, backups loaded): the hash covers elements and wiring, not name or paper,
+        so a plan deleted and rebuilt with the same content matches too. Without a backup on either side,
+        or with both empty (all empty plans hash the same, see plan_has_elements), it is no rename.
+        """
+        if old_name == new_name:
+            return False
+        hashes = [self.function_plan_backup.newest_auto_hash_sync(fub_id, name) for name in (old_name, new_name)]
+        return hashes[0] not in (None, EMPTY_PLAN_HASH) and hashes[0] == hashes[1]
+
+    def _backed_up_plan_name(self, fub_id: int) -> str:
+        """The one plan name the backups of fub_id carry; unnamed_plan_label for none or several (no restore then)."""
+        names = self.function_plan_backup.plan_names_for_fub_id_sync(fub_id)
+        return next(iter(names)) if len(names) == 1 else unnamed_plan_label(fub_id)
+
+    def _plan_watch_blocked(self) -> bool:
+        """Whether a sync, repair, restore, full poll or bus-load cascade runs — the watchdog judges nothing."""
         return self._watchdog_lock.locked() or self._plan_run_state_poll_blocked()
 
-    async def async_watch_managed_plans(self) -> bool:
-        """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed."""
-        if self.managed_plan_start_blocked:
+    @property
+    def managed_plan_start_blocked(self) -> bool:
+        """_plan_watch_blocked or a plan edit runs — no plan starts meanwhile.
+
+        A plan edit leaves the judgement alone (HA's own stop is excused by ha_stopped_within), only
+        an auto-start in it is deferred to the next check.
+        """
+        return self._plan_watch_blocked() or self.plan_edits_running or self.unloading
+
+    async def async_watch_managed_plans(self, *, run_states_read: bool = True) -> bool:
+        """Judge the watched plans' run states (see plan_watchdog); True if the stopped set changed.
+
+        One check at a time: a check started meanwhile (e.g. by Stop watching) waits and then judges
+        the picks and plan list as they are by then, after the older one has synced its view.
+        run_states_read=False (the run-state fetch failed): every run state counts as unknown, so the
+        check only syncs the vanished plans and keeps every verdict.
+        """
+        if self._plan_watch_blocked():
             return False
+        async with self._plan_watch_check_lock:
+            if self._plan_watch_blocked():
+                return False
+            return await self._async_watch_managed_plans(run_states_read)
+
+    async def _async_watch_managed_plans(self, run_states_read: bool = True) -> bool:
+        """async_watch_managed_plans' check, run under _plan_watch_check_lock."""
         if self.live_plan_list() is None:
             # Until a poll read the whole plan list, the cache holds only the plans HA created or looked
-            # up: judging by it would drop every other watched plan without a word and clear its repair.
-            # Logged once: the list never turns None again, and a list that stays unreadable is
-            # reported by _track_plan_list_read.
+            # up, and a list with an unreadable entry may hide a watched plan: judging by either would
+            # drop a watched plan without a word and clear its repair. Logged once per wait; a list that
+            # stays unread is reported by _track_plan_list_read.
             if not self._plan_watch_deferred:
                 _LOGGER.info(
-                    "[%s] Function plan watchdog waits for the first poll that reads the plan list", self.server_id
+                    "[%s] Function plan watchdog waits for a poll that reads the whole plan list", self.server_id
                 )
                 self._plan_watch_deferred = True
             return False
+        self._plan_watch_deferred = False
         in_grace = self._plan_watch_held()
         self._warn_unresolved_watch_picks()
         user_plans = self._watched_user_plan_names()
+        watched = {**user_plans, **self._managed_plan_names()}
+        self._plan_stop_unverified = {
+            fub_id: seen for fub_id, seen in self._plan_stop_unverified.items() if fub_id in watched
+        }
         # In an outage and the boot grace after it a plan seen running still clears its verdict,
         # but no plan is judged stopped anew or started: a booting Comexio starts its plans itself.
         stopped_changed = await self.plan_watchdog.async_check(
-            {**user_plans, **self._managed_plan_names()},
-            self._watchdog_grace_run_state if in_grace else self._watchdog_run_state,
+            watched,
+            self._watchdog_run_state_for(in_grace, run_states_read),
             user_plans.keys(),
-            auto_start=not in_grace,
+            # During a plan edit the start would only be deferred, logged on every tick: it follows
+            # with the first check after the edit.
+            auto_start=run_states_read and not in_grace and not self.plan_edits_running,
         )
+        # Read after the check's awaits (auto-starts, pushes): a vanished plan restored meanwhile is no longer
+        # vanished, so its repair is not raised again nor its alarm sent again. No await between it and the sync.
+        vanished = await self._async_vanished_user_plans_named()
+        if await self._async_follow_vanished_renames(vanished):
+            # Read again after its awaits: a rename followed or a plan restored meanwhile is no longer vanished.
+            vanished = await self._async_vanished_user_plans_named()
+        await self.plan_watchdog.async_sync_vanished(vanished, self.vanished_id_holders(vanished))
         # The problem sensor's last_check moves with every check, not only when a listener update follows.
         async_dispatcher_send(self.hass, plan_watch_signal(self.server_id))
         return stopped_changed
+
+    async def _async_follow_vanished_renames(self, vanished: set[tuple[int, str]]) -> bool:
+        """Follow a vanished pick's rename before its alarm: the plan on its ID holds its last backup's content.
+
+        Loads that plan fresh (the bulk snapshot may predate an ID reuse). A settled answer is kept per (ID,
+        name, holder), so a reused ID is not loaded on every check; a comparison that could not be made, or
+        a follow-up held off or failed, is tried again with the next check. True if it awaited anything: the
+        caller reads the vanished plans again.
+        """
+        holders = self.vanished_id_holders(vanished)
+        candidates = {(fub_id, name, holders[fub_id]) for fub_id, name in vanished if fub_id in holders}
+        self._rename_checked &= candidates
+        self._rename_compare_warned &= candidates
+        self._rename_check_error_logged &= candidates
+        awaited = False
+        for candidate in sorted(candidates - self._rename_checked):
+            awaited = True
+            try:
+                settled = await self._async_follow_vanished_rename(*candidate)
+            except Exception:
+                # The vanished alarm still follows; tried again with the next check, the traceback logged once.
+                if candidate in self._rename_check_error_logged:
+                    _LOGGER.debug("[%s] Rename check of ID %s failed again", self.server_id, candidate[0])
+                else:
+                    self._rename_check_error_logged.add(candidate)
+                    _LOGGER.exception(
+                        "[%s] Rename check of watchdog pick '%s' (ID %s) failed",
+                        self.server_id,
+                        one_line(candidate[1]),
+                        candidate[0],
+                    )
+                settled = False
+            if settled:
+                self._rename_checked.add(candidate)
+        return awaited
+
+    async def _async_follow_vanished_rename(self, fub_id: int, name: str, holder: str) -> bool:
+        """Compare and follow one vanished pick's rename; False when that is to be tried again with the next check.
+
+        A pick an earlier follow renamed while its backups did not move (_rename_move_pending) is compared
+        with those backups, still under their old name; renamed back to that name, only the pick goes back
+        (as _rename_sources). Not while HA manages the old name on that ID.
+        """
+        pending_old = next(
+            (
+                old
+                for (pending_id, old), pick in self._rename_move_pending.items()
+                if (pending_id, pick) == (fub_id, name) and (holder == old or not self._managed_under(fub_id, old))
+            ),
+            None,
+        )
+        backup_name = name if pending_old is None else pending_old
+        if holder == pending_old:
+            holds: bool | None = True
+        else:
+            holds = await self._async_plan_holds_backup_of(fub_id, name, holder, backup_name)
+        if holds is None:
+            return False
+        followed = holds and (pending_old is not None or self._pick_present(fub_id, name))
+        settled = not followed or await self._async_follow_rename(fub_id, backup_name, holder) is not None
+        self._rename_compare_warned.discard((fub_id, name, holder))
+        self._rename_check_error_logged.discard((fub_id, name, holder))
+        return settled
+
+    async def _async_plan_holds_backup_of(
+        self, fub_id: int, name: str, holder: str, backup_name: str | None = None
+    ) -> bool | None:
+        """Whether the plan on ID fub_id holds the content of pick name's newest auto backup (read fresh).
+
+        backup_name: the name those backups are stored under, when not the pick's. None when that could not
+        be compared (backups unreadable, plan not loaded); warned once per pick and holder, then logged at
+        debug. A plan without elements is no match: two empty plans hash the same.
+        """
+        error: str | None = None
+        try:
+            await self.function_plan_backup.async_load()
+            backed_up = self.function_plan_backup.newest_auto_hash_sync(fub_id, backup_name or name)
+            if backed_up is None:
+                return False
+            plan_data = await self.api.function_plan_load_elements(fub_id)  # None: failed, logged by the API
+        except (ComexioError, aiohttp.ClientError, OSError) as err:  # OSError covers TimeoutError
+            plan_data, error = None, f": {err}"
+        if plan_data is None:
+            candidate = (fub_id, name, holder)
+            log = _LOGGER.debug if candidate in self._rename_compare_warned else _LOGGER.warning
+            self._rename_compare_warned.add(candidate)
+            log(
+                "[%s] Function plan watchdog pick '%s' (ID %s): could not compare '%s' on its ID for a rename%s",
+                self.server_id,
+                one_line(name),
+                fub_id,
+                one_line(holder),
+                error or "",
+            )
+            return None
+        return plan_has_elements(plan_data) and plan_hash(plan_data) == backed_up
+
+    async def _async_vanished_user_plans_named(self) -> set[tuple[int, str]]:
+        """_vanished_user_plans after loading the backups a bare-ID pick takes its name from.
+
+        The check goes on when they fail to load: such a pick keeps the name the last check gave it
+        (a fallback "ID <n>" would offer a Restore that finds no backup). Logged once per outage.
+        """
+        try:
+            await self.function_plan_backup.async_load()
+        except Exception as err:
+            if not self._plan_watch_backups_unloadable:
+                _LOGGER.warning("[%s] Function plan watchdog could not load the backups: %r", self.server_id, err)
+                self._plan_watch_backups_unloadable = True
+            previous = self.plan_watchdog.vanished or set()
+            return {
+                (fub_id, _previous_vanished_name(previous, fub_id) if name == unnamed_plan_label(fub_id) else name)
+                for fub_id, name in self._vanished_user_plans()
+            }
+        if self._plan_watch_backups_unloadable:
+            _LOGGER.info("[%s] Function plan watchdog loads the backups again", self.server_id)
+            self._plan_watch_backups_unloadable = False
+        return self._vanished_user_plans()
+
+    def _report_certificate_changed(self, actual: str) -> None:
+        """Comexio presents `actual` instead of the pinned certificate: raise the certificate_changed repair."""
+        async_report_certificate_changed(self.hass, self.config_entry, actual)
+
+    def _clear_certificate_changed(self) -> None:
+        """A poll got through with the pinned certificate: drop the repair, whoever raised it."""
+        async_clear_certificate_changed(self.hass, self.config_entry.entry_id)
 
     def note_comexio_unreachable(self) -> None:
         """Comexio could not be reached (or HA rebooted it): the next successful read starts the boot grace."""
@@ -4398,6 +5577,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _plan_watch_held(self) -> bool:
         """Whether Comexio is unreachable or the boot grace after it runs: no plan is judged stopped or started."""
         return self._comexio_unreachable or self._in_plan_watch_boot_grace()
+
+    def _watchdog_run_state_for(self, in_grace: bool, run_states_read: bool) -> Callable[[int], bool | None]:
+        """The run-state reader of a watchdog check: all unknown without a fresh read, only "running" in the grace."""
+        if not run_states_read:
+            return _unknown_run_state
+        return self._watchdog_grace_run_state if in_grace else self._watchdog_verified_run_state
 
     def _watchdog_grace_run_state(self, fub_id: int) -> bool | None:
         """_watchdog_run_state in the boot grace: only "running" counts, anything else keeps the last verdict."""
@@ -4439,11 +5624,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         True if started, False if Comexio refused it, None if not attempted (a sync, restore or poll
         runs) or not answered — the auto-start counts only a refusal as a failed attempt.
+        Marked as a plan edit with no await since the check: a sort, connect, restore or sync starting
+        meanwhile refuses until the start request is answered.
         """
         if self.managed_plan_start_blocked:
             return None
-        async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
-            return await self.api.function_plan_run_fup_outcome(fub_id)
+        with self.plan_edit():
+            async with self._watchdog_lock, self.async_plan_transition(fub_id, PLAN_TRANSITION_STARTING, refresh=False):
+                return await self.api.function_plan_run_fup_outcome(fub_id)
 
     async def _async_watchdog_auto_start_plan(self, fub_id: int) -> bool | None:
         """_async_watchdog_start_plan for the auto-start, which stays off in an outage and the boot grace after it.
@@ -4453,12 +5641,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         if self._plan_watch_held():
             return None
-        return await self._async_watchdog_start_plan(fub_id)
+        result = await self._async_watchdog_start_plan(fub_id)
+        if result is False:
+            # A plan judged stopped earlier and deleted since refuses its start: the plan list tells.
+            self.hass.async_create_background_task(
+                self.async_request_refresh(), name=f"{DOMAIN}_{self.server_id}_plan_existence_check"
+            )
+        return result
 
-    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool:
-        """Start a stopped managed plan from its repair or push; False if Comexio did not confirm it."""
+    async def async_start_managed_plan(self, fub_id: int, *, from_push: bool = False) -> bool | None:
+        """Start a stopped managed plan from its repair or push.
+
+        False if Comexio did not confirm it, None if not sent: a sync, restore, poll, plan edit or
+        cascade runs (checked again after the login, which awaits Comexio).
+        """
+        if self.managed_plan_start_blocked:
+            return None
         if not await self.api.login():
             return False
+        if self.managed_plan_start_blocked:
+            return None
         if not await self._async_watchdog_start_plan(fub_id):
             return False
         # Clear the stopped verdict before the verification fetch: a plan that stopped again
@@ -4469,9 +5671,38 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.async_update_listeners()
         return True
 
+    def watched_plan_name(self, fub_id: int) -> str | None:
+        """Name of the plan watched under this ID right now (HA-managed or a picked user plan), else None."""
+        managed = self._managed_plan_names()
+        if fub_id in managed:
+            return managed[fub_id]
+        return self._watched_user_plan_names().get(fub_id)
+
+    def is_watched_user_plan(self, fub_id: int) -> bool:
+        """Whether this plan is watched as a user plan now, read from the options: known before the first check."""
+        return fub_id in self._watched_user_plan_names()
+
     def is_watched_plan(self, fub_id: int) -> bool:
         """Whether the watchdog watches this plan right now (HA-managed or a picked user plan)."""
-        return fub_id in self._managed_plan_names() or fub_id in self._watched_user_plan_names()
+        return self.watched_plan_name(fub_id) is not None
+
+    def watches_plan_raised_for(self, fub_id: int, name_matches: Callable[[str], bool]) -> bool:
+        """Whether the plan a push or repair was raised for is still the one watched under its ID.
+
+        name_matches tells whether the watched plan's name is the one it was raised for: Comexio may
+        have given the ID to another watched plan since. A bare-ID pick (no name) watches whichever
+        plan holds the ID, renamed or not, so any name passes for it.
+        """
+        name = self.watched_plan_name(fub_id)
+        if name is None:
+            return False
+        return name_matches(name) or (fub_id not in self._managed_plan_names() and self._has_bare_pick(fub_id))
+
+    def _has_bare_pick(self, fub_id: int) -> bool:
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        return isinstance(raw_picks, list) and any(
+            parse_watchdog_user_plan_pick(value) == (fub_id, None) for value in raw_picks
+        )
 
     def _plan_watchdog_notify_targets(self) -> list[str]:
         targets = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY) or []
@@ -4479,14 +5710,54 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     @callback
     def async_handle_notification_action(self, event: Event) -> None:
-        """The "Start plan" button of a watchdog push was pressed on a phone."""
-        fub_id = parse_start_action(self.server_id, event.data.get("action"))
-        if fub_id is None:
+        """A button of a watchdog push was pressed on a phone: start, restore or stop watching a plan."""
+        parsed = parse_plan_action(self.server_id, event.data.get("action"))
+        if parsed is None:
             return
-        if self.is_watched_plan(fub_id):
+        kind, fub_id, token = parsed
+        if kind != ACTION_START and token is not None:
+            self._handle_vanished_plan_action(kind, fub_id, token)
+            return
+        # A "Start plan" sent before the action carried the name digest (token None) names no plan:
+        # only a bare-ID pick, which watches whichever plan holds the ID, still starts from it.
+        if self.watches_plan_raised_for(fub_id, lambda name: token == vanished_plan_token(fub_id, name)):
             self.hass.async_create_background_task(
                 self._async_start_plan_from_push(fub_id), name=f"{DOMAIN}_{self.server_id}_start_plan_{fub_id}"
             )
+            return
+        # The ID's plan stopped: its own alarm holds the tag (sent again if undelivered). Running (or no
+        # check yet): no alarm replaced a stale push and its clear may have failed, so it is taken off the phone.
+        stopped = fub_id in (self.plan_watchdog.stopped or {})
+        if token is None and (name := self.watched_plan_name(fub_id)) is not None:
+            # The alarm is pushed on the stop only: replaced (same tag) by one naming the ID's plan now. Renamed
+            # since the last check (judged under the old name): that check's successor pushes the alarm instead.
+            current = (self.plan_watchdog.stopped or {}).get(fub_id) == name
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s ignored: the push was sent before the update and "
+                "does not name the plan; %s",
+                self.server_id,
+                fub_id,
+                _outdated_push_outcome(name, stopped=stopped, current=current),
+            )
+            if stopped and current:
+                self.hass.async_create_background_task(
+                    self.plan_watchdog.async_push_start_outdated(fub_id, name),
+                    name=f"{DOMAIN}_{self.server_id}_outdated_push_{fub_id}",
+                )
+            elif not stopped:
+                self._dismiss_stale_push(fub_id)
+            return
+        if self.is_watched_plan(fub_id):
+            # Comexio gave the ID to another watched plan since.
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s ignored: the ID belongs to another watched plan "
+                "now (%s)",
+                self.server_id,
+                fub_id,
+                self.watched_plan_name(fub_id),
+            )
+            if not stopped:
+                self._dismiss_stale_push(fub_id)
             return
         # A push from before the plan was unselected or deleted in Comexio: starting it is no longer
         # the watchdog's call, so the stale push is taken off the phone instead.
@@ -4495,8 +5766,509 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.server_id,
             fub_id,
         )
+        self._dismiss_stale_push(fub_id)
+
+    def _dismiss_stale_push(self, fub_id: int) -> None:
         self.hass.async_create_background_task(
             self.plan_watchdog.async_dismiss_push(fub_id), name=f"{DOMAIN}_{self.server_id}_dismiss_push_{fub_id}"
+        )
+
+    def _handle_vanished_plan_action(self, kind: str, fub_id: int, token: str) -> None:
+        """ "Restore" or "Stop watching" from the push of a watched user plan Comexio no longer has.
+
+        token (vanished_plan_token) names the deleted plan by ID and name: two can share an ID.
+        """
+        if self.plan_watchdog.vanished is None:
+            # Not checked since setup (no plan list read yet): unknown, not "no longer missing".
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s deferred: the plan list was not read yet",
+                self.server_id,
+                fub_id,
+            )
+            self.hass.async_create_background_task(
+                self.plan_watchdog.async_push_check_pending(fub_id, token),
+                name=f"{DOMAIN}_{self.server_id}_check_pending_push_{fub_id}",
+            )
+            return
+        name = self.plan_watchdog.vanished_name(token)
+        if name is None:
+            # Restored, unpicked or back meanwhile: the push is stale.
+            _LOGGER.warning(
+                "[%s] Watchdog push action for function plan %s ignored: the plan is not missing (any more)",
+                self.server_id,
+                fub_id,
+            )
+            self.hass.async_create_background_task(
+                self.plan_watchdog.async_dismiss_vanished_push(fub_id, token),
+                name=f"{DOMAIN}_{self.server_id}_dismiss_push_{token}",
+            )
+            return
+        if kind == ACTION_RESTORE:
+            self.hass.async_create_background_task(
+                self.async_restore_vanished_plan(fub_id, name, from_push=True),
+                name=f"{DOMAIN}_{self.server_id}_restore_plan_{fub_id}",
+            )
+            return
+        self.hass.async_create_background_task(
+            self.async_unwatch_user_plan(fub_id, name), name=f"{DOMAIN}_{self.server_id}_unwatch_plan_{fub_id}"
+        )
+
+    async def async_restore_vanished_plan(self, fub_id: int, name: str, *, from_push: bool = False) -> bool:
+        """Restore a deleted watched user plan from its newest backup, as a new plan; False without a backup.
+
+        Runs the function_plan_restore action like the plan card's restore of a deleted plan: its
+        checks, locks, notifications and the move of the watchdog pick to the new ID (restore-as-new)
+        all apply. The plan is started: it was watched, so it is meant to run. The action reports a
+        refusal or failure only as a notification, so the outcome is what the restore itself
+        reports (note_plan_restored_as_new). The phone hears it either way (from_push), and the old
+        alarm push goes once the plan is back. A live plan of that name proves nothing: plan names
+        are not unique, and a failed restore leaves a half-built one. A second tap for the same plan
+        while its restore runs is left to that restore. Restores of other plans, or one started
+        elsewhere, are waited for; a plan whose pick has moved meanwhile (restored, unwatched) is
+        not restored again.
+        """
+        key = (fub_id, name)
+        if key in self._vanished_restores:
+            _LOGGER.info(
+                "[%s] Restore of function plan '%s' (ID %s) skipped: its restore is already running and reports itself",
+                self.server_id,
+                one_line(name),
+                fub_id,
+            )
+            return False
+        # Marked before the first await: a second tap meanwhile sees it (no duplicate, no false "failed").
+        self._vanished_restores.add(key)
+        try:
+            async with self._vanished_restore_lock:
+                return await self._async_restore_vanished_when_free(fub_id, name, from_push=from_push)
+        finally:
+            self._vanished_restores.discard(key)
+
+    def vanished_restore_running(self, fub_id: int, name: str) -> bool:
+        """Whether a Restore of the deleted plan (fub_id, name) runs: the restore must then build a new plan."""
+        return (fub_id, name) in self._vanished_restores
+
+    async def _async_restore_vanished_when_free(self, fub_id: int, name: str, *, from_push: bool) -> bool:
+        """Wait for a restore running elsewhere, then restore; any error is reported like a failed restore.
+
+        Refused while the ID holds a plan that looks like this one renamed (repair and push alike: either may
+        have offered Restore while the ID was free); its push then offers no Restore again.
+        """
+        offer_restore = True
+        try:
+            await self._async_wait_for_restore_slot()
+            if self.unloading:
+                # The restore would run on the torn-down coordinator; the new one takes the next tap.
+                self._notify_vanished_restore_not_run(fub_id, name, "the integration reloaded while it waited")
+            elif not self._vanished_pick_present(fub_id, name):
+                _LOGGER.info(
+                    "[%s] Restore of function plan '%s' (ID %s) skipped: it was restored or unwatched meanwhile",
+                    self.server_id,
+                    one_line(name),
+                    fub_id,
+                )
+                return False
+            elif (holder := await self._async_suspected_rename_holder(fub_id, name)) is not None:
+                # Offered while the ID was free: for a renamed plan its Restore would start a copy beside it.
+                offer_restore = False
+                self._notify_vanished_restore_not_run(
+                    fub_id,
+                    name,
+                    f"ID {fub_id} now holds '{one_line(holder)}' with its content, most likely the plan renamed",
+                    hint="Take the rename over in its Home Assistant repair.",
+                )
+            else:
+                return await self._async_restore_vanished_from_backup(fub_id, name, from_push=from_push)
+        except Exception as err:
+            # A background task: anything left uncaught would only surface as "never retrieved".
+            _LOGGER.exception(
+                "[%s] Restore of function plan '%s' (ID %s) failed", self.server_id, one_line(name), fub_id
+            )
+            detail = one_line(err)[:FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX]
+            reason = f"it failed ({type(err).__name__})" + (f": {detail}" if detail else "")
+            self._notify_vanished_restore_not_run(fub_id, name, reason)
+        if from_push and offer_restore:
+            await self.plan_watchdog.async_push_restore_failed(fub_id, name)
+        elif from_push:
+            await self.plan_watchdog.async_push_restore_failed(fub_id, name, offer_restore=False)
+        return False
+
+    async def _async_wait_for_restore_slot(self) -> None:
+        """Wait (bounded) until no function plan restore runs; the restore action refuses one still running."""
+        if not self._restore_lock.locked():
+            return
+        _LOGGER.info("[%s] Restore of a deleted function plan waits for the running restore", self.server_id)
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(FUNCTION_PLAN_VANISHED_RESTORE_WAIT_SEC):
+                while self._restore_lock.locked() and not self.unloading:
+                    await asyncio.sleep(FUNCTION_PLAN_UNLOAD_POLL_SEC)
+
+    def _vanished_pick_present(self, fub_id: int, name: str) -> bool:
+        """Whether a watchdog pick still points at the deleted plan (fub_id, name), by ID and name or bare ID."""
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if not isinstance(raw_picks, list):
+            return False
+        return any(parse_watchdog_user_plan_pick(value) in ((fub_id, name), (fub_id, None)) for value in raw_picks)
+
+    async def _async_suspected_rename_holder(self, fub_id: int, name: str) -> str | None:
+        """The plan holding the vanished plan's ID now, if it holds the plan's content: most likely the plan renamed.
+
+        Compared live (_async_plan_holds_backup_of): a holder without a backup of its own yet counts, one whose
+        content changed since its newest backup does not. Only when that cannot be compared does the backup
+        hint decide (plan_rename_suspected). The plan list is read afresh first (_async_read_plan_list); should
+        another plan take the ID while one is compared, that one is compared in turn.
+        """
+        await self._async_read_plan_list()
+        holder = self._existing_plan_names([fub_id]).get(fub_id)
+        for _attempt in range(FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS):
+            if holder is None or holder == name:
+                return None
+            # Unreadable backups raise here (a failed restore), rather than an empty cache letting the restore run.
+            await self.function_plan_backup.async_load()
+            holds = await self._async_plan_holds_backup_of(fub_id, name, holder)
+            if holds is None:
+                holds = self.plan_rename_suspected(fub_id, name, holder)
+            await self._async_read_plan_list()  # the compare awaits: another plan may have taken the ID meanwhile
+            current = self._existing_plan_names([fub_id]).get(fub_id)
+            if current == holder:
+                return holder if holds else None
+            _LOGGER.info(
+                "[%s] Function plan ID %s changed from '%s' to %s during the rename check",
+                self.server_id,
+                fub_id,
+                one_line(holder),
+                "no plan" if current is None else f"'{one_line(current)}'",
+            )
+            holder = current
+        if holder is None or holder == name:
+            return None
+        raise ComexioError(f"the plan on ID {fub_id} kept changing")
+
+    async def _async_read_plan_list(self) -> None:
+        """Read Comexio's plan list afresh; raises when it cannot be read.
+
+        The cached one is up to a poll interval old: a plan renamed onto a freed ID since would go unseen,
+        and a Restore would build a copy beside it.
+        """
+        raw_config = await self.api.get_raw_config()
+        # aiocomexio decodes each page variable on its own: a page whose $Fubs did not decode keeps the stale list.
+        if not isinstance(raw_config.get("Fubs"), dict):
+            raise ComexioError("the plan list could not be read")
+        self.api.parse_config(raw_config)
+
+    def _notify_vanished_restore_not_run(
+        self, fub_id: int, name: str, reason: str, *, hint: str = "Choose Restore again."
+    ) -> None:
+        """The notification a "not restored" push points at, for a restore that never reached the restore action."""
+        persistent_notification.async_create(
+            self.hass,
+            f"Function plan '{one_line(name)}' (ID {fub_id}) was not restored: {reason}. {hint}",
+            title=f"Comexio Function Plan Restore ({self.server_id})",
+            notification_id=f"comexio_vanished_restore_{self.server_id}_{vanished_plan_token(fub_id, name)}",
+        )
+
+    async def _async_restore_vanished_from_backup(self, fub_id: int, name: str, *, from_push: bool) -> bool:
+        """async_restore_vanished_plan's restore: judged by the restore itself (note_plan_restored_as_new).
+
+        A plan of that name alone proves nothing: a restore that failed mid-build leaves a half-built one.
+        """
+        snapshot = await self.async_newest_backup_field(fub_id, name)
+        if snapshot is None:
+            _LOGGER.warning(
+                "[%s] Function plan '%s' (ID %s) cannot be restored: it has no backup",
+                self.server_id,
+                one_line(name),
+                fub_id,
+            )
+            if from_push:
+                await self.plan_watchdog.async_push_no_backup(fub_id, name)
+            return False
+        _LOGGER.info(
+            "[%s] Restoring deleted function plan '%s' from backup %s", self.server_id, one_line(name), snapshot
+        )
+        self._restored_as_new.pop((fub_id, name), None)
+        self._vanished_plans_back.discard((fub_id, name))
+        try:
+            await self.hass.services.async_call(
+                DOMAIN,
+                "function_plan_restore",
+                {
+                    "config_entry": self.config_entry.entry_id,
+                    "snapshot": snapshot,
+                    "confirm": True,
+                    "on_conflict": "new_id",
+                    "auto_start": True,
+                },
+                blocking=True,
+            )
+        except Exception:
+            # The action's own errors; it notifies only those it catches itself.
+            _LOGGER.exception("[%s] Restore of function plan '%s' failed", self.server_id, one_line(name))
+        if (fub_id, name) in self._vanished_plans_back:
+            self._vanished_plans_back.discard((fub_id, name))
+            # Back under its ID and name (the restore action told the user): no "failed" push, the alarm goes.
+            _LOGGER.info(
+                "[%s] Function plan '%s' (ID %s) is back in Comexio; it was not restored",
+                self.server_id,
+                one_line(name),
+                fub_id,
+            )
+            await self.plan_watchdog.async_dismiss_push(fub_id, name)
+            return False
+        if (restored := self._restored_as_new.pop((fub_id, name), None)) is None:
+            _LOGGER.warning(
+                "[%s] Function plan '%s' (ID %s) was not restored; see the restore notification",
+                self.server_id,
+                one_line(name),
+                fub_id,
+            )
+            if from_push:
+                await self.plan_watchdog.async_push_restore_failed(fub_id, name)
+            return False
+        new_fub_id, complete = restored
+        if not complete:
+            _LOGGER.warning(
+                "[%s] Function plan '%s' was restored as ID %s, but not completely; see the restore notification",
+                self.server_id,
+                one_line(name),
+                new_fub_id,
+            )
+        try:
+            # Normally moved by the restore already; not when moving its references failed.
+            self._repoint_vanished_pick(name, fub_id, new_fub_id)
+            await self._async_report_vanished_restored(fub_id, name, from_push=from_push, complete=complete)
+        except Exception:
+            # The plan is back: a failing follow-up must not be reported as "not restored".
+            _LOGGER.exception(
+                "[%s] Function plan '%s' was restored as ID %s, but updating its watchdog pick or push failed",
+                self.server_id,
+                one_line(name),
+                new_fub_id,
+            )
+        return True
+
+    def note_plan_restored_as_new(self, old_fub_id: int, plan_name: str, new_fub_id: int, *, complete: bool) -> None:
+        """A restore-as-new rebuilt plan_name (formerly old_fub_id) as new_fub_id; read by async_restore_vanished_plan.
+
+        Keyed by the old ID too: a restore of another deleted plan of the same name must not hand
+        its new ID to this plan's Restore. complete: False for a PARTIAL restore (elements,
+        connections or block settings missing).
+        """
+        self._restored_as_new[(old_fub_id, plan_name)] = (new_fub_id, complete)
+
+    def note_vanished_plan_back(self, fub_id: int, plan_name: str) -> None:
+        """The restore action refused a vanished-plan Restore: plan_name is back under fub_id; read by that Restore."""
+        self._vanished_plans_back.add((fub_id, plan_name))
+
+    def _repoint_vanished_pick(self, name: str, old_fub_id: int, new_fub_id: int) -> None:
+        """Move a vanished plan's watchdog pick to its restored plan; nothing if none points at it.
+
+        A bare-ID pick stays when another plan holds the old ID by now: it watches that plan.
+        """
+        picks = repointed_watchdog_user_plan_picks(
+            self.config_entry.options,
+            name,
+            old_fub_id,
+            new_fub_id,
+            # Any unreadable entry may be a plan holding the old ID ("05" for 5): keep the bare pick.
+            old_id_still_live=str(old_fub_id) in self.api.fub_data or bool(unreadable_plan_keys(self.api.fub_data)),
+        )
+        if picks is None:
+            return
+        if new_fub_id == old_fub_id:
+            # Comexio handed the restored plan its old, free ID again: nothing moved.
+            _LOGGER.info(
+                "[%s] Function plan watchdog pick '%s' stays on ID %s (restored under its old ID)",
+                self.server_id,
+                one_line(name),
+                new_fub_id,
+            )
+        else:
+            _LOGGER.info(
+                "[%s] Function plan watchdog pick '%s' moved from ID %s to ID %s",
+                self.server_id,
+                one_line(name),
+                old_fub_id,
+                new_fub_id,
+            )
+        self.request_options_update_without_reload(
+            {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
+        )
+
+    async def _async_report_vanished_restored(self, fub_id: int, name: str, *, from_push: bool, complete: bool) -> None:
+        """Replace the vanished alarm push: "restored" for a Restore from the phone, else just remove it."""
+        if from_push:
+            await self.plan_watchdog.async_push_restored(fub_id, name, complete=complete)
+        else:
+            await self.plan_watchdog.async_dismiss_push(fub_id, name)
+
+    async def async_newest_backup_field(self, fub_id: int, name: str) -> str | None:
+        """The restore action's 'snapshot' value of a plan identity's newest backup (auto or change)."""
+        manager = self.function_plan_backup
+        await manager.async_load()
+        dated = [
+            (captured, entry)
+            for entry in manager.plan_backups_for_identity_sync(fub_id, name)
+            if (captured := dt_util.parse_datetime(str(entry.get("captured_at") or ""))) is not None
+        ]
+        if not dated:
+            return None
+        _captured, newest = max(dated, key=lambda item: item[0])
+        return f"{fub_id}:{newest['kind']}:{newest['slot']}:{name}"
+
+    async def async_unwatch_user_plan(self, fub_id: int, name: str) -> bool:
+        """Take a user plan off the watchdog's list (its pick by ID and name, or a bare-ID one); False if not picked.
+
+        A bare-ID pick stays once another plan holds the ID again: it watches that plan by now. The plan
+        itself still holding its ID is no reuse: its bare-ID pick goes too.
+        """
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        if not isinstance(raw_picks, list):
+            return False
+        # An unreadable entry for the ID is no known reuse: function_plan_name would read it as plan "<id>".
+        id_reused = bool(function_plan_info(self.api.fub_data, fub_id)) and self.api.function_plan_name(fub_id) != name
+        dropped = {(fub_id, name)} if id_reused else {(fub_id, name), (fub_id, None)}
+        kept = [value for value in raw_picks if parse_watchdog_user_plan_pick(value) not in dropped]
+        if len(kept) == len(raw_picks):
+            if id_reused and any(parse_watchdog_user_plan_pick(value) == (fub_id, None) for value in raw_picks):
+                self._notify_bare_pick_kept(fub_id, name)
+            return False
+        _LOGGER.info(
+            "[%s] Function plan '%s' (ID %s) is no longer watched (stop watching)",
+            self.server_id,
+            one_line(name),
+            fub_id,
+        )
+        self.request_options_update_without_reload(
+            {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: kept}
+        )
+        # Drops its repair and push right away, not only with the next run-state poll.
+        if await self.async_watch_managed_plans():
+            self.async_update_listeners()
+        return True
+
+    async def async_watch_id_holder(self, fub_id: int, name: str, holder: str, *, rename: bool) -> bool:
+        """Swap the vanished pick (fub_id, name) for holder, the plan holding its ID now; False if that changed.
+
+        rename: holder is the picked plan renamed (see plan_rename_suspected); its backups move to the new
+        name first, so its history goes on as one chain instead of an orphaned one. A failing backup save
+        raises PlanBackupsNotMovedError with the pick unchanged. The caller holds plan_edit (no restore
+        moves the same backups meanwhile).
+        """
+        if not self._holder_and_pick_unchanged(fub_id, name, holder):
+            return False
+        if rename:
+            try:
+                moved = await self.function_plan_backup.async_rename_identity(fub_id, name, holder)
+            except Exception as err:
+                raise PlanBackupsNotMovedError from err
+            if not self._holder_and_pick_unchanged(fub_id, name, holder):
+                await self._async_settle_rename_changed_meanwhile(fub_id, name, holder, moved)
+                return False
+        self._swap_watch_pick(fub_id, name, holder)
+        _LOGGER.info(
+            "[%s] Function plan watchdog pick '%s' (ID %s) now watches '%s'%s",
+            self.server_id,
+            one_line(name),
+            fub_id,
+            one_line(holder),
+            " (taken over as a rename, backups moved)" if rename else "",
+        )
+        # Drops the vanished repair and push right away, not only with the next run-state poll.
+        try:
+            changed = await self.async_watch_managed_plans()
+        except Exception:
+            # The swap is done: the next run-state poll repeats the check.
+            _LOGGER.exception("[%s] Function plan watchdog check after the pick swap failed", self.server_id)
+            return True
+        if changed:
+            self.async_update_listeners()
+        return True
+
+    async def _async_settle_rename_changed_meanwhile(self, fub_id: int, name: str, holder: str, moved: int) -> None:
+        """The ID or the pick changed while a rename's backups moved to holder; the pick stays as it is.
+
+        While the ID still holds holder (the pick was edited), the backups stay with that plan. Otherwise
+        they go back to (fub_id, name), so its still-vanished pick keeps its restore (the chain is one
+        plan's history: the rename was suspected by its equal content). The holder's own snapshots from
+        before the take-over go along: the merged chain records no origin per snapshot.
+        """
+        if self._existing_plan_names([fub_id]).get(fub_id) == holder:
+            _LOGGER.warning(
+                "[%s] Function plan watchdog pick '%s' (ID %s) changed while %d backup(s) moved to '%s'; "
+                "the backups stay with it, the pick was left as it is",
+                self.server_id,
+                one_line(name),
+                fub_id,
+                moved,
+                one_line(holder),
+            )
+            return
+        try:
+            await self.function_plan_backup.async_rename_identity(fub_id, holder, name)
+        except Exception:
+            _LOGGER.exception(
+                "[%s] ID %s no longer holds '%s' after %d backup(s) moved to it, and moving them back to '%s' "
+                "failed; they are listed as orphaned backups",
+                self.server_id,
+                fub_id,
+                one_line(holder),
+                moved,
+                one_line(name),
+            )
+            return
+        _LOGGER.warning(
+            "[%s] ID %s no longer holds '%s' after its rename was taken over: the backups moved back to '%s', "
+            "whose pick was left as it is",
+            self.server_id,
+            fub_id,
+            one_line(holder),
+            one_line(name),
+        )
+
+    def _swap_watch_pick(self, fub_id: int, name: str, holder: str) -> None:
+        """Replace the watchdog pick (fub_id, name) by (fub_id, holder) in the options, without a reload."""
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        picks: list[Any] = []
+        for value in raw_picks if isinstance(raw_picks, list) else []:
+            pick = (
+                watchdog_user_plan_pick(fub_id, holder)
+                if parse_watchdog_user_plan_pick(value) == (fub_id, name)
+                else value
+            )
+            if pick not in picks:
+                picks.append(pick)
+        self.request_options_update_without_reload(
+            {**self.config_entry.options, CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS: picks}
+        )
+
+    def _holder_and_pick_unchanged(self, fub_id: int, name: str, holder: str) -> bool:
+        """Whether ID fub_id still holds holder and the options still hold the pick (fub_id, name)."""
+        return self._existing_plan_names([fub_id]).get(fub_id) == holder and self._pick_present(fub_id, name)
+
+    def _pick_present(self, fub_id: int, name: str) -> bool:
+        """Whether the options hold the named pick (fub_id, name)."""
+        raw_picks = self.config_entry.options.get(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS) or []
+        return isinstance(raw_picks, list) and any(
+            parse_watchdog_user_plan_pick(value) == (fub_id, name) for value in raw_picks
+        )
+
+    def _notify_bare_pick_kept(self, fub_id: int, name: str) -> None:
+        """Stop watching left a bare-ID pick: the ID belongs to another plan by now, which it watches."""
+        shown, current = one_line(name), one_line(self.api.function_plan_name(fub_id))
+        _LOGGER.info(
+            "[%s] Function plan '%s' (ID %s) stays watched: its pick names only the ID, which plan '%s' holds now",
+            self.server_id,
+            shown,
+            fub_id,
+            current,
+        )
+        persistent_notification.async_create(
+            self.hass,
+            f"Function plan '{shown}' (ID {fub_id}) is watched by its ID only, and plan '{current}' holds that ID "
+            "now, so the watchdog keeps watching it. Remove the pick in the integration options to stop that.",
+            title="Comexio: function plan still watched",
+            notification_id=f"{DOMAIN}_unwatch_kept_{self.server_id}_{fub_id}",
         )
 
     async def _async_start_plan_from_push(self, fub_id: int) -> None:
@@ -4505,10 +6277,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             await self.plan_watchdog.async_plan_started(fub_id, confirm=True)
             self.async_update_listeners()
             return
-        if not self.managed_plan_start_blocked and await self.async_start_managed_plan(fub_id, from_push=True):
+        started = await self.async_start_managed_plan(fub_id, from_push=True)
+        if started:
+            return
+        name = self.api.function_plan_name(fub_id)
+        if started is None:
+            _LOGGER.warning(
+                "[%s] Function plan %s not started from the watchdog push: a sync, restore, poll, function plan "
+                "edit or bus-load cascade is running",
+                self.server_id,
+                fub_id,
+            )
+            await self.plan_watchdog.async_push_start_busy(fub_id, name)
             return
         _LOGGER.warning("[%s] Function plan %s could not be started from the watchdog push", self.server_id, fub_id)
-        await self.plan_watchdog.async_push_start_failed(fub_id, self.api.function_plan_name(fub_id))
+        await self.plan_watchdog.async_push_start_failed(fub_id, name)
 
     def _apply_fetched_run_states(self, states: dict[int, bool], run_state_mark: int, cache_epoch: int) -> bool:
         """Write a run-state answer into the cache unless a newer plan list arrived meanwhile; True if changed.
@@ -4557,6 +6340,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Count a failed run-state fetch, log it once per outage and heal a lapsed main session."""
         self._plan_run_state_fail_streak += 1
         self._plan_run_state_stale_count += 1
+        if isinstance(err, ComexioCertificateMismatchError):
+            # Raised right away rather than at the next full poll, which may be 15 min off.
+            self._report_certificate_changed(err.actual)
         level = logging.WARNING if self._plan_run_state_fail_streak == 1 else logging.DEBUG
         _LOGGER.log(
             level,
@@ -4577,7 +6363,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self.api.last_login_error == LOGIN_ERROR_CONNECTION:
             # The fetch's own error was the lapsed session, but the re-login got no reply: an outage too.
             self.note_comexio_unreachable()
-        if self.api.last_login_error == "rejected":
+        if self.api.last_login_error == LOGIN_ERROR_REJECTED:
             self._plan_run_state_relogin_refused = True
             _LOGGER.warning(
                 "[%s] Comexio refused the re-login for the function plan run states; waiting for the next full poll",
@@ -4712,19 +6498,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         each managed plan, checking after each one whether the bus load recovers).
         """
         async with self._watchdog_lock:
-            raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-            plan_map: dict[str, int] = {}
-            if isinstance(raw_map, dict):
-                for plan_name, fub_id in raw_map.items():
-                    try:
-                        plan_map[plan_name] = int(fub_id)
-                    except (TypeError, ValueError):
-                        _LOGGER.warning(
-                            "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
-                            self.server_id,
-                            plan_name,
-                            fub_id,
-                        )
+            plan_map = self._cascade_plan_map()
             if not plan_map:
                 _LOGGER.warning(
                     "[%s] Bus-load watchdog: rise detected but no managed cluster plans to restart",
@@ -4740,30 +6514,67 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 baseline,
                 len(plan_map),
             )
-            culprit: str | None = None
-            for plan_name, fub_id in reversed(list(plan_map.items())):
-                if not await self.api.function_plan_stop_fup(fub_id):
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
-                        "restarting it anyway, run_fup re-applies its state authoritatively",
-                        self.server_id,
-                        plan_name,
-                        fub_id,
-                    )
-                await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
-                if not await self.api.function_plan_run_fup(fub_id):
-                    _LOGGER.warning(
-                        "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
-                        self.server_id,
-                        plan_name,
-                        fub_id,
-                    )
-                await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
-                if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
-                    culprit = plan_name
-                    break
-
+            if (
+                self._restore_lock.locked()
+                or self._sync_lock.locked()
+                or self.in_sync
+                or self.plan_edits_running
+                or self.unloading
+            ):
+                # A restore (or sync) rewrites and restarts plans itself, a plan edit stops and changes
+                # one — a stop or restart now could leave one stopped or mixed; an unload closes the session.
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: cascade not started — a function plan restore, edit, sync or reload "
+                    "is running",
+                    self.server_id,
+                )
+                return
+            # No await since the check: a restore starting from here on refuses until the cascade ends.
+            with self.plan_edit():
+                culprit = await self._async_cascade_plans(plan_map, baseline)
             await self._async_finish_watchdog_cascade(baseline, culprit, len(plan_map))
+
+    def _cascade_plan_map(self) -> dict[str, int]:
+        """The managed cluster plans (name -> fub_id) a bus-load cascade restarts; bad entries skipped."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        plan_map: dict[str, int] = {}
+        if not isinstance(raw_map, dict):
+            return plan_map
+        for plan_name, fub_id in raw_map.items():
+            try:
+                plan_map[plan_name] = int(fub_id)
+            except (TypeError, ValueError):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: skipping non-numeric plan_map entry '%s' -> %r",
+                    self.server_id,
+                    one_line(plan_name),
+                    fub_id,
+                )
+        return plan_map
+
+    async def _async_cascade_plans(self, plan_map: dict[str, int], baseline: float) -> str | None:
+        """Restart the plans back to front until the bus load recovers; returns the plan that did it."""
+        for plan_name, fub_id in reversed(list(plan_map.items())):
+            if not await self.api.function_plan_stop_fup(fub_id):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: stop_fup failed for plan '%s' (fub=%s) — "
+                    "restarting it anyway, run_fup re-applies its state authoritatively",
+                    self.server_id,
+                    one_line(plan_name),
+                    fub_id,
+                )
+            await asyncio.sleep(CASCADE_POST_STOP_WAIT_SEC)
+            if not await self.api.function_plan_run_fup(fub_id):
+                _LOGGER.warning(
+                    "[%s] Bus-load watchdog: run_fup failed for plan '%s' (fub=%s) — it may now be left stopped",
+                    self.server_id,
+                    one_line(plan_name),
+                    fub_id,
+                )
+            await asyncio.sleep(CASCADE_POST_RESTART_SETTLE_SEC)
+            if self.bus_workload is not None and baseline - self.bus_workload >= CASCADE_RECOVERY_DROP_PCT:
+                return plan_name
+        return None
 
     async def _async_finish_watchdog_cascade(self, baseline: float, culprit: str | None, plan_count: int) -> None:
         """Notify + persist history for a finished cascade run, and start its cooldown."""
@@ -4891,6 +6702,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.password = data.get(CONF_PASSWORD)
         self.api.api_user = data.get(CONF_API_USERNAME)
         self.api.api_pass = data.get(CONF_API_PASSWORD)
+        self.api.fingerprint = data.get(CONF_CERTIFICATE_FINGERPRINT)
 
         # Re-authenticate with new credentials
         await self.api.login()
@@ -4918,7 +6730,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     translation_key="extension_offline",
                     translation_placeholders={
                         "server_id": self.server_id,
-                        "extensions": ", ".join(sorted(new_offline)),
+                        "extensions": ", ".join(sorted(one_line(ext) for ext in new_offline)),
                     },
                 )
             else:
@@ -5005,24 +6817,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._skip_next_listener_reload_options = None
         return options
 
-    def _ignored_ids_for(self, category: WebioClass) -> set[int]:
+    def _ignored_ids_for(self, category: WebioClass) -> AbstractSet[int]:
         """Configured IDs excluded from entity creation and Web-IO command generation for a category.
 
         Registry-driven: resolves the option key via SourceCategory.ignored_conf_key, then
-        parses it with expand_ignored_marker_ids() (comma/semicolon/space separators, optional
-        letter prefix, ranges like '8-12'). Returns an empty set if unset or unsupported.
+        parses it with parse_ignored_ids() (comma/semicolon/space separators, optional
+        letter prefix, ranges like '8-12', kept unexpanded). Empty if unset or unsupported.
         KNX bridge markers are never ignorable (see _unignorable_ids) and never returned.
         """
         return self._configured_ignored_ids(source_category(category)) - self._unignorable_ids(category)
 
-    def _configured_ignored_ids(self, category: SourceCategory) -> set[int]:
+    def _configured_ignored_ids(self, category: SourceCategory) -> AbstractSet[int]:
         """Every id in the category's ignore-list option as currently stored, unignorable ones included."""
         conf_key = category.ignored_conf_key
         if conf_key is None:
-            return set()
+            return frozenset()
         if ignored_raw := self.config_entry.options.get(conf_key, "").strip():
-            return expand_ignored_marker_ids(ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower())
-        return set()
+            return parse_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        return frozenset()
 
     def _unignorable_ids(self, category: WebioClass) -> set[int]:
         """Ids of a category the ignore-list must never act on: the KNX bridge markers.
@@ -5034,16 +6846,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return set(self._knx_bridge_marker_ids) if category == WebioClass.MARKER else set()
 
     @property
-    def ignored_marker_ids(self) -> set[int]:
+    def ignored_marker_ids(self) -> AbstractSet[int]:
         """Configured marker IDs excluded from entity creation and Web-IO command generation."""
         return self._ignored_ids_for(WebioClass.MARKER)
 
     @property
-    def ignored_knx_ids(self) -> set[int]:
+    def ignored_knx_ids(self) -> AbstractSet[int]:
         """Configured KNX object IDs excluded from entity creation and Web-IO command generation."""
         return self._ignored_ids_for(WebioClass.KNX)
 
-    def ignored_ids_for(self, webio_class: WebioClass) -> set[int]:
+    def ignored_ids_for(self, webio_class: WebioClass) -> AbstractSet[int]:
         """Registry-driven public accessor for a category's ignore-list (markers/KNX)."""
         return self._ignored_ids_for(webio_class)
 
@@ -5053,8 +6865,43 @@ class ComexioCoordinator(DataUpdateCoordinator):
         conf = {**self.config_entry.data, **self.config_entry.options}
         return active_webio_classes(conf)
 
+    @property
+    def required_webio_classes(self) -> tuple[WebioClass, ...]:
+        """Opted-in classes that must exist on the server (see required_webio_classes() in const.py)."""
+        conf = {**self.config_entry.data, **self.config_entry.options}
+        data = self.data or {}
+        return self._webio_classes_with_commands(required_webio_classes(conf, data), data)
+
+    def _webio_classes_with_commands(
+        self, classes: Iterable[WebioClass], data: dict[str, Any]
+    ) -> tuple[WebioClass, ...]:
+        """classes less those with no wanted Web-IO command (e.g. KNX with every object ignored).
+
+        Comexio creates no device instance for an empty class: reported missing, it would be a
+        repair no sync can fix, and the sync's recreate of it would fail. Without data (no poll yet)
+        nothing is known to be empty, so every class stays.
+        """
+        if not data:
+            return tuple(classes)
+        source = self.webio_source_data(data)
+        return tuple(
+            cls
+            for cls in classes
+            if self.api.build_webio_commands(
+                self.server_id,
+                source,
+                webio_class=cls,
+                ignored_marker_ids=self.ignored_marker_ids,
+                ignored_knx_ids=self.ignored_knx_ids,
+            )
+        )
+
     async def async_check_ignored_sources(
-        self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass
+        self,
+        conf: dict[str, Any],
+        final_data: dict[str, Any],
+        webio_class: WebioClass,
+        options_at_poll: Mapping[str, Any],
     ) -> None:
         """Check ignored source IDs and manage repair issues (registry-driven: markers=2/KNX=11).
 
@@ -5065,6 +6912,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
           self._cleanup_entity_ids / self._cleanup_function_plan_count accumulator (reset once
           per audit cycle by the caller, see the "IGNORED SOURCES AUDIT" block above).
         - IDs whose source exists but has no entities/links are the intended normal state — no action.
+
+        options_at_poll is the options mapping conf was built from; a save since then defers the
+        stale pruning to the next poll (see _ignore_list_saved_since).
         """
         category = source_category(webio_class)
         conf_key = category.ignored_conf_key
@@ -5088,46 +6938,62 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not self._last_poll_scraped:
             return
 
-        stale_ids = await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else set()
+        stale_ids, cleanup_ids, affected_fub_ids = (
+            await self._audit_ignored_sources(conf, final_data, webio_class, conf_key) if active else (set(), [], set())
+        )
+        if self._ignore_list_saved_since(options_at_poll, conf, conf_key):
+            # The verdicts judge the list the audit read, not the one the user saved meanwhile
+            # (which may re-add an ID for a source created since, or unignore a source with
+            # leftovers): the next poll re-judges both.
+            stale_ids, cleanup_ids, affected_fub_ids = set(), [], set()
+        # Extend the shared cleanup accumulator for the combined sync_mismatch repair
+        self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
+        self._cleanup_function_plan_count += len(affected_fub_ids)
         # Bridge markers come from the unfiltered scrape, so they are known (and pruned) even
         # while the category is opted out.
         self._prune_ignored_ids(category, webio_class, conf_key, stale_ids)
 
     async def _audit_ignored_sources(
         self, conf: dict[str, Any], final_data: dict[str, Any], webio_class: WebioClass, conf_key: str
-    ) -> set[int]:
-        """Audit an active category's ignore-list; return its stale IDs and extend the cleanup accumulator."""
+    ) -> tuple[set[int], list[int], set[int]]:
+        """Audit an active category's ignore-list -> (stale IDs, IDs to clean up, affected plan IDs)."""
         category = source_category(webio_class)
         ignored_raw = conf.get(conf_key, "").strip()
         if not ignored_raw:
             ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-            return set()
+            return set(), [], set()
 
         sources_by_id = {int(item["id"]): item for item in final_data.get(category.data_key, [])}
         stale_ids: set[int] = set()
         cleanup_ids: list[int] = []
         affected_fub_ids: set[int] = set()
 
-        all_ignored_ids = expand_ignored_marker_ids(
-            ignored_raw, category.audit_key_prefix + category.audit_key_prefix.lower()
-        )
+        single_ids, ranges = split_ignored_ids(ignored_raw, _ignore_list_prefix_chars(category))
+        # A range contributes only the sources Comexio has in it: its gaps are never stale, and
+        # walking every ID of a wide range would cost memory and time on every poll.
+        audited_ids = single_ids | {sid for sid in sources_by_id if ignored_id_in_ranges(sid, ranges)}
         # Only managed plans: the cleanup never touches a user's own plan (e.g. the one the
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
-        lp_plans = await self._load_managed_plan_check_data()
+        # A plan whose list entry is unreadable may be managed: its wiring counts (unknown, not clean).
+        lp_plans = await self._load_managed_plan_check_data(include_unknown=True)
         ref_type = int(category.fub_module_type)
-        ids_with_entities = set(self.marker_entities_by_id(list(all_ignored_ids), category.unique_id_infix).keys())
+        ids_with_entities = set(self.marker_entities_by_id(list(audited_ids), category.unique_id_infix).keys())
         _LOGGER.debug(
-            "[%s] async_check_ignored_sources[%s]: ignored=%s, plans_loaded=%s",
+            "[%s] async_check_ignored_sources[%s]: audited=%s, ranges=%s, plans_loaded=%s",
             self.server_id,
             category.label,
-            sorted(all_ignored_ids),
+            sorted(audited_ids),
+            sorted(ranges),
             sorted(lp_plans.keys()),
         )
-        for source_id in sorted(all_ignored_ids - self._unignorable_ids(webio_class)):
+        for source_id in sorted(audited_ids - self._unignorable_ids(webio_class)):
             source = sources_by_id.get(source_id)
-            if not source or not source.get("name", "").strip():
-                # Source no longer exists in Comexio → stale, auto-remove
-                stale_ids.add(source_id)
+            if not source:
+                # A single ID whose source no longer exists in Comexio → stale, auto-remove (a range
+                # only yields the sources Comexio has). An existing source stays ignored even when it
+                # is unnamed ("#nn"), so its leftover entities and links are checked below.
+                if source_id in single_ids:
+                    stale_ids.add(source_id)
                 continue
 
             # Source exists and is intentionally ignored — only flag if legacy entities/links remain
@@ -5146,28 +7012,41 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if has_entities or function_plan_fub_id is not None:
                 cleanup_ids.append(source_id)
 
-        # Extend the shared cleanup accumulator for the combined sync_mismatch repair
-        self._cleanup_entity_ids.extend((webio_class.value, sid) for sid in cleanup_ids)
-        self._cleanup_function_plan_count += len(affected_fub_ids)
         # Remove legacy ignored_<category>_cleanup issue if it still exists from an older version
         ir.async_delete_issue(self.hass, DOMAIN, f"{conf_key}_cleanup_{self.server_id}")
-        return stale_ids
+        return stale_ids, cleanup_ids, affected_fub_ids
+
+    def _ignore_list_saved_since(self, options_at_poll: Mapping[str, Any], conf: dict[str, Any], conf_key: str) -> bool:
+        """True if the options were saved since conf was read, or the ignore-list differs from conf.
+
+        HA replaces the options mapping on every save, so a save that restored the audited
+        string (A -> B -> A) still counts.
+        """
+        current_raw = self.config_entry.options.get(conf_key, "")
+        return self.config_entry.options is not options_at_poll or current_raw.strip() != conf.get(conf_key, "").strip()
 
     def _prune_ignored_ids(
         self, category: SourceCategory, webio_class: WebioClass, conf_key: str, stale_ids: set[int]
     ) -> None:
-        """Drop stale and unignorable IDs from the ignore-list option — one update, separate notifications.
+        """Drop stale and unignorable single IDs from the ignore-list option — one update, separate notifications.
 
         Re-reads the option instead of the poll's conf snapshot: an options-flow save that landed
         while the audit awaited the plan data would otherwise be overwritten, dropping IDs the
         user just added and reactivating their sources.
+
+        Ranges are kept as written: a range covering a bridge marker or a gap would otherwise be
+        flattened into single IDs on every poll. The bridge markers in it stay unignored anyway
+        (_ignored_ids_for leaves them out).
         """
-        current_ids = self._configured_ignored_ids(category)
-        stale = current_ids & stale_ids
-        protected = current_ids & self._unignorable_ids(webio_class)
+        raw = self.config_entry.options.get(conf_key, "")
+        single_ids, ranges = split_ignored_ids(raw, _ignore_list_prefix_chars(category))
+        stale = single_ids & stale_ids
+        protected = single_ids & self._unignorable_ids(webio_class)
         if not (stale or protected):
             return
-        self._remove_ignored_ids(conf_key, current_ids - stale - protected)
+        if invalid := invalid_ignored_tokens(raw, _ignore_list_prefix_chars(category)):
+            _LOGGER.warning("Dropping invalid entries %s from the %s option", invalid, conf_key)
+        self._write_ignored_ids(conf_key, format_ignored_ids(single_ids - stale - protected, ranges))
         if stale:
             self._notify_removed_ignored_ids(
                 category,
@@ -5185,11 +7064,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "and can never be ignored.",
             )
 
-    def _remove_ignored_ids(self, conf_key: str, remaining_ids: set[int]) -> None:
-        """Rewrite an ignore-list option to remaining_ids (dropping the key when empty), without a reload."""
+    def _write_ignored_ids(self, conf_key: str, ignored_raw: str) -> None:
+        """Rewrite an ignore-list option to ignored_raw (dropping the key when empty), without a reload."""
         new_options = {**self.config_entry.options}
-        if remaining_ids:
-            new_options[conf_key] = ",".join(str(i) for i in sorted(remaining_ids))
+        if ignored_raw:
+            new_options[conf_key] = ignored_raw
         else:
             new_options.pop(conf_key, None)
         self.request_options_update_without_reload(new_options)
@@ -5209,13 +7088,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             notification_id=f"comexio_{reason_key}_ignored_{category.key.value}_{self.server_id}",
         )
 
-    async def async_check_ignored_markers(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+    async def async_check_ignored_markers(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
         """Check ignored marker IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
-        await self.async_check_ignored_sources(conf, final_data, WebioClass.MARKER)
+        await self.async_check_ignored_sources(conf, final_data, WebioClass.MARKER, options_at_poll)
 
-    async def async_check_ignored_knx(self, conf: dict[str, Any], final_data: dict[str, Any]) -> None:
+    async def async_check_ignored_knx(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
         """Check ignored KNX object IDs and manage repair issues (thin wrapper, see async_check_ignored_sources)."""
-        await self.async_check_ignored_sources(conf, final_data, WebioClass.KNX)
+        await self.async_check_ignored_sources(conf, final_data, WebioClass.KNX, options_at_poll)
 
     async def async_detect_orphaned_statistics(self) -> list[str]:
         """Return statistic_ids for this integration that no longer have a matching entity.
@@ -5398,7 +7281,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Deterministic cluster-plan name a KNX object ID currently maps to (config-aware)."""
         return self.expected_source_cluster_name(knx_id, SOURCE_CATEGORIES[WebioClass.KNX].label)
 
-    def io_cluster_plan_contains(self, live_plan_name: str, ext_name: str) -> bool:
+    def io_cluster_plan_contains(self, live_plan_name: str, ext_name: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> bool:
         """True if a live plan name still parses as a managed IO cluster plan naming ext_name.
 
         Used right before writing IO pairs to catch a plan that was renamed/repurposed
@@ -5406,7 +7289,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         fub_id got reused by an unrelated create elsewhere in the meantime) — see
         expected_marker_cluster_name() for the marker-side counterpart.
         """
-        members = self._io_plan_members(live_plan_name, self._function_plan_prefix())
+        members = self._io_plan_members(live_plan_name, self._function_plan_prefix(), kind)
         return members is not None and ext_name in members
 
     async def resolve_marker_clusters(
@@ -5452,7 +7335,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for plan_name, cluster_ids in clusters.items():
             fub_id, created = await self._resolve_single_cluster_plan(plan_name, plan_map, fub_data)
             if fub_id is None:
-                _LOGGER.error("[%s] Failed to resolve/create cluster plan '%s'", self.server_id, plan_name)
+                _LOGGER.error("[%s] Failed to resolve/create cluster plan '%s'", self.server_id, one_line(plan_name))
                 failed_plans.append(plan_name)
                 continue
             result[fub_id] = cluster_ids
@@ -5460,6 +7343,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 created_plans.add(fub_id)
             plan_map_updates[plan_name] = fub_id
 
+        plan_map_updates = {**self._renamed_managed_plans(stale, plan_map_updates), **plan_map_updates}
         if plan_map_updates or stale:
             await self._persist_plan_map(plan_map_updates, removals=set(stale))
 
@@ -5488,30 +7372,41 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if (
             cached is not None
             and cached not in self._distrusted_fub_ids
-            and fub_data.get(str(cached), {}).get("Name") == plan_name
+            and function_plan_info(fub_data, cached).get("Name") == plan_name
         ):
             return cached, False
 
-        for fid_str, fub_info in fub_data.items():
-            fid = int(fid_str)
+        for fid, fub_info in function_plans(fub_data):
             # Skip a plan _verify_new_plan_is_empty rejected but couldn't fully remove — see
             # _distrusted_fub_ids' docstring. Without this, a plain by-name match would silently
             # re-adopt the still-contaminated plan the moment fub_data gets refreshed again.
             if fid not in self._distrusted_fub_ids and fub_info.get("Name") == plan_name:
-                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, plan_name, fid_str)
+                _LOGGER.info("[%s] Found cluster plan '%s' (fub_id=%s)", self.server_id, one_line(plan_name), fid)
                 return fid, False
 
         fub_id = await self._create_managed_plan(plan_name)
         return fub_id, fub_id is not None
 
     async def _create_managed_plan(self, plan_name: str, orientation: str = _ORIENT_LANDSCAPE) -> int | None:
-        """Create a managed A3 cluster plan carrying the 'administrated by HA' comment."""
-        _LOGGER.info("[%s] Creating cluster plan '%s'", self.server_id, plan_name)
+        """Create a managed A3 cluster plan carrying the 'administrated by HA' comment.
+
+        Refused while the plan list holds an unreadable entry: it may be this very plan, and creating
+        it again would leave two plans of the same name.
+        """
+        if bad_keys := unreadable_plan_keys(self.api.fub_data):
+            _LOGGER.error(
+                "[%s] Not creating cluster plan '%s': the plan list has unreadable entries %r",
+                self.server_id,
+                one_line(plan_name),
+                bad_keys,
+            )
+            return None
+        _LOGGER.info("[%s] Creating cluster plan '%s'", self.server_id, one_line(plan_name))
         fub_id = await self.api.create_fup(
             plan_name=plan_name, paper_format=_MANAGED_PLAN_PAPER, orientation=orientation
         )
         if fub_id is None:
-            _LOGGER.error("[%s] Failed to create cluster plan '%s'", self.server_id, plan_name)
+            _LOGGER.error("[%s] Failed to create cluster plan '%s'", self.server_id, one_line(plan_name))
             return None
 
         if not await self._verify_new_plan_is_empty(plan_name, fub_id):
@@ -5582,7 +7477,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.error(
                 "[%s] Could not verify new cluster plan '%s' (fub_id=%s) is empty — removing it and aborting",
                 self.server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             await self._discard_contaminated_plan(plan_name, fub_id)
@@ -5598,7 +7493,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "not cleanable via the API; removing the plan and aborting instead of building on top of "
                 "it. Inspect/clear fub_id=%s directly in Comexio Studio.",
                 self.server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
                 conn_count,
                 fub_id,
@@ -5610,7 +7505,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "[%s] New cluster plan '%s' (fub_id=%s) unexpectedly already has %d element(s)/%d connection(s) — "
             "Comexio likely reused a stale fub_id still carrying leftover data; clearing it before use.",
             self.server_id,
-            plan_name,
+            one_line(plan_name),
             fub_id,
             len(elem_ids),
             conn_count,
@@ -5621,7 +7516,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "[%s] Cleared %d leftover element(s) from '%s' (fub_id=%s) — plan is usable now",
                 self.server_id,
                 len(elem_ids),
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
             self._distrusted_fub_ids.discard(fub_id)
@@ -5631,7 +7526,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "[%s] Could not clear leftover elements from new cluster plan '%s' (fub_id=%s) — removing it "
             "and aborting instead of building on top of it",
             self.server_id,
-            plan_name,
+            one_line(plan_name),
             fub_id,
         )
         await self._discard_contaminated_plan(plan_name, fub_id)
@@ -5667,48 +7562,109 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 "[%s] Could not remove contaminated/unverified plan '%s' (fub_id=%s) — quarantined for "
                 "this session, but manual cleanup in Comexio Studio is still required to free the name/id",
                 self.server_id,
-                plan_name,
+                one_line(plan_name),
                 fub_id,
             )
         self.api.fub_data.pop(str(fub_id), None)
 
     @staticmethod
-    def _io_plan_members(plan_name: str, prefix: str) -> list[str] | None:
-        """Extension names encoded in a managed IO plan name '{prefix} - IO [A,B]', else None."""
-        if m := re.fullmatch(re.escape(prefix) + r" - IO \[(.+)\]", plan_name):
+    def _io_plan_members(plan_name: str, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> list[str] | None:
+        """Member names encoded in a managed column plan name '{prefix} - IO [A,B]' / '... - QB [A,B]', else None."""
+        if m := re.fullmatch(rf"{re.escape(prefix)} - {re.escape(kind.label)} \[(.+)\]", plan_name):
             return [p.strip() for p in m[1].split(",") if p.strip()]
         return None
 
     @staticmethod
-    def _io_plan_name(prefix: str, members: list[str]) -> str:
-        """Managed IO cluster plan name encoding its extension membership."""
-        return f"{prefix} - IO [{','.join(members)}]"
+    def _io_plan_name(prefix: str, members: list[str], kind: IoPlanKind = IO_PLAN_KIND_IO) -> str:
+        """Managed column plan name encoding its membership (extensions / Quickbus devices)."""
+        return f"{prefix} - {kind.label} [{','.join(members)}]"
 
-    def _io_plan_membership(self, prefix: str) -> dict[int, list[str]]:
-        """Live membership of every managed IO cluster plan: {fub_id: [ext names]}.
+    def _io_plan_membership(self, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> dict[int, list[str]]:
+        """Live membership of every managed column plan of one kind: {fub_id: [member names]}.
 
         Read from the live $Fubs plan names (authoritative — plan_map keys can go stale
-        after renames); membership order defines each extension's column index. Excludes
+        after renames); membership order defines each member's column index. Excludes
         _distrusted_fub_ids — the single choke point resolve_io_clusters/_join_or_create_io_plan/
-        managed_io_plan_members all go through, so a plan _verify_new_plan_is_empty rejected but
+        managed_column_plan all go through, so a plan _verify_new_plan_is_empty rejected but
         couldn't fully remove can't be found-by-name-and-written-into or joined-as-having-free-
         capacity here either (see _resolve_single_cluster_plan's analogous check for Marker/KNX).
         """
         result: dict[int, list[str]] = {}
-        for fid_str, fub_info in self.api.fub_data.items():
-            fid = int(fid_str) if fid_str.lstrip("-").isdigit() else None
-            if fid is None or fid in self._distrusted_fub_ids:
+        for fid, fub_info in function_plans(self.api.fub_data):
+            if fid in self._distrusted_fub_ids:
                 continue
-            if members := self._io_plan_members(str(fub_info.get("Name", "")), prefix):
+            if members := self._io_plan_members(str(fub_info.get("Name", "")), prefix, kind):
                 result[fid] = members
         return result
 
-    def managed_io_plan_members(self, fub_id: int) -> list[str] | None:
-        """Extension membership when fub_id is an HA-managed IO cluster plan, else None.
+    def managed_io_groups(self, data: dict[str, Any] | None = None) -> set[tuple[str, str]]:
+        """(kind label, member) of every column-plan member whose IOs are wired: opted in and present.
+
+        An offline extension is left out (its hardware is not there, wiring it is pointless), and
+        so is a Quickbus device on an offline extension or one no longer present — each logged
+        once per change. Quickbus members are device ids (see IO_PLAN_KIND_QUICKBUS).
+        """
+        data = self.data if data is None else data
+        options = self.config_entry.options
+        offline = self.offline_extensions or set()
+        groups = {
+            (IO_PLAN_KIND_IO.label, ext) for ext in options.get(IO_PLAN_KIND_IO.conf_key, []) if ext not in offline
+        }
+        if wanted := selected_quickbus_devices(options, data or {}):
+            skipped = self._skipped_quickbus_devices(wanted, data)
+            self._log_skipped_quickbus_devices(data, skipped)
+            groups |= {(IO_PLAN_KIND_QUICKBUS.label, device) for device in wanted if device not in skipped}
+        return groups
+
+    @staticmethod
+    def _skipped_quickbus_devices(wanted: set[str], data: dict[str, Any] | None) -> dict[str, str]:
+        """{device id: reason} of the selected Quickbus devices that are not wired into a QB plan."""
+        present: set[str] = set()
+        offline_devices: set[str] = set()
+        for io in (data or {}).get(QUICKBUS_IO_DATA_KEY, []):
+            device = IO_PLAN_KIND_QUICKBUS.member_of(io)
+            present.add(device)
+            if io.get("offline"):
+                offline_devices.add(device)
+        skipped: dict[str, str] = {}
+        for device in wanted:
+            if device not in present:
+                skipped[device] = "not found (removed or Quickbus import off)"
+            elif device in offline_devices:
+                skipped[device] = "on an offline extension"
+        return skipped
+
+    def _log_skipped_quickbus_devices(self, data: Mapping[str, Any] | None, skipped: dict[str, str]) -> None:
+        """Warn once per change about selected Quickbus devices left out of the QB plans.
+
+        managed_io_groups runs on every poll and sync, so an unchanged state stays quiet.
+        """
+        if skipped == getattr(self, "_quickbus_skip_logged", {}):
+            return
+        self._quickbus_skip_logged = dict(skipped)
+        for device, reason in sorted(skipped.items()):
+            _LOGGER.warning(
+                "[%s] Selected Quickbus device '%s' is not wired into a Quickbus function plan: %s",
+                self.server_id,
+                one_line(IO_PLAN_KIND_QUICKBUS.member_label(data, device)),
+                reason,
+            )
+
+    def webio_source_data(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """data (default: coordinator.data) as the Web-IO builders get it: Quickbus IOs of selected devices only."""
+        data = (self.data if data is None else data) or {}
+        return {**data, QUICKBUS_IO_DATA_KEY: webio_quickbus_ios(self.config_entry.options, data)}
+
+    def managed_column_plan(self, fub_id: int) -> tuple[IoPlanKind, list[str]] | None:
+        """(kind, members) when fub_id is an HA-managed IO or Quickbus column plan, else None.
 
         Public counterpart of _io_plan_membership for the services module's grid/sort code.
         """
-        return self._io_plan_membership(self._function_plan_prefix()).get(fub_id)
+        prefix = self._function_plan_prefix()
+        for kind in IO_PLAN_KINDS:
+            if members := self._io_plan_membership(prefix, kind).get(fub_id):
+                return kind, members
+        return None
 
     def is_trigger_plan(self, fub_id: int) -> bool:
         """Whether fub_id is the single HA-managed trigger plan ("HA - TRIGGER").
@@ -5744,95 +7700,382 @@ class ComexioCoordinator(DataUpdateCoordinator):
         prefix = f"{self._function_plan_prefix()} - {SOURCE_CATEGORIES[WebioClass.KNX].label} ["
         return self.api.function_plan_name(fub_id).startswith(prefix)
 
-    def _io_rows_needed(self, ext_name: str) -> int:
-        """Column rows one extension package needs (IOs + header/blank separator rows)."""
-        idents = [io["identifier"] for io in (self.data or {}).get("io", []) if io["ext_name"] == ext_name]
-        rows = io_column_rows(idents)
-        return (max(rows.values()) + 1) if rows else 0
+    def _io_rows_needed(self, ext_name: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> int:
+        """Column rows one member package needs (IOs + header/blank separator rows)."""
+        return kind.rows_needed(self.data, ext_name)
 
-    async def resolve_io_clusters(self, ext_names: list[str]) -> tuple[dict[str, tuple[int, int]], set[int], list[str]]:
+    def io_member_rows(self, members: list[str], kind: IoPlanKind) -> dict[str, int]:
+        """{member: rows it needs} as the origins of a column plan derive from them (io_plan_origins)."""
+        return {member: self._io_rows_needed(member, kind) for member in members}
+
+    def io_plan_origins(self, members: list[str], kind: IoPlanKind, rows_per_col: int) -> dict[str, tuple[int, int]]:
+        """(column, first row) of every member of a column plan — see const.io_plan_member_origins.
+
+        Shared by the wire path (resolve_io_clusters) and the grid/sort code, so both place a
+        member at the same slot.
+        """
+        return io_plan_member_origins(kind, members, lambda member: self._io_rows_needed(member, kind), rows_per_col)
+
+    def _io_plan_columns(self, members: list[str], kind: IoPlanKind, rows_per_col: int) -> int:
+        """Columns the members take in a plan whose columns offer rows_per_col rows."""
+        return io_plan_columns(kind, members, lambda member: self._io_rows_needed(member, kind), rows_per_col)
+
+    def io_plan_overflow(self, members: list[str], kind: IoPlanKind, rows_per_col: int, max_columns: int) -> list[str]:
+        """Members past the last of max_columns canvas columns — see const.io_plan_overflow.
+
+        Shared by the wire path and the sort, so neither puts a pair off the canvas.
+        """
+        return io_plan_overflow(
+            kind,
+            members,
+            lambda member: self._io_rows_needed(member, kind),
+            rows_per_col,
+            max_columns,
+            check_first=bool(members) and self._fits_fresh_io_plan(members[0], kind),
+        )
+
+    def _fresh_io_plan_orientation(self, member: str, kind: IoPlanKind) -> str:
+        """Orientation of a fresh plan for this member: portrait when the landscape columns are too short."""
+        landscape_rows = self._io_plan_rows_per_col(_ORIENT_LANDSCAPE)
+        return _ORIENT_PORTRAIT if self._io_rows_needed(member, kind) > landscape_rows else _ORIENT_LANDSCAPE
+
+    def _fits_fresh_io_plan(self, member: str, kind: IoPlanKind) -> bool:
+        """Whether the canvas of a fresh plan for this member alone takes it."""
+        orientation = self._fresh_io_plan_orientation(member, kind)
+        rows_per_col = self._io_plan_rows_per_col(orientation)
+        return self._io_plan_columns([member], kind, rows_per_col) <= self._plan_canvas_columns(-1, orientation)
+
+    def _plan_canvas_columns(self, fub_id: int, fresh_orientation: str | None = None) -> int:
+        """Column groups the canvas of a plan takes — see _plan_rows_per_col for fresh_orientation."""
+        if fresh_orientation is not None or str(fub_id) not in self.api.fub_data:
+            orientation = fresh_orientation or _ORIENT_LANDSCAPE
+            x_max, _ = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
+        else:
+            x_max, _ = self.api.get_fub_canvas_bounds(fub_id)
+        return canvas_columns(x_max)
+
+    def _plan_rows_per_col(self, fub_id: int, fresh_orientation: str | None = None) -> int:
+        """Row slots one column of a plan offers — the same formula as api.function_plan_add_io_pairs.
+
+        fresh_orientation: for a plan created in this run, not in the cached $Fubs data yet.
+        """
+        if fresh_orientation is not None or str(fub_id) not in self.api.fub_data:
+            return self._io_plan_rows_per_col(fresh_orientation or _ORIENT_LANDSCAPE)
+        _, y_max = self.api.get_fub_canvas_bounds(fub_id)
+        return max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+    async def resolve_io_clusters(
+        self, ext_names: list[str], kind: IoPlanKind = IO_PLAN_KIND_IO
+    ) -> tuple[dict[str, tuple[int, tuple[int, int]]], set[int], dict[str, str]]:
         """Resolve/create the managed IO cluster plan of every extension (membership-true).
 
-        Returns ({ext_name: (fub_id, column_index)}, {fub_ids of freshly created plans},
-        [ext_names whose plan could not be resolved/created]). The third element lets callers
+        Returns ({ext_name: (fub_id, (column, first row))}, {fub_ids of freshly created plans},
+        {ext_name not wired: why — a PLAN_FAILURE_* reason}). The third element lets callers
         surface a partial failure to the user — see resolve_marker_clusters' docstring for why
         an empty first dict is not a reliable "something went wrong" signal when several
         extensions are being resolved at once.
         An extension already encoded in a managed IO plan name keeps that plan and column
         forever; a new extension joins the first plan with free capacity (the plan is
         renamed to extend its membership list) or gets a fresh plan. Capacity derives from
-        CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN: 50 → 1, 100 → 2, 150 → 3 extensions per plan.
+        CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN: 50 → 1, 100 → 2, 150 → 3 columns per plan.
+        kind: IO extensions (one column each) or Quickbus devices (stacked within the columns,
+        "{prefix} - QB [<device ids>]" plans).
         """
         prefix = self._function_plan_prefix()
         capacity = max(1, self._function_plan_cluster_size() // 50)
 
         stale = self._stale_plan_map_entries(self.api.fub_data)
-        membership = self._io_plan_membership(prefix)
-        result: dict[str, tuple[int, int]] = {}
+        membership = self._io_plan_membership(prefix, kind)
+        placed_in: dict[str, int] = {}
+        fresh_orientations: dict[int, str] = {}
         created_plans: set[int] = set()
-        plan_map_updates: dict[str, int] = {}
-        failed_exts: list[str] = []
+        failed_exts: dict[str, str] = {}
+        members_before = {fid: list(members) for fid, members in membership.items()}
 
-        for ext in ext_names:
-            placed = next(
-                ((fid, members.index(ext)) for fid, members in membership.items() if ext in members),
-                None,
-            )
-            if placed is None:
-                placed = await self._join_or_create_io_plan(ext, membership, capacity, prefix)
-            if placed is None:
-                _LOGGER.error("[%s] Failed to resolve/create IO cluster plan for '%s'", self.server_id, ext)
-                failed_exts.append(ext)
-                continue
-            fub_id, _column = placed
-            result[ext] = placed
-            if fub_id not in membership:
-                created_plans.add(fub_id)
-                membership[fub_id] = [ext]
-            plan_map_updates[self._io_plan_name(prefix, membership[fub_id])] = fub_id
+        try:
+            for ext in ext_names:
+                fub_id: int | str | None = next((fid for fid, members in membership.items() if ext in members), None)
+                if fub_id is None:
+                    fub_id = await self._place_new_io_member(
+                        ext, membership, capacity, prefix, kind, fresh_orientations
+                    )
+                if isinstance(fub_id, str):
+                    failed_exts[ext] = fub_id
+                    continue
+                placed_in[ext] = fub_id
+                if fub_id not in membership:
+                    created_plans.add(fub_id)
+                    membership[fub_id] = [ext]
+        finally:
+            # Also when the run stops part-way (an error, HA shutting down): a plan already renamed
+            # in Comexio left in plan_map under its old name only would read as lost to the watchdog.
+            changed = {fid for fid, members in membership.items() if members != members_before.get(fid)}
+            await self._persist_io_plan_names(prefix, kind, membership, changed | set(placed_in.values()), stale)
 
-        if plan_map_updates or stale:
-            await self._persist_plan_map(plan_map_updates, removals=set(stale))
+        result = self._io_member_slots(placed_in, membership, kind, fresh_orientations, failed_exts)
         return result, created_plans, failed_exts
 
-    async def _join_or_create_io_plan(
-        self, ext: str, membership: dict[int, list[str]], capacity: int, prefix: str
-    ) -> tuple[int, int] | None:
-        """Place a new extension: join an existing plan with free capacity (renaming the
-        plan to extend its membership list) or create a fresh single-extension plan.
+    async def _persist_io_plan_names(
+        self, prefix: str, kind: IoPlanKind, membership: dict[int, list[str]], fub_ids: set[int], stale: dict[str, int]
+    ) -> None:
+        """Write the final names of these IO plans to plan_map, dropping stale and superseded names.
 
-        A fresh plan turns A3 portrait when the extension package would not fit the
-        landscape column height (rows derive from the live IO list incl. blank separators).
-        Returns (fub_id, column_index) or None; membership is updated in place on join —
-        the caller registers fresh plans itself (fub_id not yet in membership = created).
+        Final names only: several joins in one run rename a plan step by step, and the names it
+        carried before ([1], [1,2]) are no plan any more — left in plan_map, the watchdog warned
+        about each of them.
         """
-        for fid, members in membership.items():
-            if len(members) < capacity:
-                new_members = [*members, ext]
-                if not await self._rename_io_plan(fid, self._io_plan_name(prefix, new_members)):
+        final_names = {fid: self._io_plan_name(prefix, membership[fid], kind) for fid in fub_ids}
+        plan_map_updates = {name: fid for fid, name in final_names.items()}
+        plan_map_updates = {**self._renamed_managed_plans(stale, plan_map_updates), **plan_map_updates}
+        removals = set(stale) | self._superseded_plan_map_names(final_names)
+        if plan_map_updates or removals:
+            await self._persist_plan_map(plan_map_updates, removals=removals)
+
+    async def _place_new_io_member(
+        self,
+        ext: str,
+        membership: dict[int, list[str]],
+        capacity: int,
+        prefix: str,
+        kind: IoPlanKind,
+        fresh_orientations: dict[int, str],
+    ) -> int | str:
+        """The plan a member no managed plan holds yet joins or gets, else why not (a PLAN_FAILURE_* reason)."""
+        label = one_line(kind.member_label(self.data, ext))
+        # An unreadable entry may be this member's plan: joining or creating would place it in a
+        # second plan and wire its IOs twice.
+        if bad_keys := unreadable_plan_keys(self.api.fub_data):
+            _LOGGER.error(
+                "[%s] Not placing '%s' in a %s cluster plan: the plan list has unreadable entries %r",
+                self.server_id,
+                label,
+                kind.label,
+                bad_keys,
+            )
+            return PLAN_FAILURE_UNREADABLE_PLAN_LIST
+        fub_id = await self._join_or_create_io_plan(ext, membership, capacity, prefix, kind, fresh_orientations)
+        if fub_id is None:
+            _LOGGER.error("[%s] Failed to resolve/create %s cluster plan for '%s'", self.server_id, kind.label, label)
+            return PLAN_FAILURE_NOT_RESOLVED
+        return fub_id
+
+    def _io_member_slots(
+        self,
+        placed_in: dict[str, int],
+        membership: dict[int, list[str]],
+        kind: IoPlanKind,
+        fresh_orientations: dict[int, str],
+        failed_exts: dict[str, str],
+    ) -> dict[str, tuple[int, tuple[int, int]]]:
+        """{member: (fub_id, (column, first row))} of every placed member that fits its plan's canvas.
+
+        Origins only once every member is placed: a later join appends to the plan, which never
+        moves an earlier member (see io_plan_member_origins). A member past the canvas edge (see
+        io_plan_overflow) or behind a member without IOs (see io_plan_shifted) goes to failed_exts
+        instead: wiring it would put its pairs off the plan or onto existing wiring.
+        """
+        slots: dict[str, tuple[int, tuple[int, int]]] = {}
+        unwirable: dict[int, dict[str, str]] = {}
+        for ext, fub_id in placed_in.items():
+            orientation = fresh_orientations.get(fub_id)
+            rows_per_col = self._plan_rows_per_col(fub_id, orientation)
+            members = membership[fub_id]
+            if fub_id not in unwirable:
+                unwirable[fub_id] = self._unwirable_members(fub_id, members, kind, rows_per_col, orientation)
+            if reason := unwirable[fub_id].get(ext):
+                self._log_unwirable_member(ext, fub_id, kind, reason)
+                failed_exts[ext] = reason
+                continue
+            slots[ext] = (fub_id, self.io_plan_origins(members, kind, rows_per_col)[ext])
+        return slots
+
+    def _log_unwirable_member(self, ext: str, fub_id: int, kind: IoPlanKind, reason: str) -> None:
+        """Log why a member of a column plan is not wired, with the way out."""
+        why = (
+            f"no longer fits on the canvas of {kind.label} plan fub={fub_id} (a {kind.member_noun} before it"
+            " grew, or the plan's paper changed) and is not wired —"
+            if reason == PLAN_FAILURE_OFF_CANVAS
+            else f"sits in {kind.label} plan fub={fub_id} behind a {kind.member_noun} with no IOs loaded"
+            " (removed from Comexio, every IO ignored, or missing from this poll) and is not wired, as its pairs"
+            f" would land on that {kind.member_noun}'s wiring — if that stays so,"
+        )
+        _LOGGER.error(
+            "[%s] '%s' %s delete the plan in Comexio to have the next sync lay it out afresh",
+            self.server_id,
+            one_line(kind.member_label(self.data, ext)),
+            why,
+        )
+
+    def _unwirable_members(
+        self, fub_id: int, members: list[str], kind: IoPlanKind, rows_per_col: int, orientation: str | None
+    ) -> dict[str, str]:
+        """{member: why its pairs must not be added (a PLAN_FAILURE_* reason)} of one column plan."""
+        canvas = self._plan_canvas_columns(fub_id, orientation)
+        reasons = dict.fromkeys(self.io_plan_overflow(members, kind, rows_per_col, canvas), PLAN_FAILURE_OFF_CANVAS)
+        shifted = io_plan_shifted(kind, members, lambda member: self._io_rows_needed(member, kind))
+        return reasons | dict.fromkeys(shifted, PLAN_FAILURE_AFTER_GONE_MEMBER)
+
+    def _renamed_managed_plans(self, stale: dict[str, int], updates: dict[str, int]) -> dict[str, int]:
+        """Live name → fub_id of the stale plan_map entries whose plan Comexio still has under a managed name.
+
+        A run prunes every stale entry but writes names only for the plans it resolves: a plan of
+        another kind renamed without plan_map following (a run stopped mid-rename) would drop out
+        of plan_map instead of following its new name. Plans in updates already get their name,
+        and a name plan_map already maps stays as it is.
+        """
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        mapped = raw_map if isinstance(raw_map, dict) else {}
+        renamed: dict[str, int] = {}
+        for fub_id in set(stale.values()) - set(updates.values()):
+            if not self._is_managed_function_plan(fub_id):
+                continue
+            name = self.api.function_plan_name(fub_id)
+            if name in mapped:
+                # The same plan listed under its live name too stays as it is; another plan is a name clash.
+                if str(mapped[name]) != str(fub_id):
                     _LOGGER.warning(
-                        "[%s] Could not rename IO plan fub=%s to add '%s' — creating a fresh plan instead",
+                        "[%s] plan_map drops plan fub=%s: its name '%s' already maps to fub=%s (two plans of one name)",
                         self.server_id,
+                        fub_id,
+                        one_line(name),
+                        mapped[name],
+                    )
+                continue
+            renamed[name] = fub_id
+        return renamed
+
+    def _superseded_plan_map_names(self, final_names: dict[int, str]) -> set[str]:
+        """plan_map names pointing at one of these plans under a name other than its final one."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            return set()
+        return {
+            name
+            for name, fid in raw_map.items()
+            if str(fid).isdigit() and int(fid) in final_names and final_names[int(fid)] != name
+        }
+
+    async def _join_or_create_io_plan(
+        self,
+        ext: str,
+        membership: dict[int, list[str]],
+        capacity: int,
+        prefix: str,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
+        fresh_orientations: dict[int, str] | None = None,
+    ) -> int | None:
+        """Place a new member: join an existing plan whose columns still take it (renaming the
+        plan to extend its membership list) or create a fresh single-member plan.
+
+        A fresh plan turns A3 portrait when the member package would not fit the landscape
+        column height (rows derive from the live IO list incl. blank separators); its
+        orientation goes to fresh_orientations, as $Fubs does not know the plan yet.
+        Returns the fub_id or None; membership is updated in place on join — the caller
+        registers fresh plans itself (fub_id not yet in membership = created).
+        """
+        fresh_orientations = {} if fresh_orientations is None else fresh_orientations
+        for fid, members in membership.items():
+            new_members = [*members, ext]
+            if self._io_plan_takes(fid, new_members, kind, capacity, fresh_orientations.get(fid)):
+                renamed = await self._rename_io_plan_confirmed(fid, self._io_plan_name(prefix, new_members, kind))
+                if renamed is None:
+                    # Not known whether Comexio applied it: a fresh plan could hold the member twice.
+                    _LOGGER.error(
+                        "[%s] '%s' not placed: the rename of %s plan fub=%s may have been applied, and the plan"
+                        " list could not be read in full to tell — the next sync places it",
+                        self.server_id,
+                        one_line(kind.member_label(self.data, ext)),
+                        kind.label,
                         fid,
-                        ext,
+                    )
+                    return None
+                if not renamed:
+                    _LOGGER.warning(
+                        "[%s] Could not rename %s plan fub=%s to add '%s' — creating a fresh plan instead",
+                        self.server_id,
+                        kind.label,
+                        fid,
+                        one_line(kind.member_label(self.data, ext)),
                     )
                     break
                 membership[fid] = new_members
-                return fid, len(new_members) - 1
+                return fid
 
-        landscape_rows = self._io_plan_rows_per_col(_ORIENT_LANDSCAPE)
-        orientation = _ORIENT_PORTRAIT if self._io_rows_needed(ext) > landscape_rows else _ORIENT_LANDSCAPE
-        fub_id = await self._create_managed_plan(self._io_plan_name(prefix, [ext]), orientation=orientation)
-        return None if fub_id is None else (fub_id, 0)
+        orientation = self._fresh_io_plan_orientation(ext, kind)
+        fub_id = await self._create_managed_plan(self._io_plan_name(prefix, [ext], kind), orientation=orientation)
+        if fub_id is not None:
+            fresh_orientations[fub_id] = orientation
+        return fub_id
+
+    def _io_plan_takes(
+        self, fub_id: int, members: list[str], kind: IoPlanKind, capacity: int, fresh_orientation: str | None
+    ) -> bool:
+        """Whether a plan's columns take these members — its capacity and its canvas, as a portrait
+        plan offers fewer columns than a capacity of 3."""
+        if io_plan_shifted(kind, members, lambda member: self._io_rows_needed(member, kind)):
+            # A member without IOs before it would put the new member's pairs onto existing wiring.
+            _LOGGER.info(
+                "[%s] %s plan fub=%s holds a %s with no IOs loaded, so '%s' does not join it",
+                self.server_id,
+                kind.label,
+                fub_id,
+                kind.member_noun,
+                one_line(kind.member_label(self.data, members[-1])),
+            )
+            return False
+        rows_per_col = self._plan_rows_per_col(fub_id, fresh_orientation)
+        if self._io_plan_columns(members, kind, rows_per_col) > capacity:
+            return False
+        canvas = self._plan_canvas_columns(fub_id, fresh_orientation)
+        if not self.io_plan_overflow(members, kind, rows_per_col, canvas):
+            return True
+        _LOGGER.info(
+            "[%s] %s plan fub=%s has no room left on its %s canvas column(s) for '%s'",
+            self.server_id,
+            kind.label,
+            fub_id,
+            canvas,
+            one_line(kind.member_label(self.data, members[-1])),
+        )
+        return False
 
     def _io_plan_rows_per_col(self, orientation: str) -> int:
         """Row slots one column offers on a fresh A3 plan of the given orientation."""
         _, y_max = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
         return max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
 
+    async def _rename_io_plan_confirmed(self, fub_id: int, new_name: str) -> bool | None:
+        """_rename_io_plan, confirmed against a fresh plan list when it reports a failure.
+
+        A request whose answer got lost (timeout) may still have renamed the plan. None: the plan
+        list could not be read again, so whether the rename took effect is unknown.
+        """
+        if await self._rename_io_plan(fub_id, new_name):
+            return True
+        try:
+            raw_config = await self.api.get_raw_config()
+        except UNREACHABLE_ERRORS as err:
+            _LOGGER.warning("[%s] Plan list not read again after the rename of fub=%s: %r", self.server_id, fub_id, err)
+            return None
+        if not raw_config:
+            return None
+        # parse_config takes the fresh plan list into the cache that function_plan_name reads.
+        self.api.parse_config(raw_config)
+        if unreadable_plan_keys(self.api.fub_data):
+            return None
+        if self.api.function_plan_name(fub_id) == new_name:
+            _LOGGER.info(
+                "[%s] The rename of plan fub=%s to '%s' took effect after all",
+                self.server_id,
+                fub_id,
+                one_line(new_name),
+            )
+            return True
+        return False
+
     async def _rename_io_plan(self, fub_id: int, new_name: str) -> bool:
         """Rename a managed IO plan (membership join), keeping paper/DPI/orientation as-is."""
-        fub = self.api.fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self.api.fub_data, fub_id)
         paper = _PAPER_NAME_BY_ID.get(str(fub.get("Paper")), _MANAGED_PLAN_PAPER)
         dpi = int(fub.get("Resolution", 90))
         orientation = _ORIENT_PORTRAIT if str(fub.get("Orientation")) == "1" else _ORIENT_LANDSCAPE
@@ -5858,10 +8101,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         _persist_plan_map.
         """
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
-        if not isinstance(raw_map, dict) or not fub_data:
+        if not isinstance(raw_map, dict) or not fub_data or unreadable_plan_keys(fub_data):
             # No live $Fubs snapshot to compare against — an empty/unpopulated fub_data must
             # never be read as "every plan is gone", or a single fetch hiccup would wipe the
-            # whole map.
+            # whole map; nor a listing with an unreadable entry, which may be a mapped plan.
             return {}
         stale = {
             name: int(fid)
@@ -5872,7 +8115,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.info(
                 "[%s] Pruned stale plan_map entry '%s' (fub %s) — no longer exists in Comexio",
                 self.server_id,
-                name,
+                one_line(name),
                 fub_id,
             )
         return stale
@@ -5888,9 +8131,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plain heads-up rather than an actionable repair.
         """
         names_to_ids: dict[str, list[int]] = {}
-        for fid, fub in self.api.fub_data.items():
+        for fid, fub in function_plans(self.api.fub_data):
             if name := fub.get("Name"):
-                names_to_ids.setdefault(name, []).append(int(fid))
+                names_to_ids.setdefault(name, []).append(fid)
         duplicates = {name: ids for name, ids in names_to_ids.items() if len(ids) > 1}
 
         issue_id = f"duplicate_plan_names_{self.server_id}"
@@ -5899,7 +8142,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
 
         plans_str = "; ".join(
-            f"'{name}' (fub {', '.join(str(fid) for fid in sorted(ids))})" for name, ids in sorted(duplicates.items())
+            f"'{one_line(name)}' (fub {', '.join(str(fid) for fid in sorted(ids))})"
+            for name, ids in sorted(duplicates.items())
         )
         ir.async_create_issue(
             self.hass,
@@ -5968,6 +8212,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
         directly. Returns {fub_id: {"elements": ..., "connections": ...}}; failed plans
         are skipped, and their fub_ids appended to load_failures when the caller passes one.
+        So are plans without a readable plan list entry while the list has unreadable entries:
+        whether such a plan is managed is unknown (its name is), so a cleanup filtering by
+        _is_managed_function_plan would skip it in silence (see plan_load_failures).
 
         A _SEEDED_EMPTY_PLAN_MARKER entry (a plan _create_managed_plan created and verified
         empty earlier in this same run, not yet refreshed by a real bulk load) counts as a
@@ -5988,26 +8235,52 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     load_failures.append(fub_id)
             if plan_data:
                 plans[fub_id] = plan_data
+        if load_failures is not None:
+            load_failures.extend(self._plans_without_readable_entry(plans))
         if not plans:
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
 
-    async def _load_managed_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
+    def _plans_without_readable_entry(self, fub_ids: Iterable[int]) -> list[int]:
+        """The fub_ids without a readable plan list entry, [] while the list has no unreadable entries."""
+        if not unreadable_plan_keys(self.api.fub_data):
+            return []
+        return [fub_id for fub_id in fub_ids if not function_plan_info(self.api.fub_data, fub_id)]
+
+    async def _load_managed_plan_check_data(
+        self, load_failures: list[int] | None = None, *, include_unknown: bool = False
+    ) -> dict[int, dict]:
         """_load_function_plan_check_data without the plans outside HA's naming and the trigger plan.
 
+        include_unknown keeps the cluster plans HA mapped whose plan list entry is unreadable
+        (managed by name is unknown then, see _plans_without_readable_entry): the read-only audit
+        counts their wiring, so a leftover there stays a finding instead of reading as clean; the
+        cleanup leaves them out and reports them as skipped (plan_load_failures). A selector-only
+        plan may be the user's own and the trigger plan is the trigger audit's, so neither is kept.
+
         The ignored-source audit and its cleanup share this set, so the audit never flags
-        wiring in a plan the cleanup may not touch (see _is_managed_function_plan). The trigger
+        wiring in a plan the cleanup may not touch (see _is_managed_function_plan) — except the
+        unknown-entry plans above, which the cleanup reports as skipped. The trigger
         plan is left to the trigger-pair audit: an ignored [TRIG] source no longer counts as a
         trigger source (_trigger_ids_by_ref), so its Source+Flanke pair is reported as orphaned
         and removed as a whole — the generic cleanup would only see the source wired to its
         Flanke, keep it, and flag it again on every audit.
         """
         plans = await self._load_function_plan_check_data(load_failures)
+        unknown = set(self._plans_without_readable_entry(plans)) if include_unknown else set()
+        unknown &= self._mapped_cluster_plan_ids()
         return {
             fub_id: plan_data
             for fub_id, plan_data in plans.items()
-            if self._is_managed_function_plan(fub_id) and not self._is_live_trigger_plan(fub_id)
+            if fub_id in unknown or (self._is_managed_function_plan(fub_id) and not self._is_live_trigger_plan(fub_id))
         }
+
+    def _mapped_cluster_plan_ids(self) -> set[int]:
+        """fub_ids of the plans HA created (CONF_FUNCTION_PLAN_PLAN_MAP), the trigger plan left out."""
+        plan_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(plan_map, dict):
+            return set()
+        return {int(fub_id) for name, fub_id in plan_map.items() if name != FUNCTION_PLAN_TRIGGER_PLAN_NAME}
 
     def _is_live_trigger_plan(self, fub_id: int) -> bool:
         """is_trigger_plan, confirmed by the live plan name (same freshness guard as _audit_trigger_pairs).
@@ -6198,12 +8471,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
 
     def plan_load_failures(self, fub_ids: list[int]) -> list[tuple[str, str]]:
-        """(name, PLAN_LOAD_FAILED) for each managed plan that could not be loaded for a cleanup."""
+        """(name, detail) for each plan a cleanup skipped (see _load_function_plan_check_data).
+
+        PLAN_LOAD_FAILED for a managed plan that could not be loaded, PLAN_ENTRY_UNREADABLE for a
+        plan without a readable plan list entry while the list has unreadable entries.
+        """
+        entries_unknown = bool(unreadable_plan_keys(self.api.fub_data))
         return [
-            (self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED)
+            (self.api.function_plan_name(fub_id), detail)
             for fub_id in dict.fromkeys(fub_ids)
-            if self._is_managed_function_plan(fub_id)
+            if (detail := self._skipped_plan_detail(fub_id, entries_unknown))
         ]
+
+    def _skipped_plan_detail(self, fub_id: int, entries_unknown: bool) -> str | None:
+        """plan_load_failures' detail for fub_id, None for a plan a cleanup may skip in silence (not managed)."""
+        if entries_unknown and not function_plan_info(self.api.fub_data, fub_id):
+            return PLAN_ENTRY_UNREADABLE
+        return PLAN_LOAD_FAILED if self._is_managed_function_plan(fub_id) else None
 
     def _check_source_function_plan_link(self, source_id: int, plans: dict[int, dict], ref_type: int = 2) -> int | None:
         """Check if the source (marker=2/KNX=11) is wired in any of the pre-loaded managed plans.
@@ -6474,7 +8758,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "webio_class": WEBIO_CLASS_KNX,
         }
 
-    def _knx_dpt_suffix_ignored_ids(self) -> set[int]:
+    def _knx_dpt_suffix_ignored_ids(self) -> AbstractSet[int]:
         """Ids the user chose "leave as writable switch" for in the knx_dpt_ambiguous repair
         flow (CONF_KNX_DPT_SUFFIX_IGNORED) — shared by both the auto-tag and the audit below
         so a manual opt-out (added by hand to the option, e.g. for an unambiguous DPT the
@@ -6482,7 +8766,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
         raw = self.config_entry.options.get(CONF_KNX_DPT_SUFFIX_IGNORED, "").strip()
-        return expand_ignored_marker_ids(raw, knx_prefix + knx_prefix.lower())
+        return parse_ignored_ids(raw, knx_prefix + knx_prefix.lower())
 
     async def _auto_suffix_unambiguous_knx(self, knx_items: list[dict[str, Any]]) -> None:
         """Auto-append "[RO]" to a digital KNX object whose DPT is semantically unambiguous
@@ -6526,7 +8810,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fail_count = self._knx_dpt_autotag_fail_counts.get(k_id, 0) + 1
             self._knx_dpt_autotag_fail_counts[k_id] = fail_count
             if fail_count >= KNX_DPT_AUTOTAG_MAX_RETRIES:
-                newly_failed.append(item["name"])
+                newly_failed.append(one_line(item["name"]))
         if newly_failed:
             _LOGGER.warning(
                 "[%s] Giving up auto-tagging %d KNX object(s) as read-only after %d failed "
@@ -6540,7 +8824,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if renamed_count:
             self._schedule_knx_dpt_reload(renamed_count)
 
-    async def async_reload_entry(self, reason: str) -> None:
+    async def async_reload_entry(self, reason: str) -> bool:
         """Reload this config entry — unless a sync is running, whose closing reload covers it.
 
         A reload tears the coordinator down and detaches the API session (api.close()), so one
@@ -6550,11 +8834,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         whatever this reload was for — options written meanwhile included — so it is skipped
         here instead of queued. Outside a sync the reload runs under _sync_lock, so it cannot
         cut into a Web-IO range check, and a sync pressed meanwhile is rejected as concurrent
-        instead of running against the coordinator being torn down.
+        instead of running against the coordinator being torn down. It also waits for a running
+        function plan restore (restores_held_off) — so a caller holding _restore_lock must not
+        await this, but schedule it (see the restore's own reload in services/backup.py) — and for
+        running plan edits (async_wait_for_plan_edits), so a plan edit must not await it either.
 
         Checks the entry's *current* coordinator, not necessarily self: a caller that outlived
         an earlier reload (the uninstall cleanup task, the KNX auto-tag timer) still holds the
         torn-down instance, whose in_sync/_sync_lock say nothing about a sync on the new one.
+
+        Returns False when Home Assistant reports the reload as failed or the entry is not loaded
+        at all (an earlier reload failed); a reload skipped because another one covers it counts
+        as done. Only the restore's reload reports a False result (services/backup.py).
         """
         current = self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)
         target = current if current is not None else self
@@ -6565,9 +8856,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
                 reason,
             )
-            return
-        async with target._sync_lock:
-            await self.hass.config_entries.async_reload(self.config_entry.entry_id)
+            return True
+        async with target._sync_lock, target.restores_held_off():
+            await target.async_wait_for_plan_edits()
+            # Re-checked under the locks: a sync or cleanup that held them may have reloaded meanwhile
+            # (a failed sync clears in_sync before its closing reload) — that reload covered this one,
+            # and a second one would cut into whatever runs on the new coordinator by now.
+            if (live := self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id)) is not target:
+                if live is None:
+                    _LOGGER.warning(
+                        "[%s] Reload requested (%s) skipped — the integration is not loaded", self.server_id, reason
+                    )
+                    return False
+                _LOGGER.info(
+                    "[%s] Reload requested (%s) skipped — the integration was reloaded meanwhile",
+                    self.server_id,
+                    reason,
+                )
+                return True
+            return await self.hass.config_entries.async_reload(self.config_entry.entry_id)
 
     def _schedule_knx_dpt_reload(self, renamed_count: int) -> None:
         """Reload the integration shortly after _auto_suffix_unambiguous_knx renamed at least
@@ -6681,12 +8988,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         relevant_fub_ids = self._function_plan_check_fub_ids()
         if not relevant_fub_ids or not self._relevant_plans_loaded(relevant_fub_ids):
             return None
-        by_k_id: dict[str, str] = {}
-        for fub_id, plan_data in self.function_plan_plans.items():
-            if fub_id in relevant_fub_ids:
-                for marker_id, k_id in self._plan_knx_bridge_pairs(plan_data):
-                    by_k_id[k_id] = marker_id
-        return by_k_id
+        return {
+            k_id: marker_id
+            for fub_id, plan_data in self.function_plan_plans.items()
+            if fub_id in relevant_fub_ids
+            for marker_id, k_id in self._plan_knx_bridge_pairs(plan_data)
+        }
 
     @staticmethod
     def _connection_endpoint_ids(conn: dict) -> set[str]:
@@ -6759,10 +9066,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         startup race (no plans loaded yet at all) is still caught even when relevant_fub_ids
         itself is empty (legacy CONF_FUNCTION_PLAN_FUB_ID == "auto"); a snapshot emptied because
         no plan is left counts as loaded, so the audit reports deleted managed plans (#140).
+        A plan list with an unreadable entry is not loaded: that entry may be a relevant plan.
         """
-        if not self._function_plan_snapshot_loaded():
+        if not self._function_plan_snapshot_loaded() or unreadable_plan_keys(self.api.fub_data):
             return False
-        existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
+        existing_fub_ids = function_plan_ids(self.api.fub_data)
         return (relevant_fub_ids & existing_fub_ids) <= self.function_plan_plans.keys()
 
     async def _ensure_relevant_plans_cached(self, relevant_fub_ids: set[int], *, force: bool = False) -> bool:
@@ -6829,7 +9137,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cache is already correctly read as "not ready" by _knx_bridge_marker_by_k_id()/
         _wired_source_webio_pairs returning None, so they're free to ignore the return value.
         """
-        existing_fub_ids = {int(fub_id) for fub_id in self.api.fub_data}
+        existing_fub_ids = function_plan_ids(self.api.fub_data)
         fetched: dict[int, dict] = {}
         candidates = relevant_fub_ids & existing_fub_ids
         to_fetch = candidates if force else {fub_id for fub_id in candidates if fub_id not in self.function_plan_plans}
@@ -6901,7 +9209,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return pairs
 
     def _audit_wired_pairs(
-        self, has_active_plan: bool, managed_io_exts: set[str]
+        self, has_active_plan: bool, managed_io_groups: set[tuple[str, str]]
     ) -> tuple[
         set[tuple[str, str]] | None,
         set[tuple[str, str]] | None,
@@ -6933,7 +9241,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self._lp_missing_recheck_pending = True
         wired_io_pairs: set[tuple[str, str]] | None = None
         connected_io_ids: set[str] | None = None
-        if managed_io_exts:
+        if managed_io_groups:
             wired_io_pairs = self._wired_source_webio_pairs("1")
             connected_io_ids = self._connected_source_ids("1")
             if wired_io_pairs is None:
@@ -6952,7 +9260,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source_type: str,
         wired_pairs: set[tuple[str, str]] | None,
         connected_ids: set[str] | None,
-    ) -> set[str]:
+    ) -> dict[str, list[int]]:
         """ref_ids of marker ("2") / IO ("1") elements present in a managed plan but never
         paired with a WebIO element there AND without any other connection either —
         Function-Plan debris left behind when a Web-IO command/element was removed (e.g.
@@ -6966,24 +9274,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         wired or otherwise connected in one, genuinely orphaned in another — so subtracting
         a floor combined across all plans (as an earlier version of this method did) would
         hide real debris in the second plan just because the first one still uses it.
+        Maps each ref_id to the plans it dangles in.
         """
         if wired_pairs is None or connected_ids is None or not self.function_plan_plans:
-            return set()
+            return {}
         relevant_fub_ids = self._function_plan_check_fub_ids()
-        dangling: set[str] = set()
+        dangling: dict[str, list[int]] = {}
         for fub_id, plan_data in self.function_plan_plans.items():
             if fub_id not in relevant_fub_ids or not self._is_managed_function_plan(fub_id):
                 continue
-            present_ids: set[str] = set()
-            for elem in (plan_data.get("elements") or {}).values():
-                ref = elem.get("reference") or {}
-                if str(ref.get("type")) == source_type:
-                    present_ids.add(str(ref.get("ref_id")))
+            present_ids = _plan_source_ref_ids(plan_data, source_type)
             if not present_ids:
                 continue
             plan_wired_ids = {rid for rid, _ in self._plan_wired_pairs(plan_data, source_type)}
             plan_connected_ids = self._plan_connected_source_ids(plan_data, source_type)
-            dangling.update(present_ids - plan_wired_ids - plan_connected_ids)
+            for rid in present_ids - plan_wired_ids - plan_connected_ids:
+                dangling.setdefault(rid, []).append(fub_id)
         return dangling
 
     async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:
@@ -7040,14 +9346,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         best_match: dict,
         wired_pairs: tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None, set[tuple[str, str]] | None],
         io_meta: dict | None,
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
     ) -> dict[str, Any] | None:
         """Missing-wiring item for one audit key, or None when the pair is wired or unchecked.
 
         wired_pairs = (marker pairs, IO pairs, KNX pairs); a set of None means that check is
         disabled or not yet loadable this run. Marker keys ("M<id>") are checked against the
-        marker set, KNX keys ("K<id>") against the KNX set; IO keys only when their extension
-        is opted into IO cluster management.
+        marker set, KNX keys ("K<id>") against the KNX set; IO and Quickbus keys only when their
+        extension / Quickbus device is a managed column-plan member (managed_io_groups).
         """
         wired_marker_pairs, wired_io_pairs, wired_knx_pairs = wired_pairs
         web_id = str(best_match.get("webIoId"))
@@ -7059,10 +9365,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if wired_knx_pairs is not None and (key[1:], web_id) not in wired_knx_pairs:
                 return {"name": ha_name, "knx_id": int(key[1:])}
             return None
-        if io_meta is None or io_meta["ext_name"] not in managed_io_exts or wired_io_pairs is None:
+        if io_meta is None or wired_io_pairs is None:
+            return None
+        kind = io_plan_kind_of(io_meta)
+        if (kind.label, kind.member_of(io_meta)) not in managed_io_groups:
             return None
         if (str(io_meta["id"]), web_id) not in wired_io_pairs:
-            return {"name": ha_name, "ext_name": io_meta["ext_name"], "identifier": io_meta["identifier"]}
+            return io_plan_gap_item(ha_name, io_meta)
         return None
 
     def _range_cluster_plan_name_for_item(self, item: dict, prefix: str, cluster_size: int) -> str | None:
@@ -7090,7 +9399,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         The repair dialog uses this to word whole-cluster gaps (cluster plan never created,
         or deleted directly in Comexio — nothing placed/wired yet) differently from
-        individual missing connections. Mirrors ios_by_ext (ext_name -> [gap, total]) with
+        individual missing connections. Mirrors ios_by_ext (ext_name -> [gap, total]) and
+        quickbus_by_device (Quickbus device label "QB3 MT1" -> [gap, total]) with
         markers_by_plan (cluster plan name -> [gap, total]), bucketed the same way the cluster
         plans themselves are named (_cluster_plan_name). Marker and KNX cluster plans share this
         one dict — their plan-name strings never collide ("... - Marker [...]" vs "... - KNX
@@ -7112,17 +9422,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if plan_name in totals_by_plan:
                 totals_by_plan[plan_name] += 1
 
-        gaps_by_ext: dict[str, int] = {}
+        gaps_by_member: dict[tuple[str, str], int] = {}
         for item in missing_items:
-            if "ext_name" in item:
-                gaps_by_ext[item["ext_name"]] = gaps_by_ext.get(item["ext_name"], 0) + 1
-        totals_by_ext = dict.fromkeys(gaps_by_ext, 0)
+            if ref := io_plan_item_member(item):
+                member_key = (ref[0].label, ref[1])
+                gaps_by_member[member_key] = gaps_by_member.get(member_key, 0) + 1
+        totals_by_member = dict.fromkeys(gaps_by_member, 0)
         for meta in io_meta_by_key.values():
-            if meta["ext_name"] in totals_by_ext:
-                totals_by_ext[meta["ext_name"]] += 1
+            kind = io_plan_kind_of(meta)
+            if (member_key := (kind.label, kind.member_of(meta))) in totals_by_member:
+                totals_by_member[member_key] += 1
+
+        def by_member(kind: IoPlanKind) -> dict[str, list[int]]:
+            # Keyed by the member as shown to the user ("QB3 MT1" rather than the device id).
+            return {
+                kind.member_label(self.data, member): [
+                    gaps_by_member[(label, member)],
+                    totals_by_member[(label, member)],
+                ]
+                for label, member in sorted(gaps_by_member)
+                if label == kind.label
+            }
+
         return {
             "markers_by_plan": {name: [gaps_by_plan[name], totals_by_plan[name]] for name in sorted(gaps_by_plan)},
-            "ios_by_ext": {ext: [gaps_by_ext[ext], totals_by_ext[ext]] for ext in sorted(gaps_by_ext)},
+            "ios_by_ext": by_member(IO_PLAN_KIND_IO),
+            "quickbus_by_device": by_member(IO_PLAN_KIND_QUICKBUS),
         }
 
     def _trigger_ids_by_ref(self, data: dict[str, Any], include_ignored: bool = False) -> dict[int, list[int]]:
@@ -7247,8 +9572,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         plan_map = {k: int(v) for k, v in raw_map.items()} if isinstance(raw_map, dict) else {}
         fub_id = plan_map.get(FUNCTION_PLAN_TRIGGER_PLAN_NAME)
-        if fub_id is None or self.api.fub_data.get(str(fub_id), {}).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME:
-            return list(trigger_source_ids), []
+        if (
+            fub_id is None
+            or function_plan_info(self.api.fub_data, fub_id).get("Name") != FUNCTION_PLAN_TRIGGER_PLAN_NAME
+        ):
+            # The trigger plan may be an unreadable entry: unknown, not "every source missing".
+            return None if unreadable_plan_keys(self.api.fub_data) else (list(trigger_source_ids), [])
         if fub_id not in self.function_plan_plans:
             return None
         flanke_ref_id = self.api.flanke_ref_id()
@@ -7297,7 +9626,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def async_ha_address(self) -> str:
         """HA webhook address, hinted by the address the Web-IO devices of the last poll store."""
-        return await self.ha_address.async_get(hint=webio_device_hint((self.data or {}).get("webio_devices")))
+        return (await self.async_webhook_target()).address
+
+    async def async_webhook_target(self, webio_devices: dict[str, Any] | None = None) -> WebhookTarget:
+        """HA webhook address (IP:Port) the Web-IO devices are to store.
+
+        webio_devices: the parsed Web-IO devices whose stored addresses hint the resolver; default:
+        those of the last poll.
+        """
+        if webio_devices is None:
+            webio_devices = (self.data or {}).get("webio_devices")
+        return await self.ha_address.async_target(*webio_device_hints(webio_devices))
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None
@@ -7321,10 +9660,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         existing (possibly stale) self.data as-is whenever self.in_sync is True, which covers
         the whole duration of a manual sync — the exact window this needs a fresh picture for.
         So this bypasses the coordinator update machinery entirely and fetches raw config
-        straight from the API. live_states/referenced_markers are omitted deliberately: marker
-        kind depends only on its title, and a trigger marker always has a real name (a suffix
-        needs something to be suffixed to), so it's never affected by the referenced-marker
-        cold-start fallback that only concerns unnamed markers.
+        straight from the API. live_states is omitted deliberately: marker kind depends only on
+        its title. referenced_markers is omitted too, so parse_config falls back to the last
+        poll's set (api.referenced_markers) and the marker list matches the poll's; trigger
+        markers are unaffected either way, as a trigger marker always has a real name (a suffix
+        needs something to be suffixed to) and the set only concerns unnamed markers.
 
         get_raw_config() returns {} on an HTTP failure rather than raising — indistinguishable
         from a genuinely empty config by shape alone. Proceeding anyway would derive empty
@@ -7549,9 +9889,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for item in missing_items:
             # Reuses the same registry-driven lookup as _function_plan_missing_detail
             # instead of a parallel "marker_id"/"knx_id" in item chain.
-            plan_name = self._range_cluster_plan_name_for_item(
-                item, prefix, cluster_size
-            ) or self._io_cluster_plan_name_for_ext(item["ext_name"], prefix)
+            plan_name = self._range_cluster_plan_name_for_item(item, prefix, cluster_size)
+            if plan_name is None:
+                if (ref := io_plan_item_member(item)) is None:
+                    _LOGGER.warning(
+                        "[%s] Missing-wiring item without a plan left out of the ETA: %s", self.server_id, item
+                    )
+                    continue
+                plan_name = self._io_cluster_plan_name_for_ext(ref[1], prefix, ref[0])
             new_pairs_per_plan[plan_name] = new_pairs_per_plan.get(plan_name, 0) + 1
 
         total = 0.0
@@ -7563,9 +9908,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         return round(total)
 
-    def _io_cluster_plan_name_for_ext(self, ext_name: str, prefix: str) -> str:
-        """Plan name the extension belongs to (existing membership) or would get (new plan)."""
-        for members in self._io_plan_membership(prefix).values():
+    def _io_cluster_plan_name_for_ext(self, ext_name: str, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> str:
+        """Plan name the member belongs to (existing membership) or would get (new plan)."""
+        for members in self._io_plan_membership(prefix, kind).values():
             if ext_name in members:
-                return self._io_plan_name(prefix, members)
-        return self._io_plan_name(prefix, [ext_name])
+                return self._io_plan_name(prefix, members, kind)
+        return self._io_plan_name(prefix, [ext_name], kind)

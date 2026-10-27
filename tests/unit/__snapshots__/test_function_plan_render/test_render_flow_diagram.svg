@@ -6,7 +6,8 @@
   .flow-box-terminal { fill: #e6f4ea; stroke: #2e7d32; }
   .flow-box-decision { fill: #f3e8fd; stroke: #7e57c2; }
   .flow-box-cycle { fill: #fff3e0; stroke: #e69138; }
-  .flow-label { fill: #111111; text-anchor: middle; dominant-baseline: middle; }
+  /* pointer-events: none: the label sits on the box that carries the title tooltip. */
+  .flow-label { fill: #111111; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
   .flow-legend-label { fill: #333333; dominant-baseline: middle; }
   .flow-edge { stroke: #555555; fill: none; }
   .flow-arrow { fill: #555555; }

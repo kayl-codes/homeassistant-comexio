@@ -4,7 +4,10 @@
       "server_id_exists": "Dieser Instanz-Name wird bereits verwendet.",
       "cannot_connect": "Verbindung zu Comexio fehlgeschlagen.",
       "invalid_auth": "Ungültige Anmeldedaten (UI User/Pass).",
-      "unknown": "Unerwarteter Fehler aufgetreten."
+      "unknown": "Unerwarteter Fehler aufgetreten.",
+      "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
+      "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
+      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches."
     },
     "step": {
       "user": {
@@ -20,12 +23,14 @@
           "import_markers": "Merker als Entitäten anlegen",
           "import_ios": "Ein- und Ausgänge anlegen",
           "import_knx": "KNX-Objekte als Entitäten anlegen",
+          "import_quickbus": "Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) als Entitäten anlegen",
           "scan_interval": "Abfrageintervall (Minuten)",
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         }
       },
       "reconfigure": {
         "title": "Comexio-Verbindung neu konfigurieren",
+        "description": "Verbindung: **{protocol}**\nGepinntes Zertifikat (SHA-256): `{fingerprint}`\n\nSobald Comexio HTTPS anbietet, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat automatisch. HTTP bedeutet: Comexio bietet kein HTTPS an, die Verbindung ist unverschlüsselt.",
         "data": {
           "host": "Host / IP-Adresse",
           "username": "Benutzername (Admin-Oberfläche)",
@@ -37,10 +42,27 @@
           "password": "Leer lassen, um das bestehende Passwort beizubehalten.",
           "api_password": "Leer lassen, um das bestehende Passwort beizubehalten."
         }
+      },
+      "reconfigure_http": {
+        "title": "Auf unverschlüsseltes HTTP wechseln?",
+        "description": "**{host}** bietet kein HTTPS an. Das gepinnte Zertifikat:\n`{pinned}`\n\nWenn du fortfährst, verbindet sich Home Assistant über reines HTTP – unverschlüsselt, auch der Admin-Login – und verwirft das gepinnte Zertifikat. Der nächste Start pinnt das Zertifikat, das Comexio dann vorlegt.\n\nSoll Comexio HTTPS anbieten (oder ist es gerade nur nicht erreichbar), schließe diesen Dialog – dann ändert sich nichts."
+      },
+      "reconfigure_certificate": {
+        "title": "Anderem Zertifikat vertrauen?",
+        "description": "**{host}** legt ein anderes Zertifikat vor als das gepinnte.\n\nGepinnt (SHA-256):\n`{pinned}`\n\nVorgelegt (SHA-256):\n`{actual}`\n\nVergleiche den vorgelegten Wert mit dem SHA-256, den die Comexio-Adminseite unter den Zertifikats-Hashes anzeigt. Fahre nur fort, wenn beide übereinstimmen – dann wird das neue Zertifikat gepinnt. Andernfalls schließe diesen Dialog – dann ändert sich nichts."
+      },
+      "reauth_confirm": {
+        "title": "Comexio erneut anmelden",
+        "description": "Comexio unter {host} hat die gespeicherten Admin-Zugangsdaten abgelehnt. Gib die aktuellen ein.",
+        "data": {
+          "username": "Benutzername (Admin-Oberfläche)",
+          "password": "Passwort (Admin-Oberfläche)"
+        }
       }
     },
     "abort": {
-      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert."
+      "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
+      "reauth_successful": "Erneute Anmeldung erfolgreich."
     }
   },
   "selector": {
@@ -106,6 +128,28 @@
         "ignore": "🔇 Ignorieren (alles behalten)",
         "enable": "🔁 Import wieder einschalten"
       }
+    },
+    "function_plan_stopped_action": {
+      "options": {
+        "start": "▶️ Plan jetzt starten",
+        "ignore": "🔕 Ignorieren (bis der Plan wieder lief)",
+        "unwatch": "🚫 Aus der Überwachung nehmen"
+      }
+    },
+    "function_plan_vanished_action": {
+      "options": {
+        "restore": "♻️ Aus dem neuesten Backup wiederherstellen",
+        "unwatch": "🚫 Diesen Plan nicht mehr überwachen",
+        "take_over_rename": "✏️ Umbenennung übernehmen (Backups ziehen mit)",
+        "watch_holder": "👁️ Stattdessen den Plan überwachen, der diese ID jetzt trägt"
+      }
+    },
+    "webhook_address_mode": {
+      "options": {
+        "auto": "Automatisch (lokale Adresse)",
+        "external": "Externe HA-URL",
+        "custom": "Eigene Adresse"
+      }
     }
   },
   "options": {
@@ -124,13 +168,15 @@
           "logikplan_plan_prefix": "Namenspräfix für verwaltete Logikpläne",
           "logikplan_max_pairs_per_plan": "Max. Paare pro verwaltetem Logikplan",
           "logikplan_io_extensions": "Als IO-Cluster-Pläne verwaltete Erweiterungen",
+          "logikplan_quickbus_devices": "Als QB-Cluster-Pläne verwaltete Quickbus-Geräte",
           "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen",
           "ignored_knx": "KNX-Objekt-IDs von der Logikplan-Verbindung ausschließen",
           "function_plan_backup_retention_months": "Aufbewahrung verwaister Backups",
           "bus_watchdog_enabled": "Bus-Auslastungs-Watchdog aktivieren",
           "bus_watchdog_auto_reboot": "Automatischen Comexio-Neustart bei Notfall-Busauslastung erlauben",
           "function_plan_watchdog_notify": "Logikplan-Watchdog: Push an",
-          "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne"
+          "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne",
+          "webhook_address_mode": "Webhook-Adresse (Comexio → HA Push)"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -138,21 +184,37 @@
           "schema_io": "Verfügbare Variablen: '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "cover_keywords": "Kommaseparierte Liste (z.B. rollo, jalousie, blind)",
           "logikplan_plan_prefix": "Präfix für automatisch angelegte Cluster-Pläne. Pläne heißen dann z. B.: HA - Marker [1-100].",
-          "logikplan_max_pairs_per_plan": "Wie viele Web-IO- und Merker-Paare in einen verwalteten Plan passen, bevor ein neuer Cluster-Plan angelegt wird. Für IO-Cluster-Pläne entspricht das 1 (50), 2 (100) bzw. 3 (150) Erweiterungen pro Plan. KNX-Cluster-Pläne ignorieren diese Einstellung und nutzen immer eine feste Größe von 50.",
+          "logikplan_max_pairs_per_plan": "Wie viele Web-IO- und Merker-Paare in einen verwalteten Plan passen, bevor ein neuer Cluster-Plan angelegt wird. Für IO- und QB-Cluster-Pläne entspricht das 1 (50), 2 (100) bzw. 3 (150) Spalten pro Plan: eine Erweiterung je Spalte, Quickbus-Geräte stapeln sich in einer Spalte, solange sie hineinpassen. KNX-Cluster-Pläne ignorieren diese Einstellung und nutzen immer eine feste Größe von 50.",
           "logikplan_io_extensions": "Für jede ausgewählte Erweiterung werden deren IOs in einen verwalteten IO-Cluster-Plan verdrahtet (z. B. HA - IO [Ext]), eine Spalte je Erweiterung. Zum Testen mit einer einzelnen Erweiterung beginnen und die übrigen danach ergänzen.",
-          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden.",
-          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden.",
+          "logikplan_quickbus_devices": "Für jedes ausgewählte Quickbus-Gerät werden dessen IOs in einen verwalteten QB-Cluster-Plan verdrahtet (z. B. HA - QB [1,3], benannt nach Geräte-ID), gestapelt in den Spalten des Plans, damit Comexio ihre Werte an Home Assistant meldet. Nur lesend: Comexio bietet keinen Weg, ein Quickbus-IO zu schreiben. Bis zur ersten Änderung sind alle Geräte ausgewählt; nur ausgewählte Geräte erhalten Web-IO-Befehle.",
+          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
+          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
           "function_plan_backup_retention_months": "Ist das neueste Backup eines direkt in Comexio gelöschten Plans älter als diese Frist, fragt eine Reparaturmeldung, ob seine Backups gelöscht oder behalten werden — ohne deine Bestätigung wird nichts gelöscht. Backups eines noch existierenden Plans sind davon nie betroffen. Die Action 'Function Plan Purge Orphaned Backups' löscht alle abgelaufenen auf einmal.",
           "bus_watchdog_enabled": "Bei anhaltendem Anstieg der Busauslastung werden die von HA verwalteten Cluster-Logikpläne automatisch (von hinten nach vorne) neu gestartet, um die Auslastung zu entlasten. Greift nicht destruktiv in die Comexio-Anlage selbst ein.",
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
-          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
-          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Absichtlich gestoppte Pläne (Tests) hier nicht auswählen."
+          "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Wird ein überwachter eigener Plan in Comexio gelöscht, kommt ebenfalls ein Push, mit den Knöpfen „Wiederherstellen“ (aus seinem neuesten Backup, als neuer Plan) und „Nicht mehr überwachen“; trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), nur „Nicht mehr überwachen“ — Wiederherstellen oder Umbenennung übernehmen dann in der Reparaturmeldung. Zeigt Comexio ein anderes TLS-Zertifikat als das gepinnte, bekommen sie außerdem einen dringenden Push. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
+          "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Ein in Comexio umbenannter Plan mit unverändertem Inhalt wird von selbst übernommen (Auswahl und Backups folgen dem neuen Namen). Trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), bietet die Reparaturmeldung zusätzlich an, stattdessen diesen Plan zu überwachen oder – wenn sein Inhalt dem letzten Backup entspricht – die Umbenennung zu übernehmen (die Backups ziehen mit). Absichtlich gestoppte Pläne (Tests) hier nicht auswählen.",
+          "webhook_address_mode": "Wohin Comexio die Live-Werte sendet. Automatisch: die lokale Adresse von HA. Externe HA-URL: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (https ohne Port bedeutet 443). Eigene Adresse: eine URL, die du im nächsten Schritt eingibst. Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Danach einen Web-IO-Sync ausführen."
+        }
+      },
+      "webhook_url": {
+        "title": "Eigene Webhook-Adresse",
+        "data": {
+          "webhook_url": "Webhook-URL"
+        },
+        "data_description": {
+          "webhook_url": "Basis-URL von Home Assistant, wie Comexio sie erreichen soll, z. B. {example_url} — ohne Pfad. Ist diese Adresse öffentlich, läuft der Push über das Internet."
         }
       }
     },
     "error": {
       "invalid_number": "Bitte eine gültige Ganzzahl eingeben.",
-      "invalid_schema": "Ungültiges Namensschema. Nur die aufgeführten Variablennamen in geschweiften Klammern verwenden und jede Klammer schließen."
+      "invalid_schema": "Ungültiges Namensschema. Nur die aufgeführten Variablennamen in geschweiften Klammern verwenden und jede Klammer schließen.",
+      "invalid_url": "Gib eine http://- oder https://-URL mit Host ein, ohne Pfad, Query oder Zugangsdaten.",
+      "loopback_url": "Eine Loopback-Adresse (localhost, 127.x, 0.0.0.0) ist von Comexio aus nicht erreichbar.",
+      "insecure_url": "Eine http://-Adresse ist nur im lokalen Netz erlaubt: sonst gingen die Werte unverschlüsselt übers Internet. Verwende https://.",
+      "insecure_external_url": "Die externe URL von Home Assistant ist eine http://-Adresse außerhalb des lokalen Netzes: die Werte gingen unverschlüsselt übers Internet. Lege zuerst eine https://-URL fest.",
+      "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest."
     }
   },
   "entity": {
@@ -230,12 +292,29 @@
         "name": "Anzahl Web-IO-Befehle"
       },
       "watchdog_event": {
-        "name": "Letztes Watchdog-Ereignis"
+        "name": "Letztes Buslast-Watchdog-Ereignis"
+      },
+      "free_storage": {
+        "name": "Freier Speicher"
+      },
+      "last_boot": {
+        "name": "Letzter Start"
+      },
+      "connection": {
+        "name": "Verbindung",
+        "state": {
+          "https": "HTTPS (verschlüsselt)",
+          "http": "HTTP (unverschlüsselt)",
+          "certificate_changed": "Zertifikat geändert"
+        }
       }
     },
     "binary_sensor": {
       "managed_plans_problem": {
         "name": "Problem verwaltete Pläne"
+      },
+      "time_server_problem": {
+        "name": "Zeitserver-Setting"
       }
     },
     "switch": {
@@ -322,7 +401,7 @@
         "step": {
           "uninstall_cleanup": {
             "title": "Deinstallations-Bereinigung",
-            "description": "Wähle, was aus Comexio entfernt werden soll. Insgesamt hat die Integration {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e) und {class_count} Web-IO-Klasse(n) angelegt.\n\n* **Everything** entfernt alles.\n* **Markers only / IOs only / KNX only** entfernen nur die Logikpläne, das Web-IO-Gerät und die Klasse dieses Bereichs. Der gemeinsame Trigger-Plan wird nur dann komplett entfernt, wenn er keine Trigger-Paare der anderen Kategorie enthält — sonst entfernen Merker/KNX nur ihre eigenen Paare daraus.\n* **KNX only** und **Everything** leeren außerdem die Titel ungenutzter KNX-Brücken-Merker, damit sie wieder als freie Merker verfügbar sind. Ein Brücken-Merker, den du in einem eigenen Logikplan verwendest, verliert nur seine Suffixe [K…], [RO] und [TRIG] und bleibt als normaler Merker samt Startwert erhalten. Die Merker selbst werden nicht gelöscht.\n\nDies kann nicht rückgängig gemacht werden. Gelöschte Logikpläne verlieren ihre Verdrahtung endgültig."
+            "description": "Wähle, was aus Comexio entfernt werden soll. Insgesamt hat die Integration {plan_count} Logikplan/-pläne, {device_count} Web-IO-Gerät(e) und {class_count} Web-IO-Klasse(n) angelegt.\n\n* **Everything** entfernt alles.\n* **Markers only / IOs only / KNX only / Quickbus only** entfernen nur die Logikpläne, das Web-IO-Gerät und die Klasse dieses Bereichs. Der gemeinsame Trigger-Plan wird nur dann komplett entfernt, wenn er keine Trigger-Paare der anderen Kategorie enthält — sonst entfernen Merker/KNX nur ihre eigenen Paare daraus.\n* **KNX only** und **Everything** leeren außerdem die Titel ungenutzter KNX-Brücken-Merker, damit sie wieder als freie Merker verfügbar sind. Ein Brücken-Merker, den du in einem eigenen Logikplan verwendest, verliert nur seine Suffixe [K…], [RO] und [TRIG] und bleibt als normaler Merker samt Startwert erhalten. Die Merker selbst werden nicht gelöscht.\n\nDies kann nicht rückgängig gemacht werden. Gelöschte Logikpläne verlieren ihre Verdrahtung endgültig."
           }
         },
         "abort": {
@@ -382,7 +461,8 @@
           "plan_exists_again": "Diesen Plan gibt es in Comexio wieder, seine Backups sind also nicht mehr verwaist. Es wurde nichts geändert.",
           "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert.",
           "loaded_in_preview": "Das neueste Backup des Plans wird jetzt in der Plan-Karte angezeigt (Plan → Orphaned plans). Diese Reparatur bleibt offen, bis du die Backups behältst oder löschst.",
-          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert."
+          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, in den Plan-Auswahlen wurde inzwischen ein anderer Plan gewählt, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert.",
+          "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
         }
       }
     },
@@ -392,15 +472,17 @@
         "step": {
           "function_plan_stopped": {
             "title": "Verwalteter Logikplan gestoppt",
-            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein."
+            "description": "Der Logikplan **{plan_name}** (ID {fub_id}) wird von Home Assistant verwaltet, läuft in Comexio aber nicht. Die damit verbundenen Merker, IOs, KNX-Objekte oder Trigger erreichen Home Assistant erst wieder, wenn er läuft.\n\nLetzte Prüfung: {last_check}.\n\n**Plan starten** startet ihn jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (HA-Pläne)** am Logikplan-Gerät ein.\n**Ignorieren** blendet diese Reparaturmeldung und ihren Push aus; der Plan bleibt überwacht, und sein nächster Stopp, nachdem er wieder lief, meldet sich neu."
           }
         },
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
-          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
-          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen.",
+          "ignored": "Die Reparaturmeldung zu {plan_name} (ID {fub_id}) wird ignoriert, ihr Push wurde entfernt. Der Plan bleibt überwacht: Sobald er wieder lief, meldet sein nächster Stopp eine neue Reparaturmeldung. Ignorierte Reparaturmeldungen zeigt das Menü (⋮) der Reparaturen-Seite.",
+          "still_watched": "Der Plan {plan_name} (ID {fub_id}) bleibt überwacht: Seine Auswahl in den Optionen nennt nur die ID, die jetzt ein anderer Plan hat. Entferne die Auswahl in den Optionen der Integration, um ihn nicht mehr zu überwachen."
         }
       }
     },
@@ -410,15 +492,17 @@
         "step": {
           "function_plan_stopped": {
             "title": "Überwachter Anwender-Logikplan gestoppt",
-            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\nLetzte Prüfung: {last_check}.\n\n**Absenden** startet den Plan jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein. Um ihn nicht mehr zu überwachen, entferne ihn in den Optionen der Integration."
+            "description": "Der Anwender-Logikplan **{plan_name}** (ID {fub_id}) wird vom Logikplan-Watchdog überwacht, läuft in Comexio aber nicht.\n\nLetzte Prüfung: {last_check}.\n\n**Plan starten** startet ihn jetzt. Soll die Integration einen solchen Plan selbst starten, schalte den Schalter **Plan Auto-Start (User-Pläne)** am Logikplan-Gerät ein.\n**Ignorieren** blendet diese Reparaturmeldung und ihren Push aus; der Plan bleibt überwacht, und sein nächster Stopp, nachdem er wieder lief, meldet sich neu.\n**Aus der Überwachung nehmen** entfernt ihn aus den überwachten User-Plänen."
           }
         },
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
-          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
-          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen.",
+          "ignored": "Die Reparaturmeldung zu {plan_name} (ID {fub_id}) wird ignoriert, ihr Push wurde entfernt. Der Plan bleibt überwacht: Sobald er wieder lief, meldet sein nächster Stopp eine neue Reparaturmeldung. Ignorierte Reparaturmeldungen zeigt das Menü (⋮) der Reparaturen-Seite.",
+          "still_watched": "Der Plan {plan_name} (ID {fub_id}) bleibt überwacht: Seine Auswahl in den Optionen nennt nur die ID, die jetzt ein anderer Plan hat. Entferne die Auswahl in den Optionen der Integration, um ihn nicht mehr zu überwachen."
         }
       }
     },
@@ -428,15 +512,59 @@
         "step": {
           "function_plan_stopped": {
             "title": "Logikplan stoppt immer wieder",
-            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}. Letzte Prüfung: {last_check}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Absenden** startet den Plan jetzt einmalig."
+            "description": "Plan Auto-Start hat den Logikplan **{plan_name}** (ID {fub_id}) {attempts}-mal gestartet, aber jedes Mal wurde der Start abgelehnt oder der Plan stoppte kurz danach wieder. Vermutlich enthält der Plan einen Fehler, deshalb versucht Auto-Start es für diesen Plan nicht weiter.\n\nLetzter Fehlversuch: {gave_up_at}. Letzte Prüfung: {last_check}.\n\nPrüfe den Plan im Comexio Studio. Auto-Start greift von selbst wieder, sobald der Plan wieder als laufend erkannt wird.\n\n**Plan starten** startet ihn jetzt einmalig. **Ignorieren** blendet diese Reparaturmeldung und ihren Push aus, bis der Plan wieder lief. Bei einem User-Plan entfernt **Aus der Überwachung nehmen** ihn aus den überwachten User-Plänen."
           }
         },
         "abort": {
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
           "already_running": "Der Plan {plan_name} (ID {fub_id}) läuft wieder. Es wurde nichts geändert.",
           "plan_not_watched": "Der Plan {plan_name} (ID {fub_id}) wird nicht mehr überwacht (abgewählt, gelöscht oder seine ID neu vergeben). Es wurde nichts gestartet.",
-          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
-          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen."
+          "busy": "Gerade läuft ein Sync, eine Wiederherstellung, ein Abruf, eine Logikplan-Änderung oder der Buslast-Watchdog. Es wurde nichts geändert — versuche es gleich noch einmal.",
+          "start_failed": "Comexio hat den Start von {plan_name} (ID {fub_id}) nicht bestätigt. Prüfe den Plan im Comexio Studio; diese Reparatur bleibt offen.",
+          "ignored": "Die Reparaturmeldung zu {plan_name} (ID {fub_id}) wird ignoriert, ihr Push wurde entfernt. Der Plan bleibt überwacht: Sobald er wieder lief, meldet sein nächster Stopp eine neue Reparaturmeldung. Ignorierte Reparaturmeldungen zeigt das Menü (⋮) der Reparaturen-Seite.",
+          "still_watched": "Der Plan {plan_name} (ID {fub_id}) bleibt überwacht: Seine Auswahl in den Optionen nennt nur die ID, die jetzt ein anderer Plan hat. Entferne die Auswahl in den Optionen der Integration, um ihn nicht mehr zu überwachen."
+        }
+      }
+    },
+    "function_plan_vanished": {
+      "title": "Logikplan {plan_name} existiert nicht mehr",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Überwachter Logikplan gelöscht",
+            "description": "Der überwachte Logikplan **{plan_name}** (ID {fub_id}) existiert in Comexio nicht mehr — er wurde gelöscht, zum Beispiel im Comexio Studio.\n\n**Wiederherstellen** baut ihn aus seinem neuesten Backup als neuen Plan wieder auf und startet ihn; er bleibt unter seiner neuen ID überwacht. Ein älteres Backup stellst du über die Plan-Karte wieder her (Plan → Orphaned plans).\n**Nicht mehr überwachen** nimmt ihn aus den überwachten Benutzerplänen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
+          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen.",
+          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen.",
+          "rename_not_confirmed": "Der Inhalt von {current_name} entspricht nicht mehr dem letzten Backup von {plan_name}, daher wurde die Umbenennung nicht übernommen. Es wurde nichts geändert — öffne die Reparatur erneut, um neu zu wählen.",
+          "backups_not_moved": "Die Backups von {plan_name} konnten nicht zu {current_name} verschoben werden, daher wurde nichts geändert. Siehe das Home-Assistant-Protokoll.",
+          "holder_changed": "ID {fub_id} trägt nicht mehr {current_name}, oder die Auswahl von {plan_name} wurde inzwischen in den Optionen geändert; die überwachten Pläne bleiben daher, wie sie sind. Siehe das Home-Assistant-Protokoll.",
+          "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
+        }
+      }
+    },
+    "function_plan_replaced": {
+      "title": "Logikplan {plan_name} unter ID {fub_id} nicht gefunden",
+      "fix_flow": {
+        "step": {
+          "function_plan_vanished": {
+            "title": "Überwachter Logikplan nicht gefunden",
+            "description": "Der überwachte Logikplan **{plan_name}** (ID {fub_id}) wurde in Comexio nicht gefunden: ID {fub_id} trägt jetzt den Plan **{current_name}**. Entweder wurde der Plan umbenannt, oder er wurde gelöscht und Comexio hat seine ID an einen anderen Plan vergeben.\n\n**Umbenennung übernehmen** wird angeboten, wenn der Inhalt von {current_name} dem letzten Backup von {plan_name} entspricht, die Integration die Umbenennung aber nicht selbst übernehmen konnte (normalerweise tut sie das): Der Watchdog überwacht dann {current_name}, und die Backups von {plan_name} laufen unter dem neuen Namen weiter. Gleicher Inhalt beweist nicht, dass es derselbe Plan ist (z. B. zwei leere Pläne).\n**Stattdessen {current_name} überwachen** überwacht den Plan, der die ID jetzt trägt; die Backups bleiben, wie sie sind.\n**Wiederherstellen** baut {plan_name} aus seinem neuesten Backup als neuen Plan wieder auf und startet ihn; er bleibt unter seiner neuen ID überwacht.\n**Nicht mehr überwachen** nimmt {plan_name} aus den überwachten Benutzerplänen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt.",
+          "plan_not_missing": "Der Plan {plan_name} (ID {fub_id}) fehlt nicht mehr (wiederhergestellt oder nicht mehr überwacht). Es wurde nichts geändert.",
+          "no_backup": "Es gibt kein Backup von {plan_name} (ID {fub_id}), aus dem er wiederhergestellt werden kann. Es wurde nichts geändert — du kannst ihn stattdessen nicht mehr überwachen.",
+          "check_pending": "Die Planliste wurde seit dem Start von Home Assistant noch nicht gelesen, daher ist noch unklar, ob {plan_name} (ID {fub_id}) noch fehlt. Es wurde nichts geändert; bitte gleich erneut versuchen.",
+          "rename_not_confirmed": "Der Inhalt von {current_name} entspricht nicht mehr dem letzten Backup von {plan_name}, daher wurde die Umbenennung nicht übernommen. Es wurde nichts geändert — öffne die Reparatur erneut, um neu zu wählen.",
+          "backups_not_moved": "Die Backups von {plan_name} konnten nicht zu {current_name} verschoben werden, daher wurde nichts geändert. Siehe das Home-Assistant-Protokoll.",
+          "holder_changed": "ID {fub_id} trägt nicht mehr {current_name}, oder die Auswahl von {plan_name} wurde inzwischen in den Optionen geändert; die überwachten Pläne bleiben daher, wie sie sind. Siehe das Home-Assistant-Protokoll.",
+          "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
         }
       }
     },
@@ -461,6 +589,23 @@
           "import_enabled": "Der Import dieser Kategorie ist wieder eingeschaltet. Es wurde nichts geändert.",
           "sync_running": "Gerade läuft ein Sync, eine Web-IO-Bereichsprüfung oder ein Neuladen der Integration. Es wurde nichts geändert — öffne diese Reparatur erneut, wenn er abgeschlossen ist.",
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde möglicherweise entfernt."
+        }
+      }
+    },
+    "certificate_changed": {
+      "title": "Comexio {server_id}: Zertifikat geändert",
+      "fix_flow": {
+        "step": {
+          "certificate_changed": {
+            "title": "Comexio-Zertifikat geändert",
+            "description": "Comexio **{server_id}** ({host}) zeigt ein anderes TLS-Zertifikat als das bei der Einrichtung gespeicherte. Bis du entscheidest, sendet Home Assistant nichts dorthin.\n\nGespeichert (SHA-256):\n`{pinned}`\n\nJetzt gezeigt (SHA-256):\n`{actual}`\n\nVergleiche den neuen Wert mit dem SHA-256-Wert, den die Comexio-Admin-Seite unter den Zertifikats-Hashes anzeigt. Stimmt er überein — etwa weil in Comexio ein neues Zertifikat erzeugt wurde —, bestätige, um ihn zu speichern; die Integration wird neu geladen. Stimmt er nicht überein, antwortet etwas anderes an Comexios Stelle: nicht bestätigen, Dialog schließen und das Netzwerk prüfen."
+          }
+        },
+        "abort": {
+          "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde eventuell entfernt.",
+          "cannot_connect": "Das Comexio-Zertifikat konnte nicht erneut gelesen werden ({host}). Nichts wurde geändert — bitte erneut versuchen, sobald Comexio erreichbar ist.",
+          "certificate_restored": "Comexio zeigt wieder das gespeicherte Zertifikat. Nichts wurde geändert.",
+          "certificate_changed_again": "Comexio zeigt jetzt noch ein anderes Zertifikat:\n`{actual}`\n\nNichts wurde geändert. Öffne die Reparatur erneut, um dieses zu vergleichen."
         }
       }
     }

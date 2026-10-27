@@ -101,3 +101,29 @@ export function fmtTs(d) {
     `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`
   );
 }
+
+// How the preview image on screen relates to a row of the orphaned-plans view.
+// shown: {fub_id, plan_name, source, captured_at} of the image (the preview image entity's
+// attributes at the time it was fetched), null when no image is shown or the entity did not
+// report them; orphan: the backup selector's `orphan` attribute (fub_id, plan_name, kind, slot,
+// captured_at).
+// "match": that very snapshot · "other_snapshot": the same deleted plan, another source ·
+// "other_plan": another plan · "unknown": no identity to compare.
+export function orphanPreviewMatch(shown, orphan) {
+  if (shown?.fub_id == null || shown.plan_name == null || shown.source == null) {
+    return "unknown";
+  }
+  // Compared as strings: an id that arrives as "12" still matches 12.
+  if (String(shown.fub_id) !== String(orphan.fub_id) || shown.plan_name !== orphan.plan_name) {
+    return "other_plan";
+  }
+  // Slots are list positions: after a delete the next backup moves into the deleted one's slot,
+  // so "orphan:<kind>:<slot>" alone would match a row the image does not show. The capture time
+  // names the snapshot itself. Only orphan renders report it; any other source (live,
+  // function_plan_visualize) counts as another snapshot — the card warns rather than guesses.
+  const sameSnapshot =
+    shown.source.startsWith(`orphan:${orphan.kind}:`) &&
+    shown.captured_at != null &&
+    shown.captured_at === orphan.captured_at;
+  return sameSnapshot ? "match" : "other_snapshot";
+}
