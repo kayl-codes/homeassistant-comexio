@@ -4,11 +4,12 @@ from typing import Any
 from unittest.mock import AsyncMock, patch
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import DOMAIN
+from custom_components.comexio.const import CONF_SERVER_ID, DOMAIN
 
 # A block with an auto-hidden input; element 408 switches its extended view on ("autohide": "1").
 CATALOG = {"fub_base": {"77": {"in": ["a", "b"], "in_hide": ["b"], "out": ["q"], "out_hide": []}}}
@@ -58,3 +59,39 @@ async def test_a_snapshot_preview_uses_the_stored_block_settings(
 
     assert await _rendered_ref_id(hass, loaded_entry, "snapshot:auto:0", block_settings={}) == "77"
     assert await _rendered_ref_id(hass, loaded_entry, "snapshot:auto:1", block_settings=EXPANDED) == "77:expanded"
+
+
+async def test_the_preview_image_names_the_shown_plan(hass: HomeAssistant, loaded_entry: MockConfigEntry) -> None:
+    """The plan card compares these attributes with the orphaned-plans choice before a delete."""
+    await _rendered_ref_id(hass, loaded_entry, "snapshot:change:2", block_settings={})
+
+    unique_id = f"comexio_{loaded_entry.data[CONF_SERVER_ID]}_plan_preview_image"
+    entity_id = er.async_get(hass).async_get_entity_id("image", DOMAIN, unique_id)
+    assert entity_id is not None
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert {key: state.attributes.get(key) for key in ("fub_id", "plan_name", "source")} == {
+        "fub_id": 1,
+        "plan_name": "Test1",
+        "source": "snapshot:change:2",
+    }
+
+
+async def test_a_restored_preview_without_a_render_names_no_plan(
+    hass: HomeAssistant, loaded_entry: MockConfigEntry
+) -> None:
+    """After a restart only last_plan_preview is restored, the SVG file may be newer: no identity."""
+    coordinator = hass.data[DOMAIN][loaded_entry.entry_id]
+    coordinator.last_plan_preview = {"fub_id": 1, "plan_name": "Test1", "source": "snapshot:change:2"}
+    assert coordinator.last_plan_preview_svg is None
+    coordinator.async_update_listeners()
+    await hass.async_block_till_done()
+
+    unique_id = f"comexio_{loaded_entry.data[CONF_SERVER_ID]}_plan_preview_image"
+    entity_id = er.async_get(hass).async_get_entity_id("image", DOMAIN, unique_id)
+    assert entity_id is not None
+    state = hass.states.get(entity_id)
+    assert state is not None
+    assert {key: state.attributes.get(key) for key in ("fub_id", "plan_name", "source")} == dict.fromkeys(
+        ("fub_id", "plan_name", "source")
+    )
