@@ -40,7 +40,11 @@ from custom_components.comexio.const import (
     webio_quickbus_ios,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
-from custom_components.comexio.options_flow import _quickbus_device_options
+from custom_components.comexio.options_flow import (
+    _drop_unchanged_quickbus_default,
+    _quickbus_device_options,
+    _shown_quickbus_pick,
+)
 from custom_components.comexio.repairs import _function_plan_gap_lines, _function_plan_option_label
 from custom_components.comexio.services import misc as services_misc
 from custom_components.comexio.services._grid import _io_header_slots, _io_ref_slots
@@ -661,6 +665,75 @@ def test_options_keep_an_offline_quickbus_device_selected_while_never_saved(quic
         {"value": "3", "label": "QB3 BM Diele"},
         {"value": "2", "label": "QB2 MT Bad"},
     ]
+    assert _shown_quickbus_pick(options, {}, data) == ["1", "3", "2"]
+    assert _shown_quickbus_pick(options, {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: [2]}, data) == ["2"]
+
+
+_SHOWN = ["1", "3", "2"]  # what the form showed: every device, live ones first
+
+
+@pytest.mark.parametrize(
+    ("conf", "submitted", "saved"),
+    [
+        # The never-saved default, sent back as shown (any order): stays implicit, so a device
+        # added in Comexio later is selected too.
+        ({}, ["3", "1", "2"], None),
+        ({}, [3, 1, 2], None),  # ids sent as numbers
+        ({}, ["1", "2"], ["1", "2"]),  # a deselected device: the pick is saved
+        ({}, ["1", "2", "3", "9"], ["1", "2", "3", "9"]),  # more than shown: saved
+        ({}, [], []),  # all deselected
+        # An already saved pick stays saved, even when it equals every current device.
+        ({CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: ["1"]}, ["1", "2", "3"], ["1", "2", "3"]),
+        ({CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}, ["1", "2", "3"], ["1", "2", "3"]),  # a saved "none" too
+    ],
+    ids=[
+        "unchanged_default",
+        "numeric_ids",
+        "deselected",
+        "more_than_shown",
+        "none_selected",
+        "saved_before",
+        "saved_none_before",
+    ],
+)
+def test_an_unchanged_quickbus_default_is_not_saved(
+    conf: dict[str, Any], submitted: list[Any], saved: list[str] | None
+) -> None:
+    user_input = {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: submitted}
+
+    _drop_unchanged_quickbus_default(user_input, conf, _SHOWN)
+
+    if saved is None:
+        assert CONF_FUNCTION_PLAN_QUICKBUS_DEVICES not in user_input
+    else:
+        assert user_input[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES] == saved
+
+
+def test_the_shown_default_counts_even_after_a_poll_added_a_device(quickbus_result: dict[str, Any]) -> None:
+    # The form showed devices 1 and 2; a poll found device 3 before the submit. The untouched
+    # default still stays implicit, so device 3 is selected too instead of a frozen ["1", "2"].
+    user_input = {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: ["1", "2"]}
+
+    _drop_unchanged_quickbus_default(user_input, {}, ["1", "2"])
+
+    assert not user_input
+    assert selected_quickbus_devices(user_input, quickbus_result) == {"1", "2", "3"}
+
+
+def test_an_empty_pick_is_saved_even_when_nothing_was_shown() -> None:
+    user_input = {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}
+
+    _drop_unchanged_quickbus_default(user_input, {}, [])
+
+    assert user_input == {CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}
+
+
+def test_no_quickbus_field_leaves_the_input_alone() -> None:
+    user_input = {"scan_interval": 10}
+
+    _drop_unchanged_quickbus_default(user_input, {}, _SHOWN)
+
+    assert user_input == {"scan_interval": 10}
 
 
 # --- stacking Quickbus devices within a plan's columns ---

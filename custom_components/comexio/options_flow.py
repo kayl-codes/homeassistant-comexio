@@ -1,5 +1,5 @@
 # Version: 0.8.0
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 import logging
 from typing import Any
 
@@ -164,6 +164,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         self._config_entry = config_entry
         # The init step's input, held while the custom webhook URL step asks for the URL.
         self._pending_input: dict[str, Any] = {}
+        # The Quickbus selection the form last showed, to tell an untouched default from a pick.
+        self._quickbus_shown: list[str] = []
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -301,17 +303,11 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         )
         if quickbus_options:
             # Only with Quickbus devices to pick (or a saved pick to drop) — a dead field otherwise.
-            schema_dict[
-                vol.Optional(
-                    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
-                    default=[
-                        option["value"]
-                        for option in quickbus_options
-                        if option["value"] in selected_quickbus_devices(conf, coordinator_data)
-                    ],
+            self._quickbus_shown = _shown_quickbus_pick(quickbus_options, conf, coordinator_data)
+            schema_dict[vol.Optional(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, default=self._quickbus_shown)] = (
+                SelectSelector(
+                    SelectSelectorConfig(options=quickbus_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
                 )
-            ] = SelectSelector(
-                SelectSelectorConfig(options=quickbus_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
             )
         schema_dict[
             vol.Required(
@@ -370,6 +366,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
     async def _async_submit_init(self, user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]):
         """Save the init step's input, or open the custom webhook URL step; None: the form again with the errors."""
+        _drop_unchanged_quickbus_default(user_input, conf, self._quickbus_shown)
         self._normalize_user_input(user_input, conf, errors, hidden_cats)
         self._validate_webhook_address_mode(user_input, errors)
         if errors:
@@ -464,6 +461,30 @@ def _io_extension_options(coordinator_data: dict[str, Any], conf: Mapping[str, A
     ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
     ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
     return ext_names
+
+
+def _shown_quickbus_pick(
+    quickbus_options: list[SelectOptionDict], conf: Mapping[str, Any], coordinator_data: Mapping[str, Any]
+) -> list[str]:
+    """The Quickbus devices the form shows selected, in option order."""
+    selected = selected_quickbus_devices(conf, coordinator_data)
+    return [option["value"] for option in quickbus_options if option["value"] in selected]
+
+
+def _drop_unchanged_quickbus_default(user_input: dict, conf: Mapping[str, Any], shown: Collection[str]) -> None:
+    """Keep "every Quickbus device" implicit while a never-saved selection is submitted as shown.
+
+    The form shows that default as a list; saving it would freeze the list, so a device added in
+    Comexio later would stay unselected — no Web-IO command, no wiring, no value in HA. Compared
+    with what the form showed, not with fresh data: a poll between show and submit changes nothing.
+    """
+    if CONF_FUNCTION_PLAN_QUICKBUS_DEVICES in conf or CONF_FUNCTION_PLAN_QUICKBUS_DEVICES not in user_input:
+        return
+    submitted = {str(device) for device in user_input[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES]}
+    # An empty pick is always deliberate: dropping it would select every device added later.
+    if submitted and submitted == set(shown):
+        _LOGGER.debug("Quickbus device selection left at its default (every device), not saved as a list")
+        user_input.pop(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES)
 
 
 def _quickbus_device_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[SelectOptionDict]:
