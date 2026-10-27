@@ -11,8 +11,10 @@ Simplified a baseline function? Lower its entry, or drop it once within the limi
 """
 
 from pathlib import Path
+import sys
 
 import complexipy
+import pytest
 
 INTEGRATION = Path(__file__).parents[2] / "custom_components" / "comexio"
 MAX_COMPLEXITY = 15
@@ -25,24 +27,21 @@ BASELINE = {
     "api.py::ComexioAPI::_function_plan_trigger_wired_source_ids": 16,
     "api.py::ComexioAPI::_function_plan_paired_flanke_ids": 22,
     "binary_sensor.py::async_setup_entry": 17,
-    "button.py::ComexioSyncButton::async_handle_press": 17,
     "button.py::ComexioSyncButton::_delta_sync_class": 21,
+    "button.py::ComexioSyncButton::_sync_all_classes": 19,
     "button.py::ComexioSyncButton::_wire_knx_full": 17,
-    "button.py::ComexioSyncButton::_wire_knx_cluster": 16,
     "config_flow.py::ComexioConfigFlow::async_step_user": 34,
-    "coordinator.py::ComexioCoordinator::_function_plan_dangling_items": 17,
+    "coordinator.py::ComexioCoordinator::_function_plan_missing_detail": 16,
     "coordinator.py::ComexioCoordinator::_vanished_user_plans": 17,
     "coordinator.py::ComexioCoordinator::_plan_wired_pairs": 23,
     "coordinator.py::ComexioCoordinator::_plan_knx_bridge_pairs": 18,
-    "coordinator.py::ComexioCoordinator::_dangling_source_ids": 16,
-    "coordinator.py::ComexioCoordinator::_audit_trigger_pairs": 32,
+    "coordinator.py::ComexioCoordinator::_audit_trigger_pairs": 34,
     "ha_address.py::HaAddressResolver::_async_known_host": 16,
     "number.py::async_setup_entry": 18,
-    "options_flow.py::ComexioOptionsFlow::async_step_init": 21,
     "options_flow.py::ComexioOptionsFlow::_normalize_user_input": 16,
     "plan_watchdog.py::ManagedPlanWatchdog::async_check": 19,
     "reference_monitor.py::ReferenceCatalogMonitor::check_plans": 17,
-    "repairs.py::ComexioRepairFlow::async_step_select_action": 167,
+    "repairs.py::ComexioRepairFlow::async_step_select_action": 174,
     "sensor.py::async_setup_entry": 18,
     "services/_grid.py::_build_sorted_pairs": 18,
     "services/backup.py::_handle_function_plan_list_backups": 17,
@@ -51,11 +50,16 @@ BASELINE = {
 
 
 def _measured() -> list[tuple[str, int]]:
-    """(key like `BASELINE`, complexipy score) of every integration function; a repeated name yields several."""
+    """(key like `BASELINE`, complexipy score) of every integration function; a repeated name yields several.
+
+    `no_ignore`: a `# complexipy: ignore` comment would otherwise drop its function from the scan, and `BASELINE`
+    is the only permitted exception.
+    """
     measured = []
     for path in sorted(INTEGRATION.rglob("*.py")):
         prefix = path.relative_to(INTEGRATION).as_posix()
-        measured += [(f"{prefix}::{f.name}", f.complexity) for f in complexipy.file_complexity(str(path)).functions]
+        functions = complexipy.file_complexity(str(path), no_ignore=True).functions
+        measured += [(f"{prefix}::{f.name}", f.complexity) for f in functions]
     return measured
 
 
@@ -92,6 +96,21 @@ def test_baseline_matches_the_current_scores() -> None:
     ]
 
     assert not stale, "Update these BASELINE entries:\n" + "\n".join(stale)
+
+
+def test_an_inline_ignore_does_not_hide_a_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "module.py").write_text(
+        "def busy(items, limit):  # complexipy: ignore\n"
+        "    for item in items:\n"
+        "        if item:\n"
+        "            while limit:\n"
+        "                limit -= 1\n"
+        "    return limit\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "INTEGRATION", tmp_path)
+
+    assert "module.py::busy" in _scores()
 
 
 def test_baseline_names_are_unique_per_file() -> None:
