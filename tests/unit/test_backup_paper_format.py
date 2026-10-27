@@ -20,6 +20,7 @@ from custom_components.comexio.api import ComexioAPI, plan_format_settable
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
+from custom_components.comexio.function_plan_module_restore import ModuleConfigRestore
 from custom_components.comexio.services import backup as backup_service, plan_actions
 from tests.common import load_json_fixture
 
@@ -465,7 +466,13 @@ def test_a_restore_onto_a_plan_already_on_the_backups_unsettable_paper_warns_not
 
 
 def test_a_restore_that_could_not_set_the_backups_paper_is_partial() -> None:
-    apply = {"paper_ok": True, "unsettable_format": ("A2", 90, "landscape"), "block_settings": None, "run_ok": True}
+    apply = {
+        "paper_ok": True,
+        "unsettable_format": ("A2", 90, "landscape"),
+        "block_settings": None,
+        "module_configs": ModuleConfigRestore(None),
+        "run_ok": True,
+    }
     verify = {"reload_ok": True, "counts_match": True}
     with patch.object(backup_service, "_block_settings_ok", return_value=True):
         assert backup_service._restore_status(True, apply, verify) == "PARTIAL"
