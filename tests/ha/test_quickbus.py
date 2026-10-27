@@ -33,7 +33,12 @@ _QUICKBUS_IO_INPUT_TYPES = {"1": {"input": True}, "12": {"input": True}, "111": 
 
 @pytest.fixture
 def api_returns(api_returns: dict[str, Any]) -> dict[str, Any]:
-    return {**api_returns, "get_raw_config": load_json_fixture("config_quickbus.json")}
+    # A live value for the gesture IO, unlike the config page's placeholder 0 (#175).
+    return {
+        **api_returns,
+        "get_raw_config": load_json_fixture("config_quickbus.json"),
+        "get_io_live_states": {"201": "1"},
+    }
 
 
 @pytest.fixture
@@ -84,12 +89,14 @@ async def test_quickbus_webhook_updates_only_the_pushed_io(
     await _setup(hass, mock_config_entry)
     client = await hass_client_no_auth()
 
+    assert hass.states.get("binary_sensor.iosrv1_qb211").state == "unknown"  # no live value yet
+
     response = await client.post(WEBHOOK_URL, json={"type": "quickbus", "id": "211", "value": 1})
     await hass.async_block_till_done()
 
     assert response.status == 200
     assert hass.states.get("binary_sensor.iosrv1_qb211").state == "on"
-    assert hass.states.get("binary_sensor.iosrv1_qb201").state == "off"
+    assert hass.states.get("binary_sensor.iosrv1_qb201").state == "on"  # its live value, untouched by the push
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -155,7 +162,7 @@ async def test_quickbus_entities_follow_their_host_going_offline_without_plain_i
         options={"import_ios": False},
     )
     await _setup(hass, entry)
-    assert hass.states.get("binary_sensor.iosrv1_qb201").state == "off"
+    assert hass.states.get("binary_sensor.iosrv1_qb201").state == "on"
 
     offline_config = load_json_fixture("config_quickbus.json")
     for module in offline_config["FubModules"]["1"].values():

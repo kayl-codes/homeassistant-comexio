@@ -405,9 +405,9 @@ def test_a_persistent_fetch_failure_warns_once_and_reports_its_end(
     first = poll(ComexioConnectionError("gone"))
     assert [(name, level) for name, level, _msg in first] == [("api", logging.DEBUG), ("coordinator", logging.WARNING)]
     assert "gone" in first[0][2]
-    assert (
+    assert first[1][2] == (
         f"[iosrv1] {FETCH_FAILED_LOG}; 1 IOs keep their last known value, 3 without one yet show unknown"
-        " (cause: ComexioConnectionError: gone)" == (first[1][2])
+        " (cause: ComexioConnectionError: gone)"
     )
 
     second = poll(ComexioConnectionError("gone"))
