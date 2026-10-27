@@ -63,6 +63,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    IO_PLAN_KIND_IO,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
@@ -72,12 +73,12 @@ from .const import (
     QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
+    IoPlanKind,
     category_by_fub_module_type,
     function_plan_id,
     function_plan_ids,
     function_plan_info,
     function_plans,
-    io_column_rows,
     io_sort_key,
     is_valid_entity_name_schema,
     knx_loopback_command_name,
@@ -4953,26 +4954,42 @@ class ComexioAPI:
         identifiers: list[str],
         column_index: int = 0,
         progress_cb: Callable[[int, int], None] | None = None,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
+        row_offset: int = 0,
+        stacked_rows: Mapping[str, int] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Add IO (type=1) + Web-IO (type=10) element pairs for one extension column.
+        """Add IO (type=1) + Web-IO (type=10) element pairs for one column (extension / Quickbus device).
 
+        ext_name: the column's member — an extension, or a Quickbus device for kind QUICKBUS.
         identifiers: the IOs to wire in this run. Row slots derive from ALL of the
-        extension's HA-relevant IOs (io_column_rows), so a pair retrofitted later lands
+        member's HA-relevant IOs (kind.column_blocks), so a pair retrofitted later lands
         exactly in the slot the initial layout reserved for it — IO plans therefore never
         need a sort pass. Should a column outgrow the canvas anyway, it wraps into a
         sub-column right next to it as a defensive fallback (the plan-creation side is
         expected to pick a canvas tall enough to avoid this).
+        column_index / row_offset: the member's origin in the plan (Quickbus devices stack within
+        a column, see const.io_plan_member_origins).
+        stacked_rows: {member: rows} of this member and every one before it in the plan, as the
+        origin was computed from them. A count the fresh config no longer has adds nothing: the
+        origin would put the new pairs onto other pairs' slots.
         Returns (added_identifiers, error_messages).
         """
 
+        wanted = set(identifiers)
+
         def _expected_names(data: dict) -> set[str]:
-            ext_idents = {io["identifier"] for io in data.get("io", []) if io["ext_name"] == ext_name}
-            return {f"HA IO {ext_name} {ident}" for ident in identifiers if ident in ext_idents}
+            return {kind.command_name(io) for io in kind.member_ios(data, ext_name) if io["identifier"] in wanted}
 
         fresh_data = await self._reload_config_until_commands_ready(_expected_names)
+        if stacked_rows and (
+            changed := [member for member, need in stacked_rows.items() if kind.rows_needed(fresh_data, member) != need]
+        ):
+            labels = ", ".join(one_line(kind.member_label(fresh_data, member)) for member in changed)
+            label = one_line(kind.member_label(fresh_data, ext_name))
+            return [], [f"{label}: not wired — the IO count of {labels} changed since the last poll"]
         webio_commands = fresh_data.get("webio_commands", {})
-        ext_ios = {io["identifier"]: io for io in fresh_data.get("io", []) if io["ext_name"] == ext_name}
-        rows = io_column_rows(list(ext_ios))
+        ext_ios = {io["identifier"]: io for io in kind.member_ios(fresh_data, ext_name)}
+        rows, _headers = kind.column_blocks(ext_name, list(ext_ios.values()))
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
@@ -4992,8 +5009,9 @@ class ComexioAPI:
                 webio_commands,
                 existing_by_ref,
                 conn_endpoints,
-                (rows.get(ident, 0), column_index, rows_per_col),
+                (row_offset + rows.get(ident, 0), column_index, rows_per_col),
                 plan_data,
+                kind,
             )
             if err is None:
                 added.append(ident)
@@ -5015,6 +5033,7 @@ class ComexioAPI:
         conn_endpoints: list[set[int]],
         slot: tuple[int, int, int],
         plan_data: dict | None = None,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
     ) -> str | None:
         """Add one IO+Web-IO pair at its deterministic slot=(row, column_index, rows_per_col).
 
@@ -5026,12 +5045,12 @@ class ComexioAPI:
         identical Marker/KNX path — function_plan_add_source_pairs/_function_plan_add_single_pair
         — already threaded it through).
         """
-        label = f"{one_line(ext_name)} {ident}"
         io_entry = ext_ios.get(ident)
+        label = f"{one_line(kind.member_display(io_entry) if io_entry else kind.member_fallback(ext_name))} {ident}"
         if not io_entry:
             return f"{label}: not found in fresh config"
 
-        expected_cmd_name = f"HA IO {ext_name} {ident}"
+        expected_cmd_name = kind.command_name(io_entry)
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
             _LOGGER.warning(

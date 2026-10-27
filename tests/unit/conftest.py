@@ -1,6 +1,7 @@
 """Fixtures for the pure-logic unit tests."""
 
 from collections.abc import Iterator
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -29,6 +30,26 @@ def parsing_api(comexio_api: ComexioAPI) -> ComexioAPI:
     comexio_api.io_types = load_json_fixture("io_types.json")
     comexio_api.io_input_types = load_json_fixture("io_input_types.json")
     return comexio_api
+
+
+# IO type tables for config_quickbus.json, as Comexio sends them: 134 = Multitouch gesture, 126 = motion (PIR),
+# 12 = temperature, 111 = LED colour channel.
+QUICKBUS_IO_TYPES = {
+    "1": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "12": {"binary": False, "min": 0, "max": 100, "unit": "°C"},
+    "111": {"binary": False, "min": 0, "max": 100, "unit": "%"},
+    "126": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+    "134": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+}
+QUICKBUS_IO_INPUT_TYPES = {"1": {"input": True}, "12": {"input": True}, "111": {"input": True}}
+
+
+@pytest.fixture
+def quickbus_result(parsing_api: ComexioAPI) -> dict[str, Any]:
+    """parse_config() result of the synthetic Quickbus installation (config_quickbus.json)."""
+    parsing_api.io_types = QUICKBUS_IO_TYPES
+    parsing_api.io_input_types = QUICKBUS_IO_INPUT_TYPES
+    return parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
 
 
 @pytest.fixture(autouse=True)

@@ -650,6 +650,18 @@ def test_every_plan_identity_is_unresolved_once_no_plan_is_left() -> None:
     assert _identity_coordinator({})._unresolved_plan_identities() == frozenset({(7, "HA - Marker 1-50")})
 
 
+def test_a_name_ha_renamed_away_is_not_unresolved() -> None:
+    """A cluster join renames plan 7; its old name left in plan_map is no plan the watchdog lost."""
+    coordinator = _identity_coordinator({"7": {"Name": "HA - QB [1,2]"}, "8": {"Name": "Lights"}})
+    coordinator.config_entry.options[CONF_FUNCTION_PLAN_PLAN_MAP] = {
+        "HA - QB [1]": 7,
+        "HA - QB [1,2]": 7,
+        "HA - QB [3]": 8,  # the ID now carries a foreign plan: still unresolved
+    }
+
+    assert coordinator._unresolved_plan_identities() == frozenset({(8, "HA - QB [3]")})
+
+
 def test_no_plan_identity_is_unresolved_without_a_plan_list() -> None:
     assert _identity_coordinator(None)._unresolved_plan_identities() == frozenset()
 

@@ -75,7 +75,6 @@ from .const import (
     CONF_ENTITY_ID_MIGRATION_IGNORED,
     CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     CONF_FUNCTION_PLAN_FUB_ID,
-    CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_MAP,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
@@ -136,12 +135,19 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    IO_PLAN_KIND_IO,
+    IO_PLAN_KIND_QUICKBUS,
+    IO_PLAN_KINDS,
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
+    PLAN_FAILURE_AFTER_GONE_MEMBER,
+    PLAN_FAILURE_NOT_RESOLVED,
+    PLAN_FAILURE_OFF_CANVAS,
+    PLAN_FAILURE_UNREADABLE_PLAN_LIST,
     PLAN_TRANSITION_STARTING,
     PREVIEW_CARD_ALIVE_SEC,
     QUICKBUS_IO_DATA_KEY,
@@ -166,15 +172,18 @@ from .const import (
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
+    WEBIO_CLASS_QUICKBUS,
     WEBIO_CLASSES,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     WEBIO_RANGE_CHECK_HOUR,
     WEBIO_RANGE_CHECK_MINUTE,
+    IoPlanKind,
     MarkerKind,
     SourceCategory,
     WebioClass,
     active_webio_classes,
     bus_load_signal,
+    canvas_columns,
     category_by_fub_module_type,
     classify_audit_key,
     entity_id_migration_target,
@@ -189,7 +198,14 @@ from .const import (
     import_disabled_issue_id,
     invalid_ignored_tokens,
     io_audit_key,
-    io_column_rows,
+    io_plan_columns,
+    io_plan_gap_item,
+    io_plan_item_member,
+    io_plan_kind_of,
+    io_plan_label,
+    io_plan_member_origins,
+    io_plan_overflow,
+    io_plan_shifted,
     one_line,
     parse_ignored_ids,
     parse_keyword_list,
@@ -197,6 +213,7 @@ from .const import (
     plan_watch_signal,
     repointed_watchdog_user_plan_picks,
     required_webio_classes,
+    selected_quickbus_devices,
     snap_to_grid,
     source_audit_key,
     source_category,
@@ -207,6 +224,7 @@ from .const import (
     watchdog_user_plan_pick,
     webio_class_label,
     webio_class_name,
+    webio_quickbus_ios,
 )
 from .function_plan_backup import (
     FunctionPlanBackupManager,
@@ -388,6 +406,16 @@ def _plan_ref_ids(elements: dict[str, Any]) -> tuple[set[str], set[str], set[str
         elif str(ref.get("type")) == "11":  # blind guess: KNX objects use $FubModules key "11"
             knx_ids.add(str(ref.get("ref_id")))
     return marker_ids, io_ids, knx_ids
+
+
+def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str]:
+    """ref_ids of the `source_type` (marker "2" / IO "1" / KNX "11") elements in one plan."""
+    ids: set[str] = set()
+    for elem in (plan_data.get("elements") or {}).values():
+        ref = elem.get("reference") or {}
+        if str(ref.get("type")) == source_type:
+            ids.add(str(ref.get("ref_id")))
+    return ids
 
 
 def _count_by_ref(by_ref: dict[int, list[int]]) -> int:
@@ -1429,7 +1457,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         payload_map = {
             cmd["Name"]: cmd
             for cmd in self.api.build_webio_commands(
-                self.server_id, final_data, None, self.ignored_marker_ids, self.ignored_knx_ids
+                self.server_id, self.webio_source_data(final_data), None, self.ignored_marker_ids, self.ignored_knx_ids
             )
         }
 
@@ -1449,22 +1477,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Offline extensions are exempt from the wiring check: their hardware is not
         # present, so wiring their IOs is pointless. Once the extension comes back
         # online the next poll flags any remaining gaps again.
-        managed_io_exts: set[str] = set(self.config_entry.options.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []))
-        managed_io_exts -= self.offline_extensions or set()
+        managed_io_groups = self.managed_io_groups(final_data)
         # Whether this audit's plan checks waited for unloaded plans. The flag spans cycles (only the
         # backup cycle clears it), so it is cleared just around these synchronous checks and restored.
         recheck_pending = self._lp_missing_recheck_pending
         self._lp_missing_recheck_pending = False
         try:
-            wired = self._audit_wired_pairs(has_active_plan, managed_io_exts)
+            wired = self._audit_wired_pairs(has_active_plan, managed_io_groups)
             wired_knx_webio_pairs = wired[2]
 
             mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
             found = self._compare_audit_maps(
-                ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_exts, mismatches
+                ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_groups, mismatches
             )
             dangling_items = self._function_plan_dangling_items(
-                final_data, wired, has_active_plan, managed_io_exts, mismatches
+                final_data, wired, has_active_plan, managed_io_groups, mismatches
             )
             trigger_missing_by_ref, trigger_orphan_by_ref = self._audit_trigger_constructs(final_data, mismatches)
 
@@ -1582,14 +1609,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             mapped_type = "digital" if io.get("is_binary") else "analog"
             ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
             io_meta_by_key[key] = io
-        # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); no io_meta entry, as
-        # they are not wired into the managed function plans.
+        # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); their io_meta entry
+        # feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).
         quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
-        for io in final_data[QUICKBUS_IO_DATA_KEY]:
-            ha_map[source_audit_key(quickbus_cat, io["id"])] = {
+        for io in webio_quickbus_ios(self.config_entry.options, final_data):
+            key = source_audit_key(quickbus_cat, io["id"])
+            ha_map[key] = {
                 "name": quickbus_command_name(io),
                 "type": "digital" if io.get("is_binary") else "analog",
             }
+            io_meta_by_key[key] = io
         return ha_map, io_meta_by_key
 
     def _update_import_disabled_issues(
@@ -1732,11 +1761,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         opted-out category (e.g. KNX by default) has no Web-IO device on the server by design,
         and flagging that as missing would wipe last_audit_results on every poll (see
         active_webio_classes docstring), and the Quickbus class only with a Quickbus IO
-        (required_webio_classes).
+        (required_webio_classes), and no class without a wanted command (_webio_classes_with_commands).
         """
-        missing_classes = [
+        without_device = [
             cls for cls in required_webio_classes(conf, final_data) if not webio_devices.get(cls, {}).get("device_id")
         ]
+        missing_classes = list(self._webio_classes_with_commands(without_device, final_data))
         if not missing_classes:
             return False
         self.last_audit_results = {}
@@ -1787,7 +1817,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         payload_map: dict[str, Any],
         wired_pairs: tuple[Any, ...],
         io_meta_by_key: dict[str, dict[str, Any]],
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
     ) -> dict[str, list[dict[str, Any]]]:
         """Missing, renamed, type-mismatched, unwired and orphaned Web-IO commands, by audit category."""
@@ -1807,7 +1837,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     payload_map,
                     wired_pairs,
                     io_meta_by_key.get(key),
-                    managed_io_exts,
+                    managed_io_groups,
                     found,
                     mismatches,
                 )
@@ -1832,7 +1862,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         payload_map: dict[str, Any],
         wired_pairs: tuple[Any, ...],
         io_meta: dict[str, Any] | None,
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
         found: dict[str, list[dict[str, Any]]],
         mismatches: set[str],
     ) -> None:
@@ -1855,7 +1885,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Function Plan gap: command exists but is not wired directly to its
             # marker (M-keys) / IO (IO_-keys of managed extensions)
             if gap_item := self._function_plan_gap_item(
-                key, ha["name"], best_match, wired_pairs, io_meta, managed_io_exts
+                key, ha["name"], best_match, wired_pairs, io_meta, managed_io_groups
             ):
                 found["function_plan_missing"].append(gap_item)
                 mismatches.add(f"function_plan_missing_{key}")
@@ -1870,7 +1900,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         final_data: dict[str, Any],
         wired: tuple[Any, ...],
         has_active_plan: bool,
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
     ) -> list[dict[str, Any]]:
         """Function Plan debris: source elements left in a managed plan without their Web-IO counterpart.
@@ -1893,17 +1923,54 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for rid in self._dangling_source_ids("11", wired_knx, connected_knx):
                 items.append({"name": knx_by_id.get(rid, f"K{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_KNX})
                 mismatches.add(f"function_plan_dangling_K{rid}")
-        if managed_io_exts:
-            # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
-            # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
-            # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
-            io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
-            for rid in self._dangling_source_ids("1", wired_io, connected_io):
-                io = io_by_id.get(rid)
-                name = f"{io['ext_name']} {io['identifier']}" if io else f"IO#{rid}"
-                items.append({"name": name, "ref_id": rid, "webio_class": WEBIO_CLASS_IO})
-                mismatches.add(f"function_plan_dangling_IO{rid}")
+        if managed_io_groups:
+            items.extend(self._dangling_io_items(final_data, wired_io, connected_io, managed_io_groups, mismatches))
         return items
+
+    def _dangling_io_items(
+        self,
+        final_data: dict[str, Any],
+        wired_io: set[tuple[str, str]] | None,
+        connected_io: set[str] | None,
+        managed_io_groups: set[tuple[str, str]],
+        mismatches: set[str],
+    ) -> list[dict[str, Any]]:
+        """IO part of _function_plan_dangling_items: debris of every IO plan kind with a managed member."""
+        # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
+        # debris in a plan (e.g. the extension was deactivated after the wiring was cut),
+        # so resolving against "io" alone silently fell back to a bare "IO#<ref_id>" label.
+        io_by_id = {str(io["id"]): io for io in final_data["io_all"]}
+        managed_kinds = {label for label, _member in managed_io_groups}
+        items: list[dict[str, Any]] = []
+        for rid, fub_ids in self._dangling_source_ids("1", wired_io, connected_io).items():
+            io = io_by_id.get(rid)
+            kind = self._dangling_io_kind(io, fub_ids)
+            if kind.label not in managed_kinds:
+                # Its kind has no managed member: no sync pass of its class would remove it.
+                _LOGGER.debug(
+                    "[%s] Dangling IO%s in plans %s not reported: no %s member is managed",
+                    self.server_id,
+                    rid,
+                    fub_ids,
+                    kind.label,
+                )
+                continue
+            name = io_plan_label(io) if io else f"IO#{rid}"
+            # The class whose sync pass removes the debris: a Quickbus IO's commands live in the
+            # Quickbus class, which may be synced while the IO class is opted out.
+            cls = WEBIO_CLASS_QUICKBUS if kind is IO_PLAN_KIND_QUICKBUS else WEBIO_CLASS_IO
+            items.append({"name": name, "ref_id": rid, "webio_class": cls})
+            mismatches.add(f"function_plan_dangling_IO{rid}")
+        return items
+
+    def _dangling_io_kind(self, io: Mapping[str, Any] | None, fub_ids: list[int]) -> IoPlanKind:
+        """Kind of a dangling IO element: from the IO itself, else (IO gone) from the plan it sits in."""
+        if io:
+            return IO_PLAN_KIND_QUICKBUS if io.get("quickbus") else IO_PLAN_KIND_IO
+        in_qb_plan = any(
+            (plan := self.managed_column_plan(fub_id)) and plan[0] is IO_PLAN_KIND_QUICKBUS for fub_id in fub_ids
+        )
+        return IO_PLAN_KIND_QUICKBUS if in_qb_plan else IO_PLAN_KIND_IO
 
     def _audit_trigger_constructs(
         self, final_data: dict[str, Any], mismatches: set[str]
@@ -4725,7 +4792,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             target_by_name = {
                 cmd["Name"]: cmd
                 for cmd in self.api.build_webio_commands(
-                    self.server_id, self.data, None, self.ignored_marker_ids, self.ignored_knx_ids
+                    self.server_id, self.webio_source_data(), None, self.ignored_marker_ids, self.ignored_knx_ids
                 )
             }
 
@@ -4981,15 +5048,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         The user picks are not among them: such a pick raises its own repair (_vanished_user_plans).
         Empty without a live plan list: a failed fetch, or a cache holding only the plans HA itself
         created or looked up, must not read as every other plan gone. Once a poll read an empty
-        plan list, every entry is unresolved (#140).
+        plan list, every entry is unresolved (#140). An ID another entry still resolves is not
+        unresolved: HA renamed the plan itself (a cluster join) and the old name is merely left over
+        until the next sync prunes it — the watchdog keeps watching the plan under its new name.
         """
         if self.live_plan_list() is None:
             return frozenset()
         raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
         identities = [(str(fub_id), name) for name, fub_id in raw_map.items()] if isinstance(raw_map, dict) else []
         live = self._existing_plan_names(fub_id for fub_id, _ in identities if fub_id.isdigit())
+        resolved = {fub_id for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) == name}
         return frozenset(
-            (int(fub_id), name) for fub_id, name in identities if fub_id.isdigit() and live.get(int(fub_id)) != name
+            (int(fub_id), name)
+            for fub_id, name in identities
+            if fub_id.isdigit() and fub_id not in resolved and live.get(int(fub_id)) != name
         )
 
     def _warn_unresolved_watch_picks(self) -> None:
@@ -6626,7 +6698,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def required_webio_classes(self) -> tuple[WebioClass, ...]:
         """Opted-in classes that must exist on the server (see required_webio_classes() in const.py)."""
         conf = {**self.config_entry.data, **self.config_entry.options}
-        return required_webio_classes(conf, self.data or {})
+        data = self.data or {}
+        return self._webio_classes_with_commands(required_webio_classes(conf, data), data)
+
+    def _webio_classes_with_commands(
+        self, classes: Iterable[WebioClass], data: dict[str, Any]
+    ) -> tuple[WebioClass, ...]:
+        """classes less those with no wanted Web-IO command (e.g. KNX with every object ignored).
+
+        Comexio creates no device instance for an empty class: reported missing, it would be a
+        repair no sync can fix, and the sync's recreate of it would fail. Without data (no poll yet)
+        nothing is known to be empty, so every class stays.
+        """
+        if not data:
+            return tuple(classes)
+        source = self.webio_source_data(data)
+        return tuple(
+            cls
+            for cls in classes
+            if self.api.build_webio_commands(
+                self.server_id,
+                source,
+                webio_class=cls,
+                ignored_marker_ids=self.ignored_marker_ids,
+                ignored_knx_ids=self.ignored_knx_ids,
+            )
+        )
 
     async def async_check_ignored_sources(
         self,
@@ -7013,7 +7110,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Deterministic cluster-plan name a KNX object ID currently maps to (config-aware)."""
         return self.expected_source_cluster_name(knx_id, SOURCE_CATEGORIES[WebioClass.KNX].label)
 
-    def io_cluster_plan_contains(self, live_plan_name: str, ext_name: str) -> bool:
+    def io_cluster_plan_contains(self, live_plan_name: str, ext_name: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> bool:
         """True if a live plan name still parses as a managed IO cluster plan naming ext_name.
 
         Used right before writing IO pairs to catch a plan that was renamed/repurposed
@@ -7021,7 +7118,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         fub_id got reused by an unrelated create elsewhere in the meantime) — see
         expected_marker_cluster_name() for the marker-side counterpart.
         """
-        members = self._io_plan_members(live_plan_name, self._function_plan_prefix())
+        members = self._io_plan_members(live_plan_name, self._function_plan_prefix(), kind)
         return members is not None and ext_name in members
 
     async def resolve_marker_clusters(
@@ -7075,6 +7172,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 created_plans.add(fub_id)
             plan_map_updates[plan_name] = fub_id
 
+        plan_map_updates = {**self._renamed_managed_plans(stale, plan_map_updates), **plan_map_updates}
         if plan_map_updates or stale:
             await self._persist_plan_map(plan_map_updates, removals=set(stale))
 
@@ -7299,24 +7397,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.fub_data.pop(str(fub_id), None)
 
     @staticmethod
-    def _io_plan_members(plan_name: str, prefix: str) -> list[str] | None:
-        """Extension names encoded in a managed IO plan name '{prefix} - IO [A,B]', else None."""
-        if m := re.fullmatch(re.escape(prefix) + r" - IO \[(.+)\]", plan_name):
+    def _io_plan_members(plan_name: str, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> list[str] | None:
+        """Member names encoded in a managed column plan name '{prefix} - IO [A,B]' / '... - QB [A,B]', else None."""
+        if m := re.fullmatch(rf"{re.escape(prefix)} - {re.escape(kind.label)} \[(.+)\]", plan_name):
             return [p.strip() for p in m[1].split(",") if p.strip()]
         return None
 
     @staticmethod
-    def _io_plan_name(prefix: str, members: list[str]) -> str:
-        """Managed IO cluster plan name encoding its extension membership."""
-        return f"{prefix} - IO [{','.join(members)}]"
+    def _io_plan_name(prefix: str, members: list[str], kind: IoPlanKind = IO_PLAN_KIND_IO) -> str:
+        """Managed column plan name encoding its membership (extensions / Quickbus devices)."""
+        return f"{prefix} - {kind.label} [{','.join(members)}]"
 
-    def _io_plan_membership(self, prefix: str) -> dict[int, list[str]]:
-        """Live membership of every managed IO cluster plan: {fub_id: [ext names]}.
+    def _io_plan_membership(self, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> dict[int, list[str]]:
+        """Live membership of every managed column plan of one kind: {fub_id: [member names]}.
 
         Read from the live $Fubs plan names (authoritative — plan_map keys can go stale
-        after renames); membership order defines each extension's column index. Excludes
+        after renames); membership order defines each member's column index. Excludes
         _distrusted_fub_ids — the single choke point resolve_io_clusters/_join_or_create_io_plan/
-        managed_io_plan_members all go through, so a plan _verify_new_plan_is_empty rejected but
+        managed_column_plan all go through, so a plan _verify_new_plan_is_empty rejected but
         couldn't fully remove can't be found-by-name-and-written-into or joined-as-having-free-
         capacity here either (see _resolve_single_cluster_plan's analogous check for Marker/KNX).
         """
@@ -7324,16 +7422,78 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for fid, fub_info in function_plans(self.api.fub_data):
             if fid in self._distrusted_fub_ids:
                 continue
-            if members := self._io_plan_members(str(fub_info.get("Name", "")), prefix):
+            if members := self._io_plan_members(str(fub_info.get("Name", "")), prefix, kind):
                 result[fid] = members
         return result
 
-    def managed_io_plan_members(self, fub_id: int) -> list[str] | None:
-        """Extension membership when fub_id is an HA-managed IO cluster plan, else None.
+    def managed_io_groups(self, data: dict[str, Any] | None = None) -> set[tuple[str, str]]:
+        """(kind label, member) of every column-plan member whose IOs are wired: opted in and present.
+
+        An offline extension is left out (its hardware is not there, wiring it is pointless), and
+        so is a Quickbus device on an offline extension or one no longer present — each logged
+        once per change. Quickbus members are device ids (see IO_PLAN_KIND_QUICKBUS).
+        """
+        data = self.data if data is None else data
+        options = self.config_entry.options
+        offline = self.offline_extensions or set()
+        groups = {
+            (IO_PLAN_KIND_IO.label, ext) for ext in options.get(IO_PLAN_KIND_IO.conf_key, []) if ext not in offline
+        }
+        if wanted := selected_quickbus_devices(options, data or {}):
+            skipped = self._skipped_quickbus_devices(wanted, data)
+            self._log_skipped_quickbus_devices(data, skipped)
+            groups |= {(IO_PLAN_KIND_QUICKBUS.label, device) for device in wanted if device not in skipped}
+        return groups
+
+    @staticmethod
+    def _skipped_quickbus_devices(wanted: set[str], data: dict[str, Any] | None) -> dict[str, str]:
+        """{device id: reason} of the selected Quickbus devices that are not wired into a QB plan."""
+        present: set[str] = set()
+        offline_devices: set[str] = set()
+        for io in (data or {}).get(QUICKBUS_IO_DATA_KEY, []):
+            device = IO_PLAN_KIND_QUICKBUS.member_of(io)
+            present.add(device)
+            if io.get("offline"):
+                offline_devices.add(device)
+        skipped: dict[str, str] = {}
+        for device in wanted:
+            if device not in present:
+                skipped[device] = "not found (removed or Quickbus import off)"
+            elif device in offline_devices:
+                skipped[device] = "on an offline extension"
+        return skipped
+
+    def _log_skipped_quickbus_devices(self, data: Mapping[str, Any] | None, skipped: dict[str, str]) -> None:
+        """Warn once per change about selected Quickbus devices left out of the QB plans.
+
+        managed_io_groups runs on every poll and sync, so an unchanged state stays quiet.
+        """
+        if skipped == getattr(self, "_quickbus_skip_logged", {}):
+            return
+        self._quickbus_skip_logged = dict(skipped)
+        for device, reason in sorted(skipped.items()):
+            _LOGGER.warning(
+                "[%s] Selected Quickbus device '%s' is not wired into a Quickbus function plan: %s",
+                self.server_id,
+                one_line(IO_PLAN_KIND_QUICKBUS.member_label(data, device)),
+                reason,
+            )
+
+    def webio_source_data(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
+        """data (default: coordinator.data) as the Web-IO builders get it: Quickbus IOs of selected devices only."""
+        data = (self.data if data is None else data) or {}
+        return {**data, QUICKBUS_IO_DATA_KEY: webio_quickbus_ios(self.config_entry.options, data)}
+
+    def managed_column_plan(self, fub_id: int) -> tuple[IoPlanKind, list[str]] | None:
+        """(kind, members) when fub_id is an HA-managed IO or Quickbus column plan, else None.
 
         Public counterpart of _io_plan_membership for the services module's grid/sort code.
         """
-        return self._io_plan_membership(self._function_plan_prefix()).get(fub_id)
+        prefix = self._function_plan_prefix()
+        for kind in IO_PLAN_KINDS:
+            if members := self._io_plan_membership(prefix, kind).get(fub_id):
+                return kind, members
+        return None
 
     def is_trigger_plan(self, fub_id: int) -> bool:
         """Whether fub_id is the single HA-managed trigger plan ("HA - TRIGGER").
@@ -7369,101 +7529,378 @@ class ComexioCoordinator(DataUpdateCoordinator):
         prefix = f"{self._function_plan_prefix()} - {SOURCE_CATEGORIES[WebioClass.KNX].label} ["
         return self.api.function_plan_name(fub_id).startswith(prefix)
 
-    def _io_rows_needed(self, ext_name: str) -> int:
-        """Column rows one extension package needs (IOs + header/blank separator rows)."""
-        idents = [io["identifier"] for io in (self.data or {}).get("io", []) if io["ext_name"] == ext_name]
-        rows = io_column_rows(idents)
-        return (max(rows.values()) + 1) if rows else 0
+    def _io_rows_needed(self, ext_name: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> int:
+        """Column rows one member package needs (IOs + header/blank separator rows)."""
+        return kind.rows_needed(self.data, ext_name)
 
-    async def resolve_io_clusters(self, ext_names: list[str]) -> tuple[dict[str, tuple[int, int]], set[int], list[str]]:
+    def io_member_rows(self, members: list[str], kind: IoPlanKind) -> dict[str, int]:
+        """{member: rows it needs} as the origins of a column plan derive from them (io_plan_origins)."""
+        return {member: self._io_rows_needed(member, kind) for member in members}
+
+    def io_plan_origins(self, members: list[str], kind: IoPlanKind, rows_per_col: int) -> dict[str, tuple[int, int]]:
+        """(column, first row) of every member of a column plan — see const.io_plan_member_origins.
+
+        Shared by the wire path (resolve_io_clusters) and the grid/sort code, so both place a
+        member at the same slot.
+        """
+        return io_plan_member_origins(kind, members, lambda member: self._io_rows_needed(member, kind), rows_per_col)
+
+    def _io_plan_columns(self, members: list[str], kind: IoPlanKind, rows_per_col: int) -> int:
+        """Columns the members take in a plan whose columns offer rows_per_col rows."""
+        return io_plan_columns(kind, members, lambda member: self._io_rows_needed(member, kind), rows_per_col)
+
+    def io_plan_overflow(self, members: list[str], kind: IoPlanKind, rows_per_col: int, max_columns: int) -> list[str]:
+        """Members past the last of max_columns canvas columns — see const.io_plan_overflow.
+
+        Shared by the wire path and the sort, so neither puts a pair off the canvas.
+        """
+        return io_plan_overflow(
+            kind,
+            members,
+            lambda member: self._io_rows_needed(member, kind),
+            rows_per_col,
+            max_columns,
+            check_first=bool(members) and self._fits_fresh_io_plan(members[0], kind),
+        )
+
+    def _fresh_io_plan_orientation(self, member: str, kind: IoPlanKind) -> str:
+        """Orientation of a fresh plan for this member: portrait when the landscape columns are too short."""
+        landscape_rows = self._io_plan_rows_per_col(_ORIENT_LANDSCAPE)
+        return _ORIENT_PORTRAIT if self._io_rows_needed(member, kind) > landscape_rows else _ORIENT_LANDSCAPE
+
+    def _fits_fresh_io_plan(self, member: str, kind: IoPlanKind) -> bool:
+        """Whether the canvas of a fresh plan for this member alone takes it."""
+        orientation = self._fresh_io_plan_orientation(member, kind)
+        rows_per_col = self._io_plan_rows_per_col(orientation)
+        return self._io_plan_columns([member], kind, rows_per_col) <= self._plan_canvas_columns(-1, orientation)
+
+    def _plan_canvas_columns(self, fub_id: int, fresh_orientation: str | None = None) -> int:
+        """Column groups the canvas of a plan takes — see _plan_rows_per_col for fresh_orientation."""
+        if fresh_orientation is not None or str(fub_id) not in self.api.fub_data:
+            orientation = fresh_orientation or _ORIENT_LANDSCAPE
+            x_max, _ = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
+        else:
+            x_max, _ = self.api.get_fub_canvas_bounds(fub_id)
+        return canvas_columns(x_max)
+
+    def _plan_rows_per_col(self, fub_id: int, fresh_orientation: str | None = None) -> int:
+        """Row slots one column of a plan offers — the same formula as api.function_plan_add_io_pairs.
+
+        fresh_orientation: for a plan created in this run, not in the cached $Fubs data yet.
+        """
+        if fresh_orientation is not None or str(fub_id) not in self.api.fub_data:
+            return self._io_plan_rows_per_col(fresh_orientation or _ORIENT_LANDSCAPE)
+        _, y_max = self.api.get_fub_canvas_bounds(fub_id)
+        return max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+    async def resolve_io_clusters(
+        self, ext_names: list[str], kind: IoPlanKind = IO_PLAN_KIND_IO
+    ) -> tuple[dict[str, tuple[int, tuple[int, int]]], set[int], dict[str, str]]:
         """Resolve/create the managed IO cluster plan of every extension (membership-true).
 
-        Returns ({ext_name: (fub_id, column_index)}, {fub_ids of freshly created plans},
-        [ext_names whose plan could not be resolved/created]). The third element lets callers
+        Returns ({ext_name: (fub_id, (column, first row))}, {fub_ids of freshly created plans},
+        {ext_name not wired: why — a PLAN_FAILURE_* reason}). The third element lets callers
         surface a partial failure to the user — see resolve_marker_clusters' docstring for why
         an empty first dict is not a reliable "something went wrong" signal when several
         extensions are being resolved at once.
         An extension already encoded in a managed IO plan name keeps that plan and column
         forever; a new extension joins the first plan with free capacity (the plan is
         renamed to extend its membership list) or gets a fresh plan. Capacity derives from
-        CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN: 50 → 1, 100 → 2, 150 → 3 extensions per plan.
+        CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN: 50 → 1, 100 → 2, 150 → 3 columns per plan.
+        kind: IO extensions (one column each) or Quickbus devices (stacked within the columns,
+        "{prefix} - QB [<device ids>]" plans).
         """
         prefix = self._function_plan_prefix()
         capacity = max(1, self._function_plan_cluster_size() // 50)
 
         stale = self._stale_plan_map_entries(self.api.fub_data)
-        membership = self._io_plan_membership(prefix)
-        result: dict[str, tuple[int, int]] = {}
+        membership = self._io_plan_membership(prefix, kind)
+        placed_in: dict[str, int] = {}
+        fresh_orientations: dict[int, str] = {}
         created_plans: set[int] = set()
-        plan_map_updates: dict[str, int] = {}
-        failed_exts: list[str] = []
+        failed_exts: dict[str, str] = {}
+        members_before = {fid: list(members) for fid, members in membership.items()}
 
-        # An unreadable entry may be the IO plan of an extension not found in membership: joining or
-        # creating would place that extension in a second plan and wire its IOs twice.
-        bad_keys = unreadable_plan_keys(self.api.fub_data)
-        for ext in ext_names:
-            placed = next(
-                ((fid, members.index(ext)) for fid, members in membership.items() if ext in members),
-                None,
-            )
-            if placed is None and bad_keys:
-                _LOGGER.error(
-                    "[%s] Not placing '%s' in an IO cluster plan: the plan list has unreadable entries %r",
-                    self.server_id,
-                    ext,
-                    bad_keys,
-                )
-            elif placed is None:
-                placed = await self._join_or_create_io_plan(ext, membership, capacity, prefix)
-            if placed is None:
-                _LOGGER.error("[%s] Failed to resolve/create IO cluster plan for '%s'", self.server_id, ext)
-                failed_exts.append(ext)
-                continue
-            fub_id, _column = placed
-            result[ext] = placed
-            if fub_id not in membership:
-                created_plans.add(fub_id)
-                membership[fub_id] = [ext]
-            plan_map_updates[self._io_plan_name(prefix, membership[fub_id])] = fub_id
+        try:
+            for ext in ext_names:
+                fub_id: int | str | None = next((fid for fid, members in membership.items() if ext in members), None)
+                if fub_id is None:
+                    fub_id = await self._place_new_io_member(
+                        ext, membership, capacity, prefix, kind, fresh_orientations
+                    )
+                if isinstance(fub_id, str):
+                    failed_exts[ext] = fub_id
+                    continue
+                placed_in[ext] = fub_id
+                if fub_id not in membership:
+                    created_plans.add(fub_id)
+                    membership[fub_id] = [ext]
+        finally:
+            # Also when the run stops part-way (an error, HA shutting down): a plan already renamed
+            # in Comexio left in plan_map under its old name only would read as lost to the watchdog.
+            changed = {fid for fid, members in membership.items() if members != members_before.get(fid)}
+            await self._persist_io_plan_names(prefix, kind, membership, changed | set(placed_in.values()), stale)
 
-        if plan_map_updates or stale:
-            await self._persist_plan_map(plan_map_updates, removals=set(stale))
+        result = self._io_member_slots(placed_in, membership, kind, fresh_orientations, failed_exts)
         return result, created_plans, failed_exts
 
-    async def _join_or_create_io_plan(
-        self, ext: str, membership: dict[int, list[str]], capacity: int, prefix: str
-    ) -> tuple[int, int] | None:
-        """Place a new extension: join an existing plan with free capacity (renaming the
-        plan to extend its membership list) or create a fresh single-extension plan.
+    async def _persist_io_plan_names(
+        self, prefix: str, kind: IoPlanKind, membership: dict[int, list[str]], fub_ids: set[int], stale: dict[str, int]
+    ) -> None:
+        """Write the final names of these IO plans to plan_map, dropping stale and superseded names.
 
-        A fresh plan turns A3 portrait when the extension package would not fit the
-        landscape column height (rows derive from the live IO list incl. blank separators).
-        Returns (fub_id, column_index) or None; membership is updated in place on join —
-        the caller registers fresh plans itself (fub_id not yet in membership = created).
+        Final names only: several joins in one run rename a plan step by step, and the names it
+        carried before ([1], [1,2]) are no plan any more — left in plan_map, the watchdog warned
+        about each of them.
         """
-        for fid, members in membership.items():
-            if len(members) < capacity:
-                new_members = [*members, ext]
-                if not await self._rename_io_plan(fid, self._io_plan_name(prefix, new_members)):
+        final_names = {fid: self._io_plan_name(prefix, membership[fid], kind) for fid in fub_ids}
+        plan_map_updates = {name: fid for fid, name in final_names.items()}
+        plan_map_updates = {**self._renamed_managed_plans(stale, plan_map_updates), **plan_map_updates}
+        removals = set(stale) | self._superseded_plan_map_names(final_names)
+        if plan_map_updates or removals:
+            await self._persist_plan_map(plan_map_updates, removals=removals)
+
+    async def _place_new_io_member(
+        self,
+        ext: str,
+        membership: dict[int, list[str]],
+        capacity: int,
+        prefix: str,
+        kind: IoPlanKind,
+        fresh_orientations: dict[int, str],
+    ) -> int | str:
+        """The plan a member no managed plan holds yet joins or gets, else why not (a PLAN_FAILURE_* reason)."""
+        label = one_line(kind.member_label(self.data, ext))
+        # An unreadable entry may be this member's plan: joining or creating would place it in a
+        # second plan and wire its IOs twice.
+        if bad_keys := unreadable_plan_keys(self.api.fub_data):
+            _LOGGER.error(
+                "[%s] Not placing '%s' in a %s cluster plan: the plan list has unreadable entries %r",
+                self.server_id,
+                label,
+                kind.label,
+                bad_keys,
+            )
+            return PLAN_FAILURE_UNREADABLE_PLAN_LIST
+        fub_id = await self._join_or_create_io_plan(ext, membership, capacity, prefix, kind, fresh_orientations)
+        if fub_id is None:
+            _LOGGER.error("[%s] Failed to resolve/create %s cluster plan for '%s'", self.server_id, kind.label, label)
+            return PLAN_FAILURE_NOT_RESOLVED
+        return fub_id
+
+    def _io_member_slots(
+        self,
+        placed_in: dict[str, int],
+        membership: dict[int, list[str]],
+        kind: IoPlanKind,
+        fresh_orientations: dict[int, str],
+        failed_exts: dict[str, str],
+    ) -> dict[str, tuple[int, tuple[int, int]]]:
+        """{member: (fub_id, (column, first row))} of every placed member that fits its plan's canvas.
+
+        Origins only once every member is placed: a later join appends to the plan, which never
+        moves an earlier member (see io_plan_member_origins). A member past the canvas edge (see
+        io_plan_overflow) or behind a member without IOs (see io_plan_shifted) goes to failed_exts
+        instead: wiring it would put its pairs off the plan or onto existing wiring.
+        """
+        slots: dict[str, tuple[int, tuple[int, int]]] = {}
+        unwirable: dict[int, dict[str, str]] = {}
+        for ext, fub_id in placed_in.items():
+            orientation = fresh_orientations.get(fub_id)
+            rows_per_col = self._plan_rows_per_col(fub_id, orientation)
+            members = membership[fub_id]
+            if fub_id not in unwirable:
+                unwirable[fub_id] = self._unwirable_members(fub_id, members, kind, rows_per_col, orientation)
+            if reason := unwirable[fub_id].get(ext):
+                self._log_unwirable_member(ext, fub_id, kind, reason)
+                failed_exts[ext] = reason
+                continue
+            slots[ext] = (fub_id, self.io_plan_origins(members, kind, rows_per_col)[ext])
+        return slots
+
+    def _log_unwirable_member(self, ext: str, fub_id: int, kind: IoPlanKind, reason: str) -> None:
+        """Log why a member of a column plan is not wired, with the way out."""
+        why = (
+            f"no longer fits on the canvas of {kind.label} plan fub={fub_id} (a {kind.member_noun} before it"
+            " grew, or the plan's paper changed) and is not wired —"
+            if reason == PLAN_FAILURE_OFF_CANVAS
+            else f"sits in {kind.label} plan fub={fub_id} behind a {kind.member_noun} with no IOs loaded"
+            " (removed from Comexio, every IO ignored, or missing from this poll) and is not wired, as its pairs"
+            f" would land on that {kind.member_noun}'s wiring — if that stays so,"
+        )
+        _LOGGER.error(
+            "[%s] '%s' %s delete the plan in Comexio to have the next sync lay it out afresh",
+            self.server_id,
+            one_line(kind.member_label(self.data, ext)),
+            why,
+        )
+
+    def _unwirable_members(
+        self, fub_id: int, members: list[str], kind: IoPlanKind, rows_per_col: int, orientation: str | None
+    ) -> dict[str, str]:
+        """{member: why its pairs must not be added (a PLAN_FAILURE_* reason)} of one column plan."""
+        canvas = self._plan_canvas_columns(fub_id, orientation)
+        reasons = dict.fromkeys(self.io_plan_overflow(members, kind, rows_per_col, canvas), PLAN_FAILURE_OFF_CANVAS)
+        shifted = io_plan_shifted(kind, members, lambda member: self._io_rows_needed(member, kind))
+        return reasons | dict.fromkeys(shifted, PLAN_FAILURE_AFTER_GONE_MEMBER)
+
+    def _renamed_managed_plans(self, stale: dict[str, int], updates: dict[str, int]) -> dict[str, int]:
+        """Live name → fub_id of the stale plan_map entries whose plan Comexio still has under a managed name.
+
+        A run prunes every stale entry but writes names only for the plans it resolves: a plan of
+        another kind renamed without plan_map following (a run stopped mid-rename) would drop out
+        of plan_map instead of following its new name. Plans in updates already get their name,
+        and a name plan_map already maps stays as it is.
+        """
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        mapped = raw_map if isinstance(raw_map, dict) else {}
+        renamed: dict[str, int] = {}
+        for fub_id in set(stale.values()) - set(updates.values()):
+            if not self._is_managed_function_plan(fub_id):
+                continue
+            name = self.api.function_plan_name(fub_id)
+            if name in mapped:
+                # The same plan listed under its live name too stays as it is; another plan is a name clash.
+                if str(mapped[name]) != str(fub_id):
                     _LOGGER.warning(
-                        "[%s] Could not rename IO plan fub=%s to add '%s' — creating a fresh plan instead",
+                        "[%s] plan_map drops plan fub=%s: its name '%s' already maps to fub=%s (two plans of one name)",
                         self.server_id,
+                        fub_id,
+                        one_line(name),
+                        mapped[name],
+                    )
+                continue
+            renamed[name] = fub_id
+        return renamed
+
+    def _superseded_plan_map_names(self, final_names: dict[int, str]) -> set[str]:
+        """plan_map names pointing at one of these plans under a name other than its final one."""
+        raw_map = self.config_entry.options.get(CONF_FUNCTION_PLAN_PLAN_MAP, {})
+        if not isinstance(raw_map, dict):
+            return set()
+        return {
+            name
+            for name, fid in raw_map.items()
+            if str(fid).isdigit() and int(fid) in final_names and final_names[int(fid)] != name
+        }
+
+    async def _join_or_create_io_plan(
+        self,
+        ext: str,
+        membership: dict[int, list[str]],
+        capacity: int,
+        prefix: str,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
+        fresh_orientations: dict[int, str] | None = None,
+    ) -> int | None:
+        """Place a new member: join an existing plan whose columns still take it (renaming the
+        plan to extend its membership list) or create a fresh single-member plan.
+
+        A fresh plan turns A3 portrait when the member package would not fit the landscape
+        column height (rows derive from the live IO list incl. blank separators); its
+        orientation goes to fresh_orientations, as $Fubs does not know the plan yet.
+        Returns the fub_id or None; membership is updated in place on join — the caller
+        registers fresh plans itself (fub_id not yet in membership = created).
+        """
+        fresh_orientations = {} if fresh_orientations is None else fresh_orientations
+        for fid, members in membership.items():
+            new_members = [*members, ext]
+            if self._io_plan_takes(fid, new_members, kind, capacity, fresh_orientations.get(fid)):
+                renamed = await self._rename_io_plan_confirmed(fid, self._io_plan_name(prefix, new_members, kind))
+                if renamed is None:
+                    # Not known whether Comexio applied it: a fresh plan could hold the member twice.
+                    _LOGGER.error(
+                        "[%s] '%s' not placed: the rename of %s plan fub=%s may have been applied, and the plan"
+                        " list could not be read in full to tell — the next sync places it",
+                        self.server_id,
+                        one_line(kind.member_label(self.data, ext)),
+                        kind.label,
                         fid,
-                        ext,
+                    )
+                    return None
+                if not renamed:
+                    _LOGGER.warning(
+                        "[%s] Could not rename %s plan fub=%s to add '%s' — creating a fresh plan instead",
+                        self.server_id,
+                        kind.label,
+                        fid,
+                        one_line(kind.member_label(self.data, ext)),
                     )
                     break
                 membership[fid] = new_members
-                return fid, len(new_members) - 1
+                return fid
 
-        landscape_rows = self._io_plan_rows_per_col(_ORIENT_LANDSCAPE)
-        orientation = _ORIENT_PORTRAIT if self._io_rows_needed(ext) > landscape_rows else _ORIENT_LANDSCAPE
-        fub_id = await self._create_managed_plan(self._io_plan_name(prefix, [ext]), orientation=orientation)
-        return None if fub_id is None else (fub_id, 0)
+        orientation = self._fresh_io_plan_orientation(ext, kind)
+        fub_id = await self._create_managed_plan(self._io_plan_name(prefix, [ext], kind), orientation=orientation)
+        if fub_id is not None:
+            fresh_orientations[fub_id] = orientation
+        return fub_id
+
+    def _io_plan_takes(
+        self, fub_id: int, members: list[str], kind: IoPlanKind, capacity: int, fresh_orientation: str | None
+    ) -> bool:
+        """Whether a plan's columns take these members — its capacity and its canvas, as a portrait
+        plan offers fewer columns than a capacity of 3."""
+        if io_plan_shifted(kind, members, lambda member: self._io_rows_needed(member, kind)):
+            # A member without IOs before it would put the new member's pairs onto existing wiring.
+            _LOGGER.info(
+                "[%s] %s plan fub=%s holds a %s with no IOs loaded, so '%s' does not join it",
+                self.server_id,
+                kind.label,
+                fub_id,
+                kind.member_noun,
+                one_line(kind.member_label(self.data, members[-1])),
+            )
+            return False
+        rows_per_col = self._plan_rows_per_col(fub_id, fresh_orientation)
+        if self._io_plan_columns(members, kind, rows_per_col) > capacity:
+            return False
+        canvas = self._plan_canvas_columns(fub_id, fresh_orientation)
+        if not self.io_plan_overflow(members, kind, rows_per_col, canvas):
+            return True
+        _LOGGER.info(
+            "[%s] %s plan fub=%s has no room left on its %s canvas column(s) for '%s'",
+            self.server_id,
+            kind.label,
+            fub_id,
+            canvas,
+            one_line(kind.member_label(self.data, members[-1])),
+        )
+        return False
 
     def _io_plan_rows_per_col(self, orientation: str) -> int:
         """Row slots one column offers on a fresh A3 plan of the given orientation."""
         _, y_max = self.api.get_fub_canvas_bounds(-1, paper_name=_MANAGED_PLAN_PAPER, orientation=orientation)
         return max(1, int((y_max - FUNCTION_PLAN_LAYOUT_Y_START) / FUNCTION_PLAN_LAYOUT_Y_STEP))
+
+    async def _rename_io_plan_confirmed(self, fub_id: int, new_name: str) -> bool | None:
+        """_rename_io_plan, confirmed against a fresh plan list when it reports a failure.
+
+        A request whose answer got lost (timeout) may still have renamed the plan. None: the plan
+        list could not be read again, so whether the rename took effect is unknown.
+        """
+        if await self._rename_io_plan(fub_id, new_name):
+            return True
+        try:
+            raw_config = await self.api.get_raw_config()
+        except UNREACHABLE_ERRORS as err:
+            _LOGGER.warning("[%s] Plan list not read again after the rename of fub=%s: %r", self.server_id, fub_id, err)
+            return None
+        if not raw_config:
+            return None
+        # parse_config takes the fresh plan list into the cache that function_plan_name reads.
+        self.api.parse_config(raw_config)
+        if unreadable_plan_keys(self.api.fub_data):
+            return None
+        if self.api.function_plan_name(fub_id) == new_name:
+            _LOGGER.info(
+                "[%s] The rename of plan fub=%s to '%s' took effect after all",
+                self.server_id,
+                fub_id,
+                one_line(new_name),
+            )
+            return True
+        return False
 
     async def _rename_io_plan(self, fub_id: int, new_name: str) -> bool:
         """Rename a managed IO plan (membership join), keeping paper/DPI/orientation as-is."""
@@ -8601,7 +9038,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return pairs
 
     def _audit_wired_pairs(
-        self, has_active_plan: bool, managed_io_exts: set[str]
+        self, has_active_plan: bool, managed_io_groups: set[tuple[str, str]]
     ) -> tuple[
         set[tuple[str, str]] | None,
         set[tuple[str, str]] | None,
@@ -8633,7 +9070,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self._lp_missing_recheck_pending = True
         wired_io_pairs: set[tuple[str, str]] | None = None
         connected_io_ids: set[str] | None = None
-        if managed_io_exts:
+        if managed_io_groups:
             wired_io_pairs = self._wired_source_webio_pairs("1")
             connected_io_ids = self._connected_source_ids("1")
             if wired_io_pairs is None:
@@ -8652,7 +9089,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source_type: str,
         wired_pairs: set[tuple[str, str]] | None,
         connected_ids: set[str] | None,
-    ) -> set[str]:
+    ) -> dict[str, list[int]]:
         """ref_ids of marker ("2") / IO ("1") elements present in a managed plan but never
         paired with a WebIO element there AND without any other connection either —
         Function-Plan debris left behind when a Web-IO command/element was removed (e.g.
@@ -8666,24 +9103,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         wired or otherwise connected in one, genuinely orphaned in another — so subtracting
         a floor combined across all plans (as an earlier version of this method did) would
         hide real debris in the second plan just because the first one still uses it.
+        Maps each ref_id to the plans it dangles in.
         """
         if wired_pairs is None or connected_ids is None or not self.function_plan_plans:
-            return set()
+            return {}
         relevant_fub_ids = self._function_plan_check_fub_ids()
-        dangling: set[str] = set()
+        dangling: dict[str, list[int]] = {}
         for fub_id, plan_data in self.function_plan_plans.items():
             if fub_id not in relevant_fub_ids or not self._is_managed_function_plan(fub_id):
                 continue
-            present_ids: set[str] = set()
-            for elem in (plan_data.get("elements") or {}).values():
-                ref = elem.get("reference") or {}
-                if str(ref.get("type")) == source_type:
-                    present_ids.add(str(ref.get("ref_id")))
+            present_ids = _plan_source_ref_ids(plan_data, source_type)
             if not present_ids:
                 continue
             plan_wired_ids = {rid for rid, _ in self._plan_wired_pairs(plan_data, source_type)}
             plan_connected_ids = self._plan_connected_source_ids(plan_data, source_type)
-            dangling.update(present_ids - plan_wired_ids - plan_connected_ids)
+            for rid in present_ids - plan_wired_ids - plan_connected_ids:
+                dangling.setdefault(rid, []).append(fub_id)
         return dangling
 
     async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:
@@ -8740,14 +9175,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         best_match: dict,
         wired_pairs: tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None, set[tuple[str, str]] | None],
         io_meta: dict | None,
-        managed_io_exts: set[str],
+        managed_io_groups: set[tuple[str, str]],
     ) -> dict[str, Any] | None:
         """Missing-wiring item for one audit key, or None when the pair is wired or unchecked.
 
         wired_pairs = (marker pairs, IO pairs, KNX pairs); a set of None means that check is
         disabled or not yet loadable this run. Marker keys ("M<id>") are checked against the
-        marker set, KNX keys ("K<id>") against the KNX set; IO keys only when their extension
-        is opted into IO cluster management.
+        marker set, KNX keys ("K<id>") against the KNX set; IO and Quickbus keys only when their
+        extension / Quickbus device is a managed column-plan member (managed_io_groups).
         """
         wired_marker_pairs, wired_io_pairs, wired_knx_pairs = wired_pairs
         web_id = str(best_match.get("webIoId"))
@@ -8759,10 +9194,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if wired_knx_pairs is not None and (key[1:], web_id) not in wired_knx_pairs:
                 return {"name": ha_name, "knx_id": int(key[1:])}
             return None
-        if io_meta is None or io_meta["ext_name"] not in managed_io_exts or wired_io_pairs is None:
+        if io_meta is None or wired_io_pairs is None:
+            return None
+        kind = io_plan_kind_of(io_meta)
+        if (kind.label, kind.member_of(io_meta)) not in managed_io_groups:
             return None
         if (str(io_meta["id"]), web_id) not in wired_io_pairs:
-            return {"name": ha_name, "ext_name": io_meta["ext_name"], "identifier": io_meta["identifier"]}
+            return io_plan_gap_item(ha_name, io_meta)
         return None
 
     def _range_cluster_plan_name_for_item(self, item: dict, prefix: str, cluster_size: int) -> str | None:
@@ -8790,7 +9228,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         The repair dialog uses this to word whole-cluster gaps (cluster plan never created,
         or deleted directly in Comexio — nothing placed/wired yet) differently from
-        individual missing connections. Mirrors ios_by_ext (ext_name -> [gap, total]) with
+        individual missing connections. Mirrors ios_by_ext (ext_name -> [gap, total]) and
+        quickbus_by_device (Quickbus device label "QB3 MT1" -> [gap, total]) with
         markers_by_plan (cluster plan name -> [gap, total]), bucketed the same way the cluster
         plans themselves are named (_cluster_plan_name). Marker and KNX cluster plans share this
         one dict — their plan-name strings never collide ("... - Marker [...]" vs "... - KNX
@@ -8812,17 +9251,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if plan_name in totals_by_plan:
                 totals_by_plan[plan_name] += 1
 
-        gaps_by_ext: dict[str, int] = {}
+        gaps_by_member: dict[tuple[str, str], int] = {}
         for item in missing_items:
-            if "ext_name" in item:
-                gaps_by_ext[item["ext_name"]] = gaps_by_ext.get(item["ext_name"], 0) + 1
-        totals_by_ext = dict.fromkeys(gaps_by_ext, 0)
+            if ref := io_plan_item_member(item):
+                member_key = (ref[0].label, ref[1])
+                gaps_by_member[member_key] = gaps_by_member.get(member_key, 0) + 1
+        totals_by_member = dict.fromkeys(gaps_by_member, 0)
         for meta in io_meta_by_key.values():
-            if meta["ext_name"] in totals_by_ext:
-                totals_by_ext[meta["ext_name"]] += 1
+            kind = io_plan_kind_of(meta)
+            if (member_key := (kind.label, kind.member_of(meta))) in totals_by_member:
+                totals_by_member[member_key] += 1
+
+        def by_member(kind: IoPlanKind) -> dict[str, list[int]]:
+            # Keyed by the member as shown to the user ("QB3 MT1" rather than the device id).
+            return {
+                kind.member_label(self.data, member): [
+                    gaps_by_member[(label, member)],
+                    totals_by_member[(label, member)],
+                ]
+                for label, member in sorted(gaps_by_member)
+                if label == kind.label
+            }
+
         return {
             "markers_by_plan": {name: [gaps_by_plan[name], totals_by_plan[name]] for name in sorted(gaps_by_plan)},
-            "ios_by_ext": {ext: [gaps_by_ext[ext], totals_by_ext[ext]] for ext in sorted(gaps_by_ext)},
+            "ios_by_ext": by_member(IO_PLAN_KIND_IO),
+            "quickbus_by_device": by_member(IO_PLAN_KIND_QUICKBUS),
         }
 
     def _trigger_ids_by_ref(self, data: dict[str, Any], include_ignored: bool = False) -> dict[int, list[int]]:
@@ -9264,9 +9718,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for item in missing_items:
             # Reuses the same registry-driven lookup as _function_plan_missing_detail
             # instead of a parallel "marker_id"/"knx_id" in item chain.
-            plan_name = self._range_cluster_plan_name_for_item(
-                item, prefix, cluster_size
-            ) or self._io_cluster_plan_name_for_ext(item["ext_name"], prefix)
+            plan_name = self._range_cluster_plan_name_for_item(item, prefix, cluster_size)
+            if plan_name is None:
+                if (ref := io_plan_item_member(item)) is None:
+                    _LOGGER.warning(
+                        "[%s] Missing-wiring item without a plan left out of the ETA: %s", self.server_id, item
+                    )
+                    continue
+                plan_name = self._io_cluster_plan_name_for_ext(ref[1], prefix, ref[0])
             new_pairs_per_plan[plan_name] = new_pairs_per_plan.get(plan_name, 0) + 1
 
         total = 0.0
@@ -9278,9 +9737,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         return round(total)
 
-    def _io_cluster_plan_name_for_ext(self, ext_name: str, prefix: str) -> str:
-        """Plan name the extension belongs to (existing membership) or would get (new plan)."""
-        for members in self._io_plan_membership(prefix).values():
+    def _io_cluster_plan_name_for_ext(self, ext_name: str, prefix: str, kind: IoPlanKind = IO_PLAN_KIND_IO) -> str:
+        """Plan name the member belongs to (existing membership) or would get (new plan)."""
+        for members in self._io_plan_membership(prefix, kind).values():
             if ext_name in members:
-                return self._io_plan_name(prefix, members)
-        return self._io_plan_name(prefix, [ext_name])
+                return self._io_plan_name(prefix, members, kind)
+        return self._io_plan_name(prefix, [ext_name], kind)
