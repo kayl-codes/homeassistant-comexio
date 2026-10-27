@@ -461,7 +461,7 @@
           "plan_exists_again": "Diesen Plan gibt es in Comexio wieder, seine Backups sind also nicht mehr verwaist. Es wurde nichts geändert.",
           "already_deleted": "Diese Backups wurden bereits gelöscht. Es wurde nichts geändert.",
           "loaded_in_preview": "Das neueste Backup des Plans wird jetzt in der Plan-Karte angezeigt (Plan → Orphaned plans). Diese Reparatur bleibt offen, bis du die Backups behältst oder löschst.",
-          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert.",
+          "preview_failed": "Die Backups konnten nicht in die Plan-Vorschau geladen werden — vielleicht wurden sie inzwischen gelöscht, in den Plan-Auswahlen wurde inzwischen ein anderer Plan gewählt, oder die Plan-Auswahlen sind deaktiviert. An den Backups wurde nichts geändert.",
           "backups_busy": "Gerade läuft eine Logikplan-Wiederherstellung, oder die Integration wird neu geladen — dabei werden Backups verschoben und markiert. An den Backups wurde nichts geändert — versuche es erneut, sobald sie abgeschlossen ist."
         }
       }

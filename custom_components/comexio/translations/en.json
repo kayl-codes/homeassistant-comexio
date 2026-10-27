@@ -461,7 +461,7 @@
           "plan_exists_again": "This plan exists in Comexio again, so its backups are no longer orphaned. Nothing was changed.",
           "already_deleted": "These backups were already deleted. Nothing was changed.",
           "loaded_in_preview": "The plan's newest backup is now shown in the plan card (Plan → Orphaned plans). This repair stays open until you keep or delete the backups.",
-          "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, or the plan selectors are disabled. The backups were not changed.",
+          "preview_failed": "The backups could not be loaded into the plan preview — they may have been deleted meanwhile, another plan may have been picked in the plan selectors meanwhile, or the plan selectors are disabled. The backups were not changed.",
           "backups_busy": "A function plan restore is running, or the integration is reloading — it moves and marks backups. The backups were not changed — try again once it has finished."
         }
       }

@@ -461,7 +461,7 @@
           "plan_exists_again": "Este plan vuelve a existir en Comexio, así que sus copias ya no están huérfanas. No se ha cambiado nada.",
           "already_deleted": "Estas copias ya se eliminaron. No se ha cambiado nada.",
           "loaded_in_preview": "La copia más reciente del plan se muestra ahora en la tarjeta del plan (Plan → Orphaned plans). Esta reparación sigue abierta hasta que conserves o elimines las copias.",
-          "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto o que los selectores de plan estén desactivados. Las copias no se han modificado.",
+          "preview_failed": "No se pudieron cargar las copias en la vista previa del plan — puede que se hayan eliminado entretanto, que se haya elegido entretanto otro plan en los selectores de plan o que los selectores de plan estén desactivados. Las copias no se han modificado.",
           "backups_busy": "Hay una restauración de plan de funciones en curso o la integración se está recargando — mueve y marca copias. Las copias no se han modificado; inténtalo de nuevo cuando haya terminado."
         }
       }

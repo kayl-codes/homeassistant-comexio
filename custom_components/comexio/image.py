@@ -79,7 +79,9 @@ class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         """Which plan and source the served SVG shows.
 
         Read by comexio-plan-card.js: in the orphaned-plans view it compares the image on screen
-        with the backup selector's choice before a delete/keep action. Only for an SVG rendered
+        (a trigger-only card without its own image: this entity's newest render) with the backup
+        selector's choice before a delete/keep action. captured_at names an orphan render's
+        snapshot (its slot shifts after a delete); None for every other source. Only for an SVG rendered
         in this run: after a restart the file fallback may be newer than the restored
         last_plan_preview (an unclean shutdown skips the last state dump), so the identity stays
         None — the card then warns — until the next render.
@@ -90,6 +92,7 @@ class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
             "fub_id": preview.get("fub_id"),
             "plan_name": preview.get("plan_name"),
             "source": preview.get("source"),
+            "captured_at": preview.get("captured_at"),
         }
 
     async def async_image(self) -> bytes | None:
