@@ -19,6 +19,7 @@ A snapshot keeps them per element under SNAPSHOT_MODULE_CONFIGS:
 no request for a Quantum module's rules, rules_not_matching names the ones that differ.
 """
 
+from collections import Counter
 from collections.abc import Callable, Iterable, Iterator, Mapping
 import json
 import logging
@@ -425,33 +426,39 @@ def rules_not_matching(wanted: Mapping[str, Any], live: Mapping[str, Any], setti
     """The events (ByDay) of the rules that differ between a stored Quantum config and the live one.
 
     Rules are matched by the event they react to: a module created by a restore numbers its rule
-    rows anew, so a rule without an event is matched by its position among those. A rule only one
-    side has counts. The name of a rule whose event is one of the settings (user_event_N) is left
-    out: it follows that setting, which the restore writes.
+    rows anew, so rules sharing an event (or without one) are matched by their position among
+    those. A rule only one side has counts. The name of a rule whose event is one of the settings
+    (user_event_N) is left out: it follows that setting, which the restore writes.
     """
     named = frozenset(settings)
     want, have = _rules_by_event(wanted), _rules_by_event(live)
-    return sorted(
-        (
-            event
-            for event in set(want) | set(have)
-            if _rule(want.get(event), event in named) != _rule(have.get(event), event in named)
-        ),
-        key=_id_order,
+    differing = (
+        key
+        for key in set(want) | set(have)
+        if _rule(want.get(key), key[0] in named) != _rule(have.get(key), key[0] in named)
     )
+    return [_rule_label(key) for key in sorted(differing, key=_rule_key_order)]
 
 
-def _rules_by_event(config: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    """{event: rule}; a rule without an event is keyed "#n" by its position among those, not by its row id."""
-    rules: dict[str, Mapping[str, Any]] = {}
-    without_event = 0
+def _rules_by_event(config: Mapping[str, Any]) -> dict[tuple[str, int], Mapping[str, Any]]:
+    """{(event, n): rule}: the n-th rule (in row order) reacting to event; "" for a rule without one."""
+    rules: dict[tuple[str, int], Mapping[str, Any]] = {}
+    seen: Counter[str] = Counter()
     for _row_id, rule in _items(config.get("rules")):
-        if event := rule.get("ByDay"):
-            rules[str(event)] = rule
-        else:
-            without_event += 1
-            rules[f"#{without_event}"] = rule
+        event = str(rule.get("ByDay") or "")
+        seen[event] += 1
+        rules[(event, seen[event])] = rule
     return rules
+
+
+def _rule_key_order(key: tuple[str, int]) -> tuple[tuple[int, str], int]:
+    return _id_order(key[0]), key[1]
+
+
+def _rule_label(key: tuple[str, int]) -> str:
+    """A rule as the restore message names it: its event, "#n" added from its second rule on ("#n" without one)."""
+    event, n = key
+    return event if event and n == 1 else f"{event}#{n}"
 
 
 def _rule(rule: Mapping[str, Any] | None, name_follows_setting: bool) -> dict[str, str] | None:

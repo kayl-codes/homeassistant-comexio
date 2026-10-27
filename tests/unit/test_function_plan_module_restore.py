@@ -159,6 +159,28 @@ def test_rules_without_an_event_are_matched_by_their_position(live_value: str, e
     assert rules_not_matching(wanted, live, ()) == expected
 
 
+@pytest.mark.parametrize(
+    ("live_value", "expected"), [("50;0;0", []), ("70;0;0", ["user_event_1#2"])], ids=["same", "value"]
+)
+def test_rules_sharing_an_event_are_each_compared(live_value: str, expected: list) -> None:
+    # Two rules on the same event: the second one is compared too, not dropped behind the first.
+    wanted = {"rules": {"9": _RULE, "12": _RULE | {"Id": 12, "Value": "50;0;0"}}}
+    live = {"rules": {"40": _RULE | {"Id": 40}, "41": _RULE | {"Id": 41, "Value": live_value}}}
+    assert rules_not_matching(wanted, live, ()) == expected
+
+
+def test_the_first_of_two_rules_on_an_event_is_compared_too() -> None:
+    # Only the first rule differs: a later rule on the same event must not stand in for it.
+    second = _RULE | {"Id": 12, "Value": "50;0;0"}
+    live = {"rules": {"40": _RULE | {"Id": 40, "Value": "70;0;0"}, "41": second | {"Id": 41}}}
+    assert rules_not_matching({"rules": {"9": _RULE, "12": second}}, live, ()) == ["user_event_1"]
+
+
+def test_a_second_rule_on_an_event_only_one_side_has_differs() -> None:
+    second = _RULE | {"Id": 12, "Value": "50;0;0"}
+    assert rules_not_matching({"rules": {"9": _RULE, "12": second}}, {"rules": {"40": _RULE}}, ()) == ["user_event_1#2"]
+
+
 def test_a_rule_without_an_event_is_counted_among_those_only() -> None:
     # Row order differs around a rule with an event: it does not shift the position of the one without.
     blank = _RULE | {"ByDay": ""}
