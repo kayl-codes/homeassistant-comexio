@@ -104,6 +104,11 @@ _FLANKE_SKIPPED_DETAIL = "trigger pairs skipped, Flanke block not usable"
 _PCT_PLAN_PAIRS = 60
 _PCT_PLAN_FINALIZE = 92
 
+# Function plan wiring stages as (label named in the cancel banner, status text while it runs).
+_STAGE_PLAN_PAIRS = ("function plan wiring", "Checking function plan wiring of the Web-IO commands...")
+_STAGE_KNX = ("KNX write path wiring", "Checking KNX write path and wiring...")
+_STAGE_TRIGGER_PAIRS = ("trigger pair wiring", "Checking trigger pairs...")
+
 _SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair always notifies too
 
 _NOTE_ACTIVATED = ", plan activated"
@@ -751,8 +756,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             if action == "function_plan_add_missing":
                 # Standalone action: wire pre-existing but unwired pairs only, no Web-IO sync.
-                plan_summary = await self._wire_created_pairs(ctx, [], gap_items)
-                plan_summary += await self._wire_trigger_pairs(ctx)
+                plan_summary = await self._run_wiring_stages(
+                    ctx,
+                    [
+                        (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, [], gap_items)),
+                        (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx)),
+                    ],
+                )
                 duration = datetime.datetime.now() - start_time
                 msg = self._build_function_plan_add_missing_message(plan_summary, duration, ctx.failed_writes)
             elif action == "knx_bridge_add_missing":
@@ -764,7 +774,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 # loopback against Comexio's *current* config instead of trusting
                 # last_audit_results; the read-path leg reuses the already-fetched
                 # function_plan_missing gap_items, same as function_plan_add_missing above.
-                plan_summary = await self._wire_knx_full(ctx, [], gap_items, refresh_audit=True)
+                plan_summary = await self._run_wiring_stages(
+                    ctx, [(*_STAGE_KNX, partial(self._wire_knx_full, ctx, [], gap_items, refresh_audit=True))]
+                )
                 duration = datetime.datetime.now() - start_time
                 msg = self._build_function_plan_add_missing_message(plan_summary, duration, ctx.failed_writes)
             else:
@@ -818,12 +830,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     async def _wire_plans_after_sync(
         self, ctx: _SyncContext, created_names: list[str], gap_items: list[dict]
     ) -> list[str]:
-        """Run the function plan wiring stages of a sync after its Web-IO classes.
-
-        A stage starts only while the run is not cancelled: each one may create a cluster plan,
-        and the KNX stage allocates bridge Markers and prestages the Loopback Web-IO class before
-        its own between-cluster cancel check.
-        """
+        """Run the function plan wiring stages of a sync after its Web-IO classes."""
         # KNX's read-path candidates are carved out of both inputs here and handed to
         # _wire_knx_full instead, which wires them together with the bridge/loopback
         # legs in one combined cycle per cluster — leaving them in what's passed to
@@ -847,23 +854,25 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # seconds; the trigger step reuses it when the KNX step wrote nothing, otherwise
         # fetches its own) and reports nothing when there is nothing to wire — without
         # these lines the status sat on the last analysis step for the whole wiring pass.
-        stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]] = [
-            (
-                "function plan wiring",
-                "Checking function plan wiring of the Web-IO commands...",
-                partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx),
-            ),
-            (
-                "KNX write path wiring",
-                "Checking KNX write path and wiring...",
-                partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True),
-            ),
-            (
-                "trigger pair wiring",
-                "Checking trigger pairs...",
-                partial(self._wire_trigger_pairs, ctx, refresh_audit=True),
-            ),
-        ]
+        return await self._run_wiring_stages(
+            ctx,
+            [
+                (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
+                (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True)),
+                (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
+            ],
+        )
+
+    async def _run_wiring_stages(
+        self, ctx: _SyncContext, stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]]
+    ) -> list[str]:
+        """Run function plan wiring stages (label, status text, stage) in order and collect their lines.
+
+        A stage starts only while the run is not cancelled: each one may create a cluster plan,
+        and the KNX stage allocates bridge Markers and prestages the Loopback Web-IO class before
+        its own between-cluster cancel check. The stages a cancel kept from starting are named in
+        the cancel banner.
+        """
         plan_summary: list[str] = []
         for idx, (_label, status_text, stage) in enumerate(stages):
             if getattr(self.coordinator, "cancel_sync", False):
