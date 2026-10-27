@@ -573,3 +573,4 @@ def test_another_certificate_on_the_io_fetch_fails_the_poll(api: ComexioAPI) -> 
         _poll(coordinator, conf, err)
 
     coordinator._report_certificate_changed.assert_called_once_with("b" * 64)
+    assert coordinator._io_live_fetch_failing is False  # a later plain failure still gets its warning

@@ -1111,6 +1111,19 @@ def test_get_io_live_states_refused_request_is_none_and_an_error(
     assert comexio_api.io_live_fetch_error == "ValueError: conflicting extension ids for IO 11"
 
 
+def test_get_io_live_states_repeated_refusal_is_an_error_once(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same refusal every poll is one ERROR, then DEBUG; another cause is an ERROR again."""
+    caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+    for cause in ("conflict 11", "conflict 11", "conflict 12"):
+        _fail(client, "get_io_live_states", ValueError(cause))
+        asyncio.run(comexio_api.get_io_live_states([(1, "11")]))
+
+    levels = [r.levelno for r in caplog.records if r.name == api_module.__name__]
+    assert levels == [logging.ERROR, logging.DEBUG, logging.ERROR]
+
+
 def test_get_io_live_states_meeting_another_certificate_keeps_the_mismatch(
     comexio_api: ComexioAPI, client: MagicMock
 ) -> None:
@@ -1120,6 +1133,7 @@ def test_get_io_live_states_meeting_another_certificate_keeps_the_mismatch(
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
     assert comexio_api.certificate_mismatch is err  # reported, not swallowed as a plain fetch failure
     assert comexio_api.certificate_mismatch_count == 1
+    assert (comexio_api.io_live_fetch_error or "").startswith("ComexioCertificateMismatchError: ")
 
 
 def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, client: MagicMock) -> None:

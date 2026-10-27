@@ -1492,7 +1492,7 @@ class ComexioAPI:
         one is kept like in get_live_states, so the coordinator fails the poll. A request aiocomexio
         refuses as contradictory (ValueError, e.g. one IO id under two extensions) is a failed fetch
         too, not a failed poll; parse_config already leaves such IOs out, so it points to a bug and
-        is logged at ERROR with its traceback.
+        is logged at ERROR with its traceback — once per cause, every further poll at DEBUG.
         """
         try:
             states = await self.client.get_io_live_states(ios)
@@ -1501,8 +1501,10 @@ class ComexioAPI:
             self._note_certificate_mismatch(err, "IO live states not fetched")
             return None
         except ValueError as err:
-            self.io_live_fetch_error = f"{type(err).__name__}: {err}"
-            _LOGGER.error("IO live states request refused: %s", err, exc_info=True)
+            cause = f"{type(err).__name__}: {err}"
+            level = logging.DEBUG if cause == self.io_live_fetch_error else logging.ERROR
+            self.io_live_fetch_error = cause
+            _LOGGER.log(level, "IO live states request refused: %s", err, exc_info=True)
             return None
         except ComexioError as err:
             self.io_live_fetch_error = f"{type(err).__name__}: {err}"
