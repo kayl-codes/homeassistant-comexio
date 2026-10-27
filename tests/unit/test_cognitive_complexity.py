@@ -86,16 +86,37 @@ def test_no_function_exceeds_its_cognitive_complexity_limit() -> None:
     )
 
 
-def test_baseline_matches_the_current_scores() -> None:
-    # A ceiling above the current score would let the function grow back unnoticed.
-    scores = _scores()
-    stale = [
+def _stale_entries(scores: dict[str, int]) -> list[str]:
+    """`BASELINE` entries whose ceiling is above the current score or within the limit; a score above the ceiling is
+    the limit test's finding."""
+    return [
         f"{key}: drop it" if scores.get(key, 0) <= MAX_COMPLEXITY else f"{key}: lower it to {scores[key]}"
         for key, ceiling in sorted(BASELINE.items())
-        if scores.get(key, 0) != ceiling
+        if scores.get(key, 0) < ceiling or ceiling <= MAX_COMPLEXITY
     ]
 
+
+def test_no_baseline_ceiling_is_above_the_current_score() -> None:
+    # A ceiling above the current score would let the function grow back unnoticed.
+    stale = _stale_entries(_scores())
+
     assert not stale, "Update these BASELINE entries:\n" + "\n".join(stale)
+
+
+def test_the_stale_check_lowers_or_drops_a_ceiling_but_never_raises_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    ceilings = {"grown": 16, "exact": 16, "simpler": 18, "at_limit": 16, "fixed": 17, "gone": 16, "listed_low": 15}
+    scores = {"grown": 17, "exact": 16, "simpler": 16, "at_limit": 15, "fixed": 12, "listed_low": 15}
+    monkeypatch.setattr(sys.modules[__name__], "BASELINE", ceilings)
+
+    stale = _stale_entries(scores)
+
+    assert stale == [
+        "at_limit: drop it",
+        "fixed: drop it",
+        "gone: drop it",
+        "listed_low: drop it",
+        "simpler: lower it to 16",
+    ]
 
 
 def test_an_inline_ignore_does_not_hide_a_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
