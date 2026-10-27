@@ -23,7 +23,7 @@ MARKER = SOURCE_CATEGORIES[WebioClass.MARKER]
 
 
 def _ctx() -> SimpleNamespace:
-    return SimpleNamespace(failed_writes=[], api=MagicMock())
+    return SimpleNamespace(failed_writes=[], skipped_classes=[], skipped_stages=[], api=MagicMock())
 
 
 def _button(**coordinator: object) -> ComexioSyncButton:

@@ -1,6 +1,6 @@
 # Version: 0.7.6
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import contextlib
 from dataclasses import dataclass, field
 import datetime
@@ -104,6 +104,11 @@ _FLANKE_SKIPPED_DETAIL = "trigger pairs skipped, Flanke block not usable"
 _PCT_PLAN_PAIRS = 60
 _PCT_PLAN_FINALIZE = 92
 
+# Function plan wiring stages as (label named in the cancel banner, status text while it runs).
+_STAGE_PLAN_PAIRS = ("function plan wiring", "Checking function plan wiring of the Web-IO commands...")
+_STAGE_KNX = ("KNX write path wiring", "Checking KNX write path and wiring...")
+_STAGE_TRIGGER_PAIRS = ("trigger pair wiring", "Checking trigger pairs...")
+
 _SYNC_PROGRESS_NOTIFY_EVERY = 5  # notify every Nth pair; the plan's final pair always notifies too
 
 _NOTE_ACTIVATED = ", plan activated"
@@ -113,15 +118,7 @@ _ERR_RENAMED_MID_SYNC = "fub {fub_id} renamed/repurposed mid-sync"
 _STEP_ANALYZING_CONFIG = "Analyzing configuration"
 _STEP_CHECKING_PLAN = "Checking function plan wiring"
 _RETRY_CLEANUP = "run the cleanup again from Repairs"
-_DELTA_RESULT_KEYS = {
-    "rename": "renamed",
-    "delete": "removed",
-    "type": "updated",
-    "protocol": "updated",
-    "create": "added",
-}
-# Actions that rewrite the commands of a class whose webhook protocol changed (part of the server address).
-_PROTOCOL_ACTIONS = frozenset({"full_sync", "update_ip"})
+_DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
 _FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
 
 
@@ -201,18 +198,21 @@ def _activation_note(ctx: "_SyncContext", plan_name: str, activated: bool) -> st
 def _mark_cancelled(ctx: "_SyncContext", msg: str) -> str:
     """Flag a user-cancelled run as partial and put the cancel banner above its result.
 
-    cancel_sync only stops further work (delta tasks / cluster-plan wiring loop) — whatever
-    already ran before the flag was set is real and reported below it as-is. The banner and
-    the "partial" sensor state tell the user the requested action did not run to its end.
+    cancel_sync only stops further work: the delta tasks, the Web-IO classes and the function
+    plan wiring stages not started yet (ctx.skipped_classes / ctx.skipped_stages, named in the
+    banner) and the cluster-plan wiring loop — whatever already ran before the flag was set is
+    real and reported below it as-is. The banner and the "partial" sensor state tell the user
+    the requested action did not run to its end.
     """
     ctx.failed_writes.append("cancelled by user")
-    return f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{msg}"
-
-
-def _protocol_only_items(cls_protocol: list[dict], type_fixes: list[dict]) -> list[dict]:
-    """The protocol rewrites a type-fix of the same command does not already cover."""
-    type_fix_ids = {item.get("id") for item in type_fixes}
-    return [item for item in cls_protocol if item.get("id") not in type_fix_ids]
+    skipped = ""
+    if ctx.skipped_classes:
+        skipped += f"Not synced: {', '.join(webio_class_label(cls) for cls in ctx.skipped_classes)}\n"
+    if ctx.skipped_stages:
+        skipped += f"Not started: {', '.join(ctx.skipped_stages)}\n"
+    if skipped:
+        skipped += "\n"
+    return f"{ICON_WARNING} **Sync cancelled by user — results below are partial.**\n\n{skipped}{msg}"
 
 
 def _class_action_eta(
@@ -221,10 +221,12 @@ def _class_action_eta(
     cls_renamed: list[dict],
     cls_types: list[dict],
     cls_orphans: list[dict],
-    cls_protocol: list[dict],
     dev_ip_mismatch: bool,
 ) -> int:
-    """Seconds the delta tasks of action take for one class (the Fast-Track decision weighs it)."""
+    """Seconds the delta tasks of action take for one class (the Fast-Track decision weighs it).
+
+    An address change costs one device write: the commands keep HTTP whatever the address.
+    """
     eta = 0
     task_count = 0
     if action in {"full_sync", "update_renames"}:
@@ -239,12 +241,8 @@ def _class_action_eta(
     if action in {"full_sync", "update_types"}:
         eta += len(cls_types) * SYNC_DURATION_WRITE
         task_count += len(cls_types)
-    if action in _PROTOCOL_ACTIONS:
-        protocol_only = _protocol_only_items(cls_protocol, cls_types if action == "full_sync" else [])
-        eta += len(protocol_only) * SYNC_DURATION_WRITE
-        task_count += len(protocol_only)
-        if dev_ip_mismatch:
-            eta += SYNC_DURATION_WRITE
+    if action in {"full_sync", "update_ip"} and dev_ip_mismatch:
+        eta += SYNC_DURATION_WRITE
     if task_count > 1:
         eta += int(1.5 * (task_count - 1))
     return eta
@@ -519,9 +517,10 @@ class _SyncContext:
     # adapter logged why), function plan wiring errors, cleanup deletions and a user cancel.
     # Named in the result message and turn the status sensor to "partial".
     failed_writes: list[str] = field(default_factory=list)
-    # The audit's commands to rewrite with the webhook protocol, and the protocol their payloads carry.
-    protocol_items: list[dict[str, Any]] = field(default_factory=list)
-    audit_protocol: int | None = None
+    # Web-IO classes and function plan wiring stages a user cancel kept from starting — no
+    # failure, named in the cancel banner.
+    skipped_classes: list[str] = field(default_factory=list)
+    skipped_stages: list[str] = field(default_factory=list)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -688,6 +687,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         if not await self._async_acquire_sync_lock(notify_enabled):
             return
         self.coordinator.in_sync = True
+        # A cancel belongs to the run it was pressed in, never to the next one.
+        self.coordinator.cancel_sync = False
         self.coordinator.sync_error = False
         self.coordinator.sync_failed_writes = []
 
@@ -739,8 +740,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 start_time=start_time,
                 class_names=class_names,
                 update_status=update_status,
-                protocol_items=audit_data.get("protocol", []),
-                audit_protocol=audit_data.get("webhook_protocol"),
             )
 
             # Read once: the KNX step's fresh config may change the list before the result is written.
@@ -757,8 +756,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
             if action == "function_plan_add_missing":
                 # Standalone action: wire pre-existing but unwired pairs only, no Web-IO sync.
-                plan_summary = await self._wire_created_pairs(ctx, [], gap_items)
-                plan_summary += await self._wire_trigger_pairs(ctx)
+                plan_summary = await self._run_wiring_stages(
+                    ctx,
+                    [
+                        (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, [], gap_items)),
+                        (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx)),
+                    ],
+                )
                 duration = datetime.datetime.now() - start_time
                 msg = self._build_function_plan_add_missing_message(plan_summary, duration, ctx.failed_writes)
             elif action == "knx_bridge_add_missing":
@@ -770,7 +774,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 # loopback against Comexio's *current* config instead of trusting
                 # last_audit_results; the read-path leg reuses the already-fetched
                 # function_plan_missing gap_items, same as function_plan_add_missing above.
-                plan_summary = await self._wire_knx_full(ctx, [], gap_items, refresh_audit=True)
+                plan_summary = await self._run_wiring_stages(
+                    ctx, [(*_STAGE_KNX, partial(self._wire_knx_full, ctx, [], gap_items, refresh_audit=True))]
+                )
                 duration = datetime.datetime.now() - start_time
                 msg = self._build_function_plan_add_missing_message(plan_summary, duration, ctx.failed_writes)
             else:
@@ -787,47 +793,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                     debris_removed,
                 ) = await self._sync_all_classes(ctx, audit_data, dev_ids)
 
-                # KNX's read-path candidates are carved out of both inputs here and handed to
-                # _wire_knx_full instead, which wires them together with the bridge/loopback
-                # legs in one combined cycle per cluster — leaving them in what's passed to
-                # _wire_created_pairs would wire the same K -> Web-IO pairs a second time
-                # (_wire_created_pairs' own _classify_created_names buckets KNX-named Web-IO
-                # commands from created_names exactly like _wire_knx_full does, and its gap-item
-                # merge does the same for gap_items — both need the KNX slice removed).
-                knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
-                knx_gap_key = f"{SOURCE_CATEGORIES[WebioClass.KNX].key.value}_id"
-                created_names_no_knx = [
-                    name for name in created_names if _parse_source_id_from_webio_name(name, knx_prefix) is None
-                ]
-                gap_items_no_knx = [item for item in gap_items if knx_gap_key not in item]
-                # _wire_knx_full must run BEFORE _wire_trigger_pairs: a KNX [TRIG]/[TP] source's
-                # self-reset pair is now wired via its write-path bridge Marker (see
-                # _resolve_knx_trigger_bridge_markers), which _wire_knx_full's leg 2 is what
-                # creates in the first place. Running trigger-pairs first left that bridge
-                # missing and the trigger pair unwired every time (live 2026-09-21: "K2: no
-                # write-path bridge marker yet, cannot wire trigger pair").
-                # Each step re-reads Comexio (the KNX step a fresh config + plan snapshot, several
-                # seconds; the trigger step reuses it when the KNX step wrote nothing, otherwise
-                # fetches its own) and reports nothing when there is nothing to wire — without
-                # these lines the status sat on the last analysis step for the whole wiring pass.
-                update_status(
-                    "Checking function plan wiring of the Web-IO commands...",
-                    pct=_PCT_PLAN_PAIRS,
-                    step_info=_STEP_CHECKING_PLAN,
-                )
-                plan_summary = await self._wire_created_pairs(ctx, created_names_no_knx, gap_items_no_knx)
-                update_status(
-                    "Checking KNX write path and wiring...",
-                    pct=_PCT_PLAN_PAIRS,
-                    step_info=_STEP_CHECKING_PLAN,
-                )
-                plan_summary += await self._wire_knx_full(ctx, created_names, gap_items, refresh_audit=True)
-                update_status(
-                    "Checking trigger pairs...",
-                    pct=_PCT_PLAN_PAIRS,
-                    step_info=_STEP_CHECKING_PLAN,
-                )
-                plan_summary += await self._wire_trigger_pairs(ctx, refresh_audit=True)
+                plan_summary = await self._wire_plans_after_sync(ctx, created_names, gap_items)
                 plan_summary += _unknown_plan_findings_lines(bad_plan_keys)
 
                 duration = datetime.datetime.now() - start_time
@@ -860,6 +826,61 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         finally:
             await self._finalize_sync()
+
+    async def _wire_plans_after_sync(
+        self, ctx: _SyncContext, created_names: list[str], gap_items: list[dict]
+    ) -> list[str]:
+        """Run the function plan wiring stages of a sync after its Web-IO classes."""
+        # KNX's read-path candidates are carved out of both inputs here and handed to
+        # _wire_knx_full instead, which wires them together with the bridge/loopback
+        # legs in one combined cycle per cluster — leaving them in what's passed to
+        # _wire_created_pairs would wire the same K -> Web-IO pairs a second time
+        # (_wire_created_pairs' own _classify_created_names buckets KNX-named Web-IO
+        # commands from created_names exactly like _wire_knx_full does, and its gap-item
+        # merge does the same for gap_items — both need the KNX slice removed).
+        knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
+        knx_gap_key = f"{SOURCE_CATEGORIES[WebioClass.KNX].key.value}_id"
+        created_names_no_knx = [
+            name for name in created_names if _parse_source_id_from_webio_name(name, knx_prefix) is None
+        ]
+        gap_items_no_knx = [item for item in gap_items if knx_gap_key not in item]
+        # _wire_knx_full must run BEFORE _wire_trigger_pairs: a KNX [TRIG]/[TP] source's
+        # self-reset pair is now wired via its write-path bridge Marker (see
+        # _resolve_knx_trigger_bridge_markers), which _wire_knx_full's leg 2 is what
+        # creates in the first place. Running trigger-pairs first left that bridge
+        # missing and the trigger pair unwired every time (live 2026-09-21: "K2: no
+        # write-path bridge marker yet, cannot wire trigger pair").
+        # Each step re-reads Comexio (the KNX step a fresh config + plan snapshot, several
+        # seconds; the trigger step reuses it when the KNX step wrote nothing, otherwise
+        # fetches its own) and reports nothing when there is nothing to wire — without
+        # these lines the status sat on the last analysis step for the whole wiring pass.
+        return await self._run_wiring_stages(
+            ctx,
+            [
+                (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
+                (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True)),
+                (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
+            ],
+        )
+
+    async def _run_wiring_stages(
+        self, ctx: _SyncContext, stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]]
+    ) -> list[str]:
+        """Run function plan wiring stages (label, status text, stage) in order and collect their lines.
+
+        A stage starts only while the run is not cancelled: each one may create a cluster plan,
+        and the KNX stage allocates bridge Markers and prestages the Loopback Web-IO class before
+        its own between-cluster cancel check. The stages a cancel kept from starting are named in
+        the cancel banner.
+        """
+        plan_summary: list[str] = []
+        for idx, (_label, status_text, stage) in enumerate(stages):
+            if getattr(self.coordinator, "cancel_sync", False):
+                ctx.skipped_stages.extend(label for label, _text, _stage in stages[idx:])
+                break
+            ctx.update_status(status_text, pct=_PCT_PLAN_PAIRS, step_info=_STEP_CHECKING_PLAN)
+            plan_summary += await stage()
+        return plan_summary
 
     def _report_sync_failure(
         self, error: Exception, ctx: _SyncContext | None, update_status: Callable[..., None]
@@ -947,7 +968,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         active_classes = tuple(c for c in WEBIO_CLASSES if c in opted_in or dev_ids.get(c))
         if not active_classes:
             return 0, 0, 0, 0, False, [], 0, {}, [], 0
-        _ensure_reachable_ha_address(ctx.ha_address, [c for c in active_classes if not dev_ids.get(c)])
+        # A run cancelled during the analysis writes nothing, so it needs no reachable address either.
+        if not getattr(self.coordinator, "cancel_sync", False):
+            _ensure_reachable_ha_address(ctx.ha_address, [c for c in active_classes if not dev_ids.get(c)])
         # Split the shared progress span evenly across however many classes are active,
         # so the UI bar advances smoothly regardless of len(active_classes).
         pct_span = (SYNC_PROGRESS_END_PCT - SYNC_PROGRESS_START_PCT) / len(active_classes)
@@ -959,7 +982,21 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             for idx, cls in enumerate(active_classes)
         }
 
-        for cls in active_classes:
+        for idx, cls in enumerate(active_classes):
+            # Against this sync's address, not the last audit's: internal_url may have changed since.
+            ip_mismatch = await _device_ip_mismatch(
+                self.coordinator.ha_address,
+                ctx.ha_address,
+                ctx.webio_devices_audit.get(cls, {}).get("device_ip"),
+                dev_ids[cls],
+            )
+            # A cancel stops before the next class: its Fast-Track would delete the device, its delta
+            # tasks write. Checked after the awaited comparison, right before the class's first write.
+            if getattr(self.coordinator, "cancel_sync", False):
+                ctx.skipped_classes.extend(active_classes[idx:])
+                skipped = ", ".join(webio_class_label(c) for c in ctx.skipped_classes)
+                _LOGGER.info("[%s] Sync cancelled: skipping class(es) %s", self.server_id, skipped)
+                break
             pct_start, pct_end = class_pct_ranges[cls]
             cls_result = await self._sync_class(
                 ctx,
@@ -970,13 +1007,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 _items_of_class(type_mismatches, cls),
                 _items_of_class(orphans, cls),
                 _items_of_class(dangling_items, cls),
-                # Against this sync's address, not the last audit's: internal_url may have changed since.
-                await _device_ip_mismatch(
-                    self.coordinator.ha_address,
-                    ctx.ha_address,
-                    ctx.webio_devices_audit.get(cls, {}).get("device_ip"),
-                    dev_ids[cls],
-                ),
+                ip_mismatch,
                 pct_start,
                 pct_end,
             )
@@ -1523,20 +1554,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_renamed: list[dict],
         cls_types: list[dict],
         cls_orphans: list[dict],
-        cls_protocol: list[dict],
         dev_ip_mismatch: bool,
     ) -> str:
         """Pick recreate vs. delta-sync for one class, based on ETA vs. the Fast-Track threshold."""
         label = webio_class_label(cls)
         action = ctx.action
-        cls_action_eta = _class_action_eta(
-            action, cls_missing, cls_renamed, cls_types, cls_orphans, cls_protocol, dev_ip_mismatch
-        )
+        cls_action_eta = _class_action_eta(action, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch)
 
         if not class_dev_id:
             _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
             return "recreate"
-        if action == "update_ip" and not cls_protocol:
+        if action == "update_ip":
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
         if cls_action_eta > SYNC_DURATION_RECREATE:
@@ -1690,7 +1718,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             cls_audit["orphans"],
             cls_audit["missing"],
             cls_audit["types"],
-            cls_audit["protocol"],
         )
         skipped_creates = 0
         if not base_id:
@@ -1718,17 +1745,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_dangling_to_delete = (
             cls_audit["dangling"] if cls_effective_action in {"full_sync", "delete_orphans"} else []
         )
-        failed_before = len(ctx.failed_writes)
         result = await self._execute_delta_tasks(
             ctx, cls, class_dev_id, base_id, tasks_to_do, cls_dangling_to_delete, on_progress, label, pct_start
-        )
-        # Every command of the class now carries the audit's protocol — unless a rewrite failed or was cancelled.
-        # Only an active class was audited for its protocol; a deselected one only keeps its device IP.
-        result["protocol_written"] = (
-            cls_effective_action in _PROTOCOL_ACTIONS
-            and cls in self.coordinator.active_webio_classes
-            and not getattr(self.coordinator, "cancel_sync", False)
-            and not any(f.startswith(("type ", "protocol ")) for f in ctx.failed_writes[failed_before:])
         )
         result["updated_ip"] = False
         result["skipped_creates"] = skipped_creates
@@ -1774,7 +1792,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "delete": f"{ICON_DELETE} Remove",
             "create": f"{ICON_ADD} Add",
             "type": f"{ICON_FIX} Type-Fix",
-            "protocol": f"{ICON_NETWORK} Protocol",
         }
         t_label = labels.get(task_type, task_type)
         prog_msg = (
@@ -1798,12 +1815,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_orphans: list[dict],
         cls_missing: list[dict],
         cls_types: list[dict],
-        cls_protocol: list[dict],
     ) -> list[dict]:
-        """Collect the individual create/rename/delete/type-fix/protocol tasks for one delta-sync run.
-
-        A type-fix writes the whole command, protocol included, so a command with both gets one write.
-        """
+        """Collect the individual create/rename/delete/type-fix tasks for one delta-sync run."""
         tasks_to_do = []
         if cls_effective_action in {"full_sync", "update_renames"}:
             tasks_to_do.extend([{"item": i, "type": "rename"} for i in cls_renamed])
@@ -1811,12 +1824,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             tasks_to_do.extend([{"item": i, "type": "delete"} for i in cls_orphans])
         if cls_effective_action in {"full_sync", "create_missing"}:
             tasks_to_do.extend([{"item": i, "type": "create"} for i in cls_missing])
-        type_fixes = cls_types if cls_effective_action in {"full_sync", "update_types"} else []
-        tasks_to_do.extend([{"item": i, "type": "type"} for i in type_fixes])
-        if cls_effective_action in _PROTOCOL_ACTIONS:
-            tasks_to_do.extend(
-                [{"item": i, "type": "protocol"} for i in _protocol_only_items(cls_protocol, type_fixes)]
-            )
+        if cls_effective_action in {"full_sync", "update_types"}:
+            tasks_to_do.extend([{"item": i, "type": "type"} for i in cls_types])
         return tasks_to_do
 
     async def _cleanup_delta_debris(
@@ -1981,15 +1990,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         class_name = ctx.class_names[cls]
         label = webio_class_label(cls)
 
-        cls_protocol = _items_of_class(ctx.protocol_items, cls)
         cls_effective_action = await self._decide_effective_action(
-            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, cls_protocol, dev_ip_mismatch
+            ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
         )
 
         if cls_effective_action == "recreate":
             await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
-            # The uploaded template was built with the protocol of this sync's address.
-            await self.coordinator.async_set_webio_synced_protocol(cls, ctx.api.webhook_protocol)
             # Everything in this class is brand new, so every command of it needs the
             # function plan pairing pass too: its old webIoId (if any) went away with the
             # deleted class, and the pre-sync audit never flagged a wiring gap for it (it
@@ -2022,7 +2028,6 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             "types": cls_types,
             "orphans": cls_orphans,
             "dangling": cls_dangling,
-            "protocol": cls_protocol,
         }
         result = await self._delta_sync_class(
             ctx,
@@ -2037,28 +2042,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             pct_end,
         )
         result["recreated"] = False
-        await self._record_delta_protocol(ctx, cls, result, result.pop("protocol_written"))
         return result
-
-    async def _record_delta_protocol(
-        self, ctx: _SyncContext, cls: str, result: dict[str, Any], protocol_written: bool
-    ) -> None:
-        """Record the protocol a delta sync left cls's commands with.
-
-        Every command rewritten: the audit's protocol. Only some of them written (a create, rename or type fix
-        carries the audit's protocol too, or a protocol rewrite failed or was cancelled) while the record names
-        another protocol: the class is mixed now, so it becomes unknown and the next audit rewrites all of it.
-        Otherwise a switch back to the recorded protocol would hide the commands written in between.
-        """
-        protocol = ctx.audit_protocol
-        if protocol is None or cls not in self.coordinator.active_webio_classes:
-            return
-        if protocol_written:
-            await self.coordinator.async_set_webio_synced_protocol(cls, protocol)
-        elif (result["added"] or result["updated"] or result["renamed"]) and (
-            self.coordinator.webio_synced_protocol(cls) != protocol
-        ):
-            await self.coordinator.async_set_webio_synced_protocol(cls, None)
 
     # --- MANAGED CLUSTER PLAN WIRING ---
 
