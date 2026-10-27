@@ -21,8 +21,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 
 ## Project rules to check
 
-- **Complexity:** cognitive complexity ≤ 15 per function (SonarQube S3776); no duplicated string literals — extract
-  constants (S1192). Tuning values and thresholds belong in `const.py`, not inline.
+- **Complexity:** cognitive complexity ≤ 15 per function as SonarCloud measures it (S3776).
+  `test_cognitive_complexity.py` checks it locally with complexipy; its `BASELINE` is the only permitted exception
+  (functions SonarCloud accepts but complexipy rates above 15) — flag a new entry there. No duplicated string
+  literals — extract constants (S1192). Tuning values and thresholds belong in `const.py`, not inline.
 - **Stable IDs:** unique_ids and entity_ids carry only the technical address (`comexio_{server_id}_m{id}`,
   `..._k{id}`, `..._{ext_name}_{identifier}`, `..._fub{id}`); only the display name carries the Comexio
   description. Flag any change that would let a renamed description or naming schema alter a unique_id or entity_id.
@@ -164,6 +166,26 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
+- **A selection filters every path:** once the user narrows what the integration manages — selected Quickbus
+  devices, opted-in Web-IO classes, managed plan kinds — every path that builds or acts on those items applies the
+  same filter through one shared helper: the generation service and the sync, the audit
+  and its repair items, the add-missing action. That includes items taken from an earlier audit result, which may
+  predate a changed selection or an offline device. Flag a path that reads `coordinator.data` or a cached result
+  directly where a sibling path filters by the selection (#220).
+- **Unavailable items keep their selection:** an options form offers only the items available now (an offline
+  extension hides its IOs and Quickbus devices), but a saved selection that is treated as authoritative must keep
+  the IDs of the hidden items — otherwise saving the form while a device is offline deselects it for good, and it
+  gets no Web-IO commands or plan wiring when it returns. Flag a form that rebuilds a selection only from the
+  currently offered options (#220).
+- **One snapshot per layout:** positions that must fit together (member origins, pair rows, header offsets) come
+  from the same config read; mixing cached coordinator data with a fresh reload lets one block overlap another when
+  the data changed in between. A layout recomputed from changed data either keeps existing origins or moves the
+  elements already placed — never only adds new elements at the new origins. Flag positions computed from two
+  different data sources, and origin changes that leave placed elements where they were (#220).
+- **No guessed default on a missed lookup:** when the metadata of an item is gone (a removed IO, a vanished
+  device), derive its category from where it was found — the plan, class or member it sits in — instead of falling
+  back to a fixed default such as `WEBIO_CLASS_IO`; a wrong default routes the item to a path that never handles
+  it. Flag a fallback constant on a failed lookup where the context still tells the right answer (#220).
 - **Re-check under the lock:** state checked before waiting for a lock (an armed preview, a selection generation, a
   cached object, a running sync or restore) can change while waiting; check it again once the lock is held, as
   `plan_preview.async_follow_selection` does. Flag a check followed by `async with <lock>` without that re-check.
