@@ -98,8 +98,8 @@ The integration creates and manages a *Web-IO* device class in Comexio automatic
 | Entity | Description |
 |--------|-------------|
 | **WebIO Sync Start** | Triggers a delta or full-recreate sync. Unavailable while a sync is running. |
-| **WebIO Sync Cancel** | Cancels an in-progress sync. Only active during a running sync. |
-| **WebIO Sync Status** | Sensor reporting `idle`, `syncing`, or `error`. |
+| **WebIO Sync Cancel** | Cancels an in-progress sync. Only active during a running sync. The step already running finishes; no further Web-IO command, Web-IO class or function plan wiring stage starts. What already ran stays in place. The result opens with *Sync cancelled by user* and names what was left out: *Not synced* lists the Web-IO classes, *Not started* the wiring stages. The status sensor then shows `partial`. |
+| **WebIO Sync Status** | Sensor reporting `idle`, `syncing`, `partial` (shown as *Incomplete*: the run finished or was cancelled, but not everything was written) or `error` (the run aborted). |
 
 **Entity state details (developer tools):**
 
@@ -229,8 +229,8 @@ Die Integration erstellt und verwaltet eine *Web-IO*-Geräteklasse in Comexio vo
 | Entität | Beschreibung |
 |---------|--------------|
 | **WebIO Sync Start** | Startet einen Delta- oder Full-Recreate-Sync. Während des Syncs nicht verfügbar. |
-| **WebIO Sync Abbruch** | Bricht einen laufenden Sync ab. Nur während eines aktiven Syncs verfügbar. |
-| **WebIO Sync Status** | Sensor mit den Zuständen `idle`, `syncing` oder `error`. |
+| **WebIO Sync Abbruch** | Bricht einen laufenden Sync ab. Nur während eines aktiven Syncs verfügbar. Der gerade laufende Schritt läuft noch zu Ende; danach startet kein weiterer Web-IO-Befehl, keine weitere Web-IO-Klasse und keine weitere Verdrahtungsstufe der Logikpläne. Was schon gelaufen ist, bleibt bestehen. Das Ergebnis beginnt mit *Sync cancelled by user* und nennt, was ausgelassen wurde: *Not synced* die Web-IO-Klassen, *Not started* die Verdrahtungsstufen. Der Status-Sensor steht danach auf `partial`. |
+| **WebIO Sync Status** | Sensor mit den Zuständen `idle`, `syncing`, `partial` (angezeigt als *Unvollständig*: der Lauf ist fertig oder wurde abgebrochen, aber nicht alles wurde geschrieben) oder `error` (der Lauf brach ab). |
 
 **Entitätszustände (Entwickler-Werkzeuge):**
 
