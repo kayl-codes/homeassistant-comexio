@@ -27,6 +27,7 @@ from custom_components.comexio.const import (
     QUICKBUS_IO_DATA_KEY,
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
+    IoPlanKind,
     canvas_columns,
     io_plan_columns,
     io_plan_gap_item,
@@ -606,6 +607,30 @@ def test_sort_of_a_column_plan_without_its_data_is_skipped(quickbus_result: dict
     # Not the marker sort: that would scramble the column grid.
     assert positions == []
     assert "sort skipped" in sort_line
+
+
+@pytest.mark.parametrize(
+    ("kind", "members", "missing"),
+    [(IO_PLAN_KIND_QUICKBUS, ["1", "9", "3"], "QB9"), (IO_PLAN_KIND_IO, ["BASE", "UD9"], "UD9")],
+    ids=["quickbus_device", "io_extension"],
+)
+def test_sort_of_a_column_plan_with_a_member_without_data_is_skipped(
+    quickbus_result: dict[str, Any], kind: IoPlanKind, members: list[str], missing: str
+) -> None:
+    # The member is still in the plan but has no IOs in the data: its pairs would be parked off
+    # the grid and its header dropped (a Quickbus device below it would move into its slots).
+    coordinator = _coordinator({}, quickbus_result)
+    coordinator.managed_column_plan = lambda _fid: (kind, members)  # type: ignore[method-assign]
+    elements = {"1": {"reference": {"type": 1, "ref_id": 301}, "x": 0, "y": 0}}
+
+    positions, _n_pairs, _n_single, sort_line, _headers, _members = _sort_compute_positions(
+        coordinator, {"elements": elements, "connections": {}}, 5, 4000, 10, 10, FUNCTION_PLAN_LAYOUT_Y_STEP
+    )
+
+    assert positions == []
+    assert missing in sort_line
+    assert "sort skipped" in sort_line
+    assert "delete the plan in Comexio" in sort_line
 
 
 def test_missing_eta_counts_quickbus_plans_apart_from_io_plans() -> None:

@@ -2909,13 +2909,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """Resolve the column plans of one kind and add the pairs. Returns (lines, added, errors)."""
         ext_plans, created_plans, failed_exts = await self.coordinator.resolve_io_clusters(sorted(by_ext), kind)
         # Surface a resolve failure to the user, not just the log — see _wire_source_clusters.
+        # Each member as the user knows it: the extension name / "QB3 MT1", not a bare device id.
+        failed = {
+            one_line(kind.member_label(self.coordinator.data, ext)): reason for ext, reason in failed_exts.items()
+        }
         summary: list[str] = [
-            f"{ICON_WARNING} {kind.label} cluster plan for '{one_line(ext)}': {reason} — see log"
-            for ext, reason in failed_exts.items()
+            f"{ICON_WARNING} {kind.label} cluster plan for '{label}': {reason} — see log"
+            for label, reason in failed.items()
         ]
         errors = len(failed_exts)
         ctx.failed_writes.extend(
-            f"{kind.label} cluster plan for '{one_line(ext)}': {reason}" for ext, reason in failed_exts.items()
+            f"{kind.label} cluster plan for '{label}': {reason}" for label, reason in failed.items()
         )
         if not ext_plans:
             if not failed_exts:

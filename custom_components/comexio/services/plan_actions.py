@@ -416,11 +416,22 @@ def _column_plan_sort_skip(
 ) -> str | None:
     """Why the sort must leave a managed column plan as it is (the sort line), or None to sort it."""
     kind, members = column_plan
-    if not (coordinator.data or {}).get(kind.data_key):
+    data = coordinator.data or {}
+    if not data.get(kind.data_key):
         # No IO data (Quickbus import off, failed parse): the marker sort would scramble its column grid.
         return (
             f"Plan {fub_id} is a managed {kind.label} plan, but no {kind.label} IOs are loaded"
             " — sort skipped to keep its column grid."
+        )
+    if missing := [member for member in members if not kind.member_ios(data, member)]:
+        # A member without IO data gets no rows: its pairs would be parked off the grid, its header
+        # dropped and a stacked member below it moved up into its slots. A member removed from
+        # Comexio for good stays in the plan name, so the message names the way out.
+        names = ", ".join(one_line(kind.member_label(data, member)) for member in missing)
+        return (
+            f"Plan {fub_id} is a managed {kind.label} plan, but no IOs are loaded for {names}"
+            " — sort skipped to keep its column grid; if it was removed from Comexio,"
+            " delete the plan in Comexio to have the next sync lay it out afresh."
         )
     if overflow := coordinator.io_plan_overflow(members, kind, rows_per_col, max_cols):
         # Its grid would move these members' pairs off the canvas.

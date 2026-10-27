@@ -17,6 +17,7 @@ from custom_components.comexio.const import (
     IO_PLAN_KIND_QUICKBUS,
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
+    QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
     WebioClass,
 )
@@ -293,17 +294,22 @@ def test_sort_that_places_nothing_returns_why_it_skipped(sort_line: str, skipped
 
 @pytest.mark.parametrize("reason", [PLAN_FAILURE_OFF_CANVAS, PLAN_FAILURE_NOT_RESOLVED])
 def test_unwired_cluster_member_is_a_failed_step_with_its_reason(reason: str) -> None:
-    button = _button(resolve_io_clusters=AsyncMock(return_value=({}, set(), {"QB2": reason})))
+    button = _button(
+        resolve_io_clusters=AsyncMock(return_value=({}, set(), {"2": reason})),
+        data={QUICKBUS_IO_DATA_KEY: [{"quickbus": {"device_id": 2, "name": "MT1"}}]},
+    )
     ctx = _ctx()
 
     summary, added, errors = asyncio.run(
-        button._wire_io_kind_clusters(ctx, IO_PLAN_KIND_QUICKBUS, {"QB2": ["G1"]}, {})  # type: ignore[arg-type]
+        button._wire_io_kind_clusters(ctx, IO_PLAN_KIND_QUICKBUS, {"2": ["G1"]}, {})  # type: ignore[arg-type]
     )
 
+    # The device as the user knows it, not its bare id.
     label = IO_PLAN_KIND_QUICKBUS.label
-    assert ctx.failed_writes == [f"{label} cluster plan for 'QB2': {reason}"]
+    assert ctx.failed_writes == [f"{label} cluster plan for 'QB2 MT1': {reason}"]
     assert len(summary) == 1
     assert reason in summary[0]
+    assert "'QB2 MT1'" in summary[0]
     assert (added, errors) == (0, 1)
 
 
