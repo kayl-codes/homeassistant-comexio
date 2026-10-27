@@ -42,6 +42,7 @@ from custom_components.comexio.const import (
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.options_flow import (
+    ComexioOptionsFlow,
     _drop_unchanged_quickbus_default,
     _quickbus_device_options,
     _shown_quickbus_pick,
@@ -743,6 +744,28 @@ def test_the_shown_default_counts_even_after_a_poll_added_a_device(quickbus_resu
 
     assert not user_input
     assert selected_quickbus_devices(user_input, quickbus_result) == {"1", "2", "3"}
+
+
+@pytest.mark.parametrize(
+    ("submitted", "saved"),
+    [(["3", "1", "2"], None), (["1", "2"], ["1", "2"])],
+    ids=["unchanged_default", "deselected"],
+)
+def test_the_options_submit_keeps_an_unchanged_quickbus_default_implicit(
+    submitted: list[str], saved: list[str] | None
+) -> None:
+    # Through the real submit, not the helper alone: saving the shown default as a list would
+    # freeze it, and a Quickbus device added in Comexio later would get no value in HA.
+    flow = ComexioOptionsFlow(SimpleNamespace(entry_id="e1", data={}, options={"scan_interval": 15}))
+    flow.hass = SimpleNamespace(config=SimpleNamespace(external_url=None))  # type: ignore[assignment]
+    flow.async_create_entry = MagicMock(side_effect=lambda **kw: kw)  # type: ignore[method-assign]
+    flow._quickbus_shown = _SHOWN
+    submit = flow._async_submit_init({CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: submitted}, {}, {}, set())
+
+    data = asyncio.run(submit)["data"]
+
+    assert data["scan_interval"] == 15
+    assert data.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES) == saved
 
 
 def test_an_empty_pick_is_saved_even_when_nothing_was_shown() -> None:

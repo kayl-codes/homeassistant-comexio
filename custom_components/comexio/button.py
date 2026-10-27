@@ -971,7 +971,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # its commands are no orphans and are left to the import_disabled repair). An opted-out class
         # with no server device is skipped entirely — _decide_effective_action force-"recreate"s
         # any class with no device, so including it would create it on the live server. The same
-        # holds for the Quickbus class while the server has no Quickbus IO (required_webio_classes).
+        # holds for the Quickbus class while the server has no Quickbus IO, and for a class without a
+        # wanted command, as Comexio creates no device for an empty class (required_webio_classes).
         opted_in = set(self.coordinator.required_webio_classes)
         active_classes = tuple(c for c in WEBIO_CLASSES if c in opted_in or dev_ids.get(c))
         if not active_classes:

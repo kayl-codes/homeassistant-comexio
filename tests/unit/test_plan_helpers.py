@@ -136,6 +136,19 @@ def test_joins_in_one_run_keep_only_the_final_plan_name() -> None:
     coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A,B,C]": 47}, removals={"HA - IO [A]"})
 
 
+def test_a_rename_before_a_failing_placement_still_reaches_plan_map() -> None:
+    # B joins plan 47 (renamed in Comexio to [A,B]), then creating a plan for C fails hard: plan_map
+    # must know plan 47 by its new name, or the watchdog reports it lost until the next sync.
+    coordinator = _cluster_coordinator("HA - IO [A]", 100, dict.fromkeys("ABC", 4))
+    coordinator._create_managed_plan = AsyncMock(side_effect=RuntimeError("connection lost"))
+    resolve = coordinator.resolve_io_clusters(["A", "B", "C"])
+
+    with pytest.raises(RuntimeError, match="connection lost"):
+        asyncio.run(resolve)
+
+    coordinator._persist_plan_map.assert_awaited_once_with({"HA - IO [A,B]": 47}, removals={"HA - IO [A]"})
+
+
 def test_quickbus_devices_join_a_plan_while_its_column_holds_them() -> None:
     # One column of 10 rows: device 1 (4 rows) is placed; device 2 (4) stacks below it after a
     # blank row; device 3 (3) no longer fits and opens a fresh plan.

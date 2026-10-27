@@ -1759,11 +1759,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         opted-out category (e.g. KNX by default) has no Web-IO device on the server by design,
         and flagging that as missing would wipe last_audit_results on every poll (see
         active_webio_classes docstring), and the Quickbus class only with a Quickbus IO
-        (required_webio_classes).
+        (required_webio_classes), and no class without a wanted command (_webio_classes_with_commands).
         """
-        missing_classes = [
+        without_device = [
             cls for cls in required_webio_classes(conf, final_data) if not webio_devices.get(cls, {}).get("device_id")
         ]
+        missing_classes = list(self._webio_classes_with_commands(without_device, final_data))
         if not missing_classes:
             return False
         self.last_audit_results = {}
@@ -6695,7 +6696,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def required_webio_classes(self) -> tuple[WebioClass, ...]:
         """Opted-in classes that must exist on the server (see required_webio_classes() in const.py)."""
         conf = {**self.config_entry.data, **self.config_entry.options}
-        return required_webio_classes(conf, self.data or {})
+        data = self.data or {}
+        return self._webio_classes_with_commands(required_webio_classes(conf, data), data)
+
+    def _webio_classes_with_commands(
+        self, classes: Iterable[WebioClass], data: dict[str, Any]
+    ) -> tuple[WebioClass, ...]:
+        """classes less those with no wanted Web-IO command (e.g. KNX with every object ignored).
+
+        Comexio creates no device instance for an empty class: reported missing, it would be a
+        repair no sync can fix, and the sync's recreate of it would fail. Without data (no poll yet)
+        nothing is known to be empty, so every class stays.
+        """
+        if not data:
+            return tuple(classes)
+        source = self.webio_source_data(data)
+        return tuple(
+            cls
+            for cls in classes
+            if self.api.build_webio_commands(
+                self.server_id,
+                source,
+                webio_class=cls,
+                ignored_marker_ids=self.ignored_marker_ids,
+                ignored_knx_ids=self.ignored_knx_ids,
+            )
+        )
 
     async def async_check_ignored_sources(
         self,
@@ -7571,30 +7597,45 @@ class ComexioCoordinator(DataUpdateCoordinator):
         fresh_orientations: dict[int, str] = {}
         created_plans: set[int] = set()
         failed_exts: dict[str, str] = {}
+        members_before = {fid: list(members) for fid, members in membership.items()}
 
-        for ext in ext_names:
-            fub_id: int | str | None = next((fid for fid, members in membership.items() if ext in members), None)
-            if fub_id is None:
-                fub_id = await self._place_new_io_member(ext, membership, capacity, prefix, kind, fresh_orientations)
-            if isinstance(fub_id, str):
-                failed_exts[ext] = fub_id
-                continue
-            placed_in[ext] = fub_id
-            if fub_id not in membership:
-                created_plans.add(fub_id)
-                membership[fub_id] = [ext]
+        try:
+            for ext in ext_names:
+                fub_id: int | str | None = next((fid for fid, members in membership.items() if ext in members), None)
+                if fub_id is None:
+                    fub_id = await self._place_new_io_member(
+                        ext, membership, capacity, prefix, kind, fresh_orientations
+                    )
+                if isinstance(fub_id, str):
+                    failed_exts[ext] = fub_id
+                    continue
+                placed_in[ext] = fub_id
+                if fub_id not in membership:
+                    created_plans.add(fub_id)
+                    membership[fub_id] = [ext]
+        finally:
+            # Also when the run stops part-way (an error, HA shutting down): a plan already renamed
+            # in Comexio left in plan_map under its old name only would read as lost to the watchdog.
+            changed = {fid for fid, members in membership.items() if members != members_before.get(fid)}
+            await self._persist_io_plan_names(prefix, kind, membership, changed | set(placed_in.values()), stale)
 
         result = self._io_member_slots(placed_in, membership, kind, fresh_orientations, failed_exts)
+        return result, created_plans, failed_exts
 
-        # Final names only: several joins in one run rename a plan step by step, and the names it
-        # carried before ([1], [1,2]) are no plan any more — left in plan_map, the watchdog warned
-        # about each of them.
-        final_names = {fid: self._io_plan_name(prefix, membership[fid], kind) for fid in set(placed_in.values())}
+    async def _persist_io_plan_names(
+        self, prefix: str, kind: IoPlanKind, membership: dict[int, list[str]], fub_ids: set[int], stale: dict[str, int]
+    ) -> None:
+        """Write the final names of these IO plans to plan_map, dropping stale and superseded names.
+
+        Final names only: several joins in one run rename a plan step by step, and the names it
+        carried before ([1], [1,2]) are no plan any more — left in plan_map, the watchdog warned
+        about each of them.
+        """
+        final_names = {fid: self._io_plan_name(prefix, membership[fid], kind) for fid in fub_ids}
         plan_map_updates = {name: fid for fid, name in final_names.items()}
         removals = set(stale) | self._superseded_plan_map_names(final_names)
         if plan_map_updates or removals:
             await self._persist_plan_map(plan_map_updates, removals=removals)
-        return result, created_plans, failed_exts
 
     async def _place_new_io_member(
         self,
