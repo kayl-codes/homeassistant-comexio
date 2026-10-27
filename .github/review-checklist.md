@@ -222,8 +222,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   covers every branch that would write it, not just one of them: `_decide_effective_action` checks
   `_class_template_empty` before the no-device recreate (the class is skipped, Comexio creates no device for an
   empty class) as well as before Fast-Track. What the guard prevents depends on the branch: a class that still has a
-  device is not skipped but delta-synced without Fast-Track, so the commands the changed selection dropped are
-  deleted on Comexio. Flag a guard that only one of several writing branches passes through, a guard that also
+  device is not skipped but delta-synced without Fast-Track, which deletes the orphans its start-of-sync audit
+  (`last_audit_results`) captured; a command dropped after that audit stays on Comexio until a later audit captures
+  it. Flag a guard that only one of several writing branches passes through, a guard that also
   skips the cleanup an existing item still needs, and an item written on the strength of a decision taken before
   the loop (#220).
 - **Unload waits for running work:** `async_unload_entry` calls `coordinator.async_wait_before_unload()` before it
