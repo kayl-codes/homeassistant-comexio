@@ -841,6 +841,8 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
 
     assert render.call_args.args[7] == title
     assert render.call_args.kwargs["canvas"] == canvas
+    # comexio-plan-card.js (orphanPreviewMatch) matches the shown image against this source.
+    coordinator._async_publish_plan_preview.assert_awaited_once_with(7, "Lights", "orphan:auto:0", "<svg/>")
 
 
 def test_a_backup_preview_without_a_known_format_names_none() -> None:

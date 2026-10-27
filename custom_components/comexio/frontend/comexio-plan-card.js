@@ -29,12 +29,18 @@
 // changes: the card file itself is deployed under a new versioned name each release, but this
 // sibling keeps its name, so a browser would otherwise pair the new card with a cached old
 // utils module (v0.9.32: "does not provide an export named 'isTextQuery'").
-import { matchesPattern, matchesElement, isTextQuery, fmtTs } from "./comexio-plan-card-utils.js?v=0.9.42";
+import {
+  matchesPattern,
+  matchesElement,
+  isTextQuery,
+  fmtTs,
+  orphanPreviewMatch,
+} from "./comexio-plan-card-utils.js?v=0.9.50";
 
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.49";
+const CARD_VERSION = "0.9.50";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -382,6 +388,7 @@ class ComexioPlanCard extends HTMLElement {
     this._keepaliveDeferred = false; // a keepalive answered during a start: re-sent once the starts settle
     this._startRetryAfter = 0; // Date.now() before which an unarmed start is not retried on that instance
     this._keepaliveWarned = false; // a failing keepalive warns once until one is answered again
+    this._shownPreview = null; // {fub_id, plan_name, source} of the image on screen (null: none / not reported)
   }
 
   setConfig(config) {
@@ -604,6 +611,8 @@ class ComexioPlanCard extends HTMLElement {
         .backup-row .orphan-btn:hover:not(:disabled) { border-color: var(--primary-color, #03a9f4); color: var(--primary-color, #03a9f4); }
         .backup-row .orphan-btn ha-icon { --mdc-icon-size: 18px; }
         .backup-row .orphan-btn:disabled { opacity: 0.4; cursor: default; }
+        /* The preview image does not show the chosen row (see _orphanPreviewWarning). */
+        .backup-row .orphan-btn.preview-mismatch { border-color: var(--warning-color, #ffa600); }
 
         .restore-dialog {
           border: 1px solid var(--divider-color, #888); border-radius: 8px; padding: 16px;
@@ -739,6 +748,7 @@ class ComexioPlanCard extends HTMLElement {
       <dialog class="restore-dialog orphan-dialog">
         <h3 class="orphan-dialog-title"></h3>
         <p class="orphan-dialog-text"></p>
+        <div class="restore-block-hint orphan-dialog-warning" hidden></div>
         <div class="restore-actions">
           <button class="orphan-dialog-cancel">Abbrechen</button>
           <button class="restore-confirm orphan-dialog-confirm"></button>
@@ -787,6 +797,7 @@ class ComexioPlanCard extends HTMLElement {
     this._orphanDialogTitleEl = root.querySelector(".orphan-dialog-title");
     this._orphanDialogTextEl = root.querySelector(".orphan-dialog-text");
     this._orphanDialogConfirmEl = root.querySelector(".orphan-dialog-confirm");
+    this._orphanDialogWarningEl = root.querySelector(".orphan-dialog-warning");
     root.querySelector(".orphan-dialog-cancel").addEventListener("click", () => this._orphanDialog.close());
     this._orphanDialogConfirmEl.addEventListener("click", () => this._confirmOrphanAction());
     this._orphanDialog.addEventListener("click", (ev) => {
@@ -1177,6 +1188,10 @@ class ComexioPlanCard extends HTMLElement {
       msg.className = "msg";
       msg.textContent = `Keine Vorschau verfügbar (${this._config.entity}: ${st ? st.state : "nicht gefunden"}).`;
       this._planEl.replaceChildren(msg);
+      if (this._shownPreview) {
+        this._shownPreview = null;
+        this._updateBackupRow();
+      }
       return;
     }
     if (st.state === this._stamp) {
@@ -1196,6 +1211,7 @@ class ComexioPlanCard extends HTMLElement {
       return;
     }
     const seq = ++this._fetchSeq;
+    const identity = this._previewIdentity(stamp);
     this._cancelRetry(); // this fetch supersedes a pending retry
     this._refetchOnConnect = false;
     this._inFlight = true;
@@ -1235,6 +1251,10 @@ class ComexioPlanCard extends HTMLElement {
       this._loadIfNewer(stamp);
       return;
     }
+    // The image serves the newest render, not necessarily the stamp it was fetched by: with a
+    // newer stamp waiting, the identity is unknown until _loadIfNewer's fetch lands.
+    this._shownPreview = stamp === this._stamp ? identity : null;
+    this._updateBackupRow();
     if (this._failures > 0) {
       console.info(`comexio-plan-card: preview loaded again after ${this._failures} failed attempt(s)`);
       this._failures = 0;
@@ -1329,6 +1349,18 @@ class ComexioPlanCard extends HTMLElement {
     }
   }
 
+  // Which plan the preview image entity reports for this stamp — taken when the fetch starts,
+  // so the image swapped in later keeps the identity it was fetched as. Null when the state
+  // moved on meanwhile or the entity reports none (an integration without these attributes).
+  _previewIdentity(stamp) {
+    const st = this._hass?.states[this._config.entity];
+    if (st?.state !== stamp) {
+      return null;
+    }
+    const { fub_id: fubId, plan_name: planName, source } = st.attributes;
+    return { fub_id: fubId, plan_name: planName, source };
+  }
+
   _cancelRetry() {
     if (this._retryTimer) {
       clearTimeout(this._retryTimer);
@@ -1382,6 +1414,12 @@ class ComexioPlanCard extends HTMLElement {
       btn.hidden = !orphanView;
       // Locked while a delete/keep call runs, so a second click cannot act on a stale row.
       btn.disabled = !orphan || !!this._orphanBusy;
+      btn.classList.remove("preview-mismatch");
+    }
+    // An open dialog keeps the row it was opened for (_confirmOrphanAction acts on that one),
+    // also when the selection moved on meanwhile.
+    if (this._orphanDialog.open && this._orphanAction) {
+      this._showOrphanDialogWarning(this._orphanAction);
     }
     if (!orphan) {
       return;
@@ -1396,6 +1434,51 @@ class ComexioPlanCard extends HTMLElement {
       ? `Backups von „${orphan.plan_name}“ nicht mehr dauerhaft behalten`
       : `Backups von „${orphan.plan_name}“ dauerhaft behalten (keine Nachfrage, kein Aufräumen)`;
     this._orphanKeepBtn.querySelector("ha-icon").setAttribute("icon", orphan.kept ? "mdi:pin-off" : "mdi:pin");
+    for (const [btn, action] of [
+      [this._orphanDeleteBtn, "delete"],
+      [this._orphanDeleteAllBtn, "delete_all"],
+      [this._orphanKeepBtn, "keep"],
+    ]) {
+      const warning = this._orphanPreviewWarning(action, orphan);
+      if (warning) {
+        btn.classList.add("preview-mismatch");
+        btn.title += `
+
+${warning}`;
+      }
+    }
+  }
+
+  // Warning text when the preview image does not show what a delete/keep action of the
+  // orphaned-plans view acts on, else null. The user judges the row by that image, but it can
+  // lag behind the choice: the render of the neighbour picked after "delete all" failed, a
+  // fetch failed, or the image still shows a plan from before. Delete (one backup) needs the
+  // very snapshot; delete all / keep act on the whole plan, so any of its backups will do.
+  // A trigger-only card shows no image, so there is nothing to mismatch.
+  _orphanPreviewWarning(action, orphan) {
+    if (this._minimal) {
+      return null;
+    }
+    const match = orphanPreviewMatch(this._shownPreview, orphan);
+    if (match === "match" || (match === "other_snapshot" && action !== "delete")) {
+      return null;
+    }
+    if (match === "unknown") {
+      return "Achtung: Die Vorschau hat diese Auswahl (noch) nicht geladen — das Bild kann einen anderen Plan zeigen.";
+    }
+    const shown = this._shownPreview;
+    const liveSuffix = shown.source === "live" ? ", Live-Stand" : "";
+    const what =
+      match === "other_snapshot"
+        ? `ein anderes Backup von „${shown.plan_name}“`
+        : `„${shown.plan_name}“ (ID ${shown.fub_id})${liveSuffix}`;
+    return `Achtung: Die Vorschau zeigt nicht diese Auswahl, sondern ${what}. Bitte die Auswahl prüfen.`;
+  }
+
+  _showOrphanDialogWarning({ action, orphan }) {
+    const warning = this._orphanPreviewWarning(action, orphan);
+    this._orphanDialogWarningEl.hidden = !warning;
+    this._orphanDialogWarningEl.textContent = warning ?? "";
   }
 
   // Texts of the delete / delete-all / keep confirmation dialog of the orphaned-plans view.
@@ -1441,6 +1524,7 @@ class ComexioPlanCard extends HTMLElement {
     this._orphanDialogTitleEl.textContent = title;
     this._orphanDialogTextEl.textContent = text;
     this._orphanDialogConfirmEl.textContent = confirm;
+    this._showOrphanDialogWarning(this._orphanAction);
     this._orphanDialog.showModal();
   }
 
@@ -1471,8 +1555,15 @@ class ComexioPlanCard extends HTMLElement {
     }
     this._orphanBusy = true;
     this._updateBackupRow();
+    const shownBefore = this._shownPreview;
     try {
       await this._hass.callService("comexio", service, data);
+      if (action !== "keep" && this._shownPreview === shownBefore) {
+        // Slots are list positions: after a delete the next backup moves into the shown
+        // image's slot, so its identity would match a row it does not show. The next render
+        // sets it again (one that landed during the call already did — kept).
+        this._shownPreview = null;
+      }
     } catch (err) {
       console.warn(`comexio-plan-card: ${service} failed`, err);
     } finally {
