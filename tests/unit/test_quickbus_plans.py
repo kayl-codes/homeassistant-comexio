@@ -394,7 +394,10 @@ def test_the_sort_skips_a_plan_whose_first_device_left_a_shrunk_canvas(
 
     line = _column_plan_sort_skip(coordinator, 7, (IO_PLAN_KIND_QUICKBUS, ["1"]), 1, 1)
 
-    assert (line is not None and "no longer fit its 1 columns" in line) is skipped
+    if skipped:
+        assert "QB1 MT Flur no longer fit its 1 columns" in (line or "")
+    else:
+        assert line is None
 
 
 # --- repair text ---
@@ -813,7 +816,11 @@ def test_the_options_submit_keeps_an_unchanged_quickbus_default_implicit(
     data = asyncio.run(submit)["data"]
 
     assert data["scan_interval"] == 15
-    assert data.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES) == saved
+    # Absent, not None: selected_quickbus_devices would iterate a stored None.
+    if saved is None:
+        assert CONF_FUNCTION_PLAN_QUICKBUS_DEVICES not in data
+    else:
+        assert data[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES] == saved
 
 
 def test_an_empty_pick_is_saved_even_when_nothing_was_shown() -> None:
