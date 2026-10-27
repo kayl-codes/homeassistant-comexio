@@ -6,14 +6,16 @@ import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from aiocomexio import ComexioConnectionError
+from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
+from homeassistant.helpers.update_coordinator import UpdateFailed
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.binary_sensor import ComexioBinarySensor
 from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY
 from custom_components.comexio.coordinator import ComexioCoordinator, _io_label, _io_live_requests
+from custom_components.comexio.switch import ComexioIOSwitch
 from tests.common import load_json_fixture
-from tests.unit.conftest import QUICKBUS_IO_INPUT_TYPES, QUICKBUS_IO_TYPES
 
 # config_basic: BASE (extension 1, online) carries I1=11, Q1=12, AI1=13 and the inactive Q2=14;
 # UD 1 (extension 2) is offline and carries QI1=21. Config page values: I1 "1", Q1 0, AI1 "21,5", QI1 "55".
@@ -444,9 +446,8 @@ def test_an_io_that_left_the_request_is_not_reported_as_recovered(
 
 
 @pytest.fixture
-def quickbus_api(api: ComexioAPI) -> ComexioAPI:
-    api.io_types = QUICKBUS_IO_TYPES
-    api.io_input_types = QUICKBUS_IO_INPUT_TYPES
+def quickbus_api(api: ComexioAPI, quickbus_parsing_api: ComexioAPI) -> ComexioAPI:
+    """api (a client mock) with the Quickbus IO type tables; both fixtures are the same parsing_api."""
     return api
 
 
@@ -494,3 +495,81 @@ def test_an_unanswered_quickbus_io_is_logged_with_its_device() -> None:
 
     assert _io_label(io) == "QB2 MT Bad G1"
     assert _io_label({"id": "11", "ext_name": "BASE", "identifier": "I1", "quickbus": None}) == "BASE I1"
+
+
+def test_webhook_value_during_a_failed_io_fetch_is_kept_as_real(api: ComexioAPI) -> None:
+    """R1 with a failed fetch: the last known values are read after the await, so the push counts."""
+    coordinator = _coordinator(api)
+    coordinator._io_index = {("base", "ai1"): {"id": "13", "ext_name": "BASE", "identifier": "AI1"}}
+
+    async def push_then_fail(_requests: list[tuple[int, str]]) -> None:
+        coordinator.update_io_by_name("BASE", "AI1", 99.0)
+
+    ios, _markers, _fetch = _poll(coordinator, _config(), AsyncMock(side_effect=push_then_fail))
+
+    assert (ios["13"]["value"], coordinator.io_states["13"]) == (99.0, 99.0)
+    assert coordinator._io_real_value_ids == {"13"}
+
+
+def test_a_pushed_quickbus_value_survives_a_failed_io_fetch(quickbus_api: ComexioAPI) -> None:
+    """A Quickbus push is a real reading: the next poll whose live fetch fails keeps it, never the placeholder."""
+    coordinator = _coordinator(quickbus_api)
+    _poll(coordinator, load_json_fixture("config_quickbus.json"), {})
+    coordinator._quickbus_index = {"301": {"id": "301", "name": "BM Diele PIR1"}}
+    coordinator.update_quickbus_io(301, 1)
+    coordinator._webhook_updated_io_ids.clear()  # what _async_update_data does before the next fetch
+
+    ios, _markers, _fetch = _poll(coordinator, load_json_fixture("config_quickbus.json"), ComexioConnectionError("x"))
+
+    assert (ios["301"]["value"], coordinator.io_states["301"], ios["201"]["value"]) == (1, 1, None)
+    assert "301" in coordinator._io_real_value_ids
+
+
+def test_quickbus_ios_are_not_asked_for_while_the_quickbus_import_is_off(quickbus_api: ComexioAPI) -> None:
+    coordinator = _coordinator(quickbus_api)
+    _ios, _markers, fetch = _poll(
+        coordinator, load_json_fixture("config_quickbus.json"), {"11": "1"}, entry_conf={"import_quickbus": False}
+    )
+
+    fetch.assert_awaited_once_with([(1, "11")])
+    assert coordinator.io_states["11"] == 1.0
+
+
+def test_an_answer_for_an_io_not_asked_for_is_ignored(api: ComexioAPI) -> None:
+    """The offline extension's QI1 was not requested: a value for it in the answer must not replace its last one."""
+    coordinator = _coordinator(api, io_states={"21": 40.0})
+    ios, _markers, _fetch = _poll(coordinator, _config(), {"11": "1", "21": "99"})
+
+    assert (ios["21"]["value"], coordinator.io_states["21"]) == (40.0, 40.0)
+
+
+@pytest.mark.parametrize(
+    ("value", "switch_on", "binary_on"),
+    [(None, None, None), ("abc", None, None), ("", None, None), ([1], None, None)]
+    + [(0.0, False, False), (1.0, True, True), (0.5, False, True)],
+)
+def test_io_entities_read_unknown_for_a_missing_or_non_numeric_value(
+    value: Any, switch_on: bool | None, binary_on: bool | None
+) -> None:
+    """No value is "unknown" (#175), never off; a relay is on from 1, a binary input above 0."""
+    coordinator = MagicMock(io_states={} if value is None else {"11": value})
+    switch = ComexioIOSwitch.__new__(ComexioIOSwitch)
+    binary = ComexioBinarySensor.__new__(ComexioBinarySensor)
+    for entity in (switch, binary):
+        entity.coordinator = coordinator
+        entity._io_id = "11"
+
+    assert (switch.is_on, binary.is_on) == (switch_on, binary_on)
+
+
+def test_another_certificate_on_the_io_fetch_fails_the_poll(api: ComexioAPI) -> None:
+    """Kept IO values must not pass as current ones while another certificate answers (like the marker fetch)."""
+    coordinator = _coordinator(api, io_states={"13": 18.25})
+    coordinator._report_certificate_changed = MagicMock()
+    err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+    conf = _config()
+
+    with pytest.raises(UpdateFailed, match="another certificate"):
+        _poll(coordinator, conf, err)
+
+    coordinator._report_certificate_changed.assert_called_once_with("b" * 64)

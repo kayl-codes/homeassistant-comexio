@@ -1488,14 +1488,23 @@ class ComexioAPI:
         absent. None on any fetch/parse failure — never {} — for the same reason as
         get_live_states: the caller keeps the last known values instead of reading 0. A fetch
         failure is logged at DEBUG only and its cause kept in io_live_fetch_error — the coordinator
-        reports it with the server context, once per outage. A request aiocomexio refuses as
-        contradictory (ValueError, e.g. one IO id under two extensions) is such a failure too, not a
-        reason to fail the whole poll; parse_config already leaves such IOs out, so a
-        ValueError here points to a bug — its cause names it in that same warning.
+        reports it with the server context, once per outage. Another certificate than the pinned
+        one is kept like in get_live_states, so the coordinator fails the poll. A request aiocomexio
+        refuses as contradictory (ValueError, e.g. one IO id under two extensions) is a failed fetch
+        too, not a failed poll; parse_config already leaves such IOs out, so it points to a bug and
+        is logged at ERROR with its traceback.
         """
         try:
             states = await self.client.get_io_live_states(ios)
-        except (ComexioError, ValueError) as err:
+        except ComexioCertificateMismatchError as err:
+            self.io_live_fetch_error = f"{type(err).__name__}: {err}"
+            self._note_certificate_mismatch(err, "IO live states not fetched")
+            return None
+        except ValueError as err:
+            self.io_live_fetch_error = f"{type(err).__name__}: {err}"
+            _LOGGER.error("IO live states request refused: %s", err, exc_info=True)
+            return None
+        except ComexioError as err:
             self.io_live_fetch_error = f"{type(err).__name__}: {err}"
             _LOGGER.debug("IO live states fetch failed: %s", self.io_live_fetch_error, exc_info=True)
             return None

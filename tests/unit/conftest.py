@@ -45,11 +45,17 @@ QUICKBUS_IO_INPUT_TYPES = {"1": {"input": True}, "12": {"input": True}, "111": {
 
 
 @pytest.fixture
-def quickbus_result(parsing_api: ComexioAPI) -> dict[str, Any]:
-    """parse_config() result of the synthetic Quickbus installation (config_quickbus.json)."""
+def quickbus_parsing_api(parsing_api: ComexioAPI) -> ComexioAPI:
+    """parsing_api with the IO type tables of the synthetic Quickbus installation (config_quickbus.json)."""
     parsing_api.io_types = QUICKBUS_IO_TYPES
     parsing_api.io_input_types = QUICKBUS_IO_INPUT_TYPES
-    return parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
+    return parsing_api
+
+
+@pytest.fixture
+def quickbus_result(quickbus_parsing_api: ComexioAPI) -> dict[str, Any]:
+    """parse_config() result of the synthetic Quickbus installation (config_quickbus.json)."""
+    return quickbus_parsing_api.parse_config(load_json_fixture("config_quickbus.json"))
 
 
 @pytest.fixture(autouse=True)

@@ -1428,7 +1428,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if conf.get(_IMPORT_IOS_KEY, True) or conf.get(_IMPORT_QUICKBUS_KEY, True):
             # Quickbus IOs share io_states with the physical IOs, so their poll value is a placeholder too.
             imported = _imported_data(parsed_data, conf)
-            await self._async_apply_io_live_states([*imported["io"], *imported[QUICKBUS_IO_DATA_KEY]])
+            await self._async_apply_io_live_states(
+                [*imported["io"], *imported[QUICKBUS_IO_DATA_KEY]], mismatches_before
+            )
         else:
             # IO and Quickbus import off: nobody shows these IOs, so no Comexio round-trip and no warnings for them.
             self._reset_io_live_tracking()
@@ -1440,8 +1442,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._unanswered_io_ids = set()
         self._io_live_fetch_failing = False
 
-    async def _async_apply_io_live_states(self, ios: list[dict[str, Any]]) -> None:
-        """Live IO values from their own dashboard refresh, over parse_config's placeholder (#175)."""
+    async def _async_apply_io_live_states(self, ios: list[dict[str, Any]], mismatches_before: int) -> None:
+        """Live IO values from their own dashboard refresh, over parse_config's placeholder (#175).
+
+        mismatches_before: as for _fail_poll_on_certificate_mismatch.
+        """
         if not ios:
             # No IO scraped (no IOs at all, or a get_raw_config blip returned {}): nothing to ask
             # for, and the trackers stay as they are — resetting them would repeat their warnings
@@ -1453,6 +1458,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
         known = {io_id: value for io_id, value in self.io_states.items() if io_id in self._io_real_value_ids}
         if io_live_states is None:
+            # Kept values must not pass as current ones while another certificate answers.
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
             self._log_io_live_fetch_failed(ios, known)
         else:
             if self._io_live_fetch_failing:
