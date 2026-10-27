@@ -35,7 +35,9 @@ from .const import (
     FUNCTION_PLAN_CHANGE_BACKUP_SLOTS,
     TIMESTAMP_DISPLAY_FORMAT,
     distinct_one_line,
+    function_plan_info,
     one_line,
+    unreadable_plan_keys,
 )
 from .function_plan_block_keys import (
     NO_FUB_BASE,
@@ -278,7 +280,7 @@ def is_orphaned_identity(fub_data: dict[str, Any] | None, fub_id: int, plan_name
     makes every identity orphaned. A fub_id that now carries a different name counts as
     orphaned (ID reused).
     """
-    return fub_data is not None and fub_data.get(str(fub_id), {}).get("Name") != plan_name
+    return fub_data is not None and function_plan_info(fub_data, fub_id).get("Name") != plan_name
 
 
 def _newest_orphaned_in_store(
@@ -385,6 +387,19 @@ def _paper_format_changed(previous: Mapping[str, Any], current: tuple[Any, Any, 
     return stored != (str(current[0]), int(current[1]), str(current[2]))
 
 
+def _auto_backup_plan_name(fub_data: dict[str, Any], key: str, list_unreadable: bool) -> str | None:
+    """The name plan key is backed up under (its ID when unlisted), None while its entry is or may be unreadable.
+
+    An unreadable entry would store the plan under the bogus identity (id, "id"); the poll warns about it.
+    """
+    if key not in fub_data and not list_unreadable:
+        return key
+    if info := function_plan_info(fub_data, key):
+        return info.get("Name", key)
+    _LOGGER.debug("Auto backup skips plan %s: its plan list entry %r is unreadable", key, fub_data.get(key))
+    return None
+
+
 def _auto_backup_reason(
     history: list[dict[str, Any]],
     new_hash: str,
@@ -473,7 +488,9 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
 
     One plan row per orphaned identity (see FunctionPlanBackupManager.orphaned_plans_sync),
     followed by its indented snapshot rows. choice carries the identity plus the kind/slot to
-    show; a plan row shows the plan's newest snapshot. Shared by select.py (options) and
+    show and that snapshot's captured_at — slots are list positions that shift after a delete,
+    the capture time names the snapshot itself (comexio-plan-card.js compares it with the preview
+    image's). A plan row shows the plan's newest snapshot. Shared by select.py (options) and
     button.py (resolving the chosen label back), like format_backup_label. Labels must be
     unique select options, but two plans changed in the same minute share a snapshot row
     label — a repeat gets its plan appended. Names that differ only in line breaks or spacing
@@ -485,15 +502,18 @@ def build_orphaned_backup_options(orphans: list[dict[str, Any]]) -> list[tuple[s
         identity = {"fub_id": orphan["fub_id"], "plan_name": orphan["plan_name"], "kept": orphan["kept"]}
         backups = orphan["backups"]
         newest = max(backups, key=lambda entry: entry.get("captured_at") or "")
-        plan_choice = {**identity, "kind": newest["kind"], "slot": newest["slot"], "plan_row": True}
-        rows.append((_orphan_plan_label(orphan), plan_choice))
+        rows.append((_orphan_plan_label(orphan), {**identity, **_orphan_snapshot_ref(newest), "plan_row": True}))
         for entry in backups:
             label = f"{_ORPHAN_SNAPSHOT_INDENT}{format_backup_label(entry)}"
             if label in seen:
                 label += f" · {distinct_one_line(orphan['plan_name'])} (ID {orphan['fub_id']})"
             seen.add(label)
-            rows.append((label, {**identity, "kind": entry["kind"], "slot": entry["slot"], "plan_row": False}))
+            rows.append((label, {**identity, **_orphan_snapshot_ref(entry), "plan_row": False}))
     return rows
+
+
+def _orphan_snapshot_ref(entry: dict[str, Any]) -> dict[str, Any]:
+    return {"kind": entry["kind"], "slot": entry["slot"], "captured_at": entry.get("captured_at")}
 
 
 def summarize_orphaned_backups(orphans: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
@@ -712,10 +732,13 @@ class FunctionPlanBackupManager:
             return []
         changed_identities: list[dict[str, Any]] = []
         rollback: list[tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]] = []
+        # Any unreadable entry may be an unlisted plan's ("08" for 8): its name is unknown then.
+        list_unreadable = bool(unreadable_plan_keys(fub_data))
         for fub_id, plan_data in plans.items():
             key = str(fub_id)
+            if (plan_name := _auto_backup_plan_name(fub_data, key, list_unreadable)) is None:
+                continue
             new_hash = plan_hash(plan_data)
-            plan_name = fub_data.get(key, {}).get("Name", key)
             history = self._auto_data.setdefault(key, {}).setdefault(plan_name, [])
             plan_settings = _plan_settings(block_settings, plan_data)
             plan_configs = _plan_module_configs(module_configs, plan_data)
@@ -852,11 +875,19 @@ class FunctionPlanBackupManager:
         if held_back is not None and held_back():
             _LOGGER.debug("[%s] Function Plan paper/DPI backfill skipped: a restore ran meanwhile", self._server_id)
             return 0
+        if bad_keys := unreadable_plan_keys(fub_data):
+            # An unreadable entry may be any backed-up plan: it would read as deleted and get the fallback.
+            _LOGGER.debug(
+                "[%s] Function Plan paper/DPI backfill skipped: plan list entries %r are unreadable",
+                self._server_id,
+                bad_keys,
+            )
+            return 0
         filled = 0
         for data, store in ((self._auto_data, self._auto_store), (self._change_data, self._change_store)):
             group_filled: list[dict[str, Any]] = []
             for key, identities in data.items():
-                live_name = fub_data.get(key, {}).get("Name")
+                live_name = function_plan_info(fub_data, key).get("Name")
                 live_format = plan_format.get(key)
                 if live_name is not None and live_format is None:
                     _LOGGER.debug(

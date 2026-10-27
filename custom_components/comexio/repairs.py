@@ -54,11 +54,13 @@ from .const import (
     ICON_RENAME,
     ICON_ROCKET,
     ICON_SYNC,
+    ICON_WARNING,
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
     ISSUE_UNINSTALL_CLEANUP,
     MARKER_READ_ONLY_SUFFIX,
     MARKER_TRIGGER_SUFFIXES,
+    PLAN_WIRING_ACTIONS,
     SOURCE_CATEGORIES,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
@@ -78,6 +80,7 @@ from .const import (
     split_ignored_ids,
     uninstall_cleanup_notification_id,
     uninstall_cleanup_pending_notification_id,
+    unreadable_plan_keys,
 )
 from .function_plan_backup import PlanBackupsNotMovedError, is_orphaned_identity
 from .orphaned_backups import ISSUE_ORPHANED_PLAN_BACKUPS, repair_placeholders
@@ -127,6 +130,33 @@ def _add_knx_dpt_suffix_ignored_ids(existing_raw: str, new_ids: set[int]) -> str
     return format_ignored_ids(singles | new_ids, ranges, knx_prefix)
 
 
+# Why the webhook URL from the options is unusable (ha_address.webhook_url_error keys): (German, English).
+_ADDRESS_FALLBACK_REASONS = {
+    "invalid_url": ("keine gültige http(s)-Adresse", "not a valid http(s) address"),
+    "loopback_url": ("eine Loopback-Adresse", "a loopback address"),
+    "insecure_url": ("unverschlüsseltes HTTP außerhalb des lokalen Netzes", "plain HTTP outside the local network"),
+}
+
+
+def _address_fallback_note(issue_data: dict, is_de: bool) -> str | None:
+    """The note that the server address fix sets the automatic address instead of the options' URL; None if not."""
+    reason = issue_data.get("address_fallback")
+    if not reason:
+        return None
+    de_reason, en_reason = _ADDRESS_FALLBACK_REASONS.get(reason, (reason, reason))
+    address = issue_data.get("ha_address") or "?"
+    if is_de:
+        return (
+            f"{ICON_WARNING} Die Webhook-URL aus den Optionen ist nicht nutzbar ({de_reason}). Die Korrektur "
+            f"der Server-Adresse setzt stattdessen die automatische Adresse **{address}**. Für die eigene Adresse "
+            "zuerst die URL korrigieren."
+        )
+    return (
+        f"{ICON_WARNING} The webhook URL from the options is unusable ({en_reason}). Fixing the server "
+        f"address sets the automatic address **{address}** instead. Correct the URL first to use your own address."
+    )
+
+
 def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
     """Summary bullets for missing Function Plan wiring, split by marker/KNX-cluster vs.
     IO-extension gaps.
@@ -149,24 +179,45 @@ def _function_plan_gap_lines(lp_missing_c: int, detail: dict) -> list[str]:
             lines.append(f"* {ICON_PUZZLE} **{cluster_noun} {one_line(plan_name)} missing:** all {gap} {item_noun}")
         else:
             lines.append(f"* {ICON_LINK} **{item_noun_cap} not wired in {one_line(plan_name)}:** {gap} of {total}")
-    for ext, (gap, total) in detail.get("ios_by_ext", {}).items():
-        if gap == total:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} not yet in an IO cluster plan:** all {gap} IOs")
-        else:
-            lines.append(f"* {ICON_PUZZLE} **Extension {ext} partially wired:** {gap} of {total} IOs missing")
+    lines.extend(
+        _io_column_gap_line(f"Extension {ext}", "an IO", gap, total)
+        for ext, (gap, total) in detail.get("ios_by_ext", {}).items()
+    )
+    lines.extend(
+        _io_column_gap_line(f"Quickbus device {one_line(device)}", "a QB", gap, total)
+        for device, (gap, total) in detail.get("quickbus_by_device", {}).items()
+    )
     return lines
+
+
+def _io_column_gap_line(member: str, plan_noun: str, gap: int, total: int) -> str:
+    """Summary bullet for one IO extension / Quickbus device with missing wiring."""
+    if gap == total:
+        return f"* {ICON_PUZZLE} **{member} not yet in {plan_noun} cluster plan:** all {gap} IOs"
+    return f"* {ICON_PUZZLE} **{member} partially wired:** {gap} of {total} IOs missing"
+
+
+def _column_noun(n_extensions: int, n_quickbus_devices: int) -> str:
+    """Noun of the column-plan members an add-missing action adds (extensions / Quickbus devices)."""
+    if not n_quickbus_devices:
+        return "extension" if n_extensions == 1 else "extensions"
+    if not n_extensions:
+        return "Quickbus device" if n_quickbus_devices == 1 else "Quickbus devices"
+    return "extensions and Quickbus devices"
 
 
 def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> str:
     """Label of the add-missing repair action, worded by gap kind.
 
-    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions
-    "Add extension(s) to Function Plan"; individual missing connections
+    Entirely missing cluster plans get "Add Function Plan(s)", whole extensions / Quickbus
+    devices "Add extension(s) to Function Plan"; individual missing connections
     (partially wired plans/extensions, legacy issues) keep "Wire in Function Plan".
     """
     markers_by_plan = detail.get("markers_by_plan", {}) if detail else {}
     ios_by_ext = detail.get("ios_by_ext", {}) if detail else {}
-    if not markers_by_plan and not ios_by_ext:
+    qb_by_device = detail.get("quickbus_by_device", {}) if detail else {}
+    columns = [*ios_by_ext.values(), *qb_by_device.values()]
+    if not markers_by_plan and not columns:
         return f"{ICON_LINK} Wire in Function Plan ({lp_missing_c}x{eta})"
     parts = []
     if marker_gap := sum(gap for name, (gap, _total) in markers_by_plan.items() if not _is_knx_cluster_plan(name)):
@@ -174,17 +225,17 @@ def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> st
     if knx_gap := sum(gap for name, (gap, _total) in markers_by_plan.items() if _is_knx_cluster_plan(name)):
         parts.append(f"{knx_gap} KNX objects")
     parts.extend(f"{ext} +{gap} IOs" for ext, (gap, _total) in ios_by_ext.items())
+    parts.extend(f"{one_line(device)} +{gap} IOs" for device, (gap, _total) in qb_by_device.items())
     detail_str = f"({', '.join(parts)},{eta})"
     all_whole = all(gap == total for gap, total in markers_by_plan.values()) and all(
-        gap == total for gap, total in ios_by_ext.values()
+        gap == total for gap, total in columns
     )
     if not all_whole:
         return f"{ICON_LINK} Wire in Function Plan {detail_str}"
     if markers_by_plan:
-        noun = "Function Plan" if len(markers_by_plan) == 1 and not ios_by_ext else "Function Plans"
+        noun = "Function Plan" if len(markers_by_plan) == 1 and not columns else "Function Plans"
         return f"{ICON_PUZZLE} Add {noun} {detail_str}"
-    noun = "extension" if len(ios_by_ext) == 1 else "extensions"
-    return f"{ICON_PUZZLE} Add {noun} to Function Plan {detail_str}"
+    return f"{ICON_PUZZLE} Add {_column_noun(len(ios_by_ext), len(qb_by_device))} to Function Plan {detail_str}"
 
 
 _CLEANUP_SCOPE_LABELS = {
@@ -327,6 +378,17 @@ def _sync_running(hass: HomeAssistant, entry_id: str | None) -> bool:
     """Whether a sync or Web-IO range check currently runs for this entry (see _sync_lock / R4)."""
     coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
     return coordinator is not None and (coordinator.in_sync or coordinator._sync_lock.locked())
+
+
+def _without_refused_plan_options(hass: HomeAssistant, entry_id: str | None, options: dict[str, str]) -> dict[str, str]:
+    """options without the plan wiring actions the sync refuses while the plan list has unreadable entries.
+
+    The press is non-blocking, so the dialog would report a refused action as executed.
+    """
+    coordinator = hass.data.get(DOMAIN, {}).get(entry_id) if entry_id else None
+    if coordinator is None or not unreadable_plan_keys(coordinator.api.fub_data):
+        return options
+    return {key: label for key, label in options.items() if key not in PLAN_WIRING_ACTIONS}
 
 
 async def async_create_fix_flow(hass: HomeAssistant, issue_id: str, data: dict | None):
@@ -676,10 +738,15 @@ class ComexioRepairFlow(RepairsFlow):
             lp_detail = self.issue_data.get("function_plan_missing_detail") or {}
             # Fallback for stale issues created before the coordinator started storing an
             # exact estimate: approximate the affected-plan count from the detail split (one
-            # finalize cost per marker-cluster plan / IO extension) instead of a flat single
+            # finalize cost per marker-cluster plan / IO extension / Quickbus device) instead of a flat single
             # SYNC_DURATION_FUNCTION_PLAN_FINALIZE, which would undercount multi-plan repairs.
             affected_plan_count = (
-                max(1, len(lp_detail.get("markers_by_plan", {})) + len(lp_detail.get("ios_by_ext", {})))
+                max(
+                    1,
+                    len(lp_detail.get("markers_by_plan", {}))
+                    + len(lp_detail.get("ios_by_ext", {}))
+                    + len(lp_detail.get("quickbus_by_device", {})),
+                )
                 if lp_detail
                 else 1
             )
@@ -733,6 +800,8 @@ class ComexioRepairFlow(RepairsFlow):
                         "Web-IO device does not match the current Home Assistant address. "
                         "This prevents receiving status updates via webhooks."
                     )
+                if fallback := _address_fallback_note(self.issue_data, is_de):
+                    summary += f"\n\n{fallback}"
             else:
                 # CASE 2: Configuration issues (with optional IP mismatch)
                 if is_de:
@@ -777,6 +846,8 @@ class ComexioRepairFlow(RepairsFlow):
                         f"* {ICON_NETWORK} **{'Server-Adresse' if is_de else 'Server Address'}:** "
                         f"{'Falsch' if is_de else 'Incorrect'}"
                     )
+                    if fallback := _address_fallback_note(self.issue_data, is_de):
+                        lines.append(f"  * {fallback}")
 
                 if is_de:
                     footer = f"\n\nWeb-IO-Befehle: {ha_count} (HA) zu {com_count} (Comexio)"
@@ -876,7 +947,11 @@ class ComexioRepairFlow(RepairsFlow):
                     label = f"{ICON_NETWORK} HA Server-Adresse (IP:Port) aktualisieren"
                 else:
                     label = f"{ICON_NETWORK} Update HA Server Address (IP:Port)"
-                specific_options["update_ip"] = f"{label} (~{SYNC_DURATION_WRITE}s)"
+                specific_options["update_ip"] = f"{label} ({format_time(SYNC_DURATION_WRITE).strip()})"
+
+            specific_options = _without_refused_plan_options(
+                self.hass, self.issue_data.get("entry_id"), specific_options
+            )
 
             # Calculate Full Sync ETA
             total_write = counts.get("type", 0) + counts.get("rename", 0) + counts.get("missing", 0)

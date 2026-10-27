@@ -143,6 +143,13 @@
         "take_over_rename": "✏️ Reprendre le renommage (les sauvegardes suivent)",
         "watch_holder": "👁️ Surveiller à la place le plan qui porte maintenant cet ID"
       }
+    },
+    "webhook_address_mode": {
+      "options": {
+        "auto": "Automatique (adresse locale)",
+        "external": "URL externe de HA",
+        "custom": "Adresse personnalisée"
+      }
     }
   },
   "options": {
@@ -160,6 +167,7 @@
           "logikplan_plan_prefix": "Préfixe de nom des plans fonctionnels gérés",
           "logikplan_max_pairs_per_plan": "Nombre max. de paires par plan fonctionnel géré",
           "logikplan_io_extensions": "Extensions gérées comme plans de cluster IO",
+          "logikplan_quickbus_devices": "Appareils Quickbus gérés comme plans de cluster QB",
           "ignored_markers": "IDs de marqueurs à exclure de la connexion aux plans de fonction",
           "ignored_knx": "IDs d'objets KNX à exclure de la connexion aux plans de fonction",
           "cover_keywords": "Mots-clés pour la détection des volets",
@@ -167,15 +175,17 @@
           "bus_watchdog_enabled": "Activer le Bus-Load Watchdog",
           "bus_watchdog_auto_reboot": "Autoriser le redémarrage automatique de Comexio en cas de charge de bus critique",
           "function_plan_watchdog_notify": "Watchdog des plans de fonctions : push vers",
-          "function_plan_watchdog_user_plans": "Watchdog des plans de fonctions : surveiller aussi des plans utilisateur"
+          "function_plan_watchdog_user_plans": "Watchdog des plans de fonctions : surveiller aussi des plans utilisateur",
+          "webhook_address_mode": "Adresse du webhook (push Comexio → HA)"
         },
         "data_description": {
           "schema_marker": "Variables disponibles : '{{MarkerId}}', '{{MarkerTitle}}'",
           "schema_knx": "Variables disponibles : '{{KnxId}}', '{{KnxTitle}}'",
           "schema_io": "Variables disponibles : '{{ExtName}}', '{{IoId}}', '{{IoTitle}}'",
           "logikplan_plan_prefix": "Préfixe des plans de cluster créés automatiquement. Les plans seront nommés par ex. : HA - Marker [1-100].",
-          "logikplan_max_pairs_per_plan": "Nombre de paires Web-IO + marqueur tenant dans un plan géré avant la création d'un nouveau plan de cluster. Pour les plans de cluster IO, cela correspond à 1 (50), 2 (100) ou 3 (150) extensions par plan. Les plans de cluster KNX ignorent ce paramètre et utilisent toujours une taille fixe de 50.",
+          "logikplan_max_pairs_per_plan": "Nombre de paires Web-IO + marqueur tenant dans un plan géré avant la création d'un nouveau plan de cluster. Pour les plans de cluster IO et Quickbus, cela correspond à 1 (50), 2 (100) ou 3 (150) colonnes par plan : une extension par colonne, tandis que les appareils Quickbus s'empilent dans une colonne tant qu'ils y tiennent. Les plans de cluster KNX ignorent ce paramètre et utilisent toujours une taille fixe de 50.",
           "logikplan_io_extensions": "Les IO de chaque extension sélectionnée sont câblés dans un plan de cluster IO géré (par ex. HA - IO [Ext]), une colonne par extension. Commencez par une seule extension pour tester, puis ajoutez les autres.",
+          "logikplan_quickbus_devices": "Les IO de chaque appareil Quickbus sélectionné sont câblés dans un plan de cluster QB géré (par ex. HA - QB [1,3], nommé d'après l'ID de l'appareil), empilés dans les colonnes du plan, afin que Comexio transmette leurs valeurs à Home Assistant. Lecture seule : Comexio ne permet pas d'écrire un IO Quickbus. Tous les appareils sont sélectionnés tant que vous ne modifiez pas ce choix ; seuls les appareils sélectionnés reçoivent des commandes Web-IO.",
           "ignored_markers": "IDs de marqueurs et plages séparés par des virgules, points-virgules, espaces ou points, avec ou sans préfixe 'M' (ex. '123, 456; 789' ou 'M123, M456' ou '8-12'). Seuls les marqueurs avec description peuvent être exclus. Un ID isolé qui n'existe plus est retiré automatiquement ; une plage reste telle quelle et couvre aussi les IDs créés plus tard.",
           "ignored_knx": "IDs d'objets KNX et plages séparés par des virgules, points-virgules, espaces ou points, avec ou sans préfixe 'K' (ex. '123, 456; 789' ou 'K123, K456' ou '8-12'). Seuls les objets KNX avec description peuvent être exclus. Un ID isolé qui n'existe plus est retiré automatiquement ; une plage reste telle quelle et couvre aussi les IDs créés plus tard.",
           "cover_keywords": "Liste séparée par des virgules (ex: volet, store, rideau)",
@@ -183,13 +193,28 @@
           "bus_watchdog_enabled": "En cas de hausse durable de la charge du bus, redémarre automatiquement les plans fonctionnels de cluster gérés par HA (de l'arrière vers l'avant) pour tenter de la soulager. Non destructif pour le système Comexio lui-même.",
           "bus_watchdog_auto_reboot": "Si la charge du bus dépasse en moyenne 90 % pendant 5 minutes, déclenche un redémarrage COMPLET et IMMÉDIAT de Comexio, sans confirmation. Désactivé par défaut — à activer une fois que vous faites confiance au mécanisme.",
           "function_plan_watchdog_notify": "Services de notification (p. ex. notify.mobile_app_votre_telephone) qui reçoivent un push lorsqu'un plan de fonctions surveillé s'arrête (géré par HA, ou plan utilisateur choisi ci-dessous). Le push comporte un bouton « Démarrer le plan » et disparaît dès que le plan s'exécute de nouveau. Un plan utilisateur surveillé supprimé dans Comexio reçoit aussi un push, avec les boutons « Restaurer » (sa sauvegarde la plus récente, comme nouveau plan) et « Ne plus surveiller » ; si son ID porte maintenant un autre plan (renommé, ou ID réattribué), seulement « Ne plus surveiller » — restaurez-le ou reprenez le renommage dans sa réparation. Ils reçoivent aussi un push urgent lorsque Comexio présente un autre certificat TLS que celui épinglé. Laisser vide pour aucun push ; la réparation est créée dans tous les cas.",
-          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. Un plan choisi supprimé dans Comexio n'est pas démarré : sa réparation et son push proposent de le restaurer depuis sa sauvegarde la plus récente ou de ne plus le surveiller. Un plan renommé dans Comexio sans changement de contenu est suivi automatiquement (la sélection et les sauvegardes prennent le nouveau nom). Si son ID porte maintenant un autre plan (renommé, ou ID réattribué), la réparation propose aussi de surveiller ce plan à la place ou, si son contenu correspond à la dernière sauvegarde, de reprendre le renommage (les sauvegardes suivent). N'y mettez pas les plans arrêtés volontairement (tests)."
+          "function_plan_watchdog_user_plans": "Plans utilisateur (non gérés par Home Assistant) qui doivent toujours s'exécuter. Le watchdog les traite comme les plans HA : réparation, capteur de problème et push lorsqu'un plan s'arrête. L'interrupteur Démarrage auto des plans (plans utilisateur) les redémarre lui-même. Un plan choisi supprimé dans Comexio n'est pas démarré : sa réparation et son push proposent de le restaurer depuis sa sauvegarde la plus récente ou de ne plus le surveiller. Un plan renommé dans Comexio sans changement de contenu est suivi automatiquement (la sélection et les sauvegardes prennent le nouveau nom). Si son ID porte maintenant un autre plan (renommé, ou ID réattribué), la réparation propose aussi de surveiller ce plan à la place ou, si son contenu correspond à la dernière sauvegarde, de reprendre le renommage (les sauvegardes suivent). N'y mettez pas les plans arrêtés volontairement (tests).",
+          "webhook_address_mode": "Où Comexio envoie les valeurs en direct. Automatique : l'adresse locale de HA. URL externe de HA : hôte et port de l'URL externe des paramètres réseau de HA (https sans port signifie 443). Adresse personnalisée : une URL saisie à l'étape suivante. Avec une adresse externe ou personnalisée, le push quitte votre réseau et passe par Internet. Lancez ensuite une synchronisation Web-IO."
+        }
+      },
+      "webhook_url": {
+        "title": "Adresse de webhook personnalisée",
+        "data": {
+          "webhook_url": "URL du webhook"
+        },
+        "data_description": {
+          "webhook_url": "URL de base de Home Assistant telle que Comexio doit la joindre, p. ex. {example_url} — sans chemin. Si cette adresse est publique, le push passe par Internet."
         }
       }
     },
     "error": {
       "invalid_number": "Veuillez saisir un nombre entier valide.",
-      "invalid_schema": "Schéma de nommage invalide. Utilisez uniquement les noms de variables indiqués entre accolades et fermez chaque accolade."
+      "invalid_schema": "Schéma de nommage invalide. Utilisez uniquement les noms de variables indiqués entre accolades et fermez chaque accolade.",
+      "invalid_url": "Saisissez une URL http:// ou https:// avec un hôte, sans chemin, requête ni identifiants.",
+      "loopback_url": "Une adresse de bouclage (localhost, 127.x, 0.0.0.0) n'est pas joignable depuis Comexio.",
+      "insecure_url": "Une adresse http:// n'est autorisée que dans le réseau local : ailleurs, les valeurs traverseraient Internet sans chiffrement. Utilisez https://.",
+      "insecure_external_url": "L'URL externe de Home Assistant est une adresse http:// hors du réseau local : les valeurs traverseraient Internet sans chiffrement. Définissez d'abord une URL externe https://.",
+      "no_external_url": "Home Assistant n'a pas d'URL externe utilisable. Définissez-la d'abord sous Paramètres → Système → Réseau."
     }
   },
   "entity": {
@@ -436,7 +461,7 @@
           "plan_exists_again": "Ce plan existe de nouveau dans Comexio, ses sauvegardes ne sont donc plus orphelines. Rien n'a été modifié.",
           "already_deleted": "Ces sauvegardes ont déjà été supprimées. Rien n'a été modifié.",
           "loaded_in_preview": "La sauvegarde la plus récente du plan est maintenant affichée dans la carte du plan (Plan → Orphaned plans). Cette réparation reste ouverte jusqu'à ce que vous conserviez ou supprimiez les sauvegardes.",
-          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées.",
+          "preview_failed": "Les sauvegardes n'ont pas pu être chargées dans l'aperçu du plan — elles ont peut-être été supprimées entre-temps, un autre plan a peut-être été choisi entre-temps dans les sélecteurs de plan, ou les sélecteurs de plan sont désactivés. Les sauvegardes n'ont pas été modifiées.",
           "backups_busy": "Une restauration de plan de fonctions est en cours, ou l'intégration est en train de se recharger — elle déplace et marque des sauvegardes. Les sauvegardes n'ont pas été modifiées — réessayez une fois l'opération terminée."
         }
       }

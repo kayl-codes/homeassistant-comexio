@@ -69,6 +69,25 @@ async def test_setup_and_unload(
     api.close.assert_called_once()
 
 
+async def test_unload_without_a_coordinator_still_unloads(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """A loaded entry whose coordinator is missing unloads cleanly, so the config flow's fallback reload completes."""
+    await _setup(hass, mock_config_entry)
+    coordinator = hass.data[DOMAIN].pop(mock_config_entry.entry_id)
+    try:
+        assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
+
+        assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
+        assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
+        assert f"{mock_config_entry.entry_id}_webhook" not in hass.data[DOMAIN]  # the cleanup after the pop still ran
+    finally:
+        # Nothing in hass.data pointed at it any more, so the unload could not stop it: the test does.
+        coordinator.plan_watchdog.close()
+        await coordinator.async_shutdown()
+
+
 async def test_setup_keeps_every_entity_it_registers(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:

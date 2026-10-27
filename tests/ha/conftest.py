@@ -110,6 +110,9 @@ def api_returns() -> dict[str, Any]:
             SystemInfo(free_storage_percent=42.0, time_server=TimeServerSettings(True, "pool.ntp.org", 86400)),
             timedelta(days=3),
         ),
+        # An unreadable form, as the real method returns it. The nightly range check (04:20 test time) runs in any
+        # test whose loaded entry spans that minute; it counts the command as not checked.
+        "get_webio_command_form": None,
     }
 
 
@@ -173,7 +176,8 @@ def mock_comexio_api(
     with (
         patch("custom_components.comexio.certificate.ComexioAPI", side_effect=_factory),
         patch("custom_components.comexio.config_flow.ComexioAPI", side_effect=_factory),
-        # DNS is disabled in tests; the resolver's own logic has unit tests (test_ha_address.py).
-        patch("custom_components.comexio.ha_address.HaAddressResolver.async_get", return_value=HA_ADDRESS),
+        # DNS and sockets are disabled in tests; the resolver's own logic has unit tests (test_ha_address.py).
+        # Patched below async_target, so the address mode around the search still runs for real.
+        patch("custom_components.comexio.ha_address.HaAddressResolver._async_get", return_value=HA_ADDRESS),
     ):
         yield created

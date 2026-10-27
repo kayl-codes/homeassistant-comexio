@@ -1,4 +1,5 @@
 # Version: 0.8.0
+from collections.abc import Collection, Mapping
 import logging
 from typing import Any
 
@@ -20,10 +21,13 @@ from .const import (
     CONF_FUNCTION_PLAN_IO_EXTENSIONS,
     CONF_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     CONF_FUNCTION_PLAN_PLAN_PREFIX,
+    CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -33,8 +37,13 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DEFAULT_SCHEMA_IO,
     DOMAIN,
+    QUICKBUS_IO_DATA_KEY,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
+    WEBHOOK_ADDRESS_AUTO,
+    WEBHOOK_ADDRESS_CUSTOM,
+    WEBHOOK_ADDRESS_EXTERNAL,
+    WEBHOOK_ADDRESS_MODES,
     SourceCategory,
     WebioClass,
     format_ignored_ids,
@@ -44,8 +53,12 @@ from .const import (
     parse_ignored_marker_tokens,
     parse_watchdog_user_plan_pick,
     prune_import_disabled_ignored,
+    quickbus_device_id,
+    quickbus_device_label,
+    selected_quickbus_devices,
     watchdog_user_plan_pick,
 )
+from .ha_address import webhook_url_error
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -126,12 +139,33 @@ def _watchdog_user_plan_field(coordinator: Any, conf: dict[str, Any]) -> tuple[l
     return saved, SelectSelector(SelectSelectorConfig(options=options, multiple=True, mode=SelectSelectorMode.DROPDOWN))
 
 
+# Example the custom webhook URL field shows (a description placeholder, see async_step_webhook_url).
+WEBHOOK_URL_EXAMPLE = "https://ha.example.com:8443"
+
+
+def _hidden_categories(
+    source_cats: list[SourceCategory], available_counts: dict, conf: dict[str, Any]
+) -> set[WebioClass]:
+    """The source categories the init step hides: no objects on the server, and not opted in."""
+    return {
+        cat.key
+        for cat in source_cats
+        if available_counts
+        and not available_counts.get(cat.key)
+        and not conf.get(cat.import_conf_key, cat.import_default)
+    }
+
+
 class ComexioOptionsFlow(config_entries.OptionsFlow):
     """Handle options for the component."""
 
     def __init__(self, config_entry):
         """Initialize options flow."""
         self._config_entry = config_entry
+        # The init step's input, held while the custom webhook URL step asks for the URL.
+        self._pending_input: dict[str, Any] = {}
+        # The Quickbus selection the form last showed, to tell an untouched default from a pick.
+        self._quickbus_shown: list[str] = []
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -147,25 +181,17 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # below (keep already-saved selections choosable even once no longer "current").
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
-        hidden_cats = {
-            cat.key
-            for cat in source_cats
-            if available_counts
-            and not available_counts.get(cat.key)
-            and not conf.get(cat.import_conf_key, cat.import_default)
-        }
+        hidden_cats = _hidden_categories(source_cats, available_counts, conf)
 
-        if user_input is not None:
-            self._normalize_user_input(user_input, conf, errors, hidden_cats)
-            if not errors:
-                return self._create_options_entry(user_input)
+        if user_input is not None and (result := await self._async_submit_init(user_input, conf, errors, hidden_cats)):
+            return result
 
         # Extension names for the IO cluster multi-select: live coordinator data first,
         # excluding offline extensions (no hardware present — wiring them is pointless),
         # but keeping already-saved selections choosable so they can be deselected.
         coordinator_data = getattr(coordinator, "data", None) or {}
-        ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
-        ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+        ext_names = _io_extension_options(coordinator_data, conf)
+        quickbus_options = _quickbus_device_options(coordinator_data, conf)
 
         # Marker + KNX share the same schema/import/ignored-ids field shape (registry-driven
         # via ignore_list_categories — the source categories that support an ignore-list);
@@ -198,6 +224,15 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
                 options=SCAN_INTERVAL_OPTIONS,
                 mode=SelectSelectorMode.DROPDOWN,
                 translation_key="scan_interval",
+            )
+        )
+        schema_dict[
+            vol.Required(CONF_WEBHOOK_ADDRESS_MODE, default=conf.get(CONF_WEBHOOK_ADDRESS_MODE, WEBHOOK_ADDRESS_AUTO))
+        ] = SelectSelector(
+            SelectSelectorConfig(
+                options=WEBHOOK_ADDRESS_MODES,
+                mode=SelectSelectorMode.DROPDOWN,
+                translation_key="webhook_address_mode",
             )
         )
         schema_dict[
@@ -266,6 +301,14 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             # so there is nothing to translate them against.
             SelectSelectorConfig(options=ext_names, multiple=True, mode=SelectSelectorMode.DROPDOWN)
         )
+        if quickbus_options:
+            # Only with Quickbus devices to pick (or a saved pick to drop) — a dead field otherwise.
+            self._quickbus_shown = _shown_quickbus_pick(quickbus_options, conf, coordinator_data)
+            schema_dict[vol.Optional(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, default=self._quickbus_shown)] = (
+                SelectSelector(
+                    SelectSelectorConfig(options=quickbus_options, multiple=True, mode=SelectSelectorMode.DROPDOWN)
+                )
+            )
         schema_dict[
             vol.Required(
                 CONF_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
@@ -301,6 +344,46 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Optional(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS, default=saved_user_plans)] = user_plan_selector
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
+
+    async def async_step_webhook_url(self, user_input=None):
+        """Ask for the custom webhook address (only reached with the "custom" webhook address mode)."""
+        errors: dict[str, str] = {}
+        if user_input is not None:
+            url = user_input.get(CONF_WEBHOOK_URL, "").strip()
+            if error := webhook_url_error(url):
+                errors[CONF_WEBHOOK_URL] = error
+            else:
+                return self._create_options_entry({**self._pending_input, CONF_WEBHOOK_URL: url})
+        conf = {**self._config_entry.data, **self._config_entry.options}
+        schema = vol.Schema({vol.Required(CONF_WEBHOOK_URL, default=conf.get(CONF_WEBHOOK_URL, "")): str})
+        return self.async_show_form(
+            step_id="webhook_url",
+            data_schema=schema,
+            errors=errors,
+            # hassfest allows no URL in a translation string.
+            description_placeholders={"example_url": WEBHOOK_URL_EXAMPLE},
+        )
+
+    async def _async_submit_init(self, user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]):
+        """Save the init step's input, or open the custom webhook URL step; None: the form again with the errors."""
+        _drop_unchanged_quickbus_default(user_input, conf, self._quickbus_shown)
+        self._normalize_user_input(user_input, conf, errors, hidden_cats)
+        self._validate_webhook_address_mode(user_input, errors)
+        if errors:
+            return None
+        if user_input.get(CONF_WEBHOOK_ADDRESS_MODE) == WEBHOOK_ADDRESS_CUSTOM:
+            self._pending_input = user_input
+            return await self.async_step_webhook_url()
+        return self._create_options_entry(user_input)
+
+    def _validate_webhook_address_mode(self, user_input: dict, errors: dict) -> None:
+        """The "external" mode needs a usable external URL in HA's network settings."""
+        if user_input.get(CONF_WEBHOOK_ADDRESS_MODE) != WEBHOOK_ADDRESS_EXTERNAL:
+            return
+        if (error := webhook_url_error(self.hass.config.external_url)) is not None:
+            errors[CONF_WEBHOOK_ADDRESS_MODE] = (
+                "insecure_external_url" if error == "insecure_url" else "no_external_url"
+            )
 
     @staticmethod
     def _restore_missing_ignored_fields(
@@ -371,3 +454,58 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)
         return self.async_create_entry(title="", data=merged_options)
+
+
+def _io_extension_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[str]:
+    """Online extension names, plus saved picks that are offline or gone so they can be deselected."""
+    ext_names = sorted({io["ext_name"] for io in coordinator_data.get("io", []) if not io.get("offline")})
+    ext_names.extend(ext for ext in conf.get(CONF_FUNCTION_PLAN_IO_EXTENSIONS, []) if ext not in ext_names)
+    return ext_names
+
+
+def _shown_quickbus_pick(
+    quickbus_options: list[SelectOptionDict], conf: Mapping[str, Any], coordinator_data: Mapping[str, Any]
+) -> list[str]:
+    """The Quickbus devices the form shows selected, in option order."""
+    selected = selected_quickbus_devices(conf, coordinator_data)
+    return [option["value"] for option in quickbus_options if option["value"] in selected]
+
+
+def _drop_unchanged_quickbus_default(user_input: dict, conf: Mapping[str, Any], shown: Collection[str]) -> None:
+    """Keep "every Quickbus device" implicit while a never-saved selection is submitted as shown.
+
+    The form shows that default as a list; saving it would freeze the list, so a device added in
+    Comexio later would stay unselected — no Web-IO command, no wiring, no value in HA. Compared
+    with what the form showed, not with fresh data: a poll between show and submit changes nothing.
+    """
+    if CONF_FUNCTION_PLAN_QUICKBUS_DEVICES in conf or CONF_FUNCTION_PLAN_QUICKBUS_DEVICES not in user_input:
+        return
+    submitted = {str(device) for device in user_input[CONF_FUNCTION_PLAN_QUICKBUS_DEVICES]}
+    # An empty pick is always deliberate: dropping it would select every device added later.
+    if submitted and submitted == set(shown):
+        _LOGGER.debug("Quickbus device selection left at its default (every device), not saved as a list")
+        user_input.pop(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES)
+
+
+def _quickbus_device_options(coordinator_data: dict[str, Any], conf: Mapping[str, Any]) -> list[SelectOptionDict]:
+    """Quickbus devices for the QB cluster multi-select: value = device id, label "QB3 MT1".
+
+    Live devices first (by id), excluding those on an offline extension, then selected devices
+    that are offline or gone — kept choosable so saving the form never drops them by accident
+    (while the option was never saved, every device is selected).
+    """
+    names: dict[str, str] = {}
+    offline: set[str] = set()
+    for io in coordinator_data.get(QUICKBUS_IO_DATA_KEY, []):
+        device = quickbus_device_id(io)
+        names.setdefault(device, io["quickbus"].get("name") or "")
+        if io.get("offline"):
+            offline.add(device)
+    by_id = sorted(names, key=lambda device: (len(device), device))
+    live = [device for device in by_id if device not in offline]
+    selected = dict.fromkeys(str(device) for device in conf.get(CONF_FUNCTION_PLAN_QUICKBUS_DEVICES, by_id))
+    kept = [device for device in selected if device not in live]
+    return [
+        SelectOptionDict(value=device, label=one_line(quickbus_device_label(device, names.get(device))))
+        for device in [*live, *kept]
+    ]

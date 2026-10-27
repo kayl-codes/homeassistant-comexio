@@ -23,6 +23,7 @@ from aiocomexio import (
     CreatedFunctionPlan,
     RawConfig,
     SystemInfo,
+    WebioCommandForm,
     config as comexio_config,
     fetch_certificate_fingerprint,
     webio as comexio_webio,
@@ -62,6 +63,7 @@ from .const import (
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
+    IO_PLAN_KIND_IO,
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
@@ -71,14 +73,17 @@ from .const import (
     QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
+    IoPlanKind,
     category_by_fub_module_type,
     function_plan_id,
     function_plan_ids,
-    io_column_rows,
+    function_plan_info,
+    function_plans,
     io_sort_key,
     is_valid_entity_name_schema,
     knx_loopback_command_name,
     one_line,
+    unreadable_plan_keys,
 )
 from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
@@ -613,13 +618,19 @@ def _saved_schema(conf_data: Mapping[str, Any], key: str, default: str) -> str:
 
 
 def _verified_plan_ids(fubs: dict[str, Any], source: str) -> set[int] | None:
-    """The plan ids of a plan list as ints, None after an error log if any is not numeric."""
-    try:
-        return {int(fid) for fid in fubs}
-    except (TypeError, ValueError):
-        bad = [fid for fid in fubs if not str(fid).strip().lstrip("-").isdigit()]
-        _LOGGER.error("_load_all_plans_verified: malformed plan id(s) %r in %s — placement unknown", bad, source)
+    """The plan ids of a plan list as ints, None after an error log if an entry's plan is unknown.
+
+    Unknown: a key that is no plan id (see function_plan_id), or an entry carrying an Id other than its
+    key. An entry with no plan info still names its plan by the key, so that plan is loaded and checked.
+    """
+    if bad := [
+        fid
+        for fid, info in fubs.items()
+        if function_plan_id(fid) is None or (isinstance(info, dict) and str(info.get("Id", fid)) != str(fid))
+    ]:
+        _LOGGER.error("_load_all_plans_verified: unreadable plan entries %r in %s — placement unknown", bad, source)
         return None
+    return function_plan_ids(fubs)
 
 
 class ComexioAPI:
@@ -1041,8 +1052,8 @@ class ComexioAPI:
         changed = False
         for fub_id, running in states.items():
             key = str(fub_id)
-            fub = self._fub_data.get(key)
-            if not isinstance(fub, dict) or self.get_fub_active(fub_id) is running:
+            fub = function_plan_info(self._fub_data, key)
+            if not fub or self.get_fub_active(fub_id) is running:
                 continue
             self._fub_data[key] = {**fub, "Active": int(running)}
             changed = True
@@ -1622,19 +1633,19 @@ class ComexioAPI:
 
     def get_fub_paper_format(self, fub_id: int) -> str:
         """Return the paper format name (e.g. 'A4') for a function plan, defaulting to 'A4'."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         paper_id = str(fub.get("Paper", ""))
         paper = self._paper_data.get(paper_id, {})
         return str(paper.get("Name", "A4"))
 
     def get_fub_dpi(self, fub_id: int) -> int:
         """Return the configured resolution (DPI) for a function plan, defaulting to 90."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         return int(fub.get("Resolution", self._CANVAS_REF_RES))
 
     def get_fub_orientation(self, fub_id: int) -> str:
         """Return 'portrait' or 'landscape' for a function plan, defaulting to 'landscape'."""
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         return "portrait" if int(fub.get("Orientation", 0)) == 1 else "landscape"
 
     def get_fub_known_format(self, fub_id: int) -> tuple[str, int, str] | None:
@@ -1643,8 +1654,8 @@ class ComexioAPI:
         Unlike the getters above, no default stands in for a missing value: a backup compares
         and stores this, and a default (an undecoded $Paper read as A4) would count as a change.
         """
-        fub = self._fub_data.get(str(fub_id))
-        if fub is None or fub.get("Resolution") is None or fub.get("Orientation") is None:
+        fub = function_plan_info(self._fub_data, fub_id)
+        if fub.get("Resolution") is None or fub.get("Orientation") is None:
             return None
         paper = self._paper_data.get(str(fub.get("Paper", "")), {}).get("Name")
         if not paper:
@@ -1659,8 +1670,8 @@ class ComexioAPI:
 
     def get_fub_active(self, fub_id: int) -> bool | None:
         """Return a function plan's active flag, or None if the plan is not known live."""
-        fub = self._fub_data.get(str(fub_id))
-        return None if fub is None else bool(int(fub.get("Active") or 0))
+        fub = function_plan_info(self._fub_data, fub_id)
+        return bool(int(fub.get("Active") or 0)) if fub else None
 
     def get_fub_canvas_bounds(
         self,
@@ -1679,7 +1690,7 @@ class ComexioAPI:
         created and is not in the cached $Fubs data yet; None = read from $Fubs, where
         0 = landscape (long side → X), 1 = portrait (long side → Y).
         """
-        fub = self._fub_data.get(str(fub_id), {})
+        fub = function_plan_info(self._fub_data, fub_id)
         res = int(fub.get("Resolution", self._CANVAS_REF_RES)) if resolution is None else resolution
         if orientation is None:
             orient_id = int(fub.get("Orientation", 0))
@@ -1843,23 +1854,21 @@ class ComexioAPI:
             return False
         return True
 
-    async def get_webio_command_range(
-        self, cmd_id: str | int, device_id: str | int
-    ) -> tuple[float | None, float | None]:
+    async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
 
         The bulk config scrape ($FubModules["10"], see aiocomexio.config._add_webhook_command) never returns
-        Min/Max for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
+        these fields for HA's own Web-IO commands — confirmed live 2026-08-30 — so this per-command
         edit form is the only reliable source. Used by the nightly range check (see
-        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against
-        WEBIO_MARKER_ANALOG_MIN/MAX. Returns (None, None) on a fetch failure or a form without
-        min/max fields; a single missing or non-numeric field comes back as None.
+        WEBIO_RANGE_CHECK_HOUR in const.py) to detect drift against WEBIO_MARKER_ANALOG_MIN/MAX.
+        Returns None on a fetch failure or a form without min/max fields; a single missing or
+        unreadable field comes back as None.
         """
         try:
-            return await self.client.get_webio_command_range(cmd_id, device_id)
+            return await self.client.get_webio_command_form(cmd_id, device_id)
         except ComexioError as err:
-            _LOGGER.warning("Reading the range of Web-IO command %s failed: %s", cmd_id, err)
-            return None, None
+            _LOGGER.warning("Reading the form of Web-IO command %s failed: %s", cmd_id, err)
+            return None
 
     def build_webio_commands(
         self,
@@ -1877,9 +1886,15 @@ class ComexioAPI:
         ignored_marker_ids / ignored_knx_ids exclude items the user configured as ignored —
         they have no HA entity, so they need no Web-IO command pushing values back via webhook.
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
+        Every command keeps the builder's default protocol (HTTP) whatever the webhook address: Comexio
+        picks HTTP or HTTPS from the device address itself, so an address change never rewrites commands.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id), _with_quickbus_ios(parsed_data), webio_class, ignored_marker_ids, ignored_knx_ids
+            _webhook_path(server_id),
+            _with_quickbus_ios(parsed_data),
+            webio_class,
+            ignored_marker_ids,
+            ignored_knx_ids,
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -1910,7 +1925,8 @@ class ComexioAPI:
         webio_name here is already the class-specific name (see const.webio_class_name) —
         callers append the ' [M]'/' [IO]'/' [KNX]'/' [QB]' suffix before calling this.
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
-        exclude ignored items.
+        exclude ignored items. Every command keeps the builder's default protocol (HTTP), see
+        build_webio_commands.
         """
         return comexio_webio.generate_webio_json(
             _webhook_path(server_id),
@@ -2599,7 +2615,7 @@ class ComexioAPI:
         once more (_find_created_plan); None then means the plan may exist without an id.
         """
         paper, orient = _plan_paper_and_orientation(paper_format, orientation)
-        known_ids = set(self._fub_data)
+        known_ids = {str(fid) for fid in self._fub_data}
 
         async def create() -> CreatedFunctionPlan | None:
             try:
@@ -2637,14 +2653,18 @@ class ComexioAPI:
                 if fubs is not None
                 else "reading the config failed (see the error above)"
             )
+        # Readable entries only: an entry carrying an Id other than its key may be another plan.
+        listing = dict(iter_group(fubs))
+        if bad_keys := unreadable_plan_keys(listing):
+            reason += f"; the unreadable plan list entries {bad_keys!r} are skipped"
         matches = [
-            (fid, info)
-            for fid, info in iter_group(fubs)
-            if fid.isdigit() and fid not in known_ids and isinstance(info, dict) and info.get("Name") == plan_name
+            (fub_id, info)
+            for fub_id, info in function_plans(listing)
+            if str(fub_id) not in known_ids and info.get("Name") == plan_name
         ]
         if len(matches) == 1:
-            fid, info = matches[0]
-            return CreatedFunctionPlan(int(fid), info)
+            fub_id, info = matches[0]
+            return CreatedFunctionPlan(fub_id, info)
         _LOGGER.error(
             "create_fup: plan '%s' was created in Comexio, but its id is still unknown (%s) — "
             "it shows up with the next poll; do not create it again",
@@ -2673,8 +2693,8 @@ class ComexioAPI:
         create-time default) rather than preserved — a cosmetic Comexio Studio setting this
         integration doesn't otherwise manage.
         """
-        fub = self._fub_data.get(str(fub_id))
-        if fub is None:
+        fub = function_plan_info(self._fub_data, fub_id)
+        if not fub:
             _LOGGER.error("function_plan_update_paper: fub_id=%s not found in live data", fub_id)
             return False
 
@@ -4934,26 +4954,42 @@ class ComexioAPI:
         identifiers: list[str],
         column_index: int = 0,
         progress_cb: Callable[[int, int], None] | None = None,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
+        row_offset: int = 0,
+        stacked_rows: Mapping[str, int] | None = None,
     ) -> tuple[list[str], list[str]]:
-        """Add IO (type=1) + Web-IO (type=10) element pairs for one extension column.
+        """Add IO (type=1) + Web-IO (type=10) element pairs for one column (extension / Quickbus device).
 
+        ext_name: the column's member — an extension, or a Quickbus device for kind QUICKBUS.
         identifiers: the IOs to wire in this run. Row slots derive from ALL of the
-        extension's HA-relevant IOs (io_column_rows), so a pair retrofitted later lands
+        member's HA-relevant IOs (kind.column_blocks), so a pair retrofitted later lands
         exactly in the slot the initial layout reserved for it — IO plans therefore never
         need a sort pass. Should a column outgrow the canvas anyway, it wraps into a
         sub-column right next to it as a defensive fallback (the plan-creation side is
         expected to pick a canvas tall enough to avoid this).
+        column_index / row_offset: the member's origin in the plan (Quickbus devices stack within
+        a column, see const.io_plan_member_origins).
+        stacked_rows: {member: rows} of this member and every one before it in the plan, as the
+        origin was computed from them. A count the fresh config no longer has adds nothing: the
+        origin would put the new pairs onto other pairs' slots.
         Returns (added_identifiers, error_messages).
         """
 
+        wanted = set(identifiers)
+
         def _expected_names(data: dict) -> set[str]:
-            ext_idents = {io["identifier"] for io in data.get("io", []) if io["ext_name"] == ext_name}
-            return {f"HA IO {ext_name} {ident}" for ident in identifiers if ident in ext_idents}
+            return {kind.command_name(io) for io in kind.member_ios(data, ext_name) if io["identifier"] in wanted}
 
         fresh_data = await self._reload_config_until_commands_ready(_expected_names)
+        if stacked_rows and (
+            changed := [member for member, need in stacked_rows.items() if kind.rows_needed(fresh_data, member) != need]
+        ):
+            labels = ", ".join(one_line(kind.member_label(fresh_data, member)) for member in changed)
+            label = one_line(kind.member_label(fresh_data, ext_name))
+            return [], [f"{label}: not wired — the IO count of {labels} changed since the last poll"]
         webio_commands = fresh_data.get("webio_commands", {})
-        ext_ios = {io["identifier"]: io for io in fresh_data.get("io", []) if io["ext_name"] == ext_name}
-        rows = io_column_rows(list(ext_ios))
+        ext_ios = {io["identifier"]: io for io in kind.member_ios(fresh_data, ext_name)}
+        rows, _headers = kind.column_blocks(ext_name, list(ext_ios.values()))
 
         plan_data = await self.function_plan_load_elements(fub_id)
         existing_by_ref, conn_endpoints = self._function_plan_existing_refs(plan_data)
@@ -4973,8 +5009,9 @@ class ComexioAPI:
                 webio_commands,
                 existing_by_ref,
                 conn_endpoints,
-                (rows.get(ident, 0), column_index, rows_per_col),
+                (row_offset + rows.get(ident, 0), column_index, rows_per_col),
                 plan_data,
+                kind,
             )
             if err is None:
                 added.append(ident)
@@ -4996,6 +5033,7 @@ class ComexioAPI:
         conn_endpoints: list[set[int]],
         slot: tuple[int, int, int],
         plan_data: dict | None = None,
+        kind: IoPlanKind = IO_PLAN_KIND_IO,
     ) -> str | None:
         """Add one IO+Web-IO pair at its deterministic slot=(row, column_index, rows_per_col).
 
@@ -5007,12 +5045,12 @@ class ComexioAPI:
         identical Marker/KNX path — function_plan_add_source_pairs/_function_plan_add_single_pair
         — already threaded it through).
         """
-        label = f"{one_line(ext_name)} {ident}"
         io_entry = ext_ios.get(ident)
+        label = f"{one_line(kind.member_display(io_entry) if io_entry else kind.member_fallback(ext_name))} {ident}"
         if not io_entry:
             return f"{label}: not found in fresh config"
 
-        expected_cmd_name = f"HA IO {ext_name} {ident}"
+        expected_cmd_name = kind.command_name(io_entry)
         webio_cmd = webio_commands.get(expected_cmd_name)
         if not webio_cmd:
             _LOGGER.warning(
@@ -5153,14 +5191,12 @@ class ComexioAPI:
     def function_plan_name(self, fub_id: int) -> str:
         """Display name of a Function Plan for logging/reporting; falls back to the id.
 
-        Tolerates a malformed $Fubs entry (key no plain number, metadata no dict): callers run inside
-        the backup cycle, which a name lookup must not abort. Keys count as in function_plan_ids.
+        Tolerates a malformed $Fubs entry (see function_plan_info): callers run inside the backup
+        cycle, which a name lookup must not abort.
         """
         wanted = function_plan_id(fub_id)
-        meta = next(
-            (fd for fid, fd in self._fub_data.items() if wanted is not None and function_plan_id(fid) == wanted), None
-        )
-        return str((meta.get("Name") if isinstance(meta, dict) else None) or fub_id)
+        meta = function_plan_info(self._fub_data, wanted) if wanted is not None else {}
+        return str(meta.get("Name") or fub_id)
 
     @staticmethod
     def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:

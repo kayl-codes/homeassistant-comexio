@@ -33,6 +33,14 @@ search finishing late must not overwrite the state a newer call (e.g. a changed 
 Accepted limit: HA must see the address Comexio reaches it under on its own interfaces (host network,
 as HA requires for container installs). Behind NAT or a Docker bridge a stored host address counts as
 foreign; set internal_url to that address there.
+
+All of the above is the automatic webhook address (#165). The other modes take host and port of a URL
+as they are, with no check against the own addresses: HA's external_url, or a URL of the user's own.
+Only host and port reach the Web-IO devices: their commands keep HTTP whatever the scheme, Comexio picks
+HTTP or HTTPS itself. The scheme only decides whether an http:// URL is allowed (webhook_url_error); for
+the automatic address it is the one of internal_url (HA's own TLS setting without one). A mode whose URL
+is unusable (external_url removed since) falls back to the automatic
+address, warned once.
 """
 
 import asyncio
@@ -41,6 +49,7 @@ from contextlib import suppress
 from enum import Enum
 import ipaddress
 import logging
+import re
 import socket
 import time
 from typing import Any, NamedTuple
@@ -49,11 +58,22 @@ from urllib.parse import urlparse
 from homeassistant.components.network.util import async_load_adapters
 from homeassistant.core import HomeAssistant
 
-from .const import HA_ADDRESS_DNS_TIMEOUT_SEC, HA_ADDRESS_NEGATIVE_CACHE_SEC, KNOWN_DOMAINS
+from .const import (
+    HA_ADDRESS_DNS_TIMEOUT_SEC,
+    HA_ADDRESS_NEGATIVE_CACHE_SEC,
+    KNOWN_DOMAINS,
+    WEBHOOK_ADDRESS_AUTO,
+    WEBHOOK_ADDRESS_EXTERNAL,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
 DEFAULT_HA_PORT = 8123
+_SCHEME_PORTS = {"http": 80, "https": 443}
+# One label of a host name in its IDNA form; "_" is tolerated, as LAN names carry it although DNS does not.
+_HOST_LABEL = re.compile(r"(?!-)[a-z0-9_-]{1,63}(?<!-)")
+# The scheme a URL starts with, kept when the URL is logged with its user info masked.
+_URL_SCHEME = re.compile(r"[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 
 HA_HOST_CANDIDATES: tuple[str, ...] = tuple(f"homeassistant.{domain}" for domain in KNOWN_DOMAINS)
 
@@ -78,6 +98,14 @@ class _Answer(NamedTuple):
 
 
 _NO_ANSWER = _Answer(_Lookup.NO_ANSWER)
+
+
+class WebhookTarget(NamedTuple):
+    """Where the Web-IO devices push to: "host:port" (see format_address), and whether over HTTPS."""
+
+    address: str
+    https: bool
+
 
 # Resolver errors that mean "this name does not exist"; anything else (EAI_AGAIN while DNS is not
 # reachable yet, EAI_FAIL, ...) is transient and must not be cached for an hour.
@@ -158,6 +186,22 @@ async def _async_own_ips() -> frozenset[IPAddress] | None:
     return frozenset(ip for address in configured if (ip := _ip(address)) is not None and not ip.is_loopback)
 
 
+# Shared address space (RFC 6598): carrier-grade NAT and VPN overlays such as Tailscale — not public. A fixed
+# network the LAN check compares against, not an address anything connects to (S1313 false positive).
+_SHARED_ADDRESS_SPACE = ipaddress.ip_network("100.64.0.0/10")  # NOSONAR
+
+
+def _is_lan_host(host: str) -> bool:
+    """A host reached only inside the local network: a private, link-local or shared-space IP, a single-label
+    name or a name under one of the KNOWN_DOMAINS (fritz.box, local, …). Cleartext there never crosses the
+    internet. Names are taken by their suffix, not resolved."""
+    name = host.rstrip(".").lower()  # "192.168.1.5." is still the IP
+    if (ip := _ip(name)) is not None:
+        ip = getattr(ip, "ipv4_mapped", None) or ip
+        return ip.is_private or ip.is_link_local or ip in _SHARED_ADDRESS_SPACE
+    return "." not in name or any(name == domain or name.endswith(f".{domain}") for domain in KNOWN_DOMAINS)
+
+
 def host_of(address: str | None) -> str | None:
     """Host part of a stored Web-IO address ("host:port", "[v6]:port" or bare host)."""
     if not address:
@@ -175,12 +219,73 @@ def format_address(host: str, port: int) -> str:
     return f"{host}:{port}"
 
 
+def _is_host_name(host: str) -> bool:
+    """Whether host is an IP address or a well-formed host name (an internationalized one in its IDNA form)."""
+    if _ip(host) is not None:
+        return True
+    try:
+        name = host.removesuffix(".").encode("idna").decode("ascii")
+    except UnicodeError:
+        return False
+    return 0 < len(name) <= 253 and all(_HOST_LABEL.fullmatch(label) for label in name.lower().split("."))
+
+
+def _without_user_info(url: str | None) -> str | None:
+    """url for the log: a password in it must not end up there.
+
+    Everything between the scheme and the last "@" is masked, as a refused URL need not be well formed: its
+    password may hold "/", "?", "#" or "//", or the scheme may be missing. An "@" in a path or query is masked
+    too, which costs nothing.
+    """
+    if not url or "@" not in url:
+        return url
+    scheme = match.group() if (match := _URL_SCHEME.match(url)) else ""
+    return f"{scheme}***@{url.rpartition('@')[2]}"
+
+
 def is_loopback_address(address: str) -> bool:
     """Whether a "host:port" address (see format_address) points to the loopback interface or is unspecified.
 
     Comexio cannot reach HA there; the resolver returns such an address only as its last resort.
     """
     return _is_loopback(host_of(address) or "")
+
+
+def webhook_url_target(url: str | None) -> WebhookTarget | None:
+    """The target of an http(s) URL with nothing but a host and an optional port; None for anything else.
+
+    No port: the scheme's (443 for https, 80 for http). The Web-IO commands bring their own path, so a
+    URL with a path, query, fragment or credentials cannot be reproduced on the device and is refused.
+    """
+    try:
+        parsed = urlparse((url or "").strip())
+        port = parsed.port
+    except ValueError:  # a port out of range or not numeric
+        return None
+    if parsed.scheme not in _SCHEME_PORTS or parsed.username is not None:
+        return None
+    if not parsed.hostname or not _is_host_name(parsed.hostname):
+        return None
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment or parsed.params:
+        return None
+    return WebhookTarget(
+        format_address(parsed.hostname, port or _SCHEME_PORTS[parsed.scheme]), parsed.scheme == "https"
+    )
+
+
+def webhook_url_error(url: str | None) -> str | None:
+    """The options-flow error key of a webhook URL ("invalid_url", "loopback_url", "insecure_url"), None when usable.
+
+    http:// only for a host inside the local network: elsewhere the pushed values would cross the internet in
+    cleartext, to a webhook whose id is predictable.
+    """
+    if (target := webhook_url_target(url)) is None:
+        return "invalid_url"
+    if is_loopback_address(target.address):
+        return "loopback_url"
+    if not target.https and not _is_lan_host(host_of(target.address) or ""):
+        return "insecure_url"
+    return None
 
 
 def webio_device_hints(webio_devices: Mapping[str, Mapping[str, Any]] | None) -> tuple[str, ...]:
@@ -195,8 +300,14 @@ def webio_device_hints(webio_devices: Mapping[str, Mapping[str, Any]] | None) ->
 class HaAddressResolver:
     """Per-coordinator resolver: keeps the known address while it still points to this host."""
 
-    def __init__(self, hass: HomeAssistant) -> None:
+    def __init__(self, hass: HomeAssistant, mode: str = WEBHOOK_ADDRESS_AUTO, url: str | None = None) -> None:
         self.hass = hass
+        # Webhook address mode (const.WEBHOOK_ADDRESS_*) and the custom mode's URL.
+        self._mode = mode
+        self._url = url
+        # Why the external/custom mode's URL was unusable the last time (a webhook_url_error key) and the automatic
+        # address was used instead; None while the mode's own URL is used (or in the automatic mode).
+        self.fallback_reason: str | None = None
         # homeassistant.<domain> name the last search found — known address next to the hints.
         self._guessed_host: str | None = None
         # host -> what was last logged about it; a notice is logged at its level only when it changes.
@@ -208,13 +319,57 @@ class HaAddressResolver:
         self._lock = asyncio.Lock()
 
     async def async_get(self, *hints: str | None) -> str:
-        """The HA address for Comexio webhooks as "host:port".
+        """The HA address for Comexio webhooks as "host:port" (see async_target)."""
+        return (await self.async_target(*hints)).address
+
+    async def async_target(self, *hints: str | None) -> WebhookTarget:
+        """The address for Comexio webhooks, and whether HA serves it over HTTPS.
 
         hints: the addresses the Web-IO devices already store (see webio_device_hints), checked in
-        order before the homeassistant.<domain> name found last time.
+        order before the homeassistant.<domain> name found last time — only for the automatic address.
         """
         async with self._lock:
-            return await self._async_get(hints)
+            if (target := self._fixed_target()) is not None:
+                return target
+            return WebhookTarget(await self._async_get(hints), self._auto_https())
+
+    def _fixed_target(self) -> WebhookTarget | None:
+        """The target of the external_url / custom mode; None for the automatic address.
+
+        An unusable URL (see webhook_url_error) falls back to the automatic address, so the pushes keep reaching
+        HA; fallback_reason tells the repair why it would set that address.
+        """
+        self.fallback_reason = None
+        if self._mode == WEBHOOK_ADDRESS_AUTO:
+            return None
+        url = self.hass.config.external_url if self._mode == WEBHOOK_ADDRESS_EXTERNAL else self._url
+        if (error := webhook_url_error(url)) is not None:
+            self.fallback_reason = error
+            self._notice(
+                self._mode,
+                error,
+                logging.WARNING,
+                "HA address: the webhook address mode %r has no usable URL (%r: %s); using the automatic address",
+                _without_user_info(url),
+                error,
+            )
+            return None
+        self._noticed.pop(self._mode, None)
+        return webhook_url_target(url)
+
+    def _auto_https(self) -> bool:
+        """Whether the automatic address is reached over HTTPS.
+
+        An internal_url with its own port: its scheme (a TLS proxy on that port). Otherwise the address
+        carries HA's own port, which speaks TLS only when HA itself does — an https internal_url without
+        a port is a proxy on 443, not on HA's port.
+        """
+        if internal_url := self.hass.config.internal_url:
+            parsed = urlparse(internal_url)
+            with suppress(ValueError):
+                if parsed.port is not None:
+                    return parsed.scheme == "https"
+        return bool(getattr(getattr(self.hass.config, "api", None), "use_ssl", False))
 
     async def _async_get(self, hints: tuple[str | None, ...]) -> str:
         api = getattr(self.hass.config, "api", None)  # None until HA's http component is set up

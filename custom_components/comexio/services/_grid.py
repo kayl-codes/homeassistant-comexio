@@ -21,8 +21,8 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
-    io_column_rows,
-    io_group_headers,
+    IO_PLAN_KIND_IO,
+    IoPlanKind,
     snap_to_grid,
 )
 from ..coordinator import ComexioCoordinator
@@ -492,19 +492,21 @@ def _io_ref_slots(
     coordinator: ComexioCoordinator,
     members: list[str],
     rows_per_col: int,
+    kind: IoPlanKind = IO_PLAN_KIND_IO,
 ) -> dict[int, tuple[float, float]]:
-    """Canonical (x_offset, y) slot per IO ref_id across the plan's extension columns.
+    """Canonical (x_offset, y) slot per IO ref_id across the plan's member columns.
 
-    Same math as the wire path (api._function_plan_add_single_io_pair): column index =
-    membership order, row slots from io_column_rows over the extension's FULL
-    identifier list, overlong columns wrap into a sub-column right next to them.
+    Same math as the wire path (api._function_plan_add_single_io_pair): each member starts at
+    its origin (coordinator.io_plan_origins — its own column for an extension, stacked for
+    Quickbus devices), row slots from kind.column_blocks over the member's FULL IO list,
+    overlong columns wrap into a sub-column right next to them.
     """
-    ios = (coordinator.data or {}).get("io", [])
     slots: dict[int, tuple[float, float]] = {}
-    for ext_col, ext in enumerate(members):
-        by_ident = {io["identifier"]: io for io in ios if io["ext_name"] == ext}
-        for ident, row in io_column_rows(list(by_ident)).items():
-            sub_col, row_in_col = divmod(row, rows_per_col)
+    for ext, (ext_col, row_offset) in coordinator.io_plan_origins(members, kind, rows_per_col).items():
+        by_ident = {io["identifier"]: io for io in kind.member_ios(coordinator.data, ext)}
+        rows, _headers = kind.column_blocks(ext, list(by_ident.values()))
+        for ident, row in rows.items():
+            sub_col, row_in_col = divmod(row_offset + row, rows_per_col)
             try:
                 ref_id = int(by_ident[ident]["id"])
             except (TypeError, ValueError):
@@ -520,19 +522,19 @@ def _io_header_slots(
     coordinator: ComexioCoordinator,
     members: list[str],
     rows_per_col: int,
+    kind: IoPlanKind = IO_PLAN_KIND_IO,
 ) -> list[tuple[float, float, str]]:
-    """Canonical (x, y, text) header-comment slot per IO type-group block, one per column.
+    """Canonical (x, y, text) header-comment slot per column block (IO type group / Quickbus device).
 
-    Same column math as _io_ref_slots, keyed by io_group_headers' reserved rows instead of
-    per-IO ref_ids — a header comment has no ref_id of its own, so callers place it by
-    position rather than matching it against an existing element.
+    Same column math as _io_ref_slots, keyed by kind.column_blocks' reserved header rows
+    instead of per-IO ref_ids — a header comment has no ref_id of its own, so callers place
+    it by position rather than matching it against an existing element.
     """
-    ios = (coordinator.data or {}).get("io", [])
     slots: list[tuple[float, float, str]] = []
-    for ext_col, ext in enumerate(members):
-        idents = [io["identifier"] for io in ios if io["ext_name"] == ext]
-        for row, text in io_group_headers(idents).items():
-            sub_col, row_in_col = divmod(row, rows_per_col)
+    for ext, (ext_col, row_offset) in coordinator.io_plan_origins(members, kind, rows_per_col).items():
+        _rows, headers = kind.column_blocks(ext, kind.member_ios(coordinator.data, ext))
+        for row, text in headers.items():
+            sub_col, row_in_col = divmod(row_offset + row, rows_per_col)
             slots.append(
                 (
                     _LAYOUT_X_MARKER + (ext_col + sub_col) * _LAYOUT_COLUMN_WIDTH,
@@ -578,23 +580,23 @@ async def _resync_io_group_headers(
 
 
 async def async_resync_io_group_headers(coordinator: ComexioCoordinator, api, fub_id: int) -> int:
-    """Recompute and place an IO cluster plan's type-group header comments.
+    """Recompute and place the header comments of an IO / Quickbus cluster plan.
 
     The IO wiring path (api.function_plan_add_io_pairs) drops each pair straight into its
     deterministic grid slot without a sort pass, so it never touches header comments —
     call this right after wiring to keep a freshly created or extended IO cluster plan
     labeled, without paying for a full sort run. Returns the number of headers placed,
-    or 0 if fub_id isn't a managed IO cluster plan.
+    or 0 if fub_id isn't a managed IO / Quickbus cluster plan.
     """
-    members = coordinator.managed_io_plan_members(fub_id)
-    if not members:
+    if (column_plan := coordinator.managed_column_plan(fub_id)) is None:
         return 0
+    kind, members = column_plan
     _x_max, y_max = api.get_fub_canvas_bounds(fub_id)
     rows_per_col = max(1, int((y_max - _LAYOUT_Y_START) / _LAYOUT_Y_STEP))
     plan_data = await api.function_plan_load_elements(fub_id)
     if not plan_data:
         return 0
-    header_slots = _io_header_slots(coordinator, members, rows_per_col)
+    header_slots = _io_header_slots(coordinator, members, rows_per_col, kind)
     return await _resync_io_group_headers(api, fub_id, plan_data, header_slots)
 
 
@@ -653,6 +655,7 @@ def _assign_io_grid_positions(
     plan_data: dict,
     members: list[str],
     rows_per_col: int,
+    kind: IoPlanKind = IO_PLAN_KIND_IO,
 ) -> tuple[list[tuple[int, float, float]], int, list[int]]:
     """Restore the deterministic IO-cluster grid of a managed IO plan.
 
@@ -661,7 +664,7 @@ def _assign_io_grid_positions(
     ids) — leftovers are elements the grid has no slot for (stale refs, foreign
     elements); comment blocks are excluded, pinning is the caller's job.
     """
-    ref_slots = _io_ref_slots(coordinator, members, rows_per_col)
+    ref_slots = _io_ref_slots(coordinator, members, rows_per_col, kind)
     elements = plan_data.get("elements", {})
     positions, elem_slot = _io_ref_positions(elements, ref_slots)
     pair_count = _assign_webio_partner_positions(plan_data.get("connections", {}), elem_slot, positions)
