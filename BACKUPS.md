@@ -91,7 +91,9 @@ bring the plan back, so the integration never deletes them on its own:
    about its older history.
 3. **Your decision:**
    - **Load into the plan preview** switches the plan card to **Orphaned plans** and shows
-     the plan's newest backup. It decides nothing — the repair stays open.
+     the plan's newest backup. It decides nothing — the repair stays open. If another plan
+     is picked in the plan selectors while it waits, that pick wins and the repair reports
+     that the backups could not be loaded.
    - **Keep** keeps the backups for good and never asks again for this plan.
    - **Delete** removes all backups of this plan.
    - **Ignore** (Home Assistant's own button) hides the repair and deletes nothing.
@@ -100,6 +102,14 @@ bring the plan back, so the integration never deletes them on its own:
 5. **In the plan card**, the **Orphaned plans** view has buttons next to **Restore**:
    delete the selected backup, delete all backups of the plan, and keep them (the pin) —
    pressed again on a kept plan, it takes that decision back. Each asks for confirmation.
+
+   The buttons act on the row picked in the **Backup** selector, not on the picture. When
+   the preview does not show that row — it has not loaded it yet, it still shows another
+   plan, or (for deleting one backup) it shows another backup of the plan — the button
+   gets an orange border, and its tooltip and the confirmation dialog name what the preview
+   shows instead. A compact card (only `backup_entity`, no `entity`) checks the preview of
+   the full plan card for the same Comexio server on the dashboard, or, without one, the
+   newest render.
 
 The repair closes by itself when the plan exists again under the same ID and name, or when
 its backups are deleted with one of the actions below. If the plan list cannot be read
@@ -230,7 +240,9 @@ sich der Plan zurückholen, deshalb löscht die Integration sie nie von selbst:
    jetzt belegt, dein umbenannter Plan, geht es in der Meldung um seine ältere Historie.
 3. **Deine Entscheidung:**
    - **In Vorschau laden** schaltet die Plan-Karte auf **Orphaned plans** und zeigt das
-     neueste Backup des Plans. Es entscheidet nichts — die Meldung bleibt offen.
+     neueste Backup des Plans. Es entscheidet nichts — die Meldung bleibt offen. Wird
+     währenddessen in den Plan-Auswahlen ein anderer Plan gewählt, gilt diese Wahl, und die
+     Meldung sagt, dass die Backups nicht geladen werden konnten.
    - **Behalten** bewahrt die Backups dauerhaft auf und fragt für diesen Plan nicht mehr.
    - **Löschen** entfernt alle Backups dieses Plans.
    - **Ignorieren** (Home Assistants eigener Knopf) blendet die Meldung aus und löscht
@@ -241,6 +253,14 @@ sich der Plan zurückholen, deshalb löscht die Integration sie nie von selbst:
    gewählte Backup löschen, alle Backups des Plans löschen und sie behalten (die
    Stecknadel) — bei einem behaltenen Plan nimmt sie die Entscheidung zurück. Jeder Knopf
    fragt vorher nach.
+
+   Die Knöpfe wirken auf die Zeile, die in der Auswahl **Backup** gewählt ist, nicht auf das
+   Bild. Zeigt die Vorschau diese Zeile nicht — sie hat sie noch nicht geladen, zeigt noch
+   einen anderen Plan oder (beim Löschen eines einzelnen Backups) ein anderes Backup des
+   Plans —, bekommt der Knopf einen orangen Rand, und sein Tooltip und der
+   Bestätigungsdialog nennen, was die Vorschau stattdessen zeigt. Eine kompakte Karte (nur
+   `backup_entity`, ohne `entity`) prüft die Vorschau der vollen Plan-Karte desselben
+   Comexio-Servers auf dem Dashboard, ohne eine solche das neueste Rendering.
 
 Die Meldung schließt sich von selbst, wenn es den Plan unter derselben ID und demselben
 Namen wieder gibt oder wenn seine Backups mit einer der Aktionen unten gelöscht werden.
