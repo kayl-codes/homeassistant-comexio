@@ -485,6 +485,39 @@ def test_no_fast_track_for_a_class_with_no_wanted_command(cls: WebioClass) -> No
 
 
 @pytest.mark.parametrize(
+    ("commands", "action"),
+    [("[]", button_module._ACTION_SKIP_CLASS), ('[{"name": "HA Q1"}]', "recreate")],
+    ids=["emptied", "wanted"],
+)
+def test_a_class_without_a_device_is_recreated_only_with_a_wanted_command(commands: str, action: str) -> None:
+    """(Sourcery) The sync picks its classes before the first write; emptied since (options saved
+    mid-sync), the class was recreated from an empty template, which gets no device on Comexio."""
+    button = _button(REACHABLE)
+    button.coordinator.api.generate_webio_json.return_value = f'{{"commands": {commands}}}'
+    ctx = _ctx(button, REACHABLE)
+
+    decided = asyncio.run(button._decide_effective_action(ctx, WebioClass.QUICKBUS, None, [{}], [], [], [], False))
+
+    assert decided == action
+
+
+def test_a_skipped_class_writes_and_counts_nothing() -> None:
+    button = _button(REACHABLE)
+    button.coordinator.api.generate_webio_json.return_value = '{"commands": []}'
+    button._recreate_class = AsyncMock()  # type: ignore[method-assign]
+    button._delta_sync_class = AsyncMock()  # type: ignore[method-assign]
+    ctx = _ctx(button, REACHABLE)
+
+    result = asyncio.run(
+        ComexioSyncButton._sync_class(button, ctx, WebioClass.QUICKBUS, None, [{}], [], [], [], [], False, 0, 100)
+    )
+
+    button._recreate_class.assert_not_awaited()
+    button._delta_sync_class.assert_not_awaited()
+    assert result == {**_CLASS_RESULT, "created_names": []}
+
+
+@pytest.mark.parametrize(
     ("ha_address", "stored", "updated"),
     [
         (REACHABLE, "192.168.0.111:8123", True),  # internal_url changed after the last audit

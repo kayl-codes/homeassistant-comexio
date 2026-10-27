@@ -124,6 +124,7 @@ _STEP_CHECKING_PLAN = "Checking function plan wiring"
 _RETRY_CLEANUP = "run the cleanup again from Repairs"
 _DELTA_RESULT_KEYS = {"rename": "renamed", "delete": "removed", "type": "updated", "create": "added"}
 _FAILED_WRITES_SHOWN = 10  # failed Web-IO writes named in the result message; the rest are counted
+_ACTION_SKIP_CLASS = "skip_class"  # _decide_effective_action: a class with neither device nor wanted command
 
 
 def _format_counts(added: int, updated: int, renamed: int, removed: int) -> str:
@@ -970,7 +971,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # server (a class deselected after a prior sync — only its device IP is kept current;
         # its commands are no orphans and are left to the import_disabled repair). An opted-out class
         # with no server device is skipped entirely — _decide_effective_action force-"recreate"s
-        # any class with no device, so including it would create it on the live server. The same
+        # any class with no device and a wanted command, so including it would create it on the live server. The same
         # holds for the Quickbus class while the server has no Quickbus IO, and for a class without a
         # wanted command, as Comexio creates no device for an empty class (required_webio_classes).
         opted_in = set(self.coordinator.required_webio_classes)
@@ -1571,13 +1572,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         cls_action_eta = _class_action_eta(action, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch)
 
         if not class_dev_id:
+            if self._class_template_empty(ctx, cls):
+                # The sync picked its classes before the earlier classes' writes; an options save since
+                # (Quickbus devices deselected, every KNX object ignored) can leave this one empty, and
+                # Comexio creates no device for an empty class, so its recreate would only fail.
+                _LOGGER.info("[%s] %s: no device instance and no wanted command. Skipping.", self.server_id, label)
+                return _ACTION_SKIP_CLASS
             _LOGGER.info("[%s] %s: no device instance found. Forcing recreate.", self.server_id, label)
             return "recreate"
         if action == "update_ip":
             _LOGGER.info("[%s] %s: targeted IP update requested. Skipping Fast-Track check.", self.server_id, label)
             return "update_ip"
         if cls_action_eta > SYNC_DURATION_RECREATE:
-            if not json.loads(self._class_webio_json(cls, ctx.class_names[cls]))["commands"]:
+            if self._class_template_empty(ctx, cls):
                 # Synced only to clear it out (e.g. Quickbus with no device selected any more, every KNX
                 # object ignored): a recreate would upload an empty class, for which Comexio creates no
                 # device instance, so the sync failed after deleting the old one.
@@ -1624,6 +1631,10 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return True
         _LOGGER.info("[%s] %s device not deleted (%s). Falling back to Delta-Sync.", self.server_id, label, error)
         return False
+
+    def _class_template_empty(self, ctx: _SyncContext, cls: str) -> bool:
+        """Whether the class template a recreate would upload has no command."""
+        return not json.loads(self._class_webio_json(cls, ctx.class_names[cls]))["commands"]
 
     def _class_webio_json(self, cls: str, class_name: str) -> str:
         """The class template a recreate uploads: every wanted command of the class (pure, no network)."""
@@ -2013,6 +2024,12 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             ctx, cls, class_dev_id, cls_missing, cls_renamed, cls_types, cls_orphans, dev_ip_mismatch
         )
 
+        if cls_effective_action == _ACTION_SKIP_CLASS:
+            return dict.fromkeys(("added", "removed", "updated", "renamed", "skipped_creates", "debris_removed"), 0) | {
+                "updated_ip": False,
+                "recreated": False,
+                "created_names": [],
+            }
         if cls_effective_action == "recreate":
             await self._recreate_class(ctx, cls, class_name, label, class_dev_id, pct_start, pct_end)
             # Everything in this class is brand new, so every command of it needs the
