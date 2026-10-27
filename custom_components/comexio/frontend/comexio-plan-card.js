@@ -1467,10 +1467,11 @@ ${warning}`;
       return "Achtung: Die Vorschau hat diese Auswahl (noch) nicht geladen — das Bild kann einen anderen Plan zeigen.";
     }
     const shown = this._shownPreview;
+    const liveSuffix = shown.source === "live" ? ", Live-Stand" : "";
     const what =
       match === "other_snapshot"
         ? `ein anderes Backup von „${shown.plan_name}“`
-        : `„${shown.plan_name}“ (ID ${shown.fub_id})${shown.source === "live" ? ", Live-Stand" : ""}`;
+        : `„${shown.plan_name}“ (ID ${shown.fub_id})${liveSuffix}`;
     return `Achtung: Die Vorschau zeigt nicht diese Auswahl, sondern ${what}. Bitte die Auswahl prüfen.`;
   }
 
