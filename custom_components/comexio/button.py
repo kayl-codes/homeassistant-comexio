@@ -3097,6 +3097,22 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             note += _activation_note(ctx, plan_name, await ctx.api.function_plan_run_fup(fub_id))
         return note
 
+    def _stacked_origin_rows(self, fub_id: int, kind: IoPlanKind, exts: list[str]) -> dict[str, dict[str, int]]:
+        """{member: rows of it and of every member before it} in a stacked plan, as its origin derives from them.
+
+        They come from the last poll: api.function_plan_add_io_pairs checks them against the fresh config.
+        """
+        if not kind.stacked:
+            return {}
+        if not (plan := self.coordinator.managed_column_plan(fub_id)):
+            _LOGGER.debug(
+                "[%s] fub=%s is no managed %s plan: its origins go unchecked", self.server_id, fub_id, kind.label
+            )
+            return {}
+        members = plan[1]
+        rows = self.coordinator.io_member_rows(members, kind)
+        return {ext: {m: rows[m] for m in members[: members.index(ext) + 1]} for ext in exts if ext in members}
+
     async def _add_io_pairs_to_plan(
         self,
         ctx: _SyncContext,
@@ -3152,6 +3168,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         added: list[str] = []
         errors: list[str] = []
+        origin_rows = self._stacked_origin_rows(fub_id, kind, [ext for ext, _ in ext_cols])
         for ext, (column, row_offset) in ext_cols:
             lp_added, lp_errors = await api.function_plan_add_io_pairs(
                 fub_id,
@@ -3161,6 +3178,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 progress_cb=lambda done, total: _plan_pair_progress(ctx, progress_state, plan_name, done, total),
                 kind=kind,
                 row_offset=row_offset,
+                stacked_rows=origin_rows.get(ext),
             )
             progress_state["done"] += len(by_ext[ext])
             label = one_line(kind.member_label(self.coordinator.data, ext))
@@ -3171,9 +3189,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
 
         if added and kind.stacked and not is_fresh:
             # Stacked origins follow each member's current IO count, but pairs already in the plan
-            # stay where they were placed: a member above that lost or gained IOs (also between the
-            # cached data the origins came from and the fresh reload) leaves the new pairs
-            # overlapping old ones. The sort restores the whole grid from one snapshot, headers
+            # stay where they were placed: a member above that lost or gained IOs since its pairs were
+            # placed leaves the new pairs overlapping old ones (a change since the last poll adds
+            # nothing, see stacked_rows). The sort restores the whole grid from one snapshot, headers
             # included, and reactivates the plan.
             note = await self._sort_and_reactivate(ctx, fub_id, plan_name, was_active)
             return (

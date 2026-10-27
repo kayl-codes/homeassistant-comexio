@@ -1429,6 +1429,11 @@ class IoPlanKind:
         ios = self.member_ios(data, member)
         return self.member_display(ios[0]) if ios else self.member_fallback(member)
 
+    def rows_needed(self, data: Mapping[str, Any] | None, member: str) -> int:
+        """Column rows one member package needs in data (IOs + header/blank separator rows)."""
+        rows, _headers = self.column_blocks(member, self.member_ios(data, member))
+        return (max(rows.values()) + 1) if rows else 0
+
 
 def io_plan_member_origins(
     kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int
@@ -1480,31 +1485,56 @@ def canvas_columns(x_max: float) -> int:
 PLAN_FAILURE_NOT_RESOLVED = "not resolved/created"
 PLAN_FAILURE_OFF_CANVAS = "no longer fits the plan canvas — delete the plan in Comexio to have it laid out afresh"
 PLAN_FAILURE_UNREADABLE_PLAN_LIST = "not placed — the plan list has unreadable entries, one may be its plan"
+PLAN_FAILURE_AFTER_GONE_MEMBER = (
+    "not wired — a device before it in the plan has no IOs loaded (removed, every IO ignored, or missing"
+    " from this poll); if that stays so, delete the plan in Comexio to have it laid out afresh"
+)
 
 
 def io_plan_overflow(
-    kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int], rows_per_col: int, max_columns: int
+    kind: IoPlanKind,
+    members: list[str],
+    rows_needed: Callable[[str], int],
+    rows_per_col: int,
+    max_columns: int,
+    *,
+    check_first: bool = False,
 ) -> list[str]:
     """Members of a Quickbus plan that end past its last canvas column, in membership order.
 
     A device joins only while the plan's columns take it, but its IO count can grow later (or the
     plan's paper change): the devices behind it then move right, past the canvas edge. From the
     first member that ends there on, every later one is returned too, as each is placed after it.
-    The first member never overflows: no other layout of the plan would fit it either. Columns
-    beyond the configured capacity but still on the canvas are fine. An extension keeps its own
-    column (empty list).
+    The first member only with check_first (a fresh plan would take it, e.g. this plan's paper
+    shrank): otherwise no layout fits it, and failing it would leave its plan empty on every sync.
+    Columns beyond the configured capacity but still on the canvas are fine. An extension keeps its
+    own column (empty list).
     """
     if not kind.stacked:
         return []
     first = next(
         (
             i
-            for i in range(1, len(members))
+            for i in range(0 if check_first else 1, len(members))
             if io_plan_columns(kind, members[: i + 1], rows_needed, rows_per_col) > max_columns
         ),
         len(members),
     )
     return members[first:]
+
+
+def io_plan_shifted(kind: IoPlanKind, members: list[str], rows_needed: Callable[[str], int]) -> list[str]:
+    """Members of a Quickbus plan placed after a member that takes no rows any more, in membership order.
+
+    A device without IOs (removed, or every IO ignored) stays in the plan name and its pairs stay
+    in the plan, but io_plan_member_origins gives it no rows: every device after it gets origins
+    inside the old slots, so a new pair would land on existing wiring. The sort refuses such a
+    plan too (_column_plan_sort_skip). An extension keeps its own column (empty list).
+    """
+    if not kind.stacked:
+        return []
+    first = next((i for i, member in enumerate(members) if not rows_needed(member)), len(members))
+    return members[first + 1 :]
 
 
 IO_PLAN_KIND_IO = IoPlanKind(

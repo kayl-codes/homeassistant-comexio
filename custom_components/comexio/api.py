@@ -4956,6 +4956,7 @@ class ComexioAPI:
         progress_cb: Callable[[int, int], None] | None = None,
         kind: IoPlanKind = IO_PLAN_KIND_IO,
         row_offset: int = 0,
+        stacked_rows: Mapping[str, int] | None = None,
     ) -> tuple[list[str], list[str]]:
         """Add IO (type=1) + Web-IO (type=10) element pairs for one column (extension / Quickbus device).
 
@@ -4968,6 +4969,9 @@ class ComexioAPI:
         expected to pick a canvas tall enough to avoid this).
         column_index / row_offset: the member's origin in the plan (Quickbus devices stack within
         a column, see const.io_plan_member_origins).
+        stacked_rows: {member: rows} of this member and every one before it in the plan, as the
+        origin was computed from them. A count the fresh config no longer has adds nothing: the
+        origin would put the new pairs onto other pairs' slots.
         Returns (added_identifiers, error_messages).
         """
 
@@ -4977,6 +4981,12 @@ class ComexioAPI:
             return {kind.command_name(io) for io in kind.member_ios(data, ext_name) if io["identifier"] in wanted}
 
         fresh_data = await self._reload_config_until_commands_ready(_expected_names)
+        if stacked_rows and (
+            changed := [member for member, need in stacked_rows.items() if kind.rows_needed(fresh_data, member) != need]
+        ):
+            labels = ", ".join(one_line(kind.member_label(fresh_data, member)) for member in changed)
+            label = one_line(kind.member_label(fresh_data, ext_name))
+            return [], [f"{label}: not wired — the IO count of {labels} changed since the last poll"]
         webio_commands = fresh_data.get("webio_commands", {})
         ext_ios = {io["identifier"]: io for io in kind.member_ios(fresh_data, ext_name)}
         rows, _headers = kind.column_blocks(ext_name, list(ext_ios.values()))

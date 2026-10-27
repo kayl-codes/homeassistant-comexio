@@ -9,8 +9,11 @@ import pytest
 
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
+    IO_PLAN_KIND_IO,
     IO_PLAN_KIND_QUICKBUS,
+    PLAN_FAILURE_AFTER_GONE_MEMBER,
     PLAN_FAILURE_OFF_CANVAS,
+    IoPlanKind,
     WebioClass,
     function_plan_id,
     source_category,
@@ -195,6 +198,129 @@ def test_a_device_alone_too_tall_for_the_canvas_keeps_its_fresh_plan() -> None:
     result = asyncio.run(coordinator.resolve_io_clusters(["1"], IO_PLAN_KIND_QUICKBUS))
 
     assert result == ({"1": (48, (0, 0))}, {48}, {})
+
+
+def test_a_first_device_off_a_shrunk_canvas_is_not_wired() -> None:
+    # The plan's paper shrank to one column: a fresh plan (three columns) would take device 1 again.
+    coordinator = _cluster_coordinator("HA - QB [1]", 150, {"1": 12})
+    coordinator._plan_canvas_columns = lambda _fid, orientation=None: 3 if orientation else 1
+
+    result = asyncio.run(coordinator.resolve_io_clusters(["1"], IO_PLAN_KIND_QUICKBUS))
+
+    assert result == ({}, set(), {"1": PLAN_FAILURE_OFF_CANVAS})
+
+
+def test_a_quickbus_device_behind_one_without_ios_is_not_wired(caplog: pytest.LogCaptureFixture) -> None:
+    # Device 2 lost every IO, its pairs still in the plan: device 3 would move up into its slots.
+    coordinator = _cluster_coordinator("HA - QB [1,2,3]", 50, {"1": 4, "2": 0, "3": 4})
+
+    with caplog.at_level(logging.ERROR):
+        result = asyncio.run(coordinator.resolve_io_clusters(["1", "3"], IO_PLAN_KIND_QUICKBUS))
+
+    assert result == ({"1": (47, (0, 0))}, set(), {"3": PLAN_FAILURE_AFTER_GONE_MEMBER})
+    assert "'QB3' sits in QB plan fub=47 behind a Quickbus device with no IOs loaded" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("live_name", "kept"),
+    [("HA - QB [1,2]", {"HA - QB [1,2]": 48}), ("Rolladen", {})],
+    ids=["managed-name", "foreign-name"],
+)
+def test_a_stale_entry_of_another_kind_follows_its_renamed_plan(live_name: str, kept: dict[str, int]) -> None:
+    # Plan 48 was renamed by a run that stopped before plan_map followed; an IO run keeps it under its
+    # live name as long as that is a managed one.
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, {"A": 4, "B": 4})
+    coordinator.api.fub_data["48"] = {"Name": live_name}
+    coordinator.api.function_plan_name = lambda fid: coordinator.api.fub_data[str(fid)]["Name"]
+    coordinator.config_entry.options["logikplan_plan_map"]["HA - QB [1]"] = 48
+
+    asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
+
+    coordinator._persist_plan_map.assert_awaited_once_with(
+        {"HA - IO [A,B]": 47, **kept}, removals={"HA - IO [A]", "HA - QB [1]"}
+    )
+
+
+def test_a_renamed_plan_whose_name_is_taken_drops_out_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    # Plan 48 now carries the name plan_map already gives plan 49: two plans of one name, 48 is not re-keyed.
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, {"A": 4, "B": 4})
+    coordinator.api.fub_data |= {"48": {"Name": "HA - QB [1,2]"}, "49": {"Name": "HA - QB [1,2]"}}
+    coordinator.api.function_plan_name = lambda fid: coordinator.api.fub_data[str(fid)]["Name"]
+    coordinator.config_entry.options["logikplan_plan_map"] |= {"HA - QB [1]": 48, "HA - QB [1,2]": 49}
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
+
+    coordinator._persist_plan_map.assert_awaited_once_with(
+        {"HA - IO [A,B]": 47}, removals={"HA - IO [A]", "HA - QB [1]"}
+    )
+    assert "plan_map drops plan fub=48: its name 'HA - QB [1,2]' already maps to fub=49" in caplog.text
+
+
+def test_a_renamed_plan_also_listed_under_its_live_name_logs_no_clash(caplog: pytest.LogCaptureFixture) -> None:
+    # plan_map lists plan 48 under its old and its live name: one plan, not two of one name.
+    coordinator = _cluster_coordinator("HA - IO [A]", 150, {"A": 4, "B": 4})
+    coordinator.api.fub_data["48"] = {"Name": "HA - QB [1,2]"}
+    coordinator.api.function_plan_name = lambda fid: coordinator.api.fub_data[str(fid)]["Name"]
+    coordinator.config_entry.options["logikplan_plan_map"] |= {"HA - QB [1]": 48, "HA - QB [1,2]": 48}
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(coordinator.resolve_io_clusters(["A", "B"]))
+
+    assert "plan_map drops plan" not in caplog.text
+
+
+def test_a_quickbus_device_does_not_join_a_plan_behind_one_without_ios(caplog: pytest.LogCaptureFixture) -> None:
+    # Device 2 lost every IO: device 3 joining plan 47 would get origins inside device 2's old slots.
+    coordinator = _cluster_coordinator("HA - QB [1,2]", 150, {"1": 4, "2": 0, "3": 4})
+
+    with caplog.at_level(logging.INFO):
+        slots, _created, failed = asyncio.run(coordinator.resolve_io_clusters(["3"], IO_PLAN_KIND_QUICKBUS))
+
+    assert slots == {"3": (48, (0, 0))}
+    assert failed == {}
+    coordinator._rename_io_plan.assert_not_awaited()
+    assert "QB plan fub=47 holds a Quickbus device with no IOs loaded, so 'QB3' does not join it" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("plan_name", "sizes", "kind", "new_name"),
+    [
+        ("HA - QB [1,2]", {"1": 4, "2": 4, "3": 0}, IO_PLAN_KIND_QUICKBUS, "HA - QB [1,2,3]"),
+        ("HA - IO [A]", {"A": 0, "B": 4}, IO_PLAN_KIND_IO, "HA - IO [A,B]"),
+    ],
+    ids=["joining-device-without-ios", "io-extension-behind-one-without-ios"],
+)
+def test_a_member_still_joins_when_nothing_sits_behind_a_gone_one(
+    plan_name: str, sizes: dict[str, int], kind: IoPlanKind, new_name: str
+) -> None:
+    # Only members placed after a gone one are refused: the gone one itself, and IO extensions (own column), join.
+    coordinator = _cluster_coordinator(plan_name, 150, sizes)
+    new_member = next(iter(sizes.keys() - set(plan_name[plan_name.index("[") + 1 : -1].split(","))))
+
+    asyncio.run(coordinator.resolve_io_clusters([new_member], kind))
+
+    coordinator._rename_io_plan.assert_awaited_once_with(47, new_name)
+
+
+def test_a_marker_run_keeps_a_stale_entry_of_a_renamed_managed_plan() -> None:
+    # A marker run prunes every stale entry too: QB plan 47, renamed without plan_map following, stays.
+    coordinator = _coordinator(
+        server_id="cx1",
+        api=SimpleNamespace(
+            fub_data={"47": {"Name": "HA - QB [1,2]"}}, function_plan_name=lambda _fid: "HA - QB [1,2]"
+        ),
+        config_entry=SimpleNamespace(options={"logikplan_plan_map": {"HA - QB [1]": 47}}),
+        _function_plan_prefix=lambda: PREFIX,
+        _function_plan_cluster_size=lambda: 50,
+        _resolve_single_cluster_plan=AsyncMock(return_value=(60, False)),
+        _persist_plan_map=AsyncMock(),
+    )
+
+    asyncio.run(coordinator.resolve_marker_clusters([5], "Marker"))
+
+    cluster = ComexioCoordinator._cluster_plan_name(5, PREFIX, 50, "Marker")
+    coordinator._persist_plan_map.assert_awaited_once_with({cluster: 60, "HA - QB [1,2]": 47}, removals={"HA - QB [1]"})
 
 
 def test_the_canvas_check_of_a_fresh_plan_uses_its_orientation() -> None:

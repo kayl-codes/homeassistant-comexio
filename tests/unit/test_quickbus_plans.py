@@ -36,6 +36,7 @@ from custom_components.comexio.const import (
     io_plan_label,
     io_plan_member_origins,
     io_plan_overflow,
+    io_plan_shifted,
     quickbus_column_blocks,
     selected_quickbus_devices,
     webio_quickbus_ios,
@@ -50,7 +51,7 @@ from custom_components.comexio.options_flow import (
 from custom_components.comexio.repairs import _function_plan_gap_lines, _function_plan_option_label
 from custom_components.comexio.services import misc as services_misc
 from custom_components.comexio.services._grid import _io_header_slots, _io_ref_slots
-from custom_components.comexio.services.plan_actions import _sort_compute_positions
+from custom_components.comexio.services.plan_actions import _column_plan_sort_skip, _sort_compute_positions
 
 PREFIX = "HA"
 
@@ -65,6 +66,8 @@ def _coordinator(options: dict[str, Any], data: dict[str, Any], offline: set[str
     coordinator.data = data
     coordinator.offline_extensions = offline or set()
     coordinator.server_id = "test"
+    # A fresh A3 canvas wide enough for any test member (io_plan_overflow asks what a fresh plan takes).
+    coordinator.api = SimpleNamespace(get_fub_canvas_bounds=lambda *_a, **_k: (4000.0, 4000.0), fub_data={})
     return coordinator
 
 
@@ -354,6 +357,46 @@ def test_quickbus_pairs_are_wired_to_their_quickbus_commands(
     assert args[8][2] == FUNCTION_PLAN_LAYOUT_Y_START + (6 + 2) * FUNCTION_PLAN_LAYOUT_Y_STEP
 
 
+@pytest.mark.parametrize(("grown", "wired"), [(0, True), (1, False)], ids=["unchanged", "changed-since-poll"])
+def test_quickbus_pairs_wait_when_an_io_count_changed_since_the_poll(
+    parsing_api: ComexioAPI, quickbus_result: dict[str, Any], grown: int, wired: bool
+) -> None:
+    api = parsing_api
+    api._reload_config_until_commands_ready = AsyncMock(return_value={**quickbus_result, "webio_commands": {}})
+    api.function_plan_load_elements = AsyncMock(return_value={})
+    api._function_plan_existing_refs = lambda _plan: ({}, [])
+    api.get_fub_canvas_bounds = lambda _fub: (2000.0, 2000.0)
+    # Device 3 sits below device 1: the last poll had one row more for device 1 than the fresh config.
+    polled_rows = {
+        "1": IO_PLAN_KIND_QUICKBUS.rows_needed(quickbus_result, "1") + grown,
+        "3": IO_PLAN_KIND_QUICKBUS.rows_needed(quickbus_result, "3"),
+    }
+
+    _added, errors = asyncio.run(
+        api.function_plan_add_io_pairs(7, "3", ["PIR1"], kind=IO_PLAN_KIND_QUICKBUS, stacked_rows=polled_rows)
+    )
+
+    assert api.function_plan_load_elements.await_count == int(wired)
+    # The message names the device whose count changed, not the one being wired.
+    assert any("IO count of QB1 MT Flur changed" in error for error in errors) is not wired
+
+
+@pytest.mark.parametrize(
+    ("fresh_canvas", "skipped"), [(4000.0, True), (100.0, False)], ids=["shrunk-paper", "too-tall-for-any"]
+)
+def test_the_sort_skips_a_plan_whose_first_device_left_a_shrunk_canvas(
+    quickbus_result: dict[str, Any], fresh_canvas: float, skipped: bool
+) -> None:
+    # One row per column and one column: device 1 runs past it. A fresh plan taking it means the plan's
+    # paper shrank (deleting the plan helps); none taking it keeps the sort, as no layout fits it.
+    coordinator = _coordinator({}, {**quickbus_result, "io": []})
+    coordinator.api = SimpleNamespace(get_fub_canvas_bounds=lambda *_a, **_k: (fresh_canvas, fresh_canvas), fub_data={})
+
+    line = _column_plan_sort_skip(coordinator, 7, (IO_PLAN_KIND_QUICKBUS, ["1"]), 1, 1)
+
+    assert (line is not None and "no longer fit its 1 columns" in line) is skipped
+
+
 # --- repair text ---
 
 
@@ -458,6 +501,8 @@ def test_pairs_added_to_an_existing_stacked_plan_restore_its_grid(
         io_cluster_plan_contains=lambda *_args: True,
         async_function_plan_change_backup=AsyncMock(),
         data={},
+        managed_column_plan=lambda _fub_id: (kind, ["1", "3"]),
+        io_member_rows=lambda members, _kind: dict.fromkeys(members, 4),
     )
     button._plan_name = lambda _fub_id: "HA - QB [1,3]"  # type: ignore[method-assign]
     button._sort_and_reactivate = AsyncMock(return_value=", sorted")  # type: ignore[method-assign]
@@ -481,6 +526,9 @@ def test_pairs_added_to_an_existing_stacked_plan_restore_its_grid(
     else:
         button._sort_and_reactivate.assert_not_awaited()
     assert resync.await_count == int(bool(added) and not sorted_)
+    # A stacked member's origin is checked against the fresh config: its own rows and those above it.
+    expected_rows = {"1": 4, "3": 4} if kind.stacked else None
+    assert api.function_plan_add_io_pairs.await_args.kwargs["stacked_rows"] == expected_rows
 
 
 def test_dangling_source_ids_names_every_plan_an_id_dangles_in() -> None:
@@ -852,6 +900,32 @@ def test_io_extensions_keep_one_column_each() -> None:
 )
 def test_quickbus_devices_past_the_canvas_overflow(sizes: dict[str, int], max_columns: int, overflow: list) -> None:
     assert io_plan_overflow(IO_PLAN_KIND_QUICKBUS, list(sizes), _rows(sizes), 10, max_columns) == overflow
+
+
+def test_a_first_quickbus_device_past_the_canvas_overflows_only_when_checked() -> None:
+    # check_first: a fresh plan would take it (this plan's paper shrank), so failing it has a way out.
+    sizes = {"a": 12, "b": 1}
+
+    assert io_plan_overflow(IO_PLAN_KIND_QUICKBUS, list(sizes), _rows(sizes), 10, 1, check_first=True) == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    ("sizes", "shifted"),
+    [
+        ({"a": 4, "b": 0, "c": 4, "d": 2}, ["c", "d"]),  # b gone: c and d would move up into its slots
+        ({"a": 4, "b": 4, "c": 0}, []),  # the last one gone: nothing behind it
+        ({"a": 4, "b": 4}, []),
+    ],
+    ids=["gone-in-between", "gone-last", "none-gone"],
+)
+def test_quickbus_devices_behind_one_without_ios_are_shifted(sizes: dict[str, int], shifted: list[str]) -> None:
+    assert io_plan_shifted(IO_PLAN_KIND_QUICKBUS, list(sizes), _rows(sizes)) == shifted
+
+
+def test_io_extensions_are_never_shifted() -> None:
+    sizes = {"BASE": 0, "UD1": 2}
+
+    assert io_plan_shifted(IO_PLAN_KIND_IO, list(sizes), _rows(sizes)) == []
 
 
 def test_io_extensions_never_overflow() -> None:
