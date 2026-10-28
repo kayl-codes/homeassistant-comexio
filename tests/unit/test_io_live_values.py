@@ -109,6 +109,13 @@ def _config(**io_values: Any) -> dict[str, Any]:
     return conf
 
 
+def _index_scraped_ios(coordinator: ComexioCoordinator, conf: dict[str, Any]) -> None:
+    """The webhook indexes as _async_update_data builds them, from the IOs parse_config scraped from conf."""
+    parsed = coordinator.api.parse_config(conf)
+    coordinator._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in parsed["io"]}
+    coordinator._quickbus_index = {str(io["id"]): io for io in parsed[QUICKBUS_IO_DATA_KEY]}
+
+
 @pytest.fixture
 def api(parsing_api: ComexioAPI) -> ComexioAPI:
     parsing_api._client = MagicMock()
@@ -273,7 +280,7 @@ def test_webhook_value_during_the_io_fetch_wins(api: ComexioAPI) -> None:
     """R1: a push that lands while get_io_live_states is awaited is newer than the poll's answer."""
     coordinator = _coordinator(api)
 
-    coordinator._io_index = {("base", "ai1"): {"id": "13", "ext_name": "BASE", "identifier": "AI1"}}
+    _index_scraped_ios(coordinator, _config())
 
     async def push_during_fetch(_requests: list[tuple[int, str]]) -> dict[str, str]:
         coordinator.update_io_by_name("BASE", "AI1", 99.0)
@@ -291,7 +298,7 @@ def test_a_pushed_value_survives_a_later_poll_without_a_live_answer(api: Comexio
     """A webhook value counts as known: the next poll that leaves the IO unanswered keeps it, not None."""
     coordinator = _coordinator(api)
     _poll(coordinator, _config(), {})
-    coordinator._io_index = {("base", "ai1"): {"id": "13", "ext_name": "BASE", "identifier": "AI1"}}
+    _index_scraped_ios(coordinator, _config())
     coordinator.update_io_by_name("BASE", "AI1", 42.0)
     coordinator._webhook_updated_io_ids.clear()  # what _async_update_data does before the next fetch
 
@@ -361,6 +368,105 @@ def test_an_io_id_handed_to_another_io_drops_its_last_known_value(
 
     assert (ios["11"]["value"], ios["12"]["value"], ios["13"]["value"]) == (None, 1.0, 74.0)
     assert coordinator._io_real_value_ids == {"12", "13"}
+
+
+def test_a_push_for_the_former_io_during_the_fetch_is_dropped(api: ComexioAPI) -> None:
+    """IO 11 handed to another IO: a push matched through the previous scrape's index is I1's, not the new IO's."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
+    _index_scraped_ios(coordinator, _config())
+    conf = _config()
+    conf["FubModules"]["1"]["1"]["inoutput"]["11"]["Identifier"] = "I5"
+
+    async def push_during_fetch(_requests: list[tuple[int, str]]) -> dict[str, str]:
+        coordinator.update_io_by_name("BASE", "I1", 1)
+        return {}
+
+    ios, _markers, _fetch = _poll(coordinator, conf, AsyncMock(side_effect=push_during_fetch))
+
+    assert ios["11"]["value"] is None
+    assert "11" not in coordinator._io_real_value_ids
+
+
+@pytest.mark.parametrize(("io_live", "expected"), [({}, None), ({"11": "0"}, 0.0)], ids=["no live answer", "live"])
+def test_a_push_for_the_former_io_before_the_reassigning_scrape_does_not_win(
+    api: ComexioAPI, io_live: dict[str, Any], expected: float | None
+) -> None:
+    """A push during get_raw_config still matches I1 (old identity): R1 must not keep it over the new IO's value."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
+    _index_scraped_ios(coordinator, _config())
+    coordinator._webhook_updated_io_ids.clear()  # what _async_update_data does before the fetch
+    coordinator.update_io_by_name("BASE", "I1", 1)  # lands during get_raw_config
+    conf = _config()
+    conf["FubModules"]["1"]["1"]["inoutput"]["11"]["Identifier"] = "I5"
+
+    ios, _markers, _fetch = _poll(coordinator, conf, io_live)
+
+    assert (ios["11"]["value"], coordinator.io_states["11"]) == (expected, expected)
+    assert ("11" in coordinator._io_real_value_ids) is (expected is not None)
+
+
+def test_a_quickbus_push_for_the_former_io_during_the_fetch_is_dropped(quickbus_api: ComexioAPI) -> None:
+    """Quickbus IO 301 handed to another IO: a push matched through the previous index is PIR1's, not the new IO's."""
+    coordinator = _coordinator(quickbus_api)
+    _poll(coordinator, load_json_fixture("config_quickbus.json"), {"301": "1"})
+    _index_scraped_ios(coordinator, load_json_fixture("config_quickbus.json"))
+    conf = load_json_fixture("config_quickbus.json")
+    conf["FubModules"]["1"]["2"]["inoutput"]["301"]["Identifier"] = "PIR9"
+
+    async def push_during_fetch(_requests: list[tuple[int, str]]) -> dict[str, str]:
+        coordinator.update_quickbus_io(301, 1)
+        return {}
+
+    ios, _markers, _fetch = _poll(coordinator, conf, AsyncMock(side_effect=push_during_fetch))
+
+    assert ios["301"]["value"] is None
+    assert "301" not in coordinator._io_real_value_ids
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "abc", ""])
+def test_a_pushed_value_that_is_no_finite_number_does_not_outlive_a_failed_fetch(api: ComexioAPI, raw: str) -> None:
+    """Only a finite number counts as a reading: a junk push over a real one shows unknown after a failed fetch."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
+    _index_scraped_ios(coordinator, _config())
+    coordinator.update_io_by_name("BASE", "AI1", raw)
+    coordinator._webhook_updated_io_ids.clear()  # what _async_update_data does before the next fetch
+
+    ios, _markers, _fetch = _poll(coordinator, _config(), None)
+
+    assert ios["13"]["value"] is None
+    assert coordinator._io_real_value_ids == {"11", "12"}
+
+
+def test_a_junk_push_during_the_fetch_does_not_win_over_the_live_answer(api: ComexioAPI) -> None:
+    """R1 keeps a push over the poll's answer only when it is a reading: junk loses to the live value."""
+    coordinator = _coordinator(api)
+    _index_scraped_ios(coordinator, _config())
+
+    async def push_during_fetch(_requests: list[tuple[int, str]]) -> dict[str, str]:
+        coordinator.update_io_by_name("BASE", "AI1", "nan")
+        return {"13": "74"}
+
+    ios, _markers, _fetch = _poll(coordinator, _config(), AsyncMock(side_effect=push_during_fetch))
+
+    assert (ios["13"]["value"], coordinator.io_states["13"]) == (74.0, 74.0)
+    assert "13" in coordinator._io_real_value_ids
+
+
+def test_a_finite_push_after_a_junk_one_is_a_reading_again(api: ComexioAPI) -> None:
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    coordinator.update_io_by_name("BASE", "AI1", "nan")
+    coordinator.update_io_by_name("BASE", "AI1", 42.0)
+    coordinator._webhook_updated_io_ids.clear()  # what _async_update_data does before the next fetch
+
+    ios, _markers, _fetch = _poll(coordinator, _config(), None)
+
+    assert ios["13"]["value"] == 42.0
+    assert "13" in coordinator._io_real_value_ids
 
 
 @pytest.mark.parametrize(
@@ -560,7 +666,7 @@ def test_an_unanswered_quickbus_io_is_logged_with_its_device() -> None:
 def test_webhook_value_during_a_failed_io_fetch_is_kept_as_real(api: ComexioAPI) -> None:
     """R1 with a failed fetch: the last known values are read after the await, so the push counts."""
     coordinator = _coordinator(api)
-    coordinator._io_index = {("base", "ai1"): {"id": "13", "ext_name": "BASE", "identifier": "AI1"}}
+    _index_scraped_ios(coordinator, _config())
 
     async def push_then_fail(_requests: list[tuple[int, str]]) -> None:
         coordinator.update_io_by_name("BASE", "AI1", 99.0)
@@ -575,7 +681,7 @@ def test_a_pushed_quickbus_value_survives_a_failed_io_fetch(quickbus_api: Comexi
     """A Quickbus push is a real reading: the next poll whose live fetch fails keeps it, never the placeholder."""
     coordinator = _coordinator(quickbus_api)
     _poll(coordinator, load_json_fixture("config_quickbus.json"), {})
-    coordinator._quickbus_index = {"301": {"id": "301", "name": "BM Diele PIR1"}}
+    _index_scraped_ios(coordinator, load_json_fixture("config_quickbus.json"))
     coordinator.update_quickbus_io(301, 1)
     coordinator._webhook_updated_io_ids.clear()  # what _async_update_data does before the next fetch
 

@@ -166,6 +166,7 @@ from .const import (
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
+    WEBHOOK_FORMER_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
@@ -1497,6 +1498,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
                 self.io_states.pop(io["id"], None)
                 self._io_real_value_ids.discard(io["id"])
+                # A push for the former IO during get_raw_config: R1 must not keep it over this poll's value.
+                self._webhook_updated_io_ids.discard(io["id"])
             self._io_identities[io["id"]] = identity
 
     def _log_io_live_fetch_failed(self, ios: list[dict[str, Any]], known: Mapping[str, Any]) -> None:
@@ -4694,14 +4697,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Dispatch an optimistic value update to the right per-category cache updater."""
         (self.update_knx if source == WebioClass.KNX else self.update_marker)(source_id, value)
 
+    def _names_another_io_now(self, io: Mapping[str, Any]) -> bool:
+        """True for an IO of the previous scrape's index whose id the current scrape already gave another IO.
+
+        A push for it (sent before Comexio deleted it, or before the index is rebuilt) must not land on the new one.
+        """
+        identity = _io_identity(io)
+        return self._io_identities.get(io["id"], identity) != identity
+
+    def _store_pushed_io_value(self, io: dict[str, Any], value: float | int | str) -> Any:
+        """Store an IO's webhook value and return the previous one.
+
+        Only a finite number counts as a reading (#175): anything else must neither outlive a failed live fetch
+        nor win R1 over the live answer of a poll in flight.
+        """
+        previous = self.io_states.get(io["id"])
+        self.io_states[io["id"]] = value
+        io["value"] = value
+        if _live_io_number(value) is None:
+            self._io_real_value_ids.discard(io["id"])
+            self._webhook_updated_io_ids.discard(io["id"])
+        else:
+            self._io_real_value_ids.add(io["id"])
+            self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+        return previous
+
     def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
         key = (ext_name.lower(), identifier.lower())
-        if io := self._io_index.get(key):
-            previous = self.io_states.get(io["id"])
-            self.io_states[io["id"]] = value
-            self._io_real_value_ids.add(io["id"])
-            io["value"] = value
-            self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+        if (io := self._io_index.get(key)) and self._names_another_io_now(io):
+            _LOGGER.debug(WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, f"{one_line(ext_name)} {identifier}", value)
+        elif io:
+            previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
@@ -4713,12 +4739,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def update_quickbus_io(self, io_id: str | int, value: float | int | str) -> None:
         """Webhook push for an IO of a Quickbus device, addressed by its unique IO Id."""
         io_id_str = str(io_id)
-        if io := self._quickbus_index.get(io_id_str):
-            previous = self.io_states.get(io["id"])
-            self.io_states[io["id"]] = value
-            self._io_real_value_ids.add(io["id"])
-            io["value"] = value
-            self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+        if (io := self._quickbus_index.get(io_id_str)) and self._names_another_io_now(io):
+            _LOGGER.debug(WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, one_line(io_id_str), value)
+        elif io:
+            previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or io_id_str
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "quickbus", one_line(label), value, previous)
             self._fire_plan_event("io", io_id_str, label, value)
