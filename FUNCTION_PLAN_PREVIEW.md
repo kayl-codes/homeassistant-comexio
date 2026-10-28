@@ -132,7 +132,10 @@ cards:
   covers both real markers/IOs and block-internal outputs, via a background poll of
   Comexio's live connection values that runs only while a plan is on screen.
 - **Hover & tooltips** — hovering an element shows its full label as a native browser
-  tooltip; hovering any wire highlights every branch of that electrical net together.
+  tooltip; a block's tooltip also lists its settings as `Name: Value` lines (the values
+  from its settings dialog in Comexio Studio). A backup preview shows the settings stored
+  in that backup, not today's. Hovering any wire highlights every branch of that
+  electrical net together.
 - **Zoom controls** — magnifier −/+ buttons next to the search bar; the current zoom
   level is remembered per browser. Click the percentage label to reset to 100%. Live
   refreshes keep your view: a zoomed-in, scrolled plan stays where it is while its values
@@ -979,8 +982,11 @@ cards:
   einen Hintergrund-Abruf der Live-Verbindungswerte von Comexio, der nur läuft,
   solange ein Plan angezeigt wird.
 - **Hover & Tooltips** — beim Überfahren eines Elements erscheint dessen volle
-  Beschriftung als natives Browser-Tooltip; beim Überfahren eines Drahts werden alle
-  Äste desselben elektrischen Netzes gemeinsam hervorgehoben.
+  Beschriftung als natives Browser-Tooltip; der Tooltip eines Bausteins listet zusätzlich
+  seine Einstellungen als Zeilen `Name: Wert` (die Werte aus seinem Einstellungsdialog in
+  Comexio Studio). Die Vorschau eines Backups zeigt die im Backup gespeicherten
+  Einstellungen, nicht die heutigen. Beim Überfahren eines Drahts werden alle Äste
+  desselben elektrischen Netzes gemeinsam hervorgehoben.
 - **Zoom-Steuerung** — Lupe-Minus/Plus-Buttons neben der Suchleiste; die Zoomstufe
   wird pro Browser gemerkt. Klick auf die Prozent-Anzeige setzt auf 100 % zurück.
   Live-Aktualisierungen behalten die Ansicht bei: Ein gezoomter, verschobener Plan bleibt
