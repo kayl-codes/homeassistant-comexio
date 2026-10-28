@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiocomexio import ComexioAuthenticationError
 from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
-from homeassistant.const import CONF_PASSWORD
+from homeassistant.const import CONF_PASSWORD, STATE_UNKNOWN
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 import pytest
@@ -28,10 +28,11 @@ EXPECTED_ENTITIES = {
     "number.iosrv1_m2": None,  # analog marker
     "binary_sensor.iosrv1_m3": None,  # [RO] digital marker
     "button.iosrv1_m4": None,  # [TRIG] marker
-    "binary_sensor.iosrv1_base_i1": "on",  # digital input
+    "binary_sensor.iosrv1_base_i1": "on",  # digital input, value from get_io_live_states
     "switch.iosrv1_base_q1": "off",  # digital output
-    "sensor.iosrv1_base_ai1": "21.5",  # analog input, Comexio decimal comma in the config
+    "sensor.iosrv1_base_ai1": "21.5",  # analog input, Comexio decimal comma in the live answer
 }
+IO_ENTITIES = ("binary_sensor.iosrv1_base_i1", "switch.iosrv1_base_q1", "sensor.iosrv1_base_ai1")
 
 
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
@@ -45,6 +46,7 @@ async def test_setup_and_unload(
 ) -> None:
     """The entry loads the fixture's entities with their live values; unload closes the session and webhook."""
     api_returns["get_live_states"] = ({"1": "1"}, {})
+    api_returns["get_io_live_states"] = {"11": "1", "12": "0", "13": "21,5"}
 
     await _setup(hass, mock_config_entry)
 
@@ -281,6 +283,53 @@ async def test_setup_retry_when_unreachable(
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
     mock_comexio_api[0].close.assert_called_once()
+
+
+async def test_io_entities_show_their_live_values(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    """The IO live answer, not the config page value, reaches the IO entities (#175)."""
+    api_returns["get_io_live_states"] = {"11": "0", "12": "1", "13": "22,75"}
+
+    await _setup(hass, mock_config_entry)
+
+    assert hass.states.get("binary_sensor.iosrv1_base_i1").state == "off"  # config page: "1"
+    assert hass.states.get("switch.iosrv1_base_q1").state == "on"  # config page: 0
+    assert hass.states.get("sensor.iosrv1_base_ai1").state == "22.75"  # config page: "21,5"
+    mock_comexio_api[0].get_io_live_states.assert_awaited_once_with([(1, "11"), (1, "12"), (1, "13")])
+
+
+async def test_io_entities_are_unknown_until_a_real_value_arrives(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    """After a restart without a live answer the IO entities are "unknown", never the config page value (#175).
+
+    The config page's placeholder (0 on a live install) must not reach the recorder as a reading.
+    """
+    api_returns["get_io_live_states"] = None  # the IO live fetch failed
+
+    await _setup(hass, mock_config_entry)
+
+    coordinator: ComexioCoordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert {entity_id: hass.states.get(entity_id).state for entity_id in IO_ENTITIES} == dict.fromkeys(
+        IO_ENTITIES, STATE_UNKNOWN
+    )  # unknown, still available
+    # The real __init__ creates the IO live trackers the first poll runs on.
+    assert (coordinator._io_real_value_ids, coordinator._polled_io_real_ids) == (set(), set())
+    assert coordinator._unanswered_io_ids == set()
+    assert coordinator._io_live_fetch_failing is True
+
+    api = mock_comexio_api[0]
+    api.get_io_live_states.return_value = {"11": "1", "12": "0", "13": "22,75"}
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    live = {"binary_sensor.iosrv1_base_i1": "on", "switch.iosrv1_base_q1": "off", "sensor.iosrv1_base_ai1": "22.75"}
+    assert {entity_id: hass.states.get(entity_id).state for entity_id in IO_ENTITIES} == live
+
+    api.get_io_live_states.return_value = None  # failing again: the real values stay
+    await coordinator.async_refresh()
+    await hass.async_block_till_done()
+    assert {entity_id: hass.states.get(entity_id).state for entity_id in IO_ENTITIES} == live
 
 
 @pytest.mark.logged_exception  # the coordinator logs the failed first refresh with its traceback

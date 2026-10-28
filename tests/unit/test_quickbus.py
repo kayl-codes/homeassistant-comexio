@@ -159,7 +159,9 @@ def _webhook_coordinator(quickbus_ios: list[dict[str, Any]]) -> ComexioCoordinat
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator._quickbus_index = {str(io["id"]): io for io in quickbus_ios}
     coordinator.io_states = {}
+    coordinator._io_real_value_ids = set()
     coordinator._webhook_updated_io_ids = set()
+    coordinator._io_identities = {}
     coordinator._async_publish_pushed_value = MagicMock()
     coordinator._fire_plan_event = MagicMock()
     coordinator.schedule_plan_preview_refresh = MagicMock()
@@ -176,6 +178,8 @@ def test_quickbus_webhook_updates_the_io_by_its_id(quickbus_result: dict[str, An
     assert _by_id(quickbus_result[QUICKBUS_IO_DATA_KEY])["211"]["value"] == 1
     assert _by_id(quickbus_result[QUICKBUS_IO_DATA_KEY])["201"]["value"] == 0.0
     assert coordinator._webhook_updated_io_ids == {"211"}
+    # A real reading (#175): it stays the last known value when the next live fetch fails.
+    assert coordinator._io_real_value_ids == {"211"}
     coordinator._fire_plan_event.assert_called_once_with("io", "211", "MT Bad G1", 1)
     coordinator._async_publish_pushed_value.assert_called_once()
 
@@ -188,6 +192,7 @@ def test_quickbus_webhook_for_an_unknown_id_is_dropped_with_a_warning(
     coordinator.update_quickbus_io("999", 1)
 
     assert coordinator.io_states == {}
+    assert coordinator._io_real_value_ids == set()
     assert coordinator._webhook_updated_io_ids == set()
     coordinator._fire_plan_event.assert_not_called()
     assert "unknown Quickbus IO 999" in caplog.text
@@ -198,6 +203,8 @@ def test_poll_keeps_a_quickbus_webhook_value_that_arrived_during_the_fetch(quick
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.marker_states = {}
     coordinator.io_states = {"201": 1}
+    coordinator._io_real_value_ids = {"201"}
+    coordinator._polled_io_real_ids = set()
     coordinator._webhook_updated_markers = set()
     coordinator._webhook_updated_io_ids = {"201"}
 

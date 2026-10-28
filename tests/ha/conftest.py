@@ -103,6 +103,8 @@ def api_returns() -> dict[str, Any]:
         "login": True,
         "get_raw_config": load_json_fixture("config_basic.json"),
         "get_live_states": ({}, {}),
+        # No IO answered: every IO shows "unknown" (no real value known yet, #175).
+        "get_io_live_states": {},
         # The real bulk load returns a dict, never None — even when it fails or there is no plan.
         "function_plan_load_all_plans": {},
         # Never None either: each part's failure is its own None plus the cause.

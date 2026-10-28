@@ -1187,6 +1187,10 @@ WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — n
 # The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
 WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
 
+# DEBUG for a push matched to an IO whose id the latest scrape gave another IO (deleted and reused):
+# it is the former IO's value and is dropped. Args: server id, IO label, new value.
+WEBHOOK_FORMER_IO_LOG_MSG = "[%s] Webhook push for %s (value %r) is for the IO that had its id before — dropped"
+
 # Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
 # opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.
 FUNCTION_PLAN_MANAGED_PLAN_COMMENT = "! Administrated by HomeAssistant, dont delete or rename !"

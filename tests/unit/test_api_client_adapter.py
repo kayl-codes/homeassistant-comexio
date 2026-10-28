@@ -1082,6 +1082,69 @@ def test_get_live_states_splits_markers_and_knx(comexio_api: ComexioAPI, client:
     assert asyncio.run(comexio_api.get_live_states(5, 5)) == ({"5": 1}, {"5": 0})
 
 
+def test_get_io_live_states_failure_is_none_not_empty(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A fetch failure logs at DEBUG only (the coordinator reports it once per outage), with its cause."""
+    _fail(client, "get_io_live_states", _connection_error())
+    caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
+
+    [record] = [r for r in caplog.records if r.name == api_module.__name__]
+    assert (record.levelno, record.exc_info is not None) == (logging.DEBUG, True)
+    assert record.getMessage().startswith("IO live states fetch failed: ComexioConnectionError: ")
+    assert (comexio_api.io_live_fetch_error or "").startswith("ComexioConnectionError: ")
+
+
+def test_get_io_live_states_refused_request_is_none_and_an_error(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A ValueError still reaching here (parse_config drops conflicts) is a bug: a failed fetch, logged at ERROR."""
+    _fail(client, "get_io_live_states", ValueError("conflicting extension ids for IO 11"))
+    caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11"), (2, "11")])) is None
+
+    [record] = [r for r in caplog.records if r.name == api_module.__name__]
+    assert (record.levelno, record.exc_info is not None) == (logging.ERROR, True)
+    assert comexio_api.io_live_fetch_error == "ValueError: conflicting extension ids for IO 11"
+
+
+def test_get_io_live_states_repeated_refusal_is_an_error_once(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The same refusal every poll is one ERROR, then DEBUG; another cause is an ERROR again."""
+    caplog.set_level(logging.DEBUG, logger=api_module.__name__)
+    for cause in ("conflict 11", "conflict 11", "conflict 12"):
+        _fail(client, "get_io_live_states", ValueError(cause))
+        asyncio.run(comexio_api.get_io_live_states([(1, "11")]))
+
+    levels = [r.levelno for r in caplog.records if r.name == api_module.__name__]
+    assert levels == [logging.ERROR, logging.DEBUG, logging.ERROR]
+
+
+def test_get_io_live_states_meeting_another_certificate_keeps_the_mismatch(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+    _fail(client, "get_io_live_states", err)
+
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
+    assert comexio_api.certificate_mismatch is err  # reported, not swallowed as a plain fetch failure
+    assert comexio_api.certificate_mismatch_count == 1
+    assert (comexio_api.io_live_fetch_error or "").startswith("ComexioCertificateMismatchError: ")
+
+
+def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """A success also clears the cause of an earlier failure."""
+    comexio_api.io_live_fetch_error = "ComexioConnectionError: gone"
+    client.get_io_live_states = AsyncMock(return_value={"11": "74"})
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) == {"11": "74"}
+    client.get_io_live_states.assert_awaited_once_with([(1, "11")])
+    assert comexio_api.io_live_fetch_error is None
+
+
 def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, client: MagicMock) -> None:
     catalog = {"KnxPoints": {"1": {}}}
     comexio_api.seed_knx_dpt_catalog(catalog, "11.0.1")
