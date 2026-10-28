@@ -87,7 +87,7 @@ from .const import (
     one_line,
     unreadable_plan_keys,
 )
-from .function_plan_block_settings import BlockSettings, block_settings_form, parse_block_settings
+from .function_plan_block_settings import BlockSettings, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
 from .function_plan_module_restore import ModuleConfigRestore, is_module_block, place_module_block
 
@@ -100,8 +100,6 @@ _PLAN_PAPER_FALLBACK = "A4"
 _PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio raises outside it)
 # Comexio's answer (as quoted in aiocomexio's refusal message) for a plan that is not running.
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
-# Comexio's editor action that stores block settings ($FubBaseConfig rows) of one element.
-_BLOCK_SETTINGS_SAVE_PATH = "/admin/function_function_module/savefubbaseconfig/"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -2265,8 +2263,9 @@ class ComexioAPI:
     async def function_plan_save_block_settings(self, element_id: int | str, settings: Mapping[str, str]) -> bool:
         """Write block settings of one element ($FubBaseConfig) the way Comexio's editor saves them.
 
-        True once Comexio answers {"saved": 1}; False (after a warning) for a refusal or any
-        other answer. A transport failure raises aiohttp.ClientError / TimeoutError.
+        True once Comexio confirms the save; False (after a warning) for a refusal, an unconfirmed
+        answer or settings aiocomexio rejects before sending (also an element id that is no integer).
+        A transport failure raises aiohttp.ClientError / TimeoutError.
         A confirmed save also updates self.block_settings: until the next config fetch, a
         backup cycle would otherwise read the pre-restore values and store them as a change.
         settings are values as Comexio stores them (parse_block_settings), so the cache holds
@@ -2274,16 +2273,11 @@ class ComexioAPI:
         of its possibly older table (see get_raw_config).
         """
         what = f"Saving block settings {sorted(settings)} of function plan element {element_id}"
-
-        async def save() -> None:
-            form = block_settings_form(element_id, settings, time.strftime("%a %b %d %Y %H:%M:%S GMT%z"))
-            # aiocomexio 0.4.0 has no request for this editor action yet; _plan_json is its
-            # generic editor POST (XHR headers, JSON object answer, ComexioError mapping).
-            answer = await self.client._plan_json(_BLOCK_SETTINGS_SAVE_PATH, form, what=what)
-            if str(answer.get("saved")) != "1":
-                raise ComexioRequestRejectedError(f"{what} was not confirmed: {answer!r:.200}")
-
-        saved = await self._succeeded(what, save, transport_raises=True)
+        saved = await self._succeeded(
+            what,
+            lambda: self.client.save_function_plan_block_settings(int(element_id), settings),
+            transport_raises=True,
+        )
         if saved:
             self._block_settings_saves_confirmed += 1
             if self.block_settings is not None:

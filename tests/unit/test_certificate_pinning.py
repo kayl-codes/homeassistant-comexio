@@ -347,7 +347,7 @@ def test_a_mismatch_on_an_admin_write_whose_transport_failures_raise_is_no_trans
     # The restore paths abort on a transport failure; a changed certificate fails the write and raises the repair.
     hook = MagicMock()
     comexio_api.on_certificate_mismatch = hook
-    client._plan_json = AsyncMock(side_effect=_mismatch())
+    client.save_function_plan_block_settings = AsyncMock(side_effect=_mismatch())
     assert asyncio.run(comexio_api.function_plan_save_block_settings(3, {"Delay": "5"})) is False
     hook.assert_called_once_with(OTHER)
 

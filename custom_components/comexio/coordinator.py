@@ -3801,7 +3801,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         than today's (possibly since-renamed) live names. None for a live render.
 
         block_settings: a snapshot's stored block settings (snapshot_block_settings), whose
-        extended views the render shows; a live render always uses the last polled ones.
+        extended views and values the render shows; a live render always uses the last polled ones.
         Kept in the preview cache with the frozen elements, so a re-render never picks up
         another backup's settings after the slots rotated.
 
@@ -3841,6 +3841,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             connection_values=connection_values,
             knx_by_id=self.function_plan_knx_label_map(),
             plan_id=str(fub_id),
+            # A snapshot shows its own stored settings, never today's: they match its frozen elements.
+            block_values=block_settings,
         )
 
         if cache_generation_before != self._preview_cache_generation and self.orphaned_plans_view_active():
@@ -4057,8 +4059,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return None
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(snapshot.get("labels"))
         catalog = await self.function_plan_catalog.async_get_catalog()
+        block_settings = snapshot_block_settings(snapshot)
         render_elements, render_catalog = expand_autohide_blocks(
-            snapshot.get("elements") or {}, catalog, snapshot_block_settings(snapshot)
+            snapshot.get("elements") or {}, catalog, block_settings
         )
         format_suffix, canvas = self._snapshot_format_title_and_canvas(fub_id, snapshot_paper_format(snapshot))
         svg_content = render_plan_svg(
@@ -4075,6 +4078,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             connection_values=None,
             knx_by_id=self.function_plan_knx_label_map(),
             plan_id=str(fub_id),
+            block_values=block_settings,
         )
         if cache_generation_before != self._preview_cache_generation:
             # A newer render (another plan picked meanwhile) owns the preview now.

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 from datetime import timedelta
+from functools import partial
 import logging
 from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock
@@ -10,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 from aiocomexio import (
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
+    ComexioClient,
     ComexioConnectionError,
     ComexioCreatedWithoutIdError,
     ComexioDataError,
@@ -873,41 +875,68 @@ def test_the_next_config_fetch_after_an_overlap_takes_its_page_again(
     assert (comexio_api.block_settings, comexio_api.comexio_version) == ({"104": {"in_0": "30"}}, "11.0.4")
 
 
+@pytest.mark.parametrize("element_id", [104, "104"])
+def test_save_block_settings_hands_the_element_to_the_library(
+    comexio_api: ComexioAPI, client: MagicMock, element_id: int | str
+) -> None:
+    # The restores pass element ids read from plan payloads as str; aiocomexio takes an int.
+    client.save_function_plan_block_settings = AsyncMock(return_value=None)
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(element_id, {"in_0": "26"})) is True
+    client.save_function_plan_block_settings.assert_awaited_once_with(104, {"in_0": "26"})
+
+
 @pytest.mark.parametrize(
-    ("answer", "saved"), [({"saved": 1}, True), ({"saved": "1"}, True), ({"saved": 0}, False), ({}, False)]
+    ("element_id", "settings"),
+    [("x", {"in_0": "26"}), (104, {}), (104, {"in_0": 26})],
+    ids=["id-no-integer", "library-empty", "library-value"],
 )
-def test_save_block_settings_needs_the_saved_confirmation(
+def test_save_block_settings_rejected_before_sending_saves_nothing(
+    comexio_api: ComexioAPI, client: MagicMock, element_id: int | str, settings: dict[str, Any]
+) -> None:
+    """A non-integer id fails the int(), bad settings fail aiocomexio's checks: a failed save, no exception escapes."""
+    comexio_api.block_settings = {"104": {"in_0": "10"}}
+    client._plan_json = AsyncMock(return_value={"saved": "1"})
+    client.save_function_plan_block_settings = partial(ComexioClient.save_function_plan_block_settings, client)
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings(element_id, settings)) is False
+    client._plan_json.assert_not_awaited()
+    assert comexio_api.block_settings == {"104": {"in_0": "10"}}
+
+
+@pytest.mark.parametrize(("answer", "saved"), [({"saved": 1}, True), ({"saved": 0}, False), ({}, False)])
+def test_save_block_settings_needs_comexios_confirmation(
     comexio_api: ComexioAPI, client: MagicMock, answer: dict[str, Any], saved: bool
 ) -> None:
+    """Through aiocomexio's real save: only a confirmed answer counts, and only it reaches the cache."""
+    comexio_api.block_settings = {"104": {"in_0": "10"}}
     client._plan_json = AsyncMock(return_value=answer)
+    client.save_function_plan_block_settings = partial(ComexioClient.save_function_plan_block_settings, client)
 
     assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is saved
-    path, form = client._plan_json.await_args.args
-    assert path == "/admin/function_function_module/savefubbaseconfig/"
-    assert (form["id"], form["element_in_0"]) == ("104", "26")
-    assert form["timestamp"]
+    assert comexio_api.block_settings == {"104": {"in_0": "26" if saved else "10"}}
 
 
 def test_save_block_settings_maps_a_refusal_but_raises_a_transport_error(
     comexio_api: ComexioAPI, client: MagicMock
 ) -> None:
-    _fail(client, "_plan_json", ComexioRequestRejectedError("no"))
+    _fail(client, "save_function_plan_block_settings", ComexioRequestRejectedError("not confirmed"))
     assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is False
 
     # The restores catch transport errors to replace their "in progress" notification.
-    _fail(client, "_plan_json", _connection_error())
+    _fail(client, "save_function_plan_block_settings", _connection_error())
     save = comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
     with pytest.raises(aiohttp.ClientError):
         asyncio.run(save)
 
 
-@pytest.mark.parametrize(("answer", "cached"), [({"saved": 1}, "26"), ({"saved": 0}, "10")])
+@pytest.mark.parametrize(("refusal", "cached"), [(None, "26"), (ComexioRequestRejectedError("not confirmed"), "10")])
 def test_save_block_settings_updates_the_cached_table_once_confirmed(
-    comexio_api: ComexioAPI, client: MagicMock, answer: dict[str, Any], cached: str
+    comexio_api: ComexioAPI, client: MagicMock, refusal: Exception | None, cached: str
 ) -> None:
     # A backup cycle before the next config fetch must see the restored values, not the old ones.
     comexio_api.block_settings = {"104": {"in_0": "10", "autohide": "1"}}
-    client._plan_json = AsyncMock(return_value=answer)
+    client.save_function_plan_block_settings = AsyncMock(side_effect=refusal)
 
     asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"}))
     asyncio.run(comexio_api.function_plan_save_block_settings(200, {"in_1": "5"}))
@@ -918,7 +947,7 @@ def test_save_block_settings_updates_the_cached_table_once_confirmed(
 
 def test_save_block_settings_leaves_an_uncaptured_table_uncaptured(comexio_api: ComexioAPI, client: MagicMock) -> None:
     comexio_api.block_settings = None
-    client._plan_json = AsyncMock(return_value={"saved": 1})
+    client.save_function_plan_block_settings = AsyncMock(return_value=None)
 
     assert asyncio.run(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})) is True
     assert comexio_api.block_settings is None
@@ -932,7 +961,7 @@ def _old_table_page() -> RawConfig:
 def test_a_config_fetch_overlapping_a_save_keeps_the_saved_values(comexio_api: ComexioAPI, client: MagicMock) -> None:
     """(bn)(4): a fetch that read the page before the save must not put the old value back into the cache."""
     comexio_api.block_settings = {"104": {"in_0": "10"}}
-    client._plan_json = AsyncMock(return_value={"saved": 1})
+    client.save_function_plan_block_settings = AsyncMock(return_value=None)
 
     async def fetch_during_save() -> RawConfig:
         await comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
@@ -955,16 +984,15 @@ def test_a_config_fetch_during_a_running_save_keeps_the_cache(comexio_api: Comex
     async def run() -> None:
         save_done, page_read = asyncio.Event(), asyncio.Event()
 
-        async def slow_save(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        async def slow_save(*_args: Any, **_kwargs: Any) -> None:
             await page_read.wait()
-            return {"saved": 1}
 
         async def slow_fetch() -> RawConfig:
             page_read.set()  # the page is read while the save is still running ...
             await save_done.wait()  # ... and the fetch only finishes after the save
             return _old_table_page()
 
-        client._plan_json = AsyncMock(side_effect=slow_save)
+        client.save_function_plan_block_settings = AsyncMock(side_effect=slow_save)
         client.get_raw_config = AsyncMock(side_effect=slow_fetch)
         save = asyncio.create_task(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"}))
         await asyncio.sleep(0)
@@ -998,11 +1026,10 @@ def test_a_save_confirmed_after_the_fetch_lands_on_the_fetched_table(
     async def run() -> None:
         fetch_done = asyncio.Event()
 
-        async def slow_save(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        async def slow_save(*_args: Any, **_kwargs: Any) -> None:
             await fetch_done.wait()
-            return {"saved": 1}
 
-        client._plan_json = AsyncMock(side_effect=slow_save)
+        client.save_function_plan_block_settings = AsyncMock(side_effect=slow_save)
         client.get_raw_config = AsyncMock(return_value=page)
         save = asyncio.create_task(comexio_api.function_plan_save_block_settings(104, {"in_0": "26"}))
         await asyncio.sleep(0)
@@ -1020,7 +1047,7 @@ def test_a_config_fetch_overlapping_a_save_leaves_an_unread_cache_unread(
 ) -> None:
     """With no table read yet, an overlapping fetch must not capture the pre-save page either."""
     comexio_api.block_settings = None
-    client._plan_json = AsyncMock(return_value={"saved": 1})
+    client.save_function_plan_block_settings = AsyncMock(return_value=None)
 
     async def fetch_during_save() -> RawConfig:
         await comexio_api.function_plan_save_block_settings(104, {"in_0": "26"})
@@ -1035,8 +1062,8 @@ def test_a_config_fetch_overlapping_a_save_leaves_an_unread_cache_unread(
 @pytest.mark.parametrize(
     "fail_save",
     [
-        lambda client: setattr(client, "_plan_json", AsyncMock(return_value={"saved": 0})),
-        lambda client: _fail(client, "_plan_json", _connection_error()),
+        lambda client: _fail(client, "save_function_plan_block_settings", ComexioRequestRejectedError("not confirmed")),
+        lambda client: _fail(client, "save_function_plan_block_settings", _connection_error()),
     ],
     ids=["refused", "transport error"],
 )
@@ -1061,7 +1088,7 @@ def test_a_config_fetch_overlapping_an_unconfirmed_save_takes_the_page(
 def test_a_failed_save_does_not_freeze_the_cache(comexio_api: ComexioAPI, client: MagicMock) -> None:
     """A save that raises is not counted as confirmed, so later fetches take the page again."""
     comexio_api.block_settings = {"104": {"in_0": "26"}}
-    _fail(client, "_plan_json", _connection_error())
+    _fail(client, "save_function_plan_block_settings", _connection_error())
     save = comexio_api.function_plan_save_block_settings(104, {"in_0": "30"})
     with pytest.raises(aiohttp.ClientError):
         asyncio.run(save)

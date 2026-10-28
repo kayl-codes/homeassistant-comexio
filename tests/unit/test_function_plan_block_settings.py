@@ -16,7 +16,6 @@ from custom_components.comexio.function_plan_block_settings import (
     SNAPSHOT_BLOCK_SETTINGS,
     block_settings_changed,
     block_settings_diff,
-    block_settings_form,
     expand_autohide_blocks,
     live_only_settings,
     map_restored_elements,
@@ -224,11 +223,6 @@ def test_settings_to_write_follows_the_id_map() -> None:
     writes, unmapped = settings_to_write(SETTINGS, {"4": 104})
     assert writes == {"104": SETTINGS["4"]}
     assert unmapped == ["7"]
-
-
-def test_form_matches_the_editor_request() -> None:
-    form = block_settings_form(104, {"in_0": "26", "autohide": "1"}, "TS")
-    assert form == {"id": "104", "element_in_0": "26", "element_autohide": "1", "timestamp": "TS"}
 
 
 def _restore_api(plan: dict[str, Any], save_ok: bool = True) -> SimpleNamespace:

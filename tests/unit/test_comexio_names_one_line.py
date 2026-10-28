@@ -69,7 +69,6 @@ IDENTITY_FUNCTIONS = {
     },
     "entity.py": {"extension_device_identifier"},  # a device registry identifier
     "function_plan_block_keys.py": {"_unresolved_element"},  # the element name written into the plan
-    "function_plan_block_settings.py": {"block_settings_form"},  # the form field names Comexio's editor sends
     "coordinator.py": {
         "async_newest_backup_field",  # the restore action's snapshot value
         "_build_ha_audit_map",  # the command names the audit compares with Comexio's

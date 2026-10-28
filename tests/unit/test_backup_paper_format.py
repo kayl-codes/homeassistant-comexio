@@ -20,6 +20,7 @@ from custom_components.comexio.api import ComexioAPI, plan_format_settable
 from custom_components.comexio.const import DOMAIN
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager
+from custom_components.comexio.function_plan_block_settings import SNAPSHOT_BLOCK_SETTINGS
 from custom_components.comexio.function_plan_module_restore import ModuleConfigRestore
 from custom_components.comexio.services import backup as backup_service, plan_actions
 from tests.common import load_json_fixture
@@ -353,8 +354,8 @@ def test_a_snapshot_taken_while_the_format_was_unreadable_is_never_backfilled(
     assert backup_module.snapshot_paper_format(backfilled) == A5
 
 
-def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cache() -> None:
-    """A dropped argument would render the first frame right and every live-value re-render with the live paper."""
+def _render_coordinator() -> ComexioCoordinator:
+    """A coordinator whose plan preview render reaches render_plan_svg with everything around it stubbed."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.server_id = SERVER_ID
     coordinator._preview_plan_cache = None
@@ -371,6 +372,12 @@ def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cach
     coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
     coordinator._async_publish_plan_preview = AsyncMock(return_value="/local/x.svg")  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
+    return coordinator
+
+
+def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cache() -> None:
+    """A dropped argument would render the first frame right and every live-value re-render with the live paper."""
+    coordinator = _render_coordinator()
 
     with (
         patch.object(coordinator_module, "_build_sun_times", return_value={}),
@@ -381,6 +388,38 @@ def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cach
 
     coordinator._build_preview_title_and_canvas.assert_called_once_with(7, A5, False)
     assert coordinator._preview_plan_cache["paper_format"] == A5
+
+
+_LIVE_SETTINGS = {"104": {"in_0": "26"}}
+_STORED_SETTINGS = {"104": {"in_0": "10"}}
+
+
+@pytest.mark.parametrize(
+    ("source", "stored", "shown"),
+    [
+        ("live", None, _LIVE_SETTINGS),
+        # The armed re-render of a live preview passes the cached table; the render still shows today's.
+        ("live", _STORED_SETTINGS, _LIVE_SETTINGS),
+        ("snapshot:auto:1", _STORED_SETTINGS, _STORED_SETTINGS),
+        ("snapshot:auto:1", None, None),
+    ],
+    ids=["live", "live-re-render", "snapshot", "snapshot-without-settings"],
+)
+def test_a_render_shows_the_block_values_of_the_plan_it_draws(
+    source: str, stored: dict[str, Any] | None, shown: dict[str, Any] | None
+) -> None:
+    """A backup's hover lines show the values it stored with its elements, never today's ones."""
+    coordinator = _render_coordinator()
+    coordinator.api = SimpleNamespace(block_settings=_LIVE_SETTINGS)
+
+    with (
+        patch.object(coordinator_module, "_build_sun_times", return_value={}),
+        patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
+        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>") as render,
+    ):
+        asyncio.run(coordinator.async_generate_plan_preview(7, "Lights", {}, {}, source, block_settings=stored))
+
+    assert render.call_args.kwargs["block_values"] == shown
 
 
 @pytest.mark.parametrize(
@@ -824,7 +863,12 @@ def test_a_backup_of_a_deleted_plan_shows_its_own_format() -> None:
     ("stored", "title", "canvas"),
     [
         (
-            {"paper": "A5", "dpi": 120, "captured_at": "2026-01-02T03:04:05+00:00"},
+            {
+                "paper": "A5",
+                "dpi": 120,
+                "captured_at": "2026-01-02T03:04:05+00:00",
+                SNAPSHOT_BLOCK_SETTINGS: _STORED_SETTINGS,
+            },
             "[verwaist] [A5 | 120dpi]",
             (1.0, 2.0),
         ),
@@ -856,6 +900,7 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
 
     assert render.call_args.args[7] == title
     assert render.call_args.kwargs["canvas"] == canvas
+    assert render.call_args.kwargs["block_values"] == stored.get(SNAPSHOT_BLOCK_SETTINGS)
     # comexio-plan-card.js (orphanPreviewMatch) matches the shown image by source and capture time.
     coordinator._async_publish_plan_preview.assert_awaited_once_with(
         7, "Lights", "orphan:auto:0", "<svg/>", captured_at=stored.get("captured_at")
