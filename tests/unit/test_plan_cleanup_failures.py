@@ -690,6 +690,26 @@ def test_a_listed_plan_the_bulk_answer_lacks_is_loaded_on_its_own() -> None:
     assert _loaded_plans(coordinator) == [6, 12]
 
 
+@pytest.mark.parametrize("listed", [{9}, set()], ids=["other-plan-listed", "no-plan-left"])
+def test_a_managed_plan_a_complete_plan_list_lacks_is_gone(listed: set[int]) -> None:
+    # Plan 6 sits in the plan map, but Comexio deleted it: the complete list does not name it.
+    coordinator = _command_coordinator({}, bulk=dict.fromkeys(listed, EMPTY_PLAN))
+    coordinator.scraped_plan_ids = listed
+    assert _unplanned(coordinator, [7], [900]) == ([901, 902], [], ["HA M7 kaputt"])
+    assert _loaded_plans(coordinator) == []
+
+
+def test_a_managed_plan_a_complete_plan_list_names_is_checked() -> None:
+    # The bulk answer lacks plan 6, the list names it: it is loaded on its own and its element counts.
+    coordinator = _command_coordinator(
+        {6: {"elements": {"1": _web_io_element(42)}, "connections": {}}}, bulk={9: EMPTY_PLAN}
+    )
+    coordinator.api.fub_data["6"] = {"Name": "Plan 6"}
+    coordinator.scraped_plan_ids = {6, 9}
+    assert _unplanned(coordinator, [7], [900]) == ([901], [], ["HA M7 kaputt"])
+    assert _loaded_plans(coordinator) == [6]
+
+
 def test_an_unreadable_plan_list_entry_keeps_every_command() -> None:
     # The entry may be a plan that holds the command, and it cannot even be loaded.
     coordinator = _command_coordinator({6: EMPTY_PLAN})

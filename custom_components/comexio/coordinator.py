@@ -8583,12 +8583,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         All plans are read fresh in one bulk request — the plan cleanup has just changed some, and a
         user may have placed the command since the backup cycle's snapshot; a plan the bulk answer
         lacks (the audit's plans included) is loaded on its own. An unreadable plan list entry may be
-        a plan holding the command: it counts as a plan that could not be checked.
+        a plan holding the command: it counts as a plan that could not be checked. A complete plan list
+        (live_plan_list: read by the last poll, plans HA created since added) names every plan there was,
+        so a managed plan it lacks (a plan map entry no sync has pruned yet) is gone and not loaded;
+        without one the managed plans are checked as well.
         """
         fresh = await self.api.function_plan_load_all_plans(strict=True)
         placed: set[int] = set()
         failures = [(key, PLAN_ENTRY_UNREADABLE) for key in unreadable_plan_keys(self.api.fub_data)]
-        for fub_id in sorted(self._function_plan_check_fub_ids() | function_plan_ids(self.api.fub_data)):
+        fub_ids = function_plan_ids(self.api.fub_data)
+        if self.live_plan_list() is None:
+            fub_ids |= self._function_plan_check_fub_ids()
+        for fub_id in sorted(fub_ids):
             plan_data = fresh.get(fub_id) or await self.api.function_plan_load_elements(fub_id, strict=True)
             if not plan_data:
                 failures.append((self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED))
