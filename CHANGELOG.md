@@ -45,6 +45,7 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - **Tests and review guards:** Home Assistant integration tests in their own CI job, a stable-entity_id check for every entity class, a local cognitive-complexity guard, and a review checklist that catches more bug classes before review (#134, #135, #223, #225–#231 and the checklist PRs).
 
 ### 🐛 Bug Fixes & Refactoring
+- **Switched-on outputs shown as off after a poll:** IO and Quickbus IO values came from the config page, which only holds a placeholder `0`, so a poll could reset a real reading to 0/off. They now come from Comexio's live refresh. An IO without a known reading yet shows *unknown* instead of off, and a failed live fetch keeps the last real values (from the live refresh or a webhook push). Reported by **@mexpert71** (#175, #239).
 - **`marker_delete` never deletes a placed marker**, not even with `force`; if a plan cannot be read, nothing is deleted (#186).
 - **Ignore lists:** the ignored-source cleanup searches every managed plan (#141); an ignored `[TRIG]` source loses its trigger pair and KNX bridge markers can no longer be ignored (#152, #164); ranges like `300-399` are kept as written and also cover IDs created later (#198).
 - **Temperature markers** accept −273 to 10,000 °C on the 0.1 grid, a bare "Soll" no longer counts as a temperature, and `markise` / `awning` join the cover keywords. Reported by **@mexpert71** (#179, #191, #218).
