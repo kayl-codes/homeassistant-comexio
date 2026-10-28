@@ -6,7 +6,7 @@ from datetime import timedelta
 from functools import partial
 import logging
 from typing import Any, NamedTuple
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -887,19 +887,36 @@ def test_save_block_settings_hands_the_element_to_the_library(
 
 
 @pytest.mark.parametrize(
-    ("element_id", "settings"),
-    [("x", {"in_0": "26"}), (104, {}), (104, {"in_0": 26})],
+    ("element_id", "settings", "rejected_by"),
+    [("x", {"in_0": "26"}, None), (104, {}, ValueError), (104, {"in_0": 26}, TypeError)],
     ids=["id-no-integer", "library-empty", "library-value"],
 )
 def test_save_block_settings_rejected_before_sending_saves_nothing(
-    comexio_api: ComexioAPI, client: MagicMock, element_id: int | str, settings: dict[str, Any]
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    element_id: int | str,
+    settings: dict[str, Any],
+    rejected_by: type[Exception] | None,
 ) -> None:
     """A non-integer id fails the int(), bad settings fail aiocomexio's checks: a failed save, no exception escapes."""
     comexio_api.block_settings = {"104": {"in_0": "10"}}
     client._plan_json = AsyncMock(return_value={"saved": "1"})
-    client.save_function_plan_block_settings = partial(ComexioClient.save_function_plan_block_settings, client)
+    rejections: list[Exception] = []
+
+    async def library_checks(elem_id: int, block_settings: dict[str, Any]) -> None:
+        # The real library method: the bad settings must reach aiocomexio's checks, not stop earlier.
+        try:
+            await ComexioClient.save_function_plan_block_settings(client, elem_id, block_settings)
+        except (TypeError, ValueError) as err:
+            rejections.append(err)
+            raise
+
+    library_save = AsyncMock(side_effect=library_checks)
+    client.save_function_plan_block_settings = library_save
 
     assert asyncio.run(comexio_api.function_plan_save_block_settings(element_id, settings)) is False
+    assert library_save.await_args_list == ([call(104, settings)] if rejected_by else [])
+    assert [type(err) for err in rejections] == ([rejected_by] if rejected_by else [])
     client._plan_json.assert_not_awaited()
     assert comexio_api.block_settings == {"104": {"in_0": "10"}}
 
