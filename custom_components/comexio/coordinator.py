@@ -477,6 +477,16 @@ def _live_io_number(raw: Any) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def _io_identity(io: Mapping[str, Any]) -> tuple[Any, ...]:
+    """What makes an IO the same one across scrapes: its id alone does not, Comexio may hand it to another IO.
+
+    Left out on purpose: the extension name (a renamed extension keeps its IOs' values) and its serial
+    (empty while the extension is offline, whose IOs keep their last known value).
+    """
+    quickbus = io.get("quickbus") or {}
+    return io.get("ext_id"), str(io.get("identifier", "")).upper(), quickbus.get("device_id"), io.get("type_id_raw")
+
+
 def _apply_io_live_values(
     ios: Iterable[dict[str, Any]], live_values: Mapping[str, Any] | None, known_values: Mapping[str, Any]
 ) -> set[str]:
@@ -931,6 +941,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # whole, as of the last poll — logged on change only.
         self._unanswered_io_ids: set[str] = set()
         self._io_live_fetch_failing = False
+        # _io_identity per IO id as of its last poll: an id that names another IO since loses its value.
+        self._io_identities: dict[str, tuple[Any, ...]] = {}
         self.knx_states: dict[str, Any] = {}
         # O(1) lookup index for webhook updates: (ext_name_lower, identifier_lower) -> io dict
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
@@ -1453,6 +1465,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # after the blip.
             self._polled_io_real_ids = set()
             return
+        self._forget_reassigned_io_values(ios)
         requests = _io_live_requests(ios)
         io_live_states = await self.api.get_io_live_states(requests)
         # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
@@ -1470,6 +1483,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             io_live_states = {io_id: value for io_id, value in io_live_states.items() if io_id in requested}
             self._track_unanswered_ios(ios, requested, io_live_states)
         self._polled_io_real_ids = _apply_io_live_values(ios, io_live_states, known)
+
+    def _forget_reassigned_io_values(self, ios: list[dict[str, Any]]) -> None:
+        """Drop the last known value of an IO id that names another IO now (deleted and reused between two scrapes).
+
+        That value belongs to the former IO; without a live answer the new one shows unknown, not its reading.
+        """
+        for io in ios:
+            identity = _io_identity(io)
+            if self._io_identities.get(io["id"], identity) != identity:
+                _LOGGER.debug(
+                    "[%s] IO id %s names another IO now; its last known value is dropped", self.server_id, io["id"]
+                )
+                self.io_states.pop(io["id"], None)
+                self._io_real_value_ids.discard(io["id"])
+            self._io_identities[io["id"]] = identity
 
     def _log_io_live_fetch_failed(self, ios: list[dict[str, Any]], known: Mapping[str, Any]) -> None:
         """WARNING with its cause on the first failed IO live fetch, DEBUG while it keeps failing."""
@@ -1535,7 +1563,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         The merge loops only revisit ids currently present in final_data — a value cached for a
         since-deleted KNX object or IO would otherwise linger forever and be inherited by a
         different one that later reuses the same numeric id (for IOs also its real-value mark,
-        #175). Keyed off parsed_data (not final_data) so the caches stay correct even while
+        #175, and its identity; an id that stays but names another IO is _forget_reassigned_io_values' case).
+        Keyed off parsed_data (not final_data) so the caches stay correct even while
         import_knx / import_ios / import_quickbus is off, and gated on a non-empty scrape (get_raw_config returns
         {} on a transient HTTP failure — pruning then would wipe every cached value over a blip).
         """
@@ -1547,6 +1576,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         known_io_ids = {io["id"] for io in (*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, []))}
         self.io_states = {io_id: v for io_id, v in self.io_states.items() if io_id in known_io_ids}
         self._io_real_value_ids &= known_io_ids
+        self._io_identities = {io_id: v for io_id, v in self._io_identities.items() if io_id in known_io_ids}
 
     def _merge_polled_knx_states(self, knx_items: list[dict[str, Any]], knx_live_states: dict[str, Any]) -> None:
         """The R1 merge of _merge_polled_states for KNX objects.

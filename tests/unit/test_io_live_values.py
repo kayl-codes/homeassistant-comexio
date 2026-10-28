@@ -13,7 +13,7 @@ import pytest
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.binary_sensor import ComexioBinarySensor
 from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY
-from custom_components.comexio.coordinator import ComexioCoordinator, _io_label, _io_live_requests
+from custom_components.comexio.coordinator import ComexioCoordinator, _io_identity, _io_label, _io_live_requests
 from custom_components.comexio.switch import ComexioIOSwitch
 from tests.common import load_json_fixture
 
@@ -49,6 +49,7 @@ def _coordinator(
         "_polled_io_real_ids": set(),
         "_unanswered_io_ids": set(),
         "_io_live_fetch_failing": False,
+        "_io_identities": {},
         "_io_index": {},
         "_fire_plan_event": MagicMock(),
         "async_update_listeners": MagicMock(),
@@ -331,21 +332,80 @@ def test_marker_and_io_with_the_same_number_are_not_mixed(api: ComexioAPI) -> No
 def test_io_states_are_pruned_to_the_scraped_ios(api: ComexioAPI) -> None:
     """A deleted IO's value and real-value mark go, so an IO that later reuses its id starts clean."""
     coordinator = _coordinator(api, io_states={"11": 1.0, "99": 5.0}, real_ids={"11", "99"})
+    coordinator._io_identities = {"11": ("1", "I1", None, 1), "99": ("1", "Q9", None, 2)}
 
     coordinator._prune_vanished_states({"FubModules": {"1": {}}}, {"io": [{"id": "11"}], "knx": []})
 
     assert coordinator.io_states == {"11": 1.0}
     assert coordinator._io_real_value_ids == {"11"}
+    assert coordinator._io_identities == {"11": ("1", "I1", None, 1)}
+
+
+@pytest.mark.parametrize("io_live", [{}, None], ids=["no live answer", "failed fetch"])
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("Identifier", "I5"), ("InOutputTypeId", 2)],
+    ids=["another identifier", "another IO type"],
+)
+def test_an_io_id_handed_to_another_io_drops_its_last_known_value(
+    api: ComexioAPI, field: str, value: Any, io_live: dict[str, Any] | None
+) -> None:
+    """IO 11 deleted and its id reused between two scrapes: without a live answer it is unknown, not I1's reading."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
+    assert coordinator._io_identities["11"] == ("1", "I1", None, 1)
+    conf = _config()
+    conf["FubModules"]["1"]["1"]["inoutput"]["11"][field] = value
+
+    ios, _markers, _fetch = _poll(coordinator, conf, io_live)
+
+    assert (ios["11"]["value"], ios["12"]["value"], ios["13"]["value"]) == (None, 1.0, 74.0)
+    assert coordinator._io_real_value_ids == {"12", "13"}
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("Name", "Keller"), ("Identifier", "1000")],
+    ids=["renamed", "gone offline (model code instead of a serial)"],
+)
+def test_an_extension_change_that_keeps_its_ios_keeps_their_values(api: ComexioAPI, field: str, value: str) -> None:
+    """Neither the extension name nor its serial is part of an IO's identity: the last known values stay."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
+    conf = _config()
+    conf["FubModules"]["1"]["1"]["extension"][field] = value
+
+    ios, _markers, _fetch = _poll(coordinator, conf, {})
+
+    assert (ios["11"]["value"], ios["12"]["value"], ios["13"]["value"]) == (1.0, 1.0, 74.0)
+    assert coordinator._io_real_value_ids == {"11", "12", "13"}
+
+
+def test_io_identity_tells_ios_apart_by_extension_identifier_device_and_type() -> None:
+    io = {"ext_id": 1, "identifier": "G1", "quickbus": {"device_id": 3, "name": "MT Flur"}, "type_id_raw": 1}
+
+    assert _io_identity({**io, "identifier": "g1", "ext_name": "Keller", "serial": ""}) == _io_identity(io)
+    for other in (
+        {"ext_id": 2},
+        {"identifier": "G2"},
+        {"quickbus": {"device_id": 4, "name": "MT Bad"}},
+        {"type_id_raw": 6},
+    ):
+        assert _io_identity({**io, **other}) != _io_identity(io), other
+    assert _io_identity({**io, "quickbus": None}) != _io_identity(io)
 
 
 def test_an_empty_scrape_prunes_nothing(api: ComexioAPI) -> None:
     """get_raw_config returns {} on a transient failure: that must not wipe the cached values."""
     coordinator = _coordinator(api, io_states={"11": 1.0, "99": 5.0})
+    coordinator._io_identities = identities = {"11": ("1", "I1", None, 1), "99": ("1", "Q9", None, 2)}
 
     coordinator._prune_vanished_states({}, {"io": [], "knx": []})
 
     assert coordinator.io_states == {"11": 1.0, "99": 5.0}
     assert coordinator._io_real_value_ids == {"11", "99"}
+    # Kept as well: the next readable scrape still sees an id handed to another IO during the blip.
+    assert coordinator._io_identities == identities
 
 
 def _seed_trackers(coordinator: ComexioCoordinator) -> None:
