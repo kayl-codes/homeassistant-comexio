@@ -2,7 +2,7 @@
 
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
 from homeassistant.core import HomeAssistant
@@ -20,7 +20,9 @@ from custom_components.comexio.const import (
     CONF_SCHEMA_MARKER,
     CONF_SERVER_ID,
     CONF_USERNAME,
+    DEFAULT_HOST,
     DOMAIN,
+    KNOWN_DOMAINS,
 )
 
 from .conftest import HOST, SERVER_ID
@@ -119,6 +121,129 @@ async def test_user_flow_rejects_taken_server_id(
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {CONF_SERVER_ID: "server_id_exists"}
     assert mock_comexio_api == []
+
+
+def _dns(table: dict[str, str]):
+    """gethostbyname answering from the table; an IP resolves to itself, every other name fails."""
+
+    def resolve(host: str) -> str:
+        if host in table:
+            return table[host]
+        if host.replace(".", "").isdigit():
+            return host
+        raise OSError(host)
+
+    return patch("custom_components.comexio.config_flow.socket.gethostbyname", side_effect=resolve)
+
+
+@pytest.mark.parametrize(
+    ("existing_host", "chosen_host"),
+    [
+        ("comexio.fritz.box", "192.168.0.5"),
+        ("192.168.0.5", "comexio.fritz.box"),
+        ("Comexio.Fritz.Box", " comexio.fritz.box "),
+        ("comexio.offline", "COMEXIO.OFFLINE"),
+    ],
+    ids=["name_then_ip", "ip_then_name", "case_and_whitespace", "unresolvable_same_name"],
+)
+async def test_user_flow_rejects_configured_host(
+    hass: HomeAssistant,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    existing_host: str,
+    chosen_host: str,
+) -> None:
+    """A host an existing entry already reaches, as written or resolved, is refused before any connection."""
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv1", CONF_HOST: existing_host}).add_to_hass(hass)
+
+    with _dns({"comexio.fritz.box": "192.168.0.5"}):
+        result = await _submit(hass, {**USER_INPUT, CONF_HOST: chosen_host})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_HOST: "already_configured"}
+    assert _form_default(result, CONF_HOST) == chosen_host  # the form keeps what the user typed
+    certificate_handshake.assert_not_awaited()
+    assert mock_comexio_api == []
+
+
+async def test_user_flow_checks_the_server_id_before_the_host(
+    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Server id and host both taken: the server id error is shown, the host is not looked at."""
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv2", CONF_HOST: HOST}).add_to_hass(hass)
+
+    result = await _submit(hass, dict(USER_INPUT))
+
+    assert result["errors"] == {CONF_SERVER_ID: "server_id_exists"}
+    assert mock_comexio_api == []
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@pytest.mark.parametrize(
+    "existing", [{CONF_HOST: "comexio.fritz.box"}, {}, {CONF_HOST: ""}], ids=["other_host", "no_host", "empty_host"]
+)
+async def test_user_flow_accepts_another_host(
+    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], existing: dict[str, str]
+) -> None:
+    """A second server on another address is created; an entry without a host blocks nothing."""
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv1", **existing}).add_to_hass(hass)
+
+    with _dns({"comexio.fritz.box": "192.168.0.5"}):
+        result = await _submit(hass, {**USER_INPUT, CONF_HOST: "192.168.0.6"})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_HOST] == "192.168.0.6"  # stored as typed, not resolved
+    mock_comexio_api[0].login.assert_awaited_once()
+
+
+# What gethostbyname raises for a malformed name: UnicodeError (a ValueError) for "a..b", TypeError for a NUL.
+MALFORMED_HOST_ERRORS = pytest.mark.parametrize(
+    "lookup_error", [UnicodeError("label empty"), TypeError("embedded null")], ids=["idna", "nul"]
+)
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@MALFORMED_HOST_ERRORS
+async def test_a_malformed_host_is_compared_as_written(
+    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], lookup_error: Exception
+) -> None:
+    """A host gethostbyname refuses outright: the form still loads and the setup goes on."""
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv1", CONF_HOST: "a..b"}).add_to_hass(hass)
+
+    with patch("custom_components.comexio.config_flow.socket.gethostbyname", side_effect=lookup_error):
+        form = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+        result = await hass.config_entries.flow.async_configure(form["flow_id"], dict(USER_INPUT))
+
+    assert _form_default(form, CONF_HOST) == DEFAULT_HOST
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    mock_comexio_api[0].login.assert_awaited_once()
+
+
+def _form_default(result: dict[str, Any], field: str) -> Any:
+    return next(key.default() for key in result["data_schema"].schema if str(key) == field)
+
+
+@pytest.mark.parametrize(
+    ("existing_hosts", "suggested"),
+    [
+        ((), "192.168.0.5"),
+        (("192.168.0.5",), "192.168.0.6"),
+        (("comexio",), "192.168.0.6"),
+        (("comexio", "192.168.0.6"), DEFAULT_HOST),
+    ],
+    ids=["none_configured", "ip_configured", "name_configured", "all_configured"],
+)
+async def test_user_form_suggests_an_unconfigured_server(
+    hass: HomeAssistant, existing_hosts: tuple[str, ...], suggested: str
+) -> None:
+    """Auto-discovery suggests the first comexio.<domain> no existing entry reaches yet, else the default."""
+    for index, host in enumerate(existing_hosts, start=1):
+        MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: f"iosrv{index}", CONF_HOST: host}).add_to_hass(hass)
+
+    with _dns({"comexio": "192.168.0.5", f"comexio.{KNOWN_DOMAINS[0]}": "192.168.0.6"}):
+        result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+
+    assert _form_default(result, CONF_HOST) == suggested
 
 
 async def test_user_form_suggests_lowest_free_server_id(hass: HomeAssistant) -> None:
@@ -252,6 +377,78 @@ async def test_reconfigure_login_errors_keep_the_stored_settings(
     assert dict(mock_config_entry.data) == data_before
     mock_comexio_api[0].login.assert_awaited_once()
     mock_comexio_api[0].close.assert_called_once()
+
+
+async def test_reconfigure_refuses_a_host_another_entry_uses(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+) -> None:
+    """Moving an entry onto another entry's server is refused before any connection, like a new entry."""
+    mock_config_entry.add_to_hass(hass)
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv2", CONF_HOST: "comexio.fritz.box"}).add_to_hass(hass)
+    data_before = dict(mock_config_entry.data)
+
+    with _dns({"comexio.fritz.box": RECONFIGURE_INPUT[CONF_HOST]}):
+        result = await _submit_reconfigure(hass, mock_config_entry, dict(RECONFIGURE_INPUT))
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_HOST: "already_configured"}
+    assert _form_default(result, CONF_HOST) == RECONFIGURE_INPUT[CONF_HOST]  # the form keeps what the user typed
+    assert dict(mock_config_entry.data) == data_before
+    certificate_handshake.assert_not_awaited()
+    assert mock_comexio_api == []
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reconfigure_onto_its_own_server_under_another_name_succeeds(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Switching from the IP to the DNS name of the same server: the entry's own host does not count as taken."""
+    mock_config_entry.add_to_hass(hass)
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv2", CONF_HOST: "192.168.1.30"}).add_to_hass(hass)
+
+    with _dns({"comexio.fritz.box": HOST}):
+        result = await _submit_reconfigure(
+            hass, mock_config_entry, {**RECONFIGURE_INPUT, CONF_HOST: "comexio.fritz.box"}
+        )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    assert mock_config_entry.data[CONF_HOST] == "comexio.fritz.box"
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+@MALFORMED_HOST_ERRORS
+async def test_reconfigure_with_a_malformed_host_does_not_crash(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], lookup_error: Exception
+) -> None:
+    """A host gethostbyname refuses outright is compared as written; the flow goes on to the login test."""
+    mock_config_entry.add_to_hass(hass)
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv2", CONF_HOST: "192.168.1.30"}).add_to_hass(hass)
+
+    with patch("custom_components.comexio.config_flow.socket.gethostbyname", side_effect=lookup_error):
+        result = await _submit_reconfigure(hass, mock_config_entry, {**RECONFIGURE_INPUT, CONF_HOST: "comexio.lan"})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    mock_comexio_api[0].login.assert_awaited_once()
+
+
+@pytest.mark.usefixtures("mock_setup_entry")
+async def test_reconfigure_keeping_a_shared_host_still_succeeds(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Two entries that already share a host (set up before the check) still take new credentials."""
+    mock_config_entry.add_to_hass(hass)
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv2", CONF_HOST: HOST}).add_to_hass(hass)
+
+    result = await _submit_reconfigure(hass, mock_config_entry, {**RECONFIGURE_INPUT, CONF_HOST: HOST})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_successful"
+    mock_comexio_api[0].login.assert_awaited_once()
 
 
 async def test_unchanged_reauth_without_a_coordinator_falls_back_to_ha_reload(

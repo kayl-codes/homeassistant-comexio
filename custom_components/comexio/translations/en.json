@@ -2,6 +2,7 @@
   "config": {
     "error": {
       "server_id_exists": "This instance name is already in use.",
+      "already_configured": "This Comexio server is already set up (same host or address).",
       "cannot_connect": "Connection to Comexio failed.",
       "invalid_auth": "Invalid credentials (UI User/Pass).",
       "unknown": "An unexpected error occurred.",

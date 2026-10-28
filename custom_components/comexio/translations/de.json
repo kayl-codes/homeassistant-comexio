@@ -2,6 +2,7 @@
   "config": {
     "error": {
       "server_id_exists": "Dieser Instanz-Name wird bereits verwendet.",
+      "already_configured": "Dieser Comexio-Server ist bereits eingerichtet (gleicher Host bzw. gleiche Adresse).",
       "cannot_connect": "Verbindung zu Comexio fehlgeschlagen.",
       "invalid_auth": "Ungültige Anmeldedaten (UI User/Pass).",
       "unknown": "Unerwarteter Fehler aufgetreten.",

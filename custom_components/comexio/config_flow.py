@@ -1,5 +1,4 @@
 # Version: 0.8.0
-import contextlib
 import logging
 import socket
 
@@ -62,6 +61,10 @@ class ServerIdExists(HomeAssistantError):
     """Error to indicate the Server ID is already in use."""
 
 
+class HostAlreadyConfigured(HomeAssistantError):
+    """Error to indicate an existing entry already talks to this Comexio server."""
+
+
 class CertificateChanged(HomeAssistantError):
     """Error to indicate Comexio presents another certificate than the pinned one."""
 
@@ -76,6 +79,58 @@ _HTTPS_DROPPED = "dropped"
 _HTTPS_REPLACED = "replaced"
 # The changes the user confirms first, and the step that asks.
 _HTTPS_CONFIRM_STEPS = {_HTTPS_DROPPED: "reconfigure_http", _HTTPS_REPLACED: "reconfigure_certificate"}
+
+
+def _lookup(host: str) -> str | None:
+    """The host's IPv4 address, or None when it does not resolve (blocking: run in the executor)."""
+    try:
+        return socket.gethostbyname(host)
+    except (OSError, ValueError, TypeError) as err:
+        # ValueError: a name the IDNA codec refuses (an empty label "a..b", a label over 63 characters);
+        # TypeError: an embedded NUL, which is_valid_host lets through (only reachable through the API)
+        _LOGGER.debug("Host %s does not resolve: %s", host, err)
+        return None
+
+
+def _resolve_host(host: str) -> str:
+    """The host's IPv4 address, or the host itself when it does not resolve (blocking).
+
+    gethostbyname is IPv4 only: an IPv6 literal or an AAAA-only name is compared as written.
+    """
+    return _lookup(host) or host
+
+
+def _host_addresses(host: str) -> set[str]:
+    """The host as written and as resolved, so a DNS name matches its IP and vice versa (blocking)."""
+    host = host.strip().lower()
+    return {host, _resolve_host(host)} if host else set()
+
+
+def _configured_addresses(hosts: list[str]) -> set[str]:
+    """Every address the configured entries reach their Comexio server under (blocking)."""
+    return set().union(*map(_host_addresses, hosts))
+
+
+def _host_configured(host: str, configured_hosts: list[str]) -> bool:
+    """Whether the host, as written or resolved, is one an existing entry uses (blocking)."""
+    return bool(_host_addresses(host) & _configured_addresses(configured_hosts))
+
+
+def _discover_host(configured_hosts: list[str]) -> str:
+    """The first resolvable comexio.<domain> no existing entry reaches yet, else DEFAULT_HOST (blocking).
+
+    Skipping configured servers makes adding a second instance suggest the next one.
+    """
+    configured = _configured_addresses(configured_hosts)
+    for domain in [""] + KNOWN_DOMAINS:
+        test_host = f"comexio.{domain}" if domain else "comexio"
+        address = _lookup(test_host)
+        if address is None:
+            continue
+        if address not in configured:
+            return address
+        _LOGGER.debug("Auto-discovery skips %s (%s): an entry already uses it", test_host, address)
+    return DEFAULT_HOST
 
 
 class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -114,17 +169,11 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         suggested_id = f"iosrv{next_index}"
 
         default_host = DEFAULT_HOST
+        configured_hosts = [str(entry.data.get(CONF_HOST, "")) for entry in current_entries]
 
         if user_input is None:
             # Auto-discovery attempt to find the Comexio IP before showing the form
-            def guess_ip():
-                for domain in [""] + KNOWN_DOMAINS:
-                    test_host = f"comexio.{domain}" if domain else "comexio"
-                    with contextlib.suppress(OSError):
-                        return socket.gethostbyname(test_host)
-                return DEFAULT_HOST
-
-            default_host = await self.hass.async_add_executor_job(guess_ip)
+            default_host = await self.hass.async_add_executor_job(_discover_host, configured_hosts)
             _LOGGER.debug("Auto-discovered default host: %s", default_host)
         else:
             default_host = user_input.get(CONF_HOST, DEFAULT_HOST)
@@ -147,7 +196,14 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         errors[CONF_SERVER_ID] = "server_id_exists"
                         raise ServerIdExists
 
-                # 2. Validation: Test connection with the provided UI credentials — over HTTPS
+                # 2. Validation: no existing entry talks to this server already, compared resolved
+                # (comexio.fritz.box vs. its IP) — two entries would fight over one Web-IO device
+                if await self.hass.async_add_executor_job(_host_configured, user_input[CONF_HOST], configured_hosts):
+                    _LOGGER.warning("Setup failed: host '%s' is already configured", user_input[CONF_HOST])
+                    errors[CONF_HOST] = "already_configured"
+                    raise HostAlreadyConfigured
+
+                # 3. Validation: Test connection with the provided UI credentials — over HTTPS
                 # with the certificate pinned when Comexio serves it, else plain HTTP.
                 fingerprint = await async_read_fingerprint(user_input[CONF_HOST])
                 await self._test_connection(user_input, fingerprint)
@@ -165,7 +221,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     data=user_input,
                 )
 
-            except ServerIdExists:
+            except (ServerIdExists, HostAlreadyConfigured):
                 # Error already added to the errors dict
                 pass
             except CannotConnect:
@@ -234,6 +290,9 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if not is_valid_host(merged[CONF_HOST]):
             # Not "no HTTPS": a pinned entry would be asked to switch to plain HTTP for a typo.
             return self._show_reconfigure_form(merged, {"base": "invalid_host"})
+        if await self._async_host_taken(entry, merged[CONF_HOST]):
+            _LOGGER.warning("Reconfigure refused: host '%s' is already configured", merged[CONF_HOST])
+            return self._show_reconfigure_form(merged, {CONF_HOST: "already_configured"})
         try:
             https_change = await self._async_pin_for_host(entry, merged)
         except CertificateChanged as err:
@@ -256,6 +315,20 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         return await self._async_apply_reconfigure(
             self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED
         )
+
+    async def _async_host_taken(self, entry, host: str) -> bool:
+        """Whether the reconfigure moves the entry onto a host another entry already uses (compared as on setup).
+
+        Only a changed host is checked, so entries that already share one still take new credentials.
+        """
+        if host.strip().lower() == str(entry.data.get(CONF_HOST, "")).strip().lower():
+            return False
+        others = [
+            str(other.data.get(CONF_HOST, ""))
+            for other in self._async_current_entries()
+            if other.entry_id != entry.entry_id
+        ]
+        return bool(others) and await self.hass.async_add_executor_job(_host_configured, host, others)
 
     def _show_reconfigure_form(self, conf, errors: dict[str, str]):
         """The reconfigure form, prefilled from conf: the entry, or after an error what the user entered."""
