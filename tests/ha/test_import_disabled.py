@@ -368,8 +368,12 @@ async def test_options_flow_keeps_a_submitted_ignore_list(
 async def test_options_flow_hides_the_ignore_list_of_a_category_not_imported(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
-    """KNX not imported: no KNX ignore-list field, and saving the form keeps the stored list."""
-    entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "4"})
+    """KNX not imported: no KNX ignore-list field, and saving keeps the stored list unvalidated.
+
+    The stored list is invalid on purpose: re-validating a hidden list would block the form
+    with an error on a field nobody sees.
+    """
+    entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "not a list"})
     await _setup(hass, entry)
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
@@ -382,7 +386,7 @@ async def test_options_flow_hides_the_ignore_list_of_a_category_not_imported(
     await hass.async_block_till_done()
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert entry.options[CONF_IGNORED_KNX] == "4"
+    assert entry.options[CONF_IGNORED_KNX] == "not a list"
 
 
 async def test_an_unreadable_scrape_keeps_the_issue(
