@@ -154,7 +154,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   hold line breaks or control characters. Before a name goes into a log line, a notification or a service response,
   replace non-printable characters and collapse whitespace to one line (`const.one_line`), so a name cannot
   split a log entry or break the notification layout. Flag new code that writes a Comexio name to a log line,
-  notification or response unfiltered; entity display names are out of scope (#186).
+  notification or response unfiltered; entity display names are out of scope (#186). An IO's extension name and
+  identifier (`ext_name`, `identifier`) count as names too. Its unique_id and Web-IO command name keep the raw
+  values and are built only by `const.io_unique_id` / `const.io_command_name` (#239).
 - **Stored values are checked against the allowed set:** a value read back from a `Store` or from the config entry
   (a protocol, a mode, an enum-like string) is compared with the values the code knows before it drives a decision.
   An unknown value — a typo, a newer version's value after a downgrade, a hand-edited file — counts as "unknown",

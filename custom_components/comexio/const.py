@@ -957,6 +957,11 @@ def quickbus_io_unique_id(server_id: str, io_id: str | int) -> str:
     return f"comexio_{server_id}_{SOURCE_CATEGORIES[WebioClass.QUICKBUS].unique_id_infix}{io_id}".lower()
 
 
+def io_unique_id(server_id: str, io: Mapping[str, Any]) -> str:
+    """unique_id of an IO's entity, from its extension's name and identifier as Comexio reports them."""
+    return f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+
+
 # Comexio's name for the IO-Server's own onboard IOs: its HA device keeps the plain name.
 BASE_EXTENSION_NAME = "BASE"
 
@@ -1541,6 +1546,11 @@ def io_plan_shifted(kind: IoPlanKind, members: list[str], rows_needed: Callable[
     return members[first + 1 :]
 
 
+def io_command_name(io: Mapping[str, Any]) -> str:
+    """Web-IO command name of an IO, e.g. "HA IO BASE I1": the name Comexio must report back."""
+    return f"HA IO {io['ext_name']} {io['identifier']}"
+
+
 IO_PLAN_KIND_IO = IoPlanKind(
     label="IO",
     data_key="io",
@@ -1548,7 +1558,7 @@ IO_PLAN_KIND_IO = IoPlanKind(
     member_noun="extension",
     member_of=lambda io: io["ext_name"],
     member_display=lambda io: io["ext_name"],
-    command_name=lambda io: f"HA IO {io['ext_name']} {io['identifier']}",
+    command_name=io_command_name,
     column_blocks=_io_ident_blocks,
     stacked=False,
     member_fallback=lambda ext_name: ext_name,
@@ -1593,8 +1603,8 @@ def io_plan_item_member(item: Mapping[str, Any]) -> tuple[IoPlanKind, str] | Non
 
 
 def io_plan_label(io: Mapping[str, Any]) -> str:
-    """Display label of an IO in a column plan: "<extension or Quickbus device> <identifier>"."""
-    return f"{io_plan_kind_of(io).member_display(io)} {io['identifier']}"
+    """Display label of an IO in a column plan: "<extension or Quickbus device> <identifier>", on one line."""
+    return f"{one_line(io_plan_kind_of(io).member_display(io))} {one_line(io['identifier'])}"
 
 
 # need for ha ip dns validation, to avoid false positives

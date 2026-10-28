@@ -19,6 +19,7 @@ from .const import (
     WebioClass,
     extension_device_name,
     hub_era_object_id,
+    io_unique_id,
     marker_device_name,
     one_line,
     quickbus_device_name,
@@ -173,7 +174,7 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
         super().__init__(coordinator)
         self._io_id: str = io["id"]
         self._ext_name: str = io["ext_name"]
-        self._attr_unique_id = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+        self._attr_unique_id = io_unique_id(server_id, io)
         self._attr_name = io["ha_name"]
 
     @property

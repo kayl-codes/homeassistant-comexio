@@ -200,6 +200,7 @@ from .const import (
     import_disabled_issue_id,
     invalid_ignored_tokens,
     io_audit_key,
+    io_command_name,
     io_plan_columns,
     io_plan_gap_item,
     io_plan_item_member,
@@ -1817,7 +1818,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             key = io_audit_key(io["ext_name"], io["identifier"])
             # api.py provides 'is_binary'; the audit type ('digital'/'analog') derives from it.
             mapped_type = "digital" if io.get("is_binary") else "analog"
-            ha_map[key] = {"name": f"HA IO {io['ext_name']} {io['identifier']}", "type": mapped_type}
+            ha_map[key] = {"name": io_command_name(io), "type": mapped_type}
             io_meta_by_key[key] = io
         # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); their io_meta entry
         # feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).

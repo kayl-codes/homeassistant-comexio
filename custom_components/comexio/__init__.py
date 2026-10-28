@@ -40,6 +40,7 @@ from .const import (
     extension_firmware_update_unique_id,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    io_unique_id,
     known_extension_names,
     migrate_entry_options,
     quickbus_io_platform,
@@ -366,7 +367,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     for io in coordinator.data.get("io", []):
         if not io.get("offline") or include_offline:
-            active_unique_ids.add(f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower())
+            active_unique_ids.add(io_unique_id(server_id, io))
     quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
     active_unique_ids |= quickbus_platforms.keys()
 
@@ -429,7 +430,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
                 expected_platform[uid] = "switch" if src["type"] == "digital" else "number"
     for io in coordinator.data.get("io", []):
         if not io.get("offline") or include_offline:
-            uid = f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+            uid = io_unique_id(server_id, io)
             is_binary = io.get("is_binary", False)
             is_input = io.get("is_input", True)
             if is_binary:
@@ -446,7 +447,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # entries count too: after the first restart with the extension offline, its entities are
     # already gone from the live registry, but their statistics must stay protected.
     offline_unique_ids = {
-        f"comexio_{server_id}_{io['ext_name']}_{io['identifier']}".lower()
+        io_unique_id(server_id, io)
         for io in coordinator.data.get("io", [])
         if io.get("offline") and not include_offline
     } | quickbus_offline_uids
