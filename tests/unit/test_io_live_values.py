@@ -705,6 +705,25 @@ def test_an_io_label_from_names_with_line_breaks_stays_on_one_line(io: dict[str,
     assert "\r" not in _io_label(io)
 
 
+@pytest.mark.parametrize("former", [True, False], ids=["former IO", "unknown IO"])
+def test_a_pushed_io_identifier_with_line_breaks_stays_on_one_log_line(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, former: bool
+) -> None:
+    """The webhook's identifier reaches the dropped-push log lines: a line break in it must not forge a log line."""
+    coordinator = _coordinator(api)
+    if former:
+        io = {"id": "11", "ext_id": "1", "identifier": "I1\r\nforged", "quickbus": None, "type_id_raw": 1}
+        coordinator._io_index = {("base", "i1\r\nforged"): io}
+        coordinator._io_identities = {"11": ("1", "I5", None, 1)}
+
+    with caplog.at_level(logging.DEBUG):
+        coordinator.update_io_by_name("BASE", "I1\r\nforged", 1)
+
+    assert ("is for the IO that had its id before" if former else "for unknown IO") in caplog.text
+    assert "\nforged" not in caplog.text
+    assert "\r" not in caplog.text
+
+
 def test_webhook_value_during_a_failed_io_fetch_is_kept_as_real(api: ComexioAPI) -> None:
     """R1 with a failed fetch: the last known values are read after the await, so the push counts."""
     coordinator = _coordinator(api)

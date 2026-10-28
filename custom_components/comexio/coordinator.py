@@ -4728,14 +4728,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
         key = (ext_name.lower(), identifier.lower())
         if (io := self._io_index.get(key)) and self._names_another_io_now(io):
-            _LOGGER.debug(WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, f"{one_line(ext_name)} {identifier}", value)
+            _LOGGER.debug(
+                WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, f"{one_line(ext_name)} {one_line(identifier)}", value
+            )
         elif io:
             previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), identifier, value)
+            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), one_line(identifier), value)
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
