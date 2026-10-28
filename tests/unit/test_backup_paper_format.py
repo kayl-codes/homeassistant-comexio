@@ -28,6 +28,8 @@ from tests.common import load_json_fixture
 SERVER_ID = "cx1"
 A4 = ("A4", 100, "landscape")
 A5 = ("A5", 120, "landscape")
+SNAPSHOT_SOURCE = "snapshot:auto:1"
+PREVIEW_SVG = "<svg/>"
 
 
 @pytest.fixture
@@ -251,7 +253,7 @@ def test_the_svg_visualize_of_a_backup_renders_with_its_paper_format() -> None:
         snapshot_paper_format_for_source=MagicMock(return_value=A5),
         async_generate_plan_preview=AsyncMock(return_value="/local/preview.svg"),
     )
-    source = (coordinator, None, 7, "Lights", {}, {}, "snapshot:auto:1", None)
+    source = (coordinator, None, 7, "Lights", {}, {}, SNAPSHOT_SOURCE, None)
     call = SimpleNamespace(data={"format": "svg", "snapshot": "7:auto:1:Lights"}, return_response=True)
     with (
         patch.object(plan_actions, "_resolve_visualize_snapshot_source", AsyncMock(return_value=source)),
@@ -259,7 +261,7 @@ def test_the_svg_visualize_of_a_backup_renders_with_its_paper_format() -> None:
     ):
         asyncio.run(plan_actions.handle_function_plan_visualize(SimpleNamespace(), call))  # type: ignore[arg-type]
 
-    coordinator.snapshot_paper_format_for_source.assert_called_once_with(7, "Lights", "snapshot:auto:1")
+    coordinator.snapshot_paper_format_for_source.assert_called_once_with(7, "Lights", SNAPSHOT_SOURCE)
     assert coordinator.async_generate_plan_preview.await_args.args[-1] == A5
 
 
@@ -382,9 +384,9 @@ def test_a_backup_render_passes_its_paper_format_to_the_title_and_the_armed_cach
     with (
         patch.object(coordinator_module, "_build_sun_times", return_value={}),
         patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
-        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>"),
+        patch.object(coordinator_module, "render_plan_svg", return_value=PREVIEW_SVG),
     ):
-        asyncio.run(coordinator.async_generate_plan_preview(7, "Lights", {}, {}, "snapshot:auto:1", paper_format=A5))
+        asyncio.run(coordinator.async_generate_plan_preview(7, "Lights", {}, {}, SNAPSHOT_SOURCE, paper_format=A5))
 
     coordinator._build_preview_title_and_canvas.assert_called_once_with(7, A5, False)
     assert coordinator._preview_plan_cache["paper_format"] == A5
@@ -400,8 +402,8 @@ _STORED_SETTINGS = {"104": {"in_0": "10"}}
         ("live", None, _LIVE_SETTINGS),
         # The armed re-render of a live preview passes the cached table; the render still shows today's.
         ("live", _STORED_SETTINGS, _LIVE_SETTINGS),
-        ("snapshot:auto:1", _STORED_SETTINGS, _STORED_SETTINGS),
-        ("snapshot:auto:1", None, None),
+        (SNAPSHOT_SOURCE, _STORED_SETTINGS, _STORED_SETTINGS),
+        (SNAPSHOT_SOURCE, None, None),
     ],
     ids=["live", "live-re-render", "snapshot", "snapshot-without-settings"],
 )
@@ -415,7 +417,7 @@ def test_a_render_shows_the_block_values_of_the_plan_it_draws(
     with (
         patch.object(coordinator_module, "_build_sun_times", return_value={}),
         patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
-        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>") as render,
+        patch.object(coordinator_module, "render_plan_svg", return_value=PREVIEW_SVG) as render,
     ):
         asyncio.run(coordinator.async_generate_plan_preview(7, "Lights", {}, {}, source, block_settings=stored))
 
@@ -429,13 +431,13 @@ def test_an_armed_backup_re_render_keeps_the_stored_block_values() -> None:
 
     async def run() -> None:
         coordinator.preview_follow_lock = asyncio.Lock()
-        await coordinator.async_generate_plan_preview(7, "Lights", {}, {}, "snapshot:auto:1", None, _STORED_SETTINGS)
+        await coordinator.async_generate_plan_preview(7, "Lights", {}, {}, SNAPSHOT_SOURCE, None, _STORED_SETTINGS)
         await coordinator._render_armed_preview(coordinator._preview_plan_cache)
 
     with (
         patch.object(coordinator_module, "_build_sun_times", return_value={}),
         patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
-        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>") as render,
+        patch.object(coordinator_module, "render_plan_svg", return_value=PREVIEW_SVG) as render,
     ):
         asyncio.run(run())
 
@@ -444,7 +446,7 @@ def test_an_armed_backup_re_render_keeps_the_stored_block_values() -> None:
 
 @pytest.mark.parametrize(
     ("source", "expected"),
-    [("live", None), ("snapshot:auto:0", A5), ("snapshot:auto:1", A4), ("snapshot:auto:2", None)],
+    [("live", None), ("snapshot:auto:0", A5), (SNAPSHOT_SOURCE, A4), ("snapshot:auto:2", None)],
 )
 def test_a_preview_source_reads_its_own_slots_paper_format(source: str, expected: tuple | None) -> None:
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, None)
@@ -914,7 +916,7 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
     with (
         patch.object(coordinator_module, "_build_sun_times", return_value={}),
         patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
-        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>") as render,
+        patch.object(coordinator_module, "render_plan_svg", return_value=PREVIEW_SVG) as render,
     ):
         asyncio.run(coordinator.async_generate_orphaned_plan_preview(7, "Lights", "auto", 0))
 
@@ -923,7 +925,7 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
     assert render.call_args.kwargs["block_values"] == stored.get(SNAPSHOT_BLOCK_SETTINGS)
     # comexio-plan-card.js (orphanPreviewMatch) matches the shown image by source and capture time.
     coordinator._async_publish_plan_preview.assert_awaited_once_with(
-        7, "Lights", "orphan:auto:0", "<svg/>", captured_at=stored.get("captured_at")
+        7, "Lights", "orphan:auto:0", PREVIEW_SVG, captured_at=stored.get("captured_at")
     )
 
 
@@ -1032,12 +1034,12 @@ def test_loading_an_orphaned_plan_leaves_a_newer_selection_to_its_own_follow(
             '<svg data-comexio-source="orphan:auto:0" data-comexio-captured-at="2026-01-02T03:04:05+00:00"'
             ' xmlns="http://www.w3.org/2000/svg"><svg x="1"/></svg>',
         ),
-        ("<svg/>", "orphan:auto:0", None, '<svg data-comexio-source="orphan:auto:0"/>'),
+        (PREVIEW_SVG, "orphan:auto:0", None, '<svg data-comexio-source="orphan:auto:0"/>'),
         # Empty like None: the card compares `captured_at || null` with the missing attribute.
-        ("<svg/>", "live", "", '<svg data-comexio-source="live"/>'),
+        (PREVIEW_SVG, "live", "", '<svg data-comexio-source="live"/>'),
         (
             '<?xml version="1.0"?>\n<svg>',
-            "snapshot:auto:1",
+            SNAPSHOT_SOURCE,
             None,
             '<?xml version="1.0"?>\n<svg data-comexio-source="snapshot:auto:1">',
         ),
@@ -1059,7 +1061,7 @@ def test_a_published_preview_names_its_render_on_the_svg_root(
     assert coordinator_module.stamp_preview_identity(svg, source, captured_at) == stamped
 
 
-@pytest.mark.parametrize(("svg", "warned"), [("<svg/>", False), ("<!-- x --><svg/>", True)])
+@pytest.mark.parametrize(("svg", "warned"), [(PREVIEW_SVG, False), ("<!-- x --><svg/>", True)])
 def test_a_preview_without_a_root_tag_to_stamp_is_published_with_a_warning(
     svg: str, warned: bool, caplog: pytest.LogCaptureFixture
 ) -> None:
