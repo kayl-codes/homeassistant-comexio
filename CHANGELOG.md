@@ -27,7 +27,7 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - **Server diagnostics:** *Free storage*, *Last boot* and a *Time server setting* problem sensor on the hub device, read every 5 minutes (#204).
 - **Backups keep more of a plan:** block settings (values from a block's settings dialog, #146, #147, #154), the paper format (#176) and the configs of scene blocks and Quantum modules (#199, #221) are stored and written back on every restore. Backups freeze each block's stable key, so they stay correct after Comexio renumbers its logic blocks (#144, #145).
 - **Backups of deleted plans:** never purged silently — a repair per deleted plan asks **Keep** / **Delete** once the retention has passed, and the plan card's **Orphaned plans** view previews, restores, deletes or keeps them (#120, #121, #123). Its buttons warn when the preview on screen shows another backup than the selected row, also in trigger-only cards (#232, #233).
-- **Block settings in the plan preview:** hovering a block lists its settings as "Name: Value" lines, e.g. `t1: 0,5 Sek.`. A live preview shows the settings read with the plan; a backup preview, also of a deleted plan, shows the ones stored in that backup (#242).
+- **Block settings in the plan preview:** hovering a block lists its settings as "Name: Value" lines, e.g. `t1: 0,5 Sek.`. A live preview shows the current settings; a backup preview, also of a deleted plan, shows the settings as they were when the backup was taken (#242).
 - **Repair for switched-off imports:** with `import_markers`, `import_ios` or `import_knx` off, its Web-IO commands no longer count as orphans; a repair offers **Clean up**, **Ignore** or **Switch import on** (#160).
 
 ### 🛠️ Core & Stability Improvements
