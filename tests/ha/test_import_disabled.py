@@ -375,11 +375,13 @@ async def test_options_flow_hides_the_ignore_list_of_a_category_not_imported(
     """
     entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "not a list"})
     await _setup(hass, entry)
+    # No counts known: no category is hidden for lack of objects, so only the import flag hides the list.
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     fields = {str(key) for key in result["data_schema"].schema}
 
-    assert CONF_IGNORED_MARKERS in fields
+    assert {"import_knx", CONF_IGNORED_MARKERS} <= fields  # the KNX category itself is shown
     assert CONF_IGNORED_KNX not in fields
 
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
@@ -387,6 +389,19 @@ async def test_options_flow_hides_the_ignore_list_of_a_category_not_imported(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_IGNORED_KNX] == "not a list"
+
+
+async def test_options_flow_shows_the_ignore_list_of_an_imported_category(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Counterpart of the hiding test: with KNX imported, the same setup shows the KNX ignore list."""
+    entry = _with_options(mock_config_entry, {"import_knx": True, CONF_IGNORED_KNX: "4"})
+    await _setup(hass, entry)
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert CONF_IGNORED_KNX in {str(key) for key in result["data_schema"].schema}
 
 
 async def test_an_unreadable_scrape_keeps_the_issue(
