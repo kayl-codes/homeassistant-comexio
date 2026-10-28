@@ -82,6 +82,7 @@ IDENTITY_FUNCTIONS = {
     "coordinator.py": {
         "async_newest_backup_field",  # the restore action's snapshot value
         "_build_ha_audit_map",  # the command names the audit compares with Comexio's
+        "_source_commands",  # the command names the cleanup matches with Comexio's
         # unique_ids and device identifiers from extension names; the device name matches the one setup gives
         "_migrate_extension_entities",
         "update_io_by_name",  # the event label the plan card matches with the plan's element labels

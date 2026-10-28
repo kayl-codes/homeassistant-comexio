@@ -442,14 +442,41 @@ def test_superseded_plan_map_names(plan_map: object, superseded: set[str]) -> No
     assert coordinator._superseded_plan_map_names({5: "HA - QB [1,2]"}) == superseded
 
 
-def test_source_link_names_the_first_plan_wiring_the_source() -> None:
-    coordinator = _coordinator()
-    wired_in = {5, 8}
-    coordinator._source_wired_in_plan = lambda _source, plan, _ref_type: plan["fub"] in wired_in  # type: ignore[method-assign]
-    plans = {3: {"fub": 3}, 5: {"fub": 5}, 8: {"fub": 8}}
+def _wired_plan(*targets: tuple[str, dict[str, Any]], source: int = 12) -> dict[str, Any]:
+    """A plan whose marker element "1" (ref source) feeds each target element."""
+    elements = {"1": {"reference": {"type": 2, "ref_id": source}}, **dict(targets)}
+    connections = {
+        str(i): {"input": {"FubElementId": "1"}, "output": [{"FubElementId": elem_id}]}
+        for i, (elem_id, _) in enumerate(targets)
+    }
+    return {"elements": elements, "connections": connections}
 
-    assert coordinator._check_source_function_plan_link(12, plans) == 5
-    assert coordinator._check_source_function_plan_link(12, {3: {"fub": 3}}) is None
+
+WEBIO_TARGET = ("2", {"reference": {"type": 10, "ref_id": 40}})
+LOGIC_TARGET = ("3", {"reference": {"type": 5, "ref_id": 1}})
+
+
+def test_source_links_name_every_plan_wiring_the_source_to_a_web_io() -> None:
+    # (bj): only the first plan counted, and logic-only wiring flagged a source the cleanup keeps.
+    coordinator = _coordinator()
+    plans = {
+        3: _wired_plan(LOGIC_TARGET),
+        5: _wired_plan(WEBIO_TARGET),
+        7: _wired_plan(source=13),
+        8: _wired_plan(LOGIC_TARGET, WEBIO_TARGET),
+    }
+
+    assert coordinator._source_function_plan_links(12, plans) == [5, 8]
+    assert coordinator._source_function_plan_links(12, {3: plans[3]}) == []
+
+
+def test_a_stray_duplicate_element_wired_to_a_web_io_counts() -> None:
+    plan = _wired_plan()
+    plan["elements"]["9"] = {"reference": {"type": "2", "ref_id": "12"}}
+    plan["elements"]["10"] = WEBIO_TARGET[1]
+    plan["connections"]["x"] = {"input": {"FubElementId": 9}, "output": {"0": {"FubElementId": "10"}}}
+
+    assert ComexioCoordinator._source_webio_wired_in_plan(12, plan)
 
 
 def test_knx_bridge_pairs_count_only_marker_to_knx() -> None:

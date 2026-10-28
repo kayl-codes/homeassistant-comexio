@@ -37,6 +37,8 @@ def _coordinator(options: dict[str, Any], bridge_marker_ids: set[int] | None = N
     coordinator.config_entry = SimpleNamespace(data=dict(IMPORT_ALL), options=options)  # type: ignore[assignment]
     coordinator._knx_bridge_marker_ids = bridge_marker_ids or set()
     coordinator._last_poll_scraped = True
+    coordinator._ignored_plan_links = {}
+    coordinator.scraped_plan_ids = None
     return coordinator
 
 
@@ -586,4 +588,146 @@ def test_the_audit_loads_the_plans_whose_list_entry_is_unreadable_too() -> None:
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
     _check_ignored(coordinator, {"markers": [*MARKERS, {"id": 335, "name": "Rollo"}]})
 
-    coordinator._load_managed_plan_check_data.assert_awaited_once_with(include_unknown=True)
+    coordinator._load_managed_plan_check_data.assert_awaited_once_with(load_failures=[], include_unknown=True)
+
+
+def _plan_with_marker_335(*targets: tuple[str, dict[str, Any]]) -> dict[str, Any]:
+    """A plan whose element "1" (marker 335) feeds each target element."""
+    return {
+        "elements": {"1": _element(2, 335), **dict(targets)},
+        "connections": {
+            str(i): {"input": {"FubElementId": "1"}, "output": [{"FubElementId": elem_id}]}
+            for i, (elem_id, _) in enumerate(targets)
+        },
+    }
+
+
+WEB_IO = ("2", _element(10, 40))
+LOGIC = ("3", _element(5, 1))
+ROLLO = [*MARKERS, {"id": 335, "name": "Rollo"}]
+
+
+def test_the_audit_counts_every_plan_that_wires_the_source_to_a_web_io() -> None:
+    # (bj): only the first plan counted; a source kept for its logic was flagged again on every poll.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    plans = {36: _plan_with_marker_335(WEB_IO), 37: _plan_with_marker_335(LOGIC), 38: _plan_with_marker_335(WEB_IO)}
+    _check_ignored(coordinator, {"markers": ROLLO}, plans=plans)
+
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335)]
+    assert coordinator._cleanup_function_plan_count == 2
+
+
+def test_a_source_wired_only_to_plan_logic_is_no_finding() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(LOGIC)})
+
+    assert coordinator._cleanup_entity_ids == []
+    assert coordinator._cleanup_function_plan_count == 0
+
+
+def test_a_plan_that_failed_to_load_keeps_the_last_finding() -> None:
+    # (bj): a failed load read as "no wiring" and cleared the cleanup repair while the wiring was still there.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
+
+    async def _plan_36_fails(load_failures: list[int], **_kwargs: Any) -> dict[int, Any]:
+        load_failures.append(36)
+        return {}
+
+    _check_ignored(coordinator, {"markers": ROLLO}, load_plans=AsyncMock(side_effect=_plan_36_fails))
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335)]
+    assert coordinator._cleanup_function_plan_count == 1
+
+    # Loaded again and clean: the finding goes.
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335()})
+    assert coordinator._cleanup_entity_ids == []
+    assert coordinator._ignored_plan_links[WebioClass.MARKER] == {}
+
+
+def _plans_fail(*fub_ids: int, loaded: dict[int, Any] | None = None) -> AsyncMock:
+    """A plan load in which the given plans fail and the loaded ones come back."""
+
+    async def _load(load_failures: list[int], **_kwargs: Any) -> dict[int, Any]:
+        load_failures.extend(fub_ids)
+        return loaded or {}
+
+    return AsyncMock(side_effect=_load)
+
+
+def test_only_the_plan_that_failed_carries_its_link_over() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    plans = {36: _plan_with_marker_335(WEB_IO), 37: _plan_with_marker_335(WEB_IO)}
+    _check_ignored(coordinator, {"markers": ROLLO}, plans=plans)
+    assert coordinator._ignored_plan_links[WebioClass.MARKER] == {335: {36, 37}}
+
+    # Plan 36 fails, plan 37 loads clean: only 36's link stays.
+    _check_ignored(coordinator, {"markers": ROLLO}, load_plans=_plans_fail(36, loaded={37: _plan_with_marker_335()}))
+    assert coordinator._ignored_plan_links[WebioClass.MARKER] == {335: {36}}
+    assert coordinator._cleanup_function_plan_count == 1
+
+
+def test_a_failed_plan_comexio_no_longer_lists_drops_its_link() -> None:
+    # A deleted plan fails to load forever: carrying its link over would keep a repair nothing can fix.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
+    coordinator.scraped_plan_ids = {37}
+    coordinator.api = SimpleNamespace(fub_data={"37": {"Name": "Other plan"}})  # type: ignore[assignment]
+
+    _check_ignored(coordinator, {"markers": ROLLO}, load_plans=_plans_fail(36))
+    assert coordinator._cleanup_entity_ids == []
+    assert coordinator._ignored_plan_links[WebioClass.MARKER] == {}
+
+
+def test_a_failed_plan_comexio_still_lists_keeps_its_link() -> None:
+    # A complete plan list that still names the plan: the load failure is transient, the finding stays.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
+    coordinator.scraped_plan_ids = {36, 37}
+    coordinator.api = SimpleNamespace(  # type: ignore[assignment]
+        fub_data={"36": {"Name": "Marker plan"}, "37": {"Name": "Other plan"}}
+    )
+
+    _check_ignored(coordinator, {"markers": ROLLO}, load_plans=_plans_fail(36))
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335)]
+    assert coordinator._ignored_plan_links[WebioClass.MARKER] == {335: {36}}
+
+
+@pytest.mark.parametrize(
+    ("options", "import_flags"),
+    [({}, IMPORT_ALL), ({CONF_IGNORED_MARKERS: "335"}, {**IMPORT_ALL, "import_markers": False})],
+    ids=["ignore-list-emptied", "category-opted-out"],
+)
+def test_links_go_once_the_category_is_no_longer_audited(
+    options: dict[str, Any], import_flags: dict[str, bool]
+) -> None:
+    # A link left behind would carry over when the list or the category comes back.
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
+    assert coordinator._ignored_plan_links[WebioClass.MARKER] == {335: {36}}
+
+    coordinator.config_entry = SimpleNamespace(data=dict(IMPORT_ALL), options=options)  # type: ignore[assignment]
+    _check_ignored(coordinator, {"markers": ROLLO}, import_flags=import_flags)
+    assert WebioClass.MARKER not in coordinator._ignored_plan_links
+
+
+def test_knx_links_are_kept_apart_from_marker_links() -> None:
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335", CONF_IGNORED_KNX: "K12"})
+    knx_plan = {
+        "elements": {"1": _element(11, 12), "2": _element(10, 41)},
+        "connections": {"0": {"input": {"FubElementId": "1"}, "output": [{"FubElementId": "2"}]}},
+    }
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
+    _check_ignored(coordinator, {"knx": [{"id": 12, "name": "Dimmer"}]}, WebioClass.KNX, plans={40: knx_plan})
+
+    assert coordinator._ignored_plan_links == {WebioClass.MARKER: {335: {36}}, WebioClass.KNX: {12: {40}}}
+
+
+def test_a_malformed_reference_is_no_element_of_the_source() -> None:
+    elements = {
+        "1": {"reference": {"type": 2, "ref_id": "x"}},
+        "2": {"reference": None},
+        "3": {"reference": {"type": 2}},
+        "4": "not an element",
+        "5": _element(2, 335),
+    }
+    assert ComexioAPI._find_source_element_ids(elements, 335) == ["5"]

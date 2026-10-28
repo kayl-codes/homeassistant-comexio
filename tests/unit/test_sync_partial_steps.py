@@ -34,7 +34,9 @@ def _ctx() -> SimpleNamespace:
 
 def _button(**coordinator: object) -> ComexioSyncButton:
     button = ComexioSyncButton.__new__(ComexioSyncButton)
-    button.coordinator = SimpleNamespace(cancel_sync=False, **coordinator)  # type: ignore[assignment]
+    button.coordinator = SimpleNamespace(  # type: ignore[assignment]
+        **{"cancel_sync": False, "unplanned_source_command_ids": AsyncMock(return_value=([], [], [])), **coordinator}
+    )
     button.server_id = "iosrv1"
     return button
 
