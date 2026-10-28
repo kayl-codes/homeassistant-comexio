@@ -139,7 +139,7 @@ def _host_configured(host: str, configured_hosts: list[str]) -> bool:
 
 
 def _discover_host(configured_hosts: list[str]) -> str:
-    """The first resolvable comexio.<domain> no existing entry reaches yet, else DEFAULT_HOST (blocking).
+    """The first resolvable comexio.<domain> no existing entry reaches yet, else DEFAULT_HOST if free (blocking).
 
     Skipping configured servers makes adding a second instance suggest the next one.
     """
@@ -152,7 +152,8 @@ def _discover_host(configured_hosts: list[str]) -> str:
         if _host_addresses(address).isdisjoint(configured):
             return address
         _LOGGER.debug("Auto-discovery skips %s (%s): an entry already uses it", test_host, address)
-    return DEFAULT_HOST
+    # An empty field rather than a placeholder the duplicate check would refuse
+    return DEFAULT_HOST if _host_addresses(DEFAULT_HOST).isdisjoint(configured) else ""
 
 
 class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
