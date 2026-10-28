@@ -30,7 +30,7 @@ BASELINE = {
     "button.py::ComexioSyncButton::_delta_sync_class": 21,
     "button.py::ComexioSyncButton::_sync_all_classes": 19,
     "button.py::ComexioSyncButton::_wire_knx_full": 17,
-    "config_flow.py::ComexioConfigFlow::async_step_user": 34,
+    "config_flow.py::ComexioConfigFlow::async_step_user": 32,
     "coordinator.py::ComexioCoordinator::_function_plan_missing_detail": 16,
     "coordinator.py::ComexioCoordinator::_vanished_user_plans": 17,
     "coordinator.py::ComexioCoordinator::_plan_wired_pairs": 23,
