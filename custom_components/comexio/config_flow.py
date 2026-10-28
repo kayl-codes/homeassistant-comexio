@@ -1,6 +1,7 @@
 # Version: 0.8.0
 import logging
 import socket
+from urllib.parse import urlsplit
 
 from aiocomexio import format_fingerprint
 from homeassistant import config_entries
@@ -79,6 +80,9 @@ _HTTPS_DROPPED = "dropped"
 _HTTPS_REPLACED = "replaced"
 # The changes the user confirms first, and the step that asks.
 _HTTPS_CONFIRM_STEPS = {_HTTPS_DROPPED: "reconfigure_http", _HTTPS_REPLACED: "reconfigure_certificate"}
+# The ports a host without one reaches: 443 over HTTPS, 80 over HTTP. Which one an entry uses is known only
+# after the TLS probe, so a duplicate check counts both.
+_IMPLICIT_PORTS = (80, 443)
 
 
 def _lookup(host: str) -> str | None:
@@ -100,14 +104,32 @@ def _resolve_host(host: str) -> str:
     return _lookup(host) or host
 
 
-def _host_addresses(host: str) -> set[str]:
-    """The host as written and as resolved, so a DNS name matches its IP and vice versa (blocking)."""
+def _split_port(host: str) -> tuple[str, int | None]:
+    """The host's name or address and its explicit port, or the host itself when it does not parse."""
+    try:
+        parts = urlsplit(f"//{host}")
+        return parts.hostname or host, parts.port
+    except ValueError as err:  # bad port, IPv6 brackets or bare IPv6: compared as written
+        _LOGGER.debug("Host %s has no parsable port: %s", host, err)
+        return host, None
+
+
+def _host_addresses(host: str) -> set[tuple[str, int]]:
+    """The host as written and as resolved, each with its port, so a DNS name matches its IP (blocking).
+
+    A host without a port reaches both implicit ports, so "comexio.local" matches "comexio.local:443";
+    different explicit ports stay apart.
+    """
     host = host.strip().lower()
-    return {host, _resolve_host(host)} if host else set()
+    if not host:
+        return set()
+    name, port = _split_port(host)
+    ports = _IMPLICIT_PORTS if port is None else (port,)
+    return {(address, each) for address in (name, _resolve_host(name)) for each in ports}
 
 
-def _configured_addresses(hosts: list[str]) -> set[str]:
-    """Every address the configured entries reach their Comexio server under (blocking)."""
+def _configured_addresses(hosts: list[str]) -> set[tuple[str, int]]:
+    """Every address and port the configured entries reach their Comexio server under (blocking)."""
     return set().union(*map(_host_addresses, hosts))
 
 
@@ -127,7 +149,7 @@ def _discover_host(configured_hosts: list[str]) -> str:
         address = _lookup(test_host)
         if address is None:
             continue
-        if address not in configured:
+        if _host_addresses(address).isdisjoint(configured):
             return address
         _LOGGER.debug("Auto-discovery skips %s (%s): an entry already uses it", test_host, address)
     return DEFAULT_HOST

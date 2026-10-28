@@ -143,8 +143,25 @@ def _dns(table: dict[str, str]):
         ("192.168.0.5", "comexio.fritz.box"),
         ("Comexio.Fritz.Box", " comexio.fritz.box "),
         ("comexio.offline", "COMEXIO.OFFLINE"),
+        ("comexio.fritz.box:443", "192.168.0.5"),
+        ("192.168.0.5", "comexio.fritz.box:80"),
+        ("comexio.fritz.box:8443", "192.168.0.5:8443"),
+        ("[fd00::5]:8443", "[FD00::5]:8443"),
+        ("fd00::5", "FD00::5"),
+        ("comexio.fritz.box:abc", "COMEXIO.FRITZ.BOX:abc"),
     ],
-    ids=["name_then_ip", "ip_then_name", "case_and_whitespace", "unresolvable_same_name"],
+    ids=[
+        "name_then_ip",
+        "ip_then_name",
+        "case_and_whitespace",
+        "unresolvable_same_name",
+        "explicit_then_implicit_port",
+        "implicit_then_explicit_port",
+        "same_custom_port",
+        "ipv6_with_port",
+        "bare_ipv6",
+        "unparsable_port_same_text",
+    ],
 )
 async def test_user_flow_rejects_configured_host(
     hass: HomeAssistant,
@@ -180,19 +197,37 @@ async def test_user_flow_checks_the_server_id_before_the_host(
 
 @pytest.mark.usefixtures("mock_setup_entry")
 @pytest.mark.parametrize(
-    "existing", [{CONF_HOST: "comexio.fritz.box"}, {}, {CONF_HOST: ""}], ids=["other_host", "no_host", "empty_host"]
+    ("existing", "chosen_host"),
+    [
+        ({CONF_HOST: "comexio.fritz.box"}, "192.168.0.6"),
+        ({}, "192.168.0.6"),
+        ({CONF_HOST: ""}, "192.168.0.6"),
+        ({CONF_HOST: "comexio.fritz.box:8443"}, "192.168.0.5:9443"),
+        ({CONF_HOST: "comexio.fritz.box:8443"}, "192.168.0.5"),
+        ({CONF_HOST: "comexio.fritz.box:80"}, "192.168.0.5:443"),
+        ({CONF_HOST: "comexio.fritz.box:99999"}, "192.168.0.5"),
+    ],
+    ids=[
+        "other_host",
+        "no_host",
+        "empty_host",
+        "other_custom_port",
+        "custom_then_implicit_port",
+        "explicit_80_then_443",
+        "stored_port_out_of_range",
+    ],
 )
 async def test_user_flow_accepts_another_host(
-    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], existing: dict[str, str]
+    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], existing: dict[str, str], chosen_host: str
 ) -> None:
-    """A second server on another address is created; an entry without a host blocks nothing."""
+    """A second server on another address or port is created; an entry without a host blocks nothing."""
     MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv1", **existing}).add_to_hass(hass)
 
     with _dns({"comexio.fritz.box": "192.168.0.5"}):
-        result = await _submit(hass, {**USER_INPUT, CONF_HOST: "192.168.0.6"})
+        result = await _submit(hass, {**USER_INPUT, CONF_HOST: chosen_host})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["data"][CONF_HOST] == "192.168.0.6"  # stored as typed, not resolved
+    assert result["data"][CONF_HOST] == chosen_host  # stored as typed, not resolved
     mock_comexio_api[0].login.assert_awaited_once()
 
 
@@ -230,8 +265,19 @@ def _form_default(result: dict[str, Any], field: str) -> Any:
         (("192.168.0.5",), "192.168.0.6"),
         (("comexio",), "192.168.0.6"),
         (("comexio", "192.168.0.6"), DEFAULT_HOST),
+        (("comexio:443",), "192.168.0.6"),
+        (("192.168.0.5:8443",), "192.168.0.5"),
+        (("comexio:99999",), "192.168.0.5"),
     ],
-    ids=["none_configured", "ip_configured", "name_configured", "all_configured"],
+    ids=[
+        "none_configured",
+        "ip_configured",
+        "name_configured",
+        "all_configured",
+        "name_with_port",
+        "custom_port",
+        "port_out_of_range",
+    ],
 )
 async def test_user_form_suggests_an_unconfigured_server(
     hass: HomeAssistant, existing_hosts: tuple[str, ...], suggested: str
