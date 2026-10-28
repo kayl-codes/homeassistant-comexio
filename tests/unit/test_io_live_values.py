@@ -455,6 +455,19 @@ def test_a_junk_push_during_the_fetch_does_not_win_over_the_live_answer(api: Com
     assert "13" in coordinator._io_real_value_ids
 
 
+@pytest.mark.parametrize(("raw", "stored"), [("inf", None), ("abc", None), ("1,5", 1.5), (" 7 ", 7.0), (0, 0.0)])
+def test_a_pushed_value_is_stored_as_the_live_path_reads_it(api: ComexioAPI, raw: Any, stored: float | None) -> None:
+    """Entities read io_states: "inf" must show unknown (not on), "1,5" the number (not unknown)."""
+    coordinator = _coordinator(api)
+    _index_scraped_ios(coordinator, _config())
+
+    coordinator.update_io_by_name("BASE", "AI1", raw)
+
+    assert coordinator.io_states["13"] == stored
+    assert coordinator._io_index["base", "ai1"]["value"] == stored
+    assert ("13" in coordinator._io_real_value_ids) is (stored is not None)
+
+
 def test_a_finite_push_after_a_junk_one_is_a_reading_again(api: ComexioAPI) -> None:
     coordinator = _coordinator(api)
     _poll(coordinator, _config(), {})

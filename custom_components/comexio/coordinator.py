@@ -4706,15 +4706,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return self._io_identities.get(io["id"], identity) != identity
 
     def _store_pushed_io_value(self, io: dict[str, Any], value: float | int | str) -> Any:
-        """Store an IO's webhook value and return the previous one.
+        """Store an IO's webhook value as the live path does, and return the previous one.
 
-        Only a finite number counts as a reading (#175): anything else must neither outlive a failed live fetch
-        nor win R1 over the live answer of a poll in flight.
+        Only a finite number counts as a reading (#175) and is stored as such (decimal comma accepted); anything
+        else is stored as unknown, and must neither outlive a failed live fetch nor win R1 over the live answer of
+        a poll in flight.
         """
         previous = self.io_states.get(io["id"])
-        self.io_states[io["id"]] = value
-        io["value"] = value
-        if _live_io_number(value) is None:
+        number = _live_io_number(value)
+        self.io_states[io["id"]] = number
+        io["value"] = number
+        if number is None:
             self._io_real_value_ids.discard(io["id"])
             self._webhook_updated_io_ids.discard(io["id"])
         else:
