@@ -51,6 +51,7 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - **Sync failing with `bad operand type for abs(): 'str'`** on an IO type with an unusable min/max (fixed in aiocomexio 0.7.0). Reported by **@Segelbootsfan** (#196).
 - **"Add missing pairs" for unnamed wired markers** no longer fails with `not found in fresh config`. Reported by **@fabbrab** (#161, #197).
 - **False write warning on firmware 11.1.5:** a stored write answered with `0` no longer logs "Comexio answered … instead of …" (aiocomexio 0.8.1, #236).
+- **Adding a second server:** the setup dialog no longer suggests a server that is already set up, and a host an existing entry already reaches — by name or resolved address, on the same port — is refused instead of creating a duplicate entry; *Reconfigure* refuses another entry's host (#240).
 - **Plan card resumes live values** within 30 s of a config entry reload (#171).
 - **`function_plan_visualize`:** `format: text` returns the diagram instead of failing with HTTP 500, and an unknown plan id is rejected (#118, #119).
 - **Naming schemas are validated** on save (#108); every repair abort reason is translated (#159, #162); the options dialog labels the import switches instead of showing their raw keys.

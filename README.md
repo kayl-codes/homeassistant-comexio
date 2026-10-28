@@ -87,7 +87,7 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 1. In Home Assistant, go to **Settings > Devices & Services**.
 2. Click **Add Integration** in the bottom right corner and search for **Comexio**.
 3. Fill in your connection details:
-   - **Host:** IP address of your Comexio server.
+   - **Host:** IP address or hostname of your Comexio server. Pre-filled with a server found as `comexio.<domain>` that is not set up yet; a server already set up is refused.
    - **Username / Password:** Your credentials for the web interface (Admin).
    - **API User / Pass (Optional):** For faster API calls via Basic Auth.
 4. After the setup, the integration logs into Comexio and downloads the configuration.
@@ -354,7 +354,7 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 1. Gehe in Home Assistant zu **Einstellungen > Geräte & Dienste**.
 2. Klicke unten rechts auf **Integration hinzufügen** und suche nach **Comexio**.
 3. Fülle die Verbindungsdaten aus:
-   - **Host:** IP-Adresse deines Comexio-Servers.
+   - **Host:** IP-Adresse oder Hostname deines Comexio-Servers. Vorbelegt mit einem als `comexio.<domain>` gefundenen Server, der noch nicht eingerichtet ist; ein bereits eingerichteter Server wird abgewiesen.
    - **Benutzername / Passwort:** Deine Zugangsdaten für die Weboberfläche (Admin).
    - **API User / Pass (Optional):** Für schnellere API-Aufrufe via Basic Auth.
 4. Nach dem Setup meldet sich die Integration in Comexio an und lädt die Konfiguration herunter.

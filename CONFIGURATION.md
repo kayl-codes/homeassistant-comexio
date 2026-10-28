@@ -24,7 +24,7 @@ Navigate to **Settings → Devices & Services → Add Integration** and search f
 | Field | Description |
 |-------|-------------|
 | **① Instance Name** | Unique prefix for all entity IDs (e.g. `iosrv1`). Cannot be changed after setup. |
-| **② Host / IP** | IP address or hostname of your Comexio IO-Server. |
+| **② Host / IP** | IP address or hostname of your Comexio IO-Server, optionally with a port (`comexio.local:8443`). Pre-filled with the address of the first `comexio.<domain>` that resolves and is not set up yet, otherwise `192.168.1.100`. A server that is already set up — same host or same address — is refused. |
 | **③ Username** | Admin UI username (default: `admin`). |
 | **④ Password** | Admin UI password. |
 | **⑤ API Username** | Basic Auth username for fast value writes (optional). |
@@ -85,7 +85,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 
 ## 4. Reconfigure Connection
 
-Open via **⋮ → Reconfigure** on the integration entry. Allows updating host, username, and passwords without re-adding the integration.
+Open via **⋮ → Reconfigure** on the integration entry. Allows updating host, username, and passwords without re-adding the integration. A new host that another entry already uses is refused.
 
 <img src="docs/assets/ui/2_integration_reconf-1_en.png" width="320">
 
@@ -167,7 +167,7 @@ Navigiere zu **Einstellungen → Geräte & Dienste → Integration hinzufügen**
 | Feld | Beschreibung |
 |------|--------------|
 | **① Instanz Name** | Eindeutiger Präfix für alle Entity-IDs (z. B. `iosrv1`). Kann nach dem Setup nicht geändert werden. |
-| **② Host / IP-Adresse** | IP-Adresse oder Hostname des Comexio IO-Servers. |
+| **② Host / IP-Adresse** | IP-Adresse oder Hostname des Comexio IO-Servers, optional mit Port (`comexio.local:8443`). Vorbelegt mit der Adresse des ersten auflösbaren `comexio.<domain>`, der noch nicht eingerichtet ist, sonst `192.168.1.100`. Ein bereits eingerichteter Server — gleicher Host oder gleiche Adresse — wird abgewiesen. |
 | **③ Benutzername** | Benutzername für die Admin-Oberfläche (Standard: `admin`). |
 | **④ Passwort** | Passwort für die Admin-Oberfläche. |
 | **⑤ API Benutzername** | Basic-Auth-Benutzername für schnelle API-Schreibzugriffe (optional). |
@@ -228,7 +228,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 
 ## 4. Verbindung neu konfigurieren
 
-Öffnen über **⋮ → Neu konfigurieren** am Integrationseintrag. Erlaubt das Ändern von Host, Benutzername und Passwörtern ohne Neueinrichtung der Integration.
+Öffnen über **⋮ → Neu konfigurieren** am Integrationseintrag. Erlaubt das Ändern von Host, Benutzername und Passwörtern ohne Neueinrichtung der Integration. Ein neuer Host, den bereits ein anderer Eintrag nutzt, wird abgewiesen.
 
 <img src="docs/assets/ui/2_integration_reconf-1_de.png" width="320">
 
