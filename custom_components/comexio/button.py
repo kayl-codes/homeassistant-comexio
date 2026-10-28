@@ -86,7 +86,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import (
-    COMMAND_WEBIO_ID_UNREADABLE,
+    COMMAND_NOT_CHECKED,
     PLAN_LOAD_FAILED,
     ComexioCoordinator,
     _device_ip_mismatch,
@@ -1142,19 +1142,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         lp_count, webio_cmd_ids, stopped_plans, stop_failures, notes = await self._cleanup_function_plan_plans(
             ctx, ids, category
         )
-        # A command of these sources with no WebIO element in any plan was never unwired above.
-        unplanned_cmd_ids, unplanned_failures, unreadable = await self.coordinator.unplanned_source_command_ids(
-            category, ids, webio_cmd_ids
-        )
-        ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in unplanned_failures)
+        # The commands unwired above and those of these sources never wired: each is deleted only once
+        # every plan is checked and none holds its WebIO element (a user's own plan may use it).
+        check = await self.coordinator.deletable_source_command_ids(category, ids, webio_cmd_ids)
+        ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in check.plan_failures)
         ctx.failed_writes.extend(
-            f"cleanup {category.label}: Web-IO command '{one_line(name)}' {COMMAND_WEBIO_ID_UNREADABLE}"
-            for name in unreadable
+            f"cleanup {category.label}: Web-IO command '{one_line(name)}' {COMMAND_NOT_CHECKED}"
+            for name in check.unchecked
         )
         plan_failed = len(ctx.failed_writes) > failures_before
-        webio_removed, webio_failed = await self._delete_webio_commands(
-            api, dev_id, [*webio_cmd_ids, *unplanned_cmd_ids], category
-        )
+        webio_removed, webio_failed = await self._delete_webio_commands(api, dev_id, check.deletable, category)
 
         lines = self._build_cleanup_summary_lines(
             ids,
@@ -1163,9 +1160,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             webio_removed,
             webio_failed,
             category,
-            has_plan_findings=bool(stop_failures or notes) or plan_failed,
+            has_plan_findings=bool(stop_failures or notes or check.in_use) or plan_failed,
         )
         lines.extend(notes)
+        lines.extend(
+            f"{ICON_INFO} Web-IO command '{one_line(name)}' stays — a plan still uses its WebIO element"
+            for name in check.in_use
+        )
         lines.extend(self._notify_stopped_plans(stopped_plans))
         lines.extend(self._build_stop_failure_lines(stop_failures))
         if webio_failed:
@@ -1239,8 +1240,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> list[str]:
         """Build the base result lines for the cleanup-entities summary notification.
 
-        has_plan_findings: a plan step failed or a plan reported a source it kept or no
-        longer holds — the result is then never "nothing to clean up".
+        has_plan_findings: a plan step failed, a plan reported a source it kept or no longer
+        holds, or a plan still uses a command — the result is then never "nothing to clean up".
         """
         ids_str = ", ".join(f"{category.audit_key_prefix}{eid}" for eid in ids)
         if (
@@ -1360,9 +1361,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]], list[str]]:
         """Run the Function Plan cleanup for every managed plan that holds the markers/KNX objects.
 
-        Returns (deleted element count, WebIO command ids to delete, stopped plans and stop
-        failures as (name, fub_id) tuples, summary lines for sources a plan kept or no longer
-        holds). Plans that could not be loaded and element deletions that failed go straight
+        Returns (deleted element count, WebIO command ids it unwired — deleted once no plan holds
+        them —, stopped plans and stop failures as (name, fub_id) tuples, summary lines for sources a
+        plan kept or no longer holds). Plans that could not be loaded and element deletions that failed go straight
         to ctx.failed_writes.
         """
         api = ctx.api

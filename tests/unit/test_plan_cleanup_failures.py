@@ -15,6 +15,7 @@ from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
     ICON_CHECK,
+    ICON_INFO,
     IO_PLAN_KIND_QUICKBUS,
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
@@ -23,13 +24,16 @@ from custom_components.comexio.const import (
     WebioClass,
 )
 from custom_components.comexio.coordinator import (
-    COMMAND_WEBIO_ID_UNREADABLE,
+    COMMAND_NOT_CHECKED,
     PLAN_CMD_NOT_FOUND,
     PLAN_DELETE_FAILED,
     PLAN_ENTRY_UNREADABLE,
+    PLAN_LIST_NAME,
+    PLAN_LIST_NOT_READ,
     PLAN_LOAD_FAILED,
     PLAN_WEBIO_ID_UNREADABLE,
     ComexioCoordinator,
+    SourceCommandCheck,
     plan_cleanup_outcome,
 )
 from custom_components.comexio.services import plan_actions
@@ -163,7 +167,7 @@ def _button(**coordinator: Any) -> ComexioSyncButton:
         "cancel_sync": False,
         "webio_id_to_cmd_id": dict,
         "delete_plan_elements_for_commands": AsyncMock(return_value=dict(NOTHING_DELETED)),
-        "unplanned_source_command_ids": AsyncMock(return_value=([], [], [])),
+        "deletable_source_command_ids": AsyncMock(return_value=SourceCommandCheck([], [], [], [])),
     }
     button.coordinator = SimpleNamespace(**(defaults | coordinator))  # type: ignore[assignment]
     button.hass = MagicMock()
@@ -560,29 +564,41 @@ def test_cleanup_deletes_every_plan_element_in_one_pass_and_folds_the_outcome() 
 
 
 @pytest.mark.parametrize(
-    ("unplanned", "deleted", "failed"),
+    ("deletable", "deleted", "failed"),
     [
         # (bj): a command of the ignored source without a plan element stayed behind as an orphan.
-        (([901], [], []), [900, 901], []),
-        # A plan that could not be checked keeps the commands and is named.
-        (([], [(PLAN, PLAN_LOAD_FAILED)], []), [900], [f"function plan '{PLAN}': {PLAN_LOAD_FAILED}"]),
+        (([900, 901], [], [], []), [900, 901], []),
+        # A plan that could not be checked keeps the commands, the unwired one included, and is named.
+        (([], [(PLAN, PLAN_LOAD_FAILED)], [], []), [], [f"function plan '{PLAN}': {PLAN_LOAD_FAILED}"]),
+        # No poll has read the plan list yet: nothing counts as checked.
+        (
+            ([], [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)], [], []),
+            [],
+            [f"function plan '{PLAN_LIST_NAME}': {PLAN_LIST_NOT_READ}"],
+        ),
         # A command without a readable webIoId cannot be checked against the plans: kept and named.
         (
-            ([], [], ["HA M7 kaputt"]),
+            ([900], [], ["HA M7 kaputt"], []),
             [900],
             [
                 f"cleanup {SOURCE_CATEGORIES[WebioClass.MARKER].label}: Web-IO command 'HA M7 kaputt' "
-                f"{COMMAND_WEBIO_ID_UNREADABLE}"
+                f"{COMMAND_NOT_CHECKED}"
             ],
         ),
+        # An unwired command the last poll does not list cannot be checked either.
+        (
+            ([], [], ["cmdId 999"], []),
+            [],
+            [f"cleanup {SOURCE_CATEGORIES[WebioClass.MARKER].label}: Web-IO command 'cmdId 999' {COMMAND_NOT_CHECKED}"],
+        ),
     ],
-    ids=["unplanned", "plan-unchecked", "command-unreadable"],
+    ids=["unplanned", "plan-unchecked", "plan-list-not-read", "command-unreadable", "command-not-listed"],
 )
 def test_cleanup_deletes_the_commands_no_plan_element_holds(
-    unplanned: tuple, deleted: list[int], failed: list[str]
+    deletable: tuple, deleted: list[int], failed: list[str]
 ) -> None:
-    unplanned_mock = AsyncMock(return_value=unplanned)
-    button = _button(unplanned_source_command_ids=unplanned_mock)
+    deletable_mock = AsyncMock(return_value=SourceCommandCheck(*deletable))
+    button = _button(deletable_source_command_ids=deletable_mock)
     ctx = _ctx()
     marker = SOURCE_CATEGORIES[WebioClass.MARKER]
     with (
@@ -592,7 +608,7 @@ def test_cleanup_deletes_the_commands_no_plan_element_holds(
     ):
         asyncio.run(button._cleanup_entities_for_category(ctx, marker, [7], "12"))
 
-    unplanned_mock.assert_awaited_once_with(marker, [7], [900])
+    deletable_mock.assert_awaited_once_with(marker, [7], [900])
     delete.assert_awaited_once_with(ctx.api, "12", deleted, marker)
     assert ctx.failed_writes == failed
 
@@ -601,12 +617,16 @@ EMPTY_PLAN: dict[str, Any] = {"elements": {}, "connections": {}}
 
 
 def _command_coordinator(
-    plans: dict[int, Any], *, bulk: dict[int, Any] | None = None, markers: list[dict[str, Any]] | None = None
+    plans: dict[int, Any],
+    *,
+    bulk: dict[int, Any] | None = None,
+    markers: list[dict[str, Any]] | None = None,
+    listed: set[int] | None = None,
 ) -> ComexioCoordinator:
-    """plans: the single-plan loads (the audit's plans, 6 always among them); bulk: the bulk answer.
+    """plans: the single-plan loads; bulk: the bulk answer; listed: Comexio's plan list, read by a poll.
 
-    Every bulk plan is listed in Comexio's plan list. A stale snapshot of each plan sits in the cache
-    and must never count.
+    The list names plan 6 and every plan of plans and bulk unless given. A stale snapshot of each
+    plan sits in the cache and must never count.
     """
 
     async def _load(fub_id: int, strict: bool = False) -> Any:
@@ -617,15 +637,18 @@ def _command_coordinator(
         assert strict
         return dict(bulk or {})
 
+    if listed is None:
+        listed = {6, *plans, *(bulk or {})}
     stale = {"elements": {"1": _web_io_element(41)}, "connections": {}}
     coordinator = _coordinator(
         _api(
             function_plan_load_elements=AsyncMock(side_effect=_load),
             function_plan_load_all_plans=AsyncMock(side_effect=_load_all),
-            fub_data={str(fub_id): {"Name": f"Plan {fub_id}"} for fub_id in bulk or {}},
+            fub_data={str(fub_id): {"Name": f"Plan {fub_id}"} for fub_id in listed},
         ),
         dict.fromkeys([6, 9, 12], stale),
     )
+    coordinator.scraped_plan_ids = set(listed)
     coordinator.data = {
         "markers": markers or [{"id": 7, "name": "M7 Licht"}, {"id": 8, "name": "M8 Rollo"}],
         "webio_commands": {
@@ -637,13 +660,12 @@ def _command_coordinator(
             "HA M7 kaputt": {"cmdId": 905, "webIoId": None, "webioClass": "marker"},  # unreadable
         },
     }
-    coordinator._function_plan_check_fub_ids = lambda: set(plans) | {6}  # type: ignore[method-assign]
     return coordinator
 
 
-def _unplanned(coordinator: ComexioCoordinator, source_ids: list[int], handled: list[int]) -> tuple:
+def _deletable(coordinator: ComexioCoordinator, source_ids: list[int], unwired: list[int]) -> SourceCommandCheck:
     return asyncio.run(
-        coordinator.unplanned_source_command_ids(SOURCE_CATEGORIES[WebioClass.MARKER], source_ids, handled)
+        coordinator.deletable_source_command_ids(SOURCE_CATEGORIES[WebioClass.MARKER], source_ids, unwired)
     )
 
 
@@ -651,70 +673,83 @@ def _loaded_plans(coordinator: ComexioCoordinator) -> list[int]:
     return [call.args[0] for call in coordinator.api.function_plan_load_elements.await_args_list]
 
 
-def test_commands_without_a_plan_element_are_picked_for_deletion() -> None:
+def test_commands_no_plan_holds_are_picked_for_deletion() -> None:
+    # 900 was unwired by the plan cleanup, 901 was never wired; 902 still sits in plan 6.
     coordinator = _command_coordinator({6: {"elements": {"1": _web_io_element(42)}, "connections": {}}, 9: EMPTY_PLAN})
-    assert _unplanned(coordinator, [7], [900]) == ([901], [], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([900, 901], [], ["HA M7 kaputt"], ["HA M7 Licht (2)"])
 
 
 def test_a_plan_that_cannot_be_loaded_keeps_every_command() -> None:
+    # The unwired command too: plan 6 may hold another element of it.
     coordinator = _command_coordinator({9: EMPTY_PLAN})  # plan 6 fails
-    assert _unplanned(coordinator, [7], []) == ([], [("Plan 6", PLAN_LOAD_FAILED)], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([], [("Plan 6", PLAN_LOAD_FAILED)], ["HA M7 kaputt"], [])
 
 
-def test_no_command_left_loads_no_plan() -> None:
+def test_a_source_without_commands_loads_no_plan() -> None:
     coordinator = _command_coordinator({})
-    assert _unplanned(coordinator, [8], [903]) == ([], [], [])
-    coordinator.api.function_plan_load_elements.assert_not_awaited()
+    assert _deletable(coordinator, [10], []) == ([], [], [], [])
+    coordinator.api.function_plan_load_all_plans.assert_not_awaited()
 
 
 def test_a_command_placed_only_in_a_users_own_plan_is_kept() -> None:
-    # A user's own plan may use the command too: the fresh bulk answer counts, no single load needed.
+    # A user's own plan may use the command too, the unwired one included (the plan cleanup searches
+    # the managed plans only): the fresh bulk answer counts, no single load needed.
     plan_6 = {"elements": {"1": _web_io_element(42)}, "connections": {}}
-    plan_12 = {"elements": {"1": _web_io_element("41")}, "connections": {}}
+    plan_12 = {"elements": {"1": _web_io_element("41"), "2": _web_io_element(40)}, "connections": {}}
     coordinator = _command_coordinator({}, bulk={6: plan_6, 12: plan_12})
-    assert _unplanned(coordinator, [7], [900]) == ([], [], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == (
+        [],
+        [],
+        ["HA M7 kaputt"],
+        ["HA M7 Licht", "HA M7 Licht alt", "HA M7 Licht (2)"],
+    )
     assert _loaded_plans(coordinator) == []
 
 
 def test_the_cached_snapshot_never_counts() -> None:
     # The snapshot may predate the plan cleanup or a user's edit: a fresh read says 41 is gone.
     coordinator = _command_coordinator({6: EMPTY_PLAN}, bulk={12: EMPTY_PLAN})
-    assert _unplanned(coordinator, [7], [900]) == ([901, 902], [], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([900, 901, 902], [], ["HA M7 kaputt"], [])
 
 
 def test_a_listed_plan_the_bulk_answer_lacks_is_loaded_on_its_own() -> None:
     # Plan 12 has no single-load answer either: it cannot be checked, so nothing is deleted.
-    coordinator = _command_coordinator({6: EMPTY_PLAN}, bulk={9: EMPTY_PLAN})
-    coordinator.api.fub_data["12"] = {"Name": "Plan 12"}
-    assert _unplanned(coordinator, [7], [900]) == ([], [("Plan 12", PLAN_LOAD_FAILED)], ["HA M7 kaputt"])
+    coordinator = _command_coordinator({6: EMPTY_PLAN}, bulk={9: EMPTY_PLAN}, listed={6, 9, 12})
+    assert _deletable(coordinator, [7], [900]) == ([], [("Plan 12", PLAN_LOAD_FAILED)], ["HA M7 kaputt"], [])
     assert _loaded_plans(coordinator) == [6, 12]
 
 
-@pytest.mark.parametrize("listed", [{9}, set()], ids=["other-plan-listed", "no-plan-left"])
-def test_a_managed_plan_a_complete_plan_list_lacks_is_gone(listed: set[int]) -> None:
-    # Plan 6 sits in the plan map, but Comexio deleted it: the complete list does not name it.
-    coordinator = _command_coordinator({}, bulk=dict.fromkeys(listed, EMPTY_PLAN))
-    coordinator.scraped_plan_ids = listed
-    assert _unplanned(coordinator, [7], [900]) == ([901, 902], [], ["HA M7 kaputt"])
-    assert _loaded_plans(coordinator) == []
-
-
-def test_a_managed_plan_a_complete_plan_list_names_is_checked() -> None:
+def test_a_listed_plan_the_bulk_answer_lacks_counts() -> None:
     # The bulk answer lacks plan 6, the list names it: it is loaded on its own and its element counts.
     coordinator = _command_coordinator(
         {6: {"elements": {"1": _web_io_element(42)}, "connections": {}}}, bulk={9: EMPTY_PLAN}
     )
-    coordinator.api.fub_data["6"] = {"Name": "Plan 6"}
-    coordinator.scraped_plan_ids = {6, 9}
-    assert _unplanned(coordinator, [7], [900]) == ([901], [], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([900, 901], [], ["HA M7 kaputt"], ["HA M7 Licht (2)"])
     assert _loaded_plans(coordinator) == [6]
+
+
+@pytest.mark.parametrize("listed", [{9}, set()], ids=["other-plan-listed", "no-plan-left"])
+def test_a_managed_plan_the_plan_list_lacks_is_gone(listed: set[int]) -> None:
+    # Plan 6 sits in the plan map, but Comexio deleted it: the list a poll read does not name it.
+    coordinator = _command_coordinator({}, bulk=dict.fromkeys(listed, EMPTY_PLAN), listed=listed)
+    coordinator._function_plan_check_fub_ids = lambda: {6}  # type: ignore[method-assign]
+    assert _deletable(coordinator, [7], [900]) == ([900, 901, 902], [], ["HA M7 kaputt"], [])
+    assert _loaded_plans(coordinator) == []
+
+
+def test_a_plan_list_no_poll_has_read_keeps_every_command() -> None:
+    # Before it the cache may lack a user's plan that holds a command: nothing counts as checked.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    coordinator.scraped_plan_ids = None
+    assert _deletable(coordinator, [7], [900]) == ([], [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)], ["HA M7 kaputt"], [])
+    coordinator.api.function_plan_load_all_plans.assert_not_awaited()
 
 
 def test_an_unreadable_plan_list_entry_keeps_every_command() -> None:
     # The entry may be a plan that holds the command, and it cannot even be loaded.
     coordinator = _command_coordinator({6: EMPTY_PLAN})
     coordinator.api.fub_data = {"x7": {"Name": "Broken"}}
-    assert _unplanned(coordinator, [7], [900]) == ([], [("x7", PLAN_ENTRY_UNREADABLE)], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([], [("x7", PLAN_ENTRY_UNREADABLE)], ["HA M7 kaputt"], [])
 
 
 def test_only_web_io_elements_count_for_placed_commands() -> None:
@@ -722,26 +757,69 @@ def test_only_web_io_elements_count_for_placed_commands() -> None:
     plan = {"elements": {"1": {"reference": {"type": 2, "ref_id": "x"}}, "2": _web_io_element(42)}, "connections": {}}
     assert ComexioAPI.plan_webio_ids(plan) == ({42}, False)
     coordinator = _command_coordinator({6: plan})
-    assert _unplanned(coordinator, [7], [900]) == ([901], [], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([900, 901], [], ["HA M7 kaputt"], ["HA M7 Licht (2)"])
 
 
 def test_an_unreadable_command_is_reported_even_without_a_command_to_check() -> None:
     coordinator = _command_coordinator({})
-    assert _unplanned(coordinator, [7], [900, 901, 902]) == ([], [], ["HA M7 kaputt"])
+    for name in ("HA M7 Licht", "HA M7 Licht alt", "HA M7 Licht (2)"):
+        del coordinator.data["webio_commands"][name]
+    assert _deletable(coordinator, [7], []) == ([], [], ["HA M7 kaputt"], [])
     coordinator.api.function_plan_load_all_plans.assert_not_awaited()
 
 
 def test_a_plan_with_an_unreadable_web_io_element_keeps_every_command() -> None:
     # That element may stand for any of the commands.
     coordinator = _command_coordinator({6: {"elements": {"1": _web_io_element("x")}, "connections": {}}})
-    assert _unplanned(coordinator, [7], [900]) == ([], [("Plan 6", PLAN_WEBIO_ID_UNREADABLE)], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([], [("Plan 6", PLAN_WEBIO_ID_UNREADABLE)], ["HA M7 kaputt"], [])
 
 
 def test_a_command_named_after_another_source_is_never_matched() -> None:
     # Marker 9 carries the name "M7 Licht alt": that command is its own, not marker 7's renamed leftover.
     markers = [{"id": 7, "name": "M7 Licht"}, {"id": 9, "name": "M7 Licht alt"}]
     coordinator = _command_coordinator({6: EMPTY_PLAN}, markers=markers)
-    assert _unplanned(coordinator, [7], [900]) == ([902], [], ["HA M7 kaputt"])
+    assert _deletable(coordinator, [7], [900]) == ([900, 902], [], ["HA M7 kaputt"], [])
+
+
+def test_an_unwired_command_counts_whatever_its_name() -> None:
+    # The plan cleanup found 903 wired to marker 7's element: its name does not decide.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    assert _deletable(coordinator, [7], [903]) == ([900, 901, 902, 903], [], ["HA M7 kaputt"], [])
+
+
+def test_an_unwired_command_counts_whatever_its_class() -> None:
+    # 904 is a KNX command by its class, but the plan cleanup unwired it from marker 7's element.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    assert _deletable(coordinator, [7], [904]) == ([900, 901, 902, 904], [], ["HA M7 kaputt"], [])
+
+
+def test_an_unwired_command_the_last_poll_lacks_is_kept_and_named() -> None:
+    # It cannot be checked against the plans; the next audit shows it again if it is still there.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    assert _deletable(coordinator, [7], [999]) == ([900, 901, 902], [], ["HA M7 kaputt", "cmdId 999"], [])
+
+
+def test_only_unwired_commands_the_last_poll_lacks_load_no_plan() -> None:
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    coordinator.data["webio_commands"] = {}
+    assert _deletable(coordinator, [7], [999, 950]) == ([], [], ["cmdId 950", "cmdId 999"], [])
+    coordinator.api.function_plan_load_all_plans.assert_not_awaited()
+
+
+def test_an_unwired_command_without_a_readable_web_io_id_is_kept() -> None:
+    # 903 belongs to marker 8 by its name: only the unwired path brings it in, and it cannot be checked.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    coordinator.data["webio_commands"]["HA M8 Rollo"]["webIoId"] = None
+    assert _deletable(coordinator, [7], [903]) == ([900, 901, 902], [], ["HA M8 Rollo", "HA M7 kaputt"], [])
+
+
+def test_a_plan_ha_created_since_the_poll_is_checked() -> None:
+    # HA adds the plans it creates to the plan list cache; the list the poll read does not name them yet.
+    plan_15 = {"elements": {"1": _web_io_element(40)}, "connections": {}}
+    coordinator = _command_coordinator({6: EMPTY_PLAN, 15: plan_15}, listed={6})
+    coordinator.api.fub_data["15"] = {"Name": "Plan 15"}
+    assert _deletable(coordinator, [7], [900]) == ([901, 902], [], ["HA M7 kaputt"], ["HA M7 Licht"])
+    assert _loaded_plans(coordinator) == [6, 15]
 
 
 def _run_cleanup_action(button: ComexioSyncButton, plan_result: Any) -> tuple[SimpleNamespace, MagicMock]:
@@ -926,11 +1004,11 @@ def test_deleting_elements_resolves_only_the_unwired_commands() -> None:
 
 @pytest.mark.parametrize(
     "unplanned",
-    [([], [(PLAN, PLAN_LOAD_FAILED)], []), ([], [], ["HA M7 kaputt"])],
-    ids=["plan-unchecked", "command-unreadable"],
+    [([], [(PLAN, PLAN_LOAD_FAILED)], [], []), ([], [], ["HA M7 kaputt"], []), ([], [], [], ["HA M7 Licht"])],
+    ids=["plan-unchecked", "command-unreadable", "command-in-use"],
 )
 def test_a_command_check_that_kept_commands_is_never_nothing_to_clean_up(unplanned: tuple) -> None:
-    button = _button(unplanned_source_command_ids=AsyncMock(return_value=unplanned))
+    button = _button(deletable_source_command_ids=AsyncMock(return_value=SourceCommandCheck(*unplanned)))
     with (
         patch.object(ComexioSyncButton, "_delete_source_entities", MagicMock(return_value=0)),
         patch.object(ComexioSyncButton, "_cleanup_function_plan_plans", AsyncMock(return_value=(0, [], [], [], []))),
@@ -940,3 +1018,20 @@ def test_a_command_check_that_kept_commands_is_never_nothing_to_clean_up(unplann
             button._cleanup_entities_for_category(_ctx(), SOURCE_CATEGORIES[WebioClass.MARKER], [7], "12")
         )
     assert f"{ICON_CHECK} 0 WebIO commands deleted" in lines
+
+
+def test_a_command_a_plan_still_uses_is_named_in_the_result() -> None:
+    check = SourceCommandCheck([], [], [], ["HA M7 Licht", "HA M7 Licht alt"])
+    button = _button(deletable_source_command_ids=AsyncMock(return_value=check))
+    ctx = _ctx()
+    with (
+        patch.object(ComexioSyncButton, "_delete_source_entities", MagicMock(return_value=0)),
+        patch.object(ComexioSyncButton, "_cleanup_function_plan_plans", AsyncMock(return_value=(1, [900], [], [], []))),
+        patch.object(ComexioSyncButton, "_delete_webio_commands", AsyncMock(return_value=(0, 0))) as delete,
+    ):
+        lines = asyncio.run(button._cleanup_entities_for_category(ctx, SOURCE_CATEGORIES[WebioClass.MARKER], [7], "12"))
+    stays = "stays — a plan still uses its WebIO element"
+    assert f"{ICON_INFO} Web-IO command 'HA M7 Licht' {stays}" in lines
+    assert f"{ICON_INFO} Web-IO command 'HA M7 Licht alt' {stays}" in lines
+    assert delete.await_args.args[2] == []  # the unwired 900 is still in use: not deleted
+    assert ctx.failed_writes == []

@@ -11,7 +11,7 @@ import math
 import pathlib
 import re
 import time
-from typing import Any
+from typing import Any, NamedTuple
 import uuid
 
 from aiocomexio import (
@@ -604,6 +604,19 @@ def _fallback_audit_key(full_name: str) -> str:
     return full_name
 
 
+def _serves_sources(
+    name: str, info: dict[str, Any], category: SourceCategory, match: tuple[set[str], set[str], set[str]]
+) -> bool:
+    """Whether a Web-IO command serves the sources, by name — see ComexioCoordinator._source_commands.
+
+    match: (the sources' command names, names another source of the category carries, the sources' audit keys).
+    """
+    names, taken, keys = match
+    if info.get("webioClass") != category.key or name in taken:
+        return False
+    return name in names or _fallback_audit_key(name) in keys
+
+
 def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
     """("QB<device id>", identifier) of a Quickbus command name "HA QB<device id> <device name> <identifier>".
 
@@ -780,8 +793,21 @@ PLAN_DELETE_FAILED = "element deletion failed"
 PLAN_CMD_NOT_FOUND = "Web-IO command not found, not deleted"
 # A plan's WebIO element without a readable webIoId may stand for any command: none is deleted.
 PLAN_WEBIO_ID_UNREADABLE = "holds a WebIO element without a readable webIoId, no Web-IO command deleted"
-# A Web-IO command of an ignored source whose webIoId is unreadable: it cannot be checked against the plans.
-COMMAND_WEBIO_ID_UNREADABLE = "has no readable webIoId, not deleted"
+# A Web-IO command of an ignored source without a readable webIoId, or an unwired one the last poll
+# does not list: it cannot be checked against the plans.
+COMMAND_NOT_CHECKED = "could not be checked against the plans, not deleted"
+# No poll has read the plan list yet: a plan holding a command may be missing from the cache.
+PLAN_LIST_NAME = "plan list"
+PLAN_LIST_NOT_READ = "not read by a poll yet, no Web-IO command deleted"
+
+
+class SourceCommandCheck(NamedTuple):
+    """Which Web-IO commands of cleaned-up sources go (see ComexioCoordinator.deletable_source_command_ids)."""
+
+    deletable: list[Any]  # cmdIds no plan holds a WebIO element of
+    plan_failures: list[tuple[str, str]]  # (name, detail) of each plan that could not be checked
+    unchecked: list[str]  # names of commands that could not be checked, left in place
+    in_use: list[str]  # names of commands a plan still holds a WebIO element of, left in place
 
 
 def plan_cleanup_outcome(
@@ -8550,21 +8576,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "was_running": result.get("was_running") is not False,
         }
 
-    async def unplanned_source_command_ids(
-        self, category: SourceCategory, source_ids: list[int], handled_cmd_ids: Iterable[Any]
-    ) -> tuple[list[Any], list[tuple[str, str]], list[str]]:
-        """(cmdIds of the sources' Web-IO commands no plan holds an element of, plan failures, unreadable commands).
+    async def deletable_source_command_ids(
+        self, category: SourceCategory, source_ids: list[int], unwired_cmd_ids: Iterable[Any]
+    ) -> SourceCommandCheck:
+        """The sources' Web-IO commands no plan holds a WebIO element of, and why the others stay.
 
-        The plan cleanup deletes the commands it unwired; a command of an ignored source whose WebIO
-        element sits in no plan (never wired, or removed by hand) would otherwise stay behind as an
-        orphan. Every plan counts — a user's own plan may use the command too, and the trigger plan's
-        pairs belong to the trigger audit. One plan that could not be checked keeps every command (its
-        element may sit there) and is returned as a failure (name, detail). Unreadable commands: names
-        of matching commands without a readable webIoId, left in place.
+        Two kinds of command are checked: those the plan cleanup unwired (unwired_cmd_ids) — it searches
+        the managed plans only, so a user's own plan or a managed plan it could not load may still hold
+        an element of one — and those of an ignored source whose WebIO element sits in no plan (never
+        wired, or removed by hand), which would otherwise stay behind as orphans. Every plan counts — a
+        user's own plan may use the command too, and the trigger plan's pairs belong to the trigger
+        audit. One plan that could not be checked keeps every command (its element may sit there) and
+        is returned as a failure (name, detail).
         """
-        candidates, unreadable = self._source_commands(category, source_ids, set(handled_cmd_ids))
+        candidates, unchecked = self._source_commands(category, source_ids, set(unwired_cmd_ids))
         if not candidates:
-            return [], [], unreadable
+            return SourceCommandCheck([], [], unchecked, [])
         placed, failures = await self._placed_webio_ids()
         if failures:
             _LOGGER.warning(
@@ -8574,27 +8601,37 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 len(failures),
                 len(candidates),
             )
-            return [], failures, unreadable
-        return [cmd_id for cmd_id, webio_id in candidates if webio_id not in placed], [], unreadable
+            return SourceCommandCheck([], failures, unchecked, [])
+        in_use = [name for name, _cmd_id, webio_id in candidates if webio_id in placed]
+        if in_use:
+            _LOGGER.info(
+                "[%s] cleanup %s: a plan still holds the WebIO element of Web-IO command(s) %s — kept",
+                self.server_id,
+                category.label,
+                [one_line(name) for name in in_use],
+            )
+        deletable = [cmd_id for _name, cmd_id, webio_id in candidates if webio_id not in placed]
+        return SourceCommandCheck(deletable, [], unchecked, in_use)
 
     async def _placed_webio_ids(self) -> tuple[set[int], list[tuple[str, str]]]:
         """(webIoIds with an element in any plan, (name, detail) of each plan that could not be checked).
 
-        All plans are read fresh in one bulk request — the plan cleanup has just changed some, and a
-        user may have placed the command since the backup cycle's snapshot; a plan the bulk answer
-        lacks (the audit's plans included) is loaded on its own. An unreadable plan list entry may be
-        a plan holding the command: it counts as a plan that could not be checked. A complete plan list
-        (live_plan_list: read by the last poll, plans HA created since added) names every plan there was,
-        so a managed plan it lacks (a plan map entry no sync has pruned yet) is gone and not loaded;
-        without one the managed plans are checked as well.
+        Only a plan list a poll has read ($Fubs, see scraped_plan_ids) names every plan; before that
+        the cache may lack a user's plan holding the command, so nothing counts as checked. All plans
+        are read fresh in one bulk request — the plan cleanup has just changed some, and a user may
+        have placed the command since the backup cycle's snapshot; a listed plan the bulk answer lacks
+        is loaded on its own. An unreadable plan list entry may be a plan holding the command: it counts
+        as a plan that could not be checked. A managed plan the list lacks (a plan map entry no sync has
+        pruned yet) is gone and not loaded. Plans HA created since the poll are in the list (the plan
+        creation adds them); a plan the user created in Comexio since the last poll is not — an accepted
+        window of at most one poll interval, as re-reading $Fubs here would cost a full config fetch.
         """
+        if self.scraped_plan_ids is None:
+            return set(), [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)]
         fresh = await self.api.function_plan_load_all_plans(strict=True)
         placed: set[int] = set()
         failures = [(key, PLAN_ENTRY_UNREADABLE) for key in unreadable_plan_keys(self.api.fub_data)]
-        fub_ids = function_plan_ids(self.api.fub_data)
-        if self.live_plan_list() is None:
-            fub_ids |= self._function_plan_check_fub_ids()
-        for fub_id in sorted(fub_ids):
+        for fub_id in sorted(function_plan_ids(self.api.fub_data)):
             plan_data = fresh.get(fub_id) or await self.api.function_plan_load_elements(fub_id, strict=True)
             if not plan_data:
                 failures.append((self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED))
@@ -8606,14 +8643,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return placed, failures
 
     def _source_commands(
-        self, category: SourceCategory, source_ids: list[int], handled_cmd_ids: AbstractSet[Any]
-    ) -> tuple[list[tuple[Any, int]], list[str]]:
-        """((cmdId, webIoId) of the Web-IO commands serving the given sources, names without a readable webIoId).
+        self, category: SourceCategory, source_ids: list[int], unwired_cmd_ids: AbstractSet[Any]
+    ) -> tuple[list[tuple[str, Any, int]], list[str]]:
+        """((name, cmdId, webIoId) of the Web-IO commands serving the given sources, names of those not checkable).
 
         A command matches by the name HA gives the source ("HA <name>") or, after a rename, by the audit
         key its name carries (_fallback_audit_key) — the grouping that lists it as an orphan in the audit.
         A name another source of the category carries as well is never matched: it may be that one's.
-        handled_cmd_ids are left out.
+        unwired_cmd_ids always match: the plan cleanup found them wired to these sources. Not checkable:
+        a command without a readable webIoId, and an unwired one the last poll does not list ("cmdId <id>").
         """
         data = self.data or {}
         wanted = set(source_ids)
@@ -8622,13 +8660,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         for item in data.get(category.data_key, []):
             (names if int(item["id"]) in wanted else taken).add(f"HA {item['name']}")
         keys = {source_audit_key(category, source_id) for source_id in wanted}
-        found: list[tuple[Any, int]] = []
+        found: list[tuple[str, Any, int]] = []
         unreadable: list[str] = []
+        listed: set[Any] = set()
         for name, info in data.get("webio_commands", {}).items():
             cmd_id = info.get("cmdId")
-            if info.get("webioClass") != category.key or cmd_id is None or cmd_id in handled_cmd_ids:
+            if cmd_id is None:
                 continue
-            if name in taken or (name not in names and _fallback_audit_key(name) not in keys):
+            listed.add(cmd_id)
+            if cmd_id not in unwired_cmd_ids and not _serves_sources(name, info, category, (names, taken, keys)):
                 continue
             if (webio_id := ComexioAPI._reference_id({"ref_id": info.get("webIoId")})) is None:
                 _LOGGER.warning(
@@ -8639,7 +8679,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
                 unreadable.append(name)
             else:
-                found.append((cmd_id, webio_id))
+                found.append((name, cmd_id, webio_id))
+        if missing := sorted((cmd_id for cmd_id in unwired_cmd_ids if cmd_id not in listed), key=str):
+            _LOGGER.warning(
+                "[%s] cleanup %s: unwired Web-IO command(s) %s missing from the last poll — left in place",
+                self.server_id,
+                category.label,
+                missing,
+            )
+            unreadable.extend(f"cmdId {cmd_id}" for cmd_id in missing)
         return found, unreadable
 
     async def unwire_webio_commands(self, webio_ids: list[int], preferred_fub_id: int | None = None) -> dict[str, Any]:
