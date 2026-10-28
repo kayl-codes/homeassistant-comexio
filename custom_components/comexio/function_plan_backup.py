@@ -1440,9 +1440,12 @@ class FunctionPlanBackupManager:
         never rewritten.
         """
         await self._async_ensure_loaded()
+        fub_base, _changed_at = await self._async_catalog_state()
+        # The slot is read after the last await: a backup rotating the slots meanwhile would
+        # otherwise hand back one snapshot while block_settings_sync / paper_format_sync, read by
+        # the same slot right after, already see the next one.
         if (stored := self._stored_snapshot(kind, fub_id, plan_name, slot)) is None:
             return None
-        fub_base, _changed_at = await self._async_catalog_state()
         return resolve_block_ids(stored, fub_base)
 
     def _stored_snapshot(self, kind: str, fub_id: int, plan_name: str, slot: int) -> dict[str, Any] | None:

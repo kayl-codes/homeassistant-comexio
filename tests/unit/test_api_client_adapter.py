@@ -945,6 +945,15 @@ def test_save_block_settings_updates_the_cached_table_once_confirmed(
     assert ("200" in comexio_api.block_settings) is (cached == "26")
 
 
+def test_save_block_settings_caches_under_the_id_comexio_saved_to(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # The save goes to int("0104") == 104; the cache must update that element, not add a twin.
+    comexio_api.block_settings = {"104": {"in_0": "10"}}
+    client.save_function_plan_block_settings = AsyncMock(return_value=None)
+
+    assert asyncio.run(comexio_api.function_plan_save_block_settings("0104", {"in_0": "26"})) is True
+    assert comexio_api.block_settings == {"104": {"in_0": "26"}}
+
+
 def test_save_block_settings_leaves_an_uncaptured_table_uncaptured(comexio_api: ComexioAPI, client: MagicMock) -> None:
     comexio_api.block_settings = None
     client.save_function_plan_block_settings = AsyncMock(return_value=None)

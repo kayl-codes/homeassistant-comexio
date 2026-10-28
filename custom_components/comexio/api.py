@@ -2281,7 +2281,8 @@ class ComexioAPI:
         if saved:
             self._block_settings_saves_confirmed += 1
             if self.block_settings is not None:
-                self.block_settings.setdefault(str(element_id), {}).update(
+                # Under the id Comexio saved to: "0104" or " 104" would otherwise cache beside "104".
+                self.block_settings.setdefault(str(int(element_id)), {}).update(
                     {str(name): str(value) for name, value in settings.items()}
                 )
         return saved

@@ -422,6 +422,26 @@ def test_a_render_shows_the_block_values_of_the_plan_it_draws(
     assert render.call_args.kwargs["block_values"] == shown
 
 
+def test_an_armed_backup_re_render_keeps_the_stored_block_values() -> None:
+    """Every live-value re-render of a backup preview renders from the armed cache, not from the slot."""
+    coordinator = _render_coordinator()
+    coordinator.api = SimpleNamespace(block_settings=_LIVE_SETTINGS)
+
+    async def run() -> None:
+        coordinator.preview_follow_lock = asyncio.Lock()
+        await coordinator.async_generate_plan_preview(7, "Lights", {}, {}, "snapshot:auto:1", None, _STORED_SETTINGS)
+        await coordinator._render_armed_preview(coordinator._preview_plan_cache)
+
+    with (
+        patch.object(coordinator_module, "_build_sun_times", return_value={}),
+        patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
+        patch.object(coordinator_module, "render_plan_svg", return_value="<svg/>") as render,
+    ):
+        asyncio.run(run())
+
+    assert [call.kwargs["block_values"] for call in render.call_args_list] == [_STORED_SETTINGS, _STORED_SETTINGS]
+
+
 @pytest.mark.parametrize(
     ("source", "expected"),
     [("live", None), ("snapshot:auto:0", A5), ("snapshot:auto:1", A4), ("snapshot:auto:2", None)],
