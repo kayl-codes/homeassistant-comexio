@@ -195,12 +195,6 @@ def live_only_settings(
     return kept
 
 
-def block_settings_form(element_id: int | str, settings: Mapping[str, str], timestamp: str) -> dict[str, str]:
-    """The savefubbaseconfig form Comexio's editor sends: id, one element_<name> per setting, timestamp."""
-    fields = {f"element_{name}": str(value) for name, value in settings.items()}
-    return {"id": str(element_id)} | fields | {"timestamp": timestamp}
-
-
 def block_settings_diff(
     newer: Mapping[str, Any], older: Mapping[str, Any]
 ) -> list[tuple[str, str, str | None, str | None]] | None:
