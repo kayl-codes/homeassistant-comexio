@@ -443,10 +443,11 @@ def _io_label(io: Mapping[str, Any]) -> str:
     """An IO as the user knows it from Comexio: "<extension> <identifier>" (e.g. "BASE AI1").
 
     A Quickbus IO's identifier repeats on every device of its extension, so it names its device: "QB3 MT1 G1".
+    Every part is set in Comexio, so each is put on one line (quickbus_device_label does so itself): it is only logged.
     """
     if quickbus := io.get("quickbus"):
-        return f"{quickbus_device_label(quickbus_device_id(io), quickbus.get('name'))} {io['identifier']}"
-    return f"{io['ext_name']} {io['identifier']}"
+        return f"{quickbus_device_label(quickbus_device_id(io), quickbus.get('name'))} {one_line(io['identifier'])}"
+    return f"{one_line(io['ext_name'])} {one_line(io['identifier'])}"
 
 
 def _io_labels(ios_by_id: Mapping[str, Mapping[str, Any]], io_ids: Iterable[str]) -> str:

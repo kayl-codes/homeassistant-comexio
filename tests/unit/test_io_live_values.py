@@ -676,6 +676,35 @@ def test_an_unanswered_quickbus_io_is_logged_with_its_device() -> None:
     assert _io_label({"id": "11", "ext_name": "BASE", "identifier": "I1", "quickbus": None}) == "BASE I1"
 
 
+def test_the_unanswered_io_warning_names_the_quickbus_device(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """The warning itself, not only the label helper, names a Quickbus IO by its device."""
+    coordinator = _coordinator(api)
+    io = {"id": "211", "ext_name": "BASE", "identifier": "G1", "quickbus": {"device_id": "2", "name": "MT Bad"}}
+
+    with caplog.at_level(logging.WARNING):
+        coordinator._track_unanswered_ios([io], {"211"}, {})
+
+    assert "no live value for IOs QB2 MT Bad G1;" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "io",
+    [
+        {"id": "11", "ext_name": "EXT\nforged", "identifier": "I1\r\nforged", "quickbus": None},
+        {
+            "id": "211",
+            "ext_name": "BASE",
+            "identifier": "G1\nforged",
+            "quickbus": {"device_id": "2", "name": "MT\nBad"},
+        },
+    ],
+)
+def test_an_io_label_from_names_with_line_breaks_stays_on_one_line(io: dict[str, Any]) -> None:
+    """Extension, device and identifier are set in Comexio: a line break in one must not forge a log line."""
+    assert "\n" not in _io_label(io)
+    assert "\r" not in _io_label(io)
+
+
 def test_webhook_value_during_a_failed_io_fetch_is_kept_as_real(api: ComexioAPI) -> None:
     """R1 with a failed fetch: the last known values are read after the await, so the push counts."""
     coordinator = _coordinator(api)
