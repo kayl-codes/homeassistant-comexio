@@ -29,6 +29,18 @@
           "cover_keywords": "Keywords for cover detection"
         }
       },
+      "ignore_lists": {
+        "title": "Ignore lists",
+        "description": "Optional: the IDs listed here are left out — no entity in Home Assistant, no Web-IO command, no function plan connection. Leave the fields empty to import everything; you can change the lists later in the integration's options.",
+        "data": {
+          "ignored_markers": "Marker IDs to exclude from function plan connection",
+          "ignored_knx": "KNX object IDs to exclude from function plan connection"
+        },
+        "data_description": {
+          "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later.",
+          "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later."
+        }
+      },
       "reconfigure": {
         "title": "Reconfigure Comexio Connection",
         "description": "Connection: **{protocol}**\nPinned certificate (SHA-256): `{fingerprint}`\n\nWhenever Comexio serves HTTPS, the integration connects encrypted and pins the certificate automatically. HTTP means Comexio serves no HTTPS: the connection is not encrypted.",
@@ -63,7 +75,8 @@
     },
     "abort": {
       "reconfigure_successful": "Connection settings updated successfully.",
-      "reauth_successful": "Re-authentication successful."
+      "reauth_successful": "Re-authentication successful.",
+      "already_configured": "This Comexio server or instance name was set up in the meantime."
     }
   },
   "selector": {

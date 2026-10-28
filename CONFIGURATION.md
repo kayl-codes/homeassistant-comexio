@@ -34,7 +34,9 @@ Navigate to **Settings → Devices & Services → Add Integration** and search f
 | **⑨ Device class name** | Name of the Web-IO device class created in Comexio (default: `HomeAssistant`). |
 | **⑩ Polling interval** | Background polling interval in minutes. |
 
-After a successful login test, HA confirms the new device:
+After a successful login test, a second step asks for the **ignore lists** of every category whose import is on (Markers, KNX objects): the IDs listed there get no entity, no Web-IO command and no function plan connection. Leave the fields empty to import everything — the lists can be changed later in the [Settings](#3-settings), where each field only shows while its import is on. Without Marker and KNX import this step is skipped.
+
+HA then confirms the new device:
 
 <img src="docs/assets/ui/0_setup_dialog-2_en.png" width="320">
 
@@ -165,7 +167,9 @@ Navigiere zu **Einstellungen → Geräte & Dienste → Integration hinzufügen**
 | **⑨ Name der Geräteklasse** | Name der Web-IO-Geräteklasse in Comexio (Standard: `HomeAssistant`). |
 | **⑩ Abfrageintervall** | Hintergrund-Polling-Intervall in Minuten. |
 
-Nach erfolgreichem Login-Test bestätigt HA die Anlage des neuen Geräts:
+Nach erfolgreichem Login-Test fragt ein zweiter Schritt nach den **Ignorier-Listen** jeder Kategorie, deren Import eingeschaltet ist (Merker, KNX-Objekte): Die dort eingetragenen IDs bekommen keine Entität, keinen Web-IO-Befehl und keine Logikplan-Verbindung. Leer lassen, um alles zu importieren — die Listen lassen sich später in den [Einstellungen](#3-einstellungen) ändern; dort erscheint jedes Feld nur, solange sein Import eingeschaltet ist. Ohne Merker- und KNX-Import entfällt dieser Schritt.
+
+Danach bestätigt HA die Anlage des neuen Geräts:
 
 <img src="docs/assets/ui/0_setup_dialog-2_de.png" width="320">
 

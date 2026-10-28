@@ -29,6 +29,18 @@
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
         }
       },
+      "ignore_lists": {
+        "title": "Ignorier-Listen",
+        "description": "Optional: Die hier eingetragenen IDs werden ausgelassen — keine Entität in Home Assistant, kein Web-IO-Befehl, keine Logikplan-Verbindung. Leer lassen, um alles zu importieren; die Listen lassen sich später in den Optionen der Integration ändern.",
+        "data": {
+          "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen",
+          "ignored_knx": "KNX-Objekt-IDs von der Logikplan-Verbindung ausschließen"
+        },
+        "data_description": {
+          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
+          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs."
+        }
+      },
       "reconfigure": {
         "title": "Comexio-Verbindung neu konfigurieren",
         "description": "Verbindung: **{protocol}**\nGepinntes Zertifikat (SHA-256): `{fingerprint}`\n\nSobald Comexio HTTPS anbietet, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat automatisch. HTTP bedeutet: Comexio bietet kein HTTPS an, die Verbindung ist unverschlüsselt.",
@@ -63,7 +75,8 @@
     },
     "abort": {
       "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
-      "reauth_successful": "Erneute Anmeldung erfolgreich."
+      "reauth_successful": "Erneute Anmeldung erfolgreich.",
+      "already_configured": "Dieser Comexio-Server oder Instanzname wurde inzwischen eingerichtet."
     }
   },
   "selector": {

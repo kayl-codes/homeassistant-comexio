@@ -13,6 +13,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_IGNORED_KNX,
     CONF_IGNORED_MARKERS,
     CONF_IMPORT_DISABLED_IGNORED,
     DOMAIN,
@@ -362,6 +363,26 @@ async def test_options_flow_keeps_a_submitted_ignore_list(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_IGNORED_MARKERS] == "1,2"  # normalized
+
+
+async def test_options_flow_hides_the_ignore_list_of_a_category_not_imported(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """KNX not imported: no KNX ignore-list field, and saving the form keeps the stored list."""
+    entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "4"})
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    fields = {str(key) for key in result["data_schema"].schema}
+
+    assert CONF_IGNORED_MARKERS in fields
+    assert CONF_IGNORED_KNX not in fields
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IGNORED_KNX] == "4"
 
 
 async def test_an_unreadable_scrape_keeps_the_issue(

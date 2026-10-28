@@ -1,5 +1,5 @@
 # Version: 0.8.0
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping, Set as AbstractSet
 import logging
 from typing import Any
 
@@ -97,6 +97,25 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
     return format_ignored_ids(ints, ranges)
 
 
+def normalize_ignore_lists(user_input: dict, categories: Iterable[SourceCategory], errors: dict[str, str]) -> None:
+    """Normalize the ignore-list of every category in user_input in place; a field error for each invalid one."""
+    for cat in categories:
+        try:
+            ignored_raw = user_input.get(cat.ignored_conf_key, "").strip()
+            prefix_chars = cat.audit_key_prefix + cat.audit_key_prefix.lower()
+            user_input[cat.ignored_conf_key] = _normalize_ignored_ids(ignored_raw, prefix_chars, cat.german_label)
+        except vol.Invalid as e:
+            errors[cat.ignored_conf_key] = str(e)
+        except Exception as e:
+            _LOGGER.exception("Unexpected error validating %s: %s", cat.ignored_conf_key, e)
+            errors[cat.ignored_conf_key] = f"Fehler bei Validierung: {e}"
+
+
+def import_enabled_ignore_list_categories(conf: Mapping[str, Any]) -> list[SourceCategory]:
+    """The categories with an ignore-list whose import conf switches on: only their lists act on anything."""
+    return [cat for cat in ignore_list_categories() if conf.get(cat.import_conf_key, cat.import_default)]
+
+
 def _saved_user_plan_pick(value: Any, candidates: dict[int, str]) -> str:
     """A saved user-plan pick; a bare ID saved before the name was takes the plan's current name."""
     pick = parse_watchdog_user_plan_pick(value)
@@ -156,6 +175,18 @@ def _hidden_categories(
     }
 
 
+def _hidden_ignore_lists(
+    source_cats: list[SourceCategory], conf: Mapping[str, Any], hidden_cats: set[WebioClass]
+) -> set[WebioClass]:
+    """The categories whose ignore-list field the init step hides: hidden ones and those with their import off.
+
+    The list of a category that is not imported acts on nothing, so its field would only confuse. The
+    saved list stays (see _restore_missing_ignored_fields) and applies again once the import is back on.
+    """
+    enabled = {cat.key for cat in import_enabled_ignore_list_categories(conf)}
+    return hidden_cats | ({cat.key for cat in source_cats} - enabled)
+
+
 class ComexioOptionsFlow(config_entries.OptionsFlow):
     """Handle options for the component."""
 
@@ -182,8 +213,11 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
         hidden_cats = _hidden_categories(source_cats, available_counts, conf)
+        hidden_ignore_lists = _hidden_ignore_lists(source_cats, conf, hidden_cats)
 
-        if user_input is not None and (result := await self._async_submit_init(user_input, conf, errors, hidden_cats)):
+        if user_input is not None and (
+            result := await self._async_submit_init(user_input, conf, errors, hidden_cats, hidden_ignore_lists)
+        ):
             return result
 
         # Extension names for the IO cluster multi-select: live coordinator data first,
@@ -264,9 +298,9 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             vol.Optional(CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
         ] = str
         for cat in source_cats:
-            # Same visibility as the opt-in toggle above — an ignore-list for a category the
-            # user can't even opt into would be a dead field.
-            if cat.key in hidden_cats:
+            # Hidden with the opt-in toggle above, and while the category's import is off: an
+            # ignore-list for a category that is not imported would be a dead field.
+            if cat.key in hidden_ignore_lists:
                 continue
             # suggested_value, not default: HA sends no key for a field the user emptied, and a
             # default would fill the old list back in — the last entry could never be removed.
@@ -364,10 +398,17 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={"example_url": WEBHOOK_URL_EXAMPLE},
         )
 
-    async def _async_submit_init(self, user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]):
+    async def _async_submit_init(
+        self,
+        user_input: dict,
+        conf: dict,
+        errors: dict,
+        hidden_cats: set[WebioClass],
+        hidden_ignore_lists: AbstractSet[WebioClass] = frozenset(),
+    ):
         """Save the init step's input, or open the custom webhook URL step; None: the form again with the errors."""
         _drop_unchanged_quickbus_default(user_input, conf, self._quickbus_shown)
-        self._normalize_user_input(user_input, conf, errors, hidden_cats)
+        self._normalize_user_input(user_input, conf, errors, hidden_cats, hidden_ignore_lists)
         self._validate_webhook_address_mode(user_input, errors)
         if errors:
             return None
@@ -392,17 +433,27 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         """Fill in the ignored_conf_key value of every category user_input has none for.
 
         A visible field the user emptied is sent without its key, so it reads as an emptied
-        list. Only a hidden category (see async_step_init) had no field and keeps its old list.
+        list. Only a category whose field was hidden (see _hidden_ignore_lists) keeps its old list.
         """
         for cat in source_cats:
             if cat.ignored_conf_key not in user_input:
                 user_input[cat.ignored_conf_key] = conf.get(cat.ignored_conf_key, "") if cat.key in hidden_cats else ""
 
     @staticmethod
-    def _normalize_user_input(user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]) -> None:
-        """Validate and normalize user_input in-place; populate errors on failure."""
+    def _normalize_user_input(
+        user_input: dict,
+        conf: dict,
+        errors: dict,
+        hidden_cats: set[WebioClass],
+        hidden_ignore_lists: AbstractSet[WebioClass] = frozenset(),
+    ) -> None:
+        """Validate and normalize user_input in-place; populate errors on failure.
+
+        hidden_ignore_lists: the categories whose ignore-list field the form hid on top of hidden_cats.
+        """
         source_cats = ignore_list_categories()
-        ComexioOptionsFlow._restore_missing_ignored_fields(user_input, conf, source_cats, hidden_cats)
+        hidden_lists = hidden_cats | hidden_ignore_lists
+        ComexioOptionsFlow._restore_missing_ignored_fields(user_input, conf, source_cats, hidden_lists)
 
         numeric_option_keys = (
             "scan_interval",
@@ -429,16 +480,9 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if key in user_input and not is_valid_entity_name_schema(user_input[key]):
                 errors[key] = "invalid_schema"
 
-        for cat in source_cats:
-            try:
-                ignored_raw = user_input.get(cat.ignored_conf_key, "").strip()
-                prefix_chars = cat.audit_key_prefix + cat.audit_key_prefix.lower()
-                user_input[cat.ignored_conf_key] = _normalize_ignored_ids(ignored_raw, prefix_chars, cat.german_label)
-            except vol.Invalid as e:
-                errors[cat.ignored_conf_key] = str(e)
-            except Exception as e:
-                _LOGGER.exception("Unexpected error validating %s: %s", cat.ignored_conf_key, e)
-                errors[cat.ignored_conf_key] = f"Fehler bei Validierung: {e}"
+        # A hidden list keeps its stored value as it is: an error there would sit on a field the
+        # form does not show, and block every other option.
+        normalize_ignore_lists(user_input, [cat for cat in source_cats if cat.key not in hidden_lists], errors)
 
     def _create_options_entry(self, user_input: dict):
         """Merge new options with existing entry options and create the config entry.

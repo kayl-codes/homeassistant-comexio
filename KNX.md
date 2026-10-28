@@ -34,7 +34,7 @@ Turn on **Create entities for KNX objects** in the integration options (off by d
 ## 3. Naming and Excluding Objects
 
 - **Naming Schema for KNX objects** (default `K{KnxId} {KnxTitle}`) works exactly like the Marker/IO naming schemas — available placeholders: `{KnxId}`, `{KnxTitle}`.
-- **KNX object IDs to exclude from function plan connection** lets you ignore individual K-Elements by ID (comma-, semicolon-, space- or dot-separated, with or without the `K` prefix, ranges like `8-12` supported) — exactly like the Marker ignore list. An ignored K-Element gets no HA entity and is skipped by the sync/connect actions entirely.
+- **KNX object IDs to exclude from function plan connection** lets you ignore individual K-Elements by ID (comma-, semicolon-, space- or dot-separated, with or without the `K` prefix, ranges like `8-12` supported) — exactly like the Marker ignore list. An ignored K-Element gets no HA entity and is skipped by the sync/connect actions entirely. The field shows only while **Create entities for KNX objects** is on; with KNX import switched on at setup, the setup already asks for it in its second step.
 
 ## 4. Automatic Unit & Device-Class Detection
 

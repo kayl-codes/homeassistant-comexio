@@ -29,6 +29,18 @@
           "cover_keywords": "Palabras clave para detectar persianas"
         }
       },
+      "ignore_lists": {
+        "title": "Listas de exclusión",
+        "description": "Opcional: los IDs indicados aquí se omiten — sin entidad en Home Assistant, sin comando Web-IO, sin conexión de planes de función. Deje los campos vacíos para importarlo todo; las listas se pueden cambiar más tarde en las opciones de la integración.",
+        "data": {
+          "ignored_markers": "IDs de marcadores a excluir de la conexión de planes de función",
+          "ignored_knx": "IDs de objetos KNX a excluir de la conexión de planes de función"
+        },
+        "data_description": {
+          "ignored_markers": "IDs de marcadores y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'M' (p. ej. '123, 456; 789' o 'M123, M456' o '8-12'). Solo se pueden excluir marcadores con descripción. Un ID suelto que ya no existe se elimina automáticamente; un rango se mantiene tal cual y abarca también los IDs creados más tarde.",
+          "ignored_knx": "IDs de objetos KNX y rangos separados por comas, punto y coma, espacios o puntos, con o sin prefijo 'K' (p. ej. '123, 456; 789' o 'K123, K456' o '8-12'). Solo se pueden excluir objetos KNX con descripción. Un ID suelto que ya no existe se elimina automáticamente; un rango se mantiene tal cual y abarca también los IDs creados más tarde."
+        }
+      },
       "reconfigure": {
         "title": "Reconfigurar conexión Comexio",
         "description": "Conexión: **{protocol}**\nCertificado fijado (SHA-256): `{fingerprint}`\n\nEn cuanto Comexio ofrece HTTPS, la integración se conecta cifrada y fija el certificado automáticamente. HTTP significa que Comexio no ofrece HTTPS: la conexión no está cifrada.",
@@ -63,7 +75,8 @@
     },
     "abort": {
       "reconfigure_successful": "Configuración de conexión actualizada correctamente.",
-      "reauth_successful": "Reautenticación correcta."
+      "reauth_successful": "Reautenticación correcta.",
+      "already_configured": "Este servidor Comexio o nombre de instancia se ha configurado mientras tanto."
     }
   },
   "selector": {

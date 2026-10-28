@@ -16,6 +16,8 @@ from custom_components.comexio.const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_HOST,
+    CONF_IGNORED_KNX,
+    CONF_IGNORED_MARKERS,
     CONF_PASSWORD,
     CONF_SCHEMA_MARKER,
     CONF_SERVER_ID,
@@ -59,17 +61,132 @@ async def _submit(hass: HomeAssistant, user_input: dict[str, Any]) -> dict[str, 
     return await hass.config_entries.flow.async_configure(result["flow_id"], user_input)
 
 
+async def _submit_both_steps(hass: HomeAssistant, user_input: dict[str, Any]) -> dict[str, Any]:
+    """The user step, then the ignore lists step with nothing typed."""
+    result = await _submit(hass, user_input)
+    assert result.get("step_id") == "ignore_lists", result
+    return await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+
 @pytest.mark.usefixtures("mock_setup_entry")
 async def test_user_flow_creates_entry(hass: HomeAssistant, mock_comexio_api: list[ComexioAPI]) -> None:
-    """Valid credentials create an entry with the normalised server id; the test session is closed."""
+    """Valid credentials lead to the ignore lists, then an entry with the normalised server id."""
     result = await _submit(hass, dict(USER_INPUT))
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "ignore_lists"
+    mock_comexio_api[0].login.assert_awaited_once()  # the credentials were tested before the ignore lists
+    mock_comexio_api[0].close.assert_called_once()
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["title"] == f"Comexio iosrv2 ({HOST})"
     # The rest of data are the form's defaults for the fields the user left alone.
     assert {**USER_INPUT, CONF_SERVER_ID: "iosrv2", "scan_interval": 15}.items() <= result["data"].items()
-    mock_comexio_api[0].login.assert_awaited_once()  # the credentials were tested before the entry was created
-    mock_comexio_api[0].close.assert_called_once()
+    assert result["options"] == {}  # nothing typed: nothing ignored
+    assert len(mock_comexio_api) == 1  # the ignore lists step does not log in again
+
+
+def _form_suggested(result: dict[str, Any], field: str) -> Any:
+    return next(key.description["suggested_value"] for key in result["data_schema"].schema if str(key) == field)
+
+
+def _form_fields(result: dict[str, Any]) -> list[str]:
+    return [str(key) for key in result["data_schema"].schema]
+
+
+@pytest.mark.parametrize(
+    ("imports", "fields"),
+    [
+        ({}, [CONF_IGNORED_MARKERS]),  # defaults: markers on, KNX off
+        ({"import_knx": True}, [CONF_IGNORED_MARKERS, CONF_IGNORED_KNX]),
+        ({"import_markers": False, "import_knx": True}, [CONF_IGNORED_KNX]),
+    ],
+    ids=["markers", "markers_and_knx", "knx"],
+)
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_ignore_lists_step_asks_only_for_imported_categories(
+    hass: HomeAssistant, imports: dict[str, bool], fields: list[str]
+) -> None:
+    """The step shows the ignore list of every imported category, and only those; typed lists become options."""
+    result = await _submit(hass, {**USER_INPUT, **imports})
+    assert result["step_id"] == "ignore_lists"
+    assert _form_fields(result) == fields
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], dict.fromkeys(fields, "3; 1-2, 5"))
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    # Normalised as in the options flow; a stored ignore list belongs in options, where the coordinator reads it.
+    assert result["options"] == dict.fromkeys(fields, "1-2,3,5")
+    assert not set(fields) & result["data"].keys()
+
+
+@pytest.mark.parametrize("knx_field", [{CONF_IGNORED_KNX: "  "}, {}], ids=["blank", "absent"])
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_an_empty_ignore_list_is_not_stored(hass: HomeAssistant, knx_field: dict[str, str]) -> None:
+    """Only the lists the user filled in become options; an empty one stores no "" key.
+
+    "absent" is what HA sends for a field the user left empty.
+    """
+    result = await _submit(hass, {**USER_INPUT, "import_knx": True})
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_IGNORED_MARKERS: "M7", **knx_field}
+    )
+
+    assert result["options"] == {CONF_IGNORED_MARKERS: "7"}
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_without_markers_and_knx_the_entry_is_created_at_once(hass: HomeAssistant) -> None:
+    """No imported category has an ignore list: no second step."""
+    result = await _submit(hass, {**USER_INPUT, "import_markers": False, "import_knx": False})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["options"] == {}
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_an_invalid_ignore_list_shows_the_step_again_with_the_input(hass: HomeAssistant) -> None:
+    result = await _submit(hass, dict(USER_INPUT))
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_IGNORED_MARKERS: "3, abc"})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "ignore_lists"
+    assert list(result["errors"]) == [CONF_IGNORED_MARKERS]
+    assert _form_suggested(result, CONF_IGNORED_MARKERS) == "3, abc"  # what the user typed, to correct it
+    assert hass.config_entries.async_entries(DOMAIN) == []
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_IGNORED_MARKERS: "3"})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY  # the corrected list completes the same setup
+    assert result["options"] == {CONF_IGNORED_MARKERS: "3"}
+
+
+@pytest.mark.parametrize(
+    ("existing", "ignore_lists"),
+    [
+        ({CONF_SERVER_ID: "iosrv2", CONF_HOST: "10.9.9.9"}, {}),
+        ({CONF_SERVER_ID: "other", CONF_HOST: HOST}, {}),
+        # Checked before the lists: a list that would not validate changes nothing.
+        ({CONF_SERVER_ID: "iosrv2", CONF_HOST: "10.9.9.9"}, {CONF_IGNORED_MARKERS: "abc"}),
+    ],
+    ids=["server_id", "host", "invalid_list"],
+)
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_ignore_lists_step_aborts_when_the_server_was_set_up_meanwhile(
+    hass: HomeAssistant, existing: dict[str, str], ignore_lists: dict[str, str]
+) -> None:
+    """Another flow created an entry for the same server ID or host while this step was open."""
+    result = await _submit(hass, dict(USER_INPUT))
+    MockConfigEntry(domain=DOMAIN, data=existing).add_to_hass(hass)
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], ignore_lists)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 1  # only the other one
 
 
 # (login result, ComexioAPI attributes after it, form error): Comexio refusing, not answering, transport error.
@@ -224,7 +341,7 @@ async def test_user_flow_accepts_another_host(
     MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "iosrv1", **existing}).add_to_hass(hass)
 
     with _dns({"comexio.fritz.box": "192.168.0.5"}):
-        result = await _submit(hass, {**USER_INPUT, CONF_HOST: chosen_host})
+        result = await _submit_both_steps(hass, {**USER_INPUT, CONF_HOST: chosen_host})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["data"][CONF_HOST] == chosen_host  # stored as typed, not resolved
@@ -248,6 +365,7 @@ async def test_a_malformed_host_is_compared_as_written(
     with patch("custom_components.comexio.config_flow.socket.gethostbyname", side_effect=lookup_error):
         form = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
         result = await hass.config_entries.flow.async_configure(form["flow_id"], dict(USER_INPUT))
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})  # the ignore lists
 
     assert _form_default(form, CONF_HOST) == DEFAULT_HOST
     assert result["type"] is FlowResultType.CREATE_ENTRY

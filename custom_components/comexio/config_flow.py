@@ -40,7 +40,7 @@ from .const import (
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
 )
-from .options_flow import ComexioOptionsFlow
+from .options_flow import ComexioOptionsFlow, import_enabled_ignore_list_categories, normalize_ignore_lists
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -138,6 +138,20 @@ def _host_configured(host: str, configured_hosts: list[str]) -> bool:
     return bool(_host_addresses(host) & _configured_addresses(configured_hosts))
 
 
+def _taken_server_id(server_id: str, entries) -> str | None:
+    """The existing server ID that server_id collides with, verbatim or slugified; None while it is free.
+
+    Slugified too: entity_ids are built from slugify(server_id) (see webio_range_check_entity_id()), so two
+    distinct raw IDs (e.g. "my-server" vs. "my_server") would otherwise collide there.
+    """
+    slug = slugify(server_id)
+    for entry in entries:
+        existing_id = str(entry.data.get(CONF_SERVER_ID, "")).strip().lower()
+        if existing_id == server_id or slugify(existing_id) == slug:
+            return existing_id
+    return None
+
+
 def _discover_host(configured_hosts: list[str]) -> str:
     """The first resolvable comexio.<domain> no existing entry reaches yet, else DEFAULT_HOST if free (blocking).
 
@@ -164,6 +178,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # The reconfigure settings waiting in a confirmation step (see _HTTPS_CONFIRM_STEPS).
     _pending_reconfigure: dict
+    # The entry data the user step validated, waiting for the ignore_lists step.
+    _pending_entry: dict
 
     async def async_step_user(self, user_input=None):
         """Handle the initial setup step when a user adds the integration."""
@@ -207,17 +223,14 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # (see webio_range_check_entity_id()) and two distinct raw IDs (e.g. "my-server"
                 # vs. "my_server") would otherwise collide there despite passing this check.
                 chosen_id = user_input[CONF_SERVER_ID].strip().lower()
-                chosen_slug = slugify(chosen_id)
-                for entry in current_entries:
-                    existing_id = str(entry.data.get(CONF_SERVER_ID, "")).strip().lower()
-                    if existing_id == chosen_id or slugify(existing_id) == chosen_slug:
-                        _LOGGER.warning(
-                            "Setup failed: Server ID '%s' collides with existing entry '%s'",
-                            chosen_id,
-                            existing_id,
-                        )
-                        errors[CONF_SERVER_ID] = "server_id_exists"
-                        raise ServerIdExists
+                if (existing_id := _taken_server_id(chosen_id, current_entries)) is not None:
+                    _LOGGER.warning(
+                        "Setup failed: Server ID '%s' collides with existing entry '%s'",
+                        chosen_id,
+                        existing_id,
+                    )
+                    errors[CONF_SERVER_ID] = "server_id_exists"
+                    raise ServerIdExists
 
                 # 2. Validation: no existing entry talks to this server already, compared resolved
                 # (comexio.fritz.box vs. its IP) — two entries would fight over one Web-IO device
@@ -236,14 +249,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input["scan_interval"] = int(user_input["scan_interval"])
                 if fingerprint is not None:
                     user_input[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
-                    notify_https_enabled(self.hass, chosen_id, user_input[CONF_HOST], fingerprint)
-                _LOGGER.info("Config entry created for server: %s", chosen_id)
-
-                return self.async_create_entry(
-                    title=f"Comexio {chosen_id} ({user_input[CONF_HOST]})",
-                    data=user_input,
-                )
-
+                self._pending_entry = user_input
             except (ServerIdExists, HostAlreadyConfigured):
                 # Error already added to the errors dict
                 pass
@@ -257,6 +263,11 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             except Exception as e:
                 _LOGGER.exception("Unexpected error during setup: %s", e)
                 errors["base"] = "unknown"
+            else:
+                # Outside the try: an error from here on is no setup validation failure.
+                if import_enabled_ignore_list_categories(user_input):
+                    return await self.async_step_ignore_lists()
+                return self._create_setup_entry({})
 
         # Preserve user input for the form if validation failed (to improve UX)
         ui = user_input or {}
@@ -291,6 +302,54 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         )
 
         return self.async_show_form(step_id="user", data_schema=schema, errors=errors)
+
+    async def async_step_ignore_lists(self, user_input=None):
+        """Ask for the ignore-lists of the categories whose import the user step switched on.
+
+        Optional fields: empty imports everything. The lists go to the entry's options, where the
+        coordinator and the options flow read them.
+        """
+        categories = import_enabled_ignore_list_categories(self._pending_entry)
+        errors: dict[str, str] = {}
+        ignore_lists = {cat.ignored_conf_key: (user_input or {}).get(cat.ignored_conf_key, "") for cat in categories}
+        if user_input is not None:
+            if not await self._async_pending_entry_still_free():
+                return self.async_abort(reason="already_configured")
+            normalize_ignore_lists(ignore_lists, categories, errors)
+            if not errors:
+                return self._create_setup_entry({key: value for key, value in ignore_lists.items() if value})
+
+        # suggested_value, not default: after an error the field shows what the user typed, and
+        # a field the user emptied stays empty.
+        schema = vol.Schema(
+            {vol.Optional(key, description={"suggested_value": value}): str for key, value in ignore_lists.items()}
+        )
+        return self.async_show_form(step_id="ignore_lists", data_schema=schema, errors=errors)
+
+    async def _async_pending_entry_still_free(self) -> bool:
+        """Whether no entry took the pending server ID or host while the ignore_lists step was open."""
+        entries = self._async_current_entries()
+        if _taken_server_id(self._pending_entry[CONF_SERVER_ID], entries) is not None:
+            _LOGGER.warning(
+                "Setup aborted: server ID '%s' was configured meanwhile", self._pending_entry[CONF_SERVER_ID]
+            )
+            return False
+        hosts = [str(entry.data.get(CONF_HOST, "")) for entry in entries]
+        host = self._pending_entry[CONF_HOST]
+        if hosts and await self.hass.async_add_executor_job(_host_configured, host, hosts):
+            _LOGGER.warning("Setup aborted: host '%s' was configured meanwhile", host)
+            return False
+        return True
+
+    def _create_setup_entry(self, options: dict[str, str]):
+        """Create the entry the user step validated, with the ignore-lists as its options."""
+        data = self._pending_entry
+        server_id, host = data[CONF_SERVER_ID], data[CONF_HOST]
+        if (fingerprint := data.get(CONF_CERTIFICATE_FINGERPRINT)) is not None:
+            # Only now: an abandoned ignore_lists step creates no entry to tell about.
+            notify_https_enabled(self.hass, server_id, host, fingerprint)
+        _LOGGER.info("Config entry created for server: %s", server_id)
+        return self.async_create_entry(title=f"Comexio {server_id} ({host})", data=data, options=options)
 
     @staticmethod
     @callback
