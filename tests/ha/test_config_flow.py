@@ -2,8 +2,9 @@
 
 from collections.abc import Generator
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, call, patch
 
+from aiocomexio import ComexioConnectionError
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.data_entry_flow import FlowResultType
@@ -187,6 +188,83 @@ async def test_ignore_lists_step_aborts_when_the_server_was_set_up_meanwhile(
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"
     assert len(hass.config_entries.async_entries(DOMAIN)) == 1  # only the other one
+
+
+@pytest.mark.parametrize(
+    ("rival_data", "lookups"),
+    [
+        # Same server ID: the round after the lookup refuses it without asking DNS.
+        ({CONF_SERVER_ID: "iosrv2", CONF_HOST: "10.8.8.8"}, [["10.9.9.9"]]),
+        # Other server ID on the same server: a second round compares only the rival's host.
+        ({CONF_SERVER_ID: "rival", CONF_HOST: "10.8.8.8"}, [["10.9.9.9"], ["10.8.8.8"]]),
+    ],
+    ids=["server_id", "host"],
+)
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_an_entry_added_during_the_host_lookup_aborts_the_ignore_lists_step(
+    hass: HomeAssistant, rival_data: dict[str, str], lookups: list[list[str]]
+) -> None:
+    """Another flow creates an entry for this server while this step looks up a host."""
+    result = await _submit(hass, dict(USER_INPUT))
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "other", CONF_HOST: "10.9.9.9"}).add_to_hass(hass)
+    rival = MockConfigEntry(domain=DOMAIN, data=rival_data)
+
+    def lookup_while_another_flow_finishes(host: str, configured_hosts: list[str]) -> bool:
+        if rival.entry_id in hass.config_entries.async_entry_ids():
+            return rival_data[CONF_HOST] in configured_hosts  # the rival's host is this server
+        rival.add_to_hass(hass)
+        return False
+
+    # A Mock target runs inline on the event loop (see the test harness's async_add_executor_job), so the
+    # rival entry exists when the lookup's result arrives, as it would after a slow lookup.
+    with patch(
+        "custom_components.comexio.config_flow._host_configured", side_effect=lookup_while_another_flow_finishes
+    ) as host_configured:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    # Only hosts not compared yet: neither the user step's entries nor "other" a second time.
+    assert host_configured.call_args_list == [call(HOST, hosts) for hosts in lookups]
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert len(hass.config_entries.async_entries(DOMAIN)) == 2  # the two others
+
+
+@pytest.mark.parametrize(
+    "rival_data",
+    [{CONF_SERVER_ID: "iosrv2", CONF_HOST: "10.8.8.8"}, {CONF_SERVER_ID: "rival", CONF_HOST: HOST}],
+    ids=["server_id", "host"],
+)
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_an_entry_added_during_the_login_aborts_the_setup(
+    hass: HomeAssistant, certificate_handshake: AsyncMock, rival_data: dict[str, str]
+) -> None:
+    """Without an ignore lists step the user step creates the entry, after rechecking its server."""
+    rival = MockConfigEntry(domain=DOMAIN, data=rival_data)
+
+    async def handshake_while_another_flow_finishes(*_args: Any, **_kwargs: Any) -> None:
+        rival.add_to_hass(hass)
+        raise ComexioConnectionError("no HTTPS")
+
+    certificate_handshake.side_effect = handshake_while_another_flow_finishes
+
+    result = await _submit(hass, {**USER_INPUT, "import_markers": False})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "already_configured"
+    assert hass.config_entries.async_entries(DOMAIN) == [rival]
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_unchanged_entries_cost_the_ignore_lists_step_no_host_lookup(hass: HomeAssistant) -> None:
+    """The user step already compared the host with every entry; the second step does not ask DNS again."""
+    MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: "other", CONF_HOST: "10.9.9.9"}).add_to_hass(hass)
+    result = await _submit(hass, dict(USER_INPUT))
+
+    with patch("custom_components.comexio.config_flow._host_configured") as host_configured:
+        result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    host_configured.assert_not_called()
 
 
 # (login result, ComexioAPI attributes after it, form error): Comexio refusing, not answering, transport error.
