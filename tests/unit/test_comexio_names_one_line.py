@@ -22,7 +22,13 @@ from pathlib import Path
 
 import pytest
 
-from custom_components.comexio.const import distinct_one_line, extension_firmware_update_unique_id
+from custom_components.comexio.const import (
+    distinct_one_line,
+    extension_firmware_update_unique_id,
+    io_command_name,
+    io_plan_label,
+    io_unique_id,
+)
 from custom_components.comexio.select import _plan_option_label
 from custom_components.comexio.services._context import _resolve_fub_id
 from custom_components.comexio.services._yaml_sync import _build_restore_options, _build_snapshot_options
@@ -41,9 +47,10 @@ NAME_VARIABLES = {
     "k_title",
     "ext_name",
     "option_value",
+    "identifier",
 }
-# Mapping keys that hold a Comexio name: item["name"], fub.get("Name"), entry.get("plan_name").
-NAME_KEYS = {"name", "Name", "plan_name"}
+# Mapping keys that hold a Comexio name: item["name"], fub.get("Name"), entry.get("plan_name"), io["identifier"].
+NAME_KEYS = {"name", "Name", "plan_name", "ext_name", "identifier"}
 # Calls that return a Comexio name: api.function_plan_name(fub_id).
 NAME_CALLS = {"function_plan_name"}
 # Keyword arguments and dict keys that identify rather than show: they keep the raw name.
@@ -66,6 +73,8 @@ IDENTITY_FUNCTIONS = {
         "io_audit_key",  # the audit map's key of an IO
         "extension_firmware_update_unique_id",  # an entity's unique_id
         "extension_firmware_object_id",  # an entity's object id
+        "io_unique_id",  # an entity's unique_id
+        "io_command_name",  # the Web-IO command name Comexio must report back
     },
     "entity.py": {"extension_device_identifier"},  # a device registry identifier
     "function_plan_block_keys.py": {"_unresolved_element"},  # the element name written into the plan
@@ -372,7 +381,10 @@ def raw_name_outputs(source: str, identity_functions: set[str] | None = None) ->
         ('def f(name):\n    msg = f"Plan {one_line(name)}"\n    _LOGGER.info(msg)', []),
         ('_LOGGER.info("Plan %s", self.api.function_plan_name(fid))', [(1, "self.api.function_plan_name(fid)")]),
         ('names = ", ".join(f"\'{function_plan_name(fid)}\'" for fid in ids)', [(1, "function_plan_name(fid)")]),
-        ('_LOGGER.warning("Unknown IO %s %s", ext_name, identifier)', [(1, "ext_name")]),
+        ('_LOGGER.warning("Unknown IO %s %s", ext_name, identifier)', [(1, "ext_name"), (1, "identifier")]),
+        ('_LOGGER.debug("%s %s", io["ext_name"], io["identifier"])', [(1, "io['ext_name']"), (1, "io['identifier']")]),
+        ("label = f\"{io.get('ext_name')} {one_line(io['identifier'])}\"", [(1, "io.get('ext_name')")]),
+        ("label = f\"{one_line(io['ext_name'])} {one_line(io['identifier'])}\"", []),
         ('self._attr_unique_id = f"comexio_{server_id}_{ext_name}_x"', []),
         ("total = fub_id + name_count", []),
         ("token = vanished_plan_token(fub_id, plan_name)", []),
@@ -475,3 +487,17 @@ def test_restore_and_snapshot_options_tell_apart_names_that_coincide_on_one_line
 def test_the_firmware_update_unique_id_keeps_the_raw_extension_name(ext_name: str, unique_id: str) -> None:
     """An identity: one_line here would orphan (and the cleanup remove) every existing firmware update entity."""
     assert extension_firmware_update_unique_id("abc", ext_name) == unique_id
+
+
+def test_an_io_keeps_its_raw_names_in_its_identities_but_shows_them_on_one_line() -> None:
+    """unique_id and Web-IO command name are identities: one_line there would orphan entities and commands."""
+    io = {"ext_name": "EXT\n01", "identifier": "I\t1", "quickbus": None}
+    assert io_unique_id("IOSrv1", io) == "comexio_iosrv1_ext\n01_i\t1"
+    assert io_unique_id("IOSrv1", {"ext_name": "BASE", "identifier": "I1"}) == "comexio_iosrv1_base_i1"
+    assert io_command_name(io) == "HA IO EXT\n01 I\t1"
+    assert io_plan_label(io) == "EXT 01 I 1"
+
+
+def test_a_quickbus_io_label_is_one_line() -> None:
+    io = {"ext_name": "BASE", "identifier": "PIR\t1", "quickbus": {"device_id": 3, "name": "BM\nDiele"}}
+    assert io_plan_label(io) == "QB3 BM Diele PIR 1"
