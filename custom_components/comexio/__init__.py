@@ -55,7 +55,7 @@ from .entity import track_quickbus_devices
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
 from .services import async_setup_services
-from .unsupported_ios import io_platform, unsupported_io_issue_id
+from .unsupported_ios import io_has_entity, io_platform, unsupported_io_issue_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -377,7 +377,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     for io in coordinator.data.get("io", []):
         # An IO of an unsupported type has no entity: an earlier one (a writable number) goes (#196).
-        if (not io.get("offline") or include_offline) and io_platform(io):
+        if io_has_entity(io, include_offline):
             active_unique_ids.add(io_unique_id(server_id, io))
     quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
     active_unique_ids |= quickbus_platforms.keys()
@@ -440,7 +440,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             else:
                 expected_platform[uid] = "switch" if src["type"] == "digital" else "number"
     for io in coordinator.data.get("io", []):
-        if (not io.get("offline") or include_offline) and (platform := io_platform(io)):
+        if io_has_entity(io, include_offline) and (platform := io_platform(io)):
             expected_platform[io_unique_id(server_id, io)] = platform
     expected_platform.update(quickbus_platforms)
     # The run-state sensors were binary sensors before they became enum sensors.

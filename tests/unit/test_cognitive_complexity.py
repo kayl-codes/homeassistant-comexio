@@ -21,7 +21,7 @@ MAX_COMPLEXITY = 15
 
 # "<path below custom_components/comexio>::<function>": complexipy score at the time it was listed.
 BASELINE = {
-    "__init__.py::async_setup_entry": 113,
+    "__init__.py::async_setup_entry": 110,
     "api.py::ComexioAPI::ensure_knx_loopback_webio": 16,
     "api.py::ComexioAPI::function_plan_add_knx_bridge_pairs": 18,
     "api.py::ComexioAPI::_function_plan_trigger_wired_source_ids": 16,
