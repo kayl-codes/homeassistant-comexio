@@ -90,7 +90,8 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
    - **Host:** IP address or hostname of your Comexio server. Pre-filled with a server found as `comexio.<domain>` that is not set up yet; a server already set up is refused.
    - **Username / Password:** Your credentials for the web interface (Admin).
    - **API User / Pass (Optional):** For faster API calls via Basic Auth.
-4. After the setup, the integration logs into Comexio and downloads the configuration.
+4. **Ignore lists (optional):** with marker or KNX import on, a second step asks which marker or KNX object IDs to leave out — no entity, no Web-IO command, no function plan connection. Leave the fields empty to import everything; the lists can be changed later in the options.
+5. After the setup, the integration logs into Comexio and downloads the configuration.
 
 > [!TIP]
 > **Initial Setup:** When the integration starts for the first time, it will propose to automatically create the Web-IO device class in Comexio via the Home Assistant "Repairs" menu. Confirm this to activate full webhook functionality!
@@ -357,7 +358,8 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
    - **Host:** IP-Adresse oder Hostname deines Comexio-Servers. Vorbelegt mit einem als `comexio.<domain>` gefundenen Server, der noch nicht eingerichtet ist; ein bereits eingerichteter Server wird abgewiesen.
    - **Benutzername / Passwort:** Deine Zugangsdaten für die Weboberfläche (Admin).
    - **API User / Pass (Optional):** Für schnellere API-Aufrufe via Basic Auth.
-4. Nach dem Setup meldet sich die Integration in Comexio an und lädt die Konfiguration herunter.
+4. **Ignore-Listen (optional):** Ist der Import von Markern oder KNX-Objekten eingeschaltet, fragt ein zweiter Schritt, welche Marker- bzw. KNX-Objekt-IDs ausgelassen werden — keine Entität, kein Web-IO-Command, keine Logikplan-Verbindung. Felder leer lassen, um alles zu importieren; die Listen lassen sich später in den Optionen ändern.
+5. Nach dem Setup meldet sich die Integration in Comexio an und lädt die Konfiguration herunter.
 
 > [!TIP]
 > **Verbindungsdaten nachträglich ändern:** Wenn sich IP-Adresse oder Passwörter ändern, musst du die Integration **nicht** neu einrichten. Öffne die Integration unter *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu konfigurieren* und passe Host, Benutzername und Passwörter direkt an. Felder für Passwörter leer lassen bedeutet "bestehendes Passwort beibehalten".
