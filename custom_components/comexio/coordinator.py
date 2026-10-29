@@ -8668,7 +8668,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         key its name carries (_fallback_audit_key) — the grouping that lists it as an orphan in the audit.
         A name another source of the category carries as well is never matched: it may be that one's.
         unwired_cmd_ids always match: the plan cleanup found them wired to these sources. Not checkable:
-        a command without a readable webIoId, and an unwired one the last poll does not list ("cmdId <id>").
+        a command without a readable cmdId or webIoId, and an unwired one the last poll does not list ("cmdId <id>").
         """
         data = self.data or {}
         wanted = set(source_ids)
@@ -8682,18 +8682,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         listed: set[Any] = set()
         for name, info in data.get("webio_commands", {}).items():
             cmd_id = info.get("cmdId")
-            if cmd_id is None:
-                continue
             listed.add(cmd_id)
             if cmd_id not in unwired_cmd_ids and not _serves_sources(name, info, category, (names, taken, keys)):
                 continue
-            if (webio_id := ComexioAPI._reference_id({"ref_id": info.get("webIoId")})) is None:
-                _LOGGER.warning(
-                    "[%s] cleanup %s: Web-IO command '%s' has no readable webIoId — left in place",
-                    self.server_id,
-                    category.label,
-                    one_line(name),
-                )
+            if (webio_id := self._deletable_command_webio_id(category, name, info)) is None:
                 unreadable.append(name)
             else:
                 found.append((name, cmd_id, webio_id))
@@ -8706,6 +8698,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             unreadable.extend(f"cmdId {cmd_id}" for cmd_id in missing)
         return found, unreadable
+
+    def _deletable_command_webio_id(self, category: SourceCategory, name: str, info: dict[str, Any]) -> int | None:
+        """The webIoId of a matched command, None (logged) when its cmdId or webIoId is unreadable."""
+        if info.get("cmdId") is None:
+            missing = "cmdId"
+        elif (webio_id := ComexioAPI._reference_id({"ref_id": info.get("webIoId")})) is not None:
+            return webio_id
+        else:
+            missing = "webIoId"
+        _LOGGER.warning(
+            "[%s] cleanup %s: Web-IO command '%s' has no readable %s — left in place",
+            self.server_id,
+            category.label,
+            one_line(name),
+            missing,
+        )
+        return None
 
     async def unwire_webio_commands(self, webio_ids: list[int], preferred_fub_id: int | None = None) -> dict[str, Any]:
         """Remove Function-Plan wiring for the given webIoIds and resolve their real cmdIds.

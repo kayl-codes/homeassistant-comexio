@@ -470,6 +470,24 @@ def test_source_links_name_every_plan_wiring_the_source_to_a_web_io() -> None:
     assert coordinator._source_function_plan_links(12, {3: plans[3]}) == []
 
 
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"input": {"FubElementId": "2"}, "output": [{"FubElementId": "3"}]},  # the WebIO feeds logic
+        {"input": {"FubElementId": "3"}, "output": [{"FubElementId": "2"}]},  # a second wire feeds it
+    ],
+    ids=["web-io-feeds-logic", "web-io-fed-twice"],
+)
+def test_a_shared_web_io_element_raises_no_cleanup_finding(extra: dict[str, Any]) -> None:
+    # The cleanup keeps a WebIO element other wiring uses too, so the audit must not flag it on every poll.
+    plan = _wired_plan(WEBIO_TARGET)
+    plan["elements"]["3"] = LOGIC_TARGET[1]
+    plan["connections"]["x"] = extra
+
+    assert not ComexioCoordinator._source_webio_wired_in_plan(12, plan)
+    assert _coordinator()._source_function_plan_links(12, {3: plan}) == []
+
+
 def test_a_stray_duplicate_element_wired_to_a_web_io_counts() -> None:
     plan = _wired_plan()
     plan["elements"]["9"] = {"reference": {"type": "2", "ref_id": "12"}}

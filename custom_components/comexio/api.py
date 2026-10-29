@@ -5339,10 +5339,16 @@ class ComexioAPI:
 
     @staticmethod
     def _reference_id(ref: dict[str, Any]) -> int | None:
-        """reference.ref_id as int (it comes as int or str), None when missing or malformed."""
+        """reference.ref_id as int (it comes as int or str), None when missing or malformed.
+
+        A fractional or boolean ref_id is malformed too: int() would truncate it into another id.
+        """
+        ref_id = ref.get("ref_id")
+        if ref_id is None or isinstance(ref_id, bool) or (isinstance(ref_id, float) and not ref_id.is_integer()):
+            return None
         try:
-            return int(ref["ref_id"])
-        except (KeyError, TypeError, ValueError):
+            return int(ref_id)
+        except (TypeError, ValueError):
             return None
 
     @staticmethod
@@ -5396,26 +5402,62 @@ class ComexioAPI:
         """(WebIO elements the source element feeds, as (element id, webIoId); whether anything else is wired to it).
 
         Anything else: a connection feeding the source element, or one feeding a non-WebIO element (a
-        logic block, a timer) or a WebIO element without a readable webIoId. Such a source element
-        still takes part in plan logic, so a cleanup may remove its WebIO elements but not the element.
+        logic block, a timer), a WebIO element without a readable webIoId, or a WebIO element some
+        other connection uses too (shared plan logic: it stays, and its command with it). Such a source
+        element still takes part in plan logic, so a cleanup may remove its WebIO elements but not the element.
+        A connection whose ends cannot be read may be any of these, so it counts as other wiring too.
         """
         elements = plan_data.get("elements", {})
+        connections = plan_data.get("connections", {})
         webio: list[tuple[str, int]] = []
         other = False
-        for conn_data in plan_data.get("connections", {}).values():
-            outputs = ComexioAPI._connection_output_ids(conn_data)
-            if source_elem_id in outputs:
+        for conn_id, conn_data in connections.items():
+            if (ends := ComexioAPI._connection_ends(conn_data)) is None:
+                _LOGGER.warning("Function plan connection %s has an unreadable end — its elements stay", conn_id)
                 other = True
                 continue
-            if str(conn_data.get("input", {}).get("FubElementId", -1)) != source_elem_id:
+            if source_elem_id in ends[1]:
+                other = True
                 continue
-            for out_elem_id in outputs:
+            if ends[0] != source_elem_id:
+                continue
+            for out_elem_id in ends[1]:
                 webio_id = ComexioAPI._webio_element_id(elements.get(out_elem_id), out_elem_id)
-                if webio_id is None:
+                if webio_id is None or ComexioAPI._wired_elsewhere(out_elem_id, conn_id, connections):
                     other = True
                 else:
                     webio.append((out_elem_id, webio_id))
         return webio, other
+
+    @staticmethod
+    def _connection_ends(conn_data: Any) -> tuple[str, list[str]] | None:
+        """(element id a connection starts at, element ids it feeds), None when either end is unreadable."""
+        source = conn_data.get("input") if isinstance(conn_data, dict) else None
+        if not isinstance(source, dict) or source.get("FubElementId") is None:
+            return None
+        outputs = conn_data.get("output") or []
+        if isinstance(outputs, dict):
+            outputs = list(outputs.values())
+        if not isinstance(outputs, list):
+            return None
+        targets = [o.get("FubElementId") if isinstance(o, dict) else None for o in outputs]
+        if None in targets:
+            return None
+        return str(source["FubElementId"]), [str(target) for target in targets]
+
+    @staticmethod
+    def _wired_elsewhere(elem_id: str, conn_id: Any, connections: dict[str, Any]) -> bool:
+        """Whether the element takes part in a connection other than conn_id, at either end.
+
+        Fails closed: an unreadable connection counts, and so does a second wire from another ignored
+        source (or a stray duplicate of the same one), so such a WebIO element stays rather than being
+        judged shared or not.
+        """
+        return any(
+            (ends := ComexioAPI._connection_ends(other)) is None or elem_id == ends[0] or elem_id in ends[1]
+            for other_id, other in connections.items()
+            if other_id != conn_id
+        )
 
     @staticmethod
     def _find_webio_wiring(webio_id: int, plan_data: dict) -> list[int] | None:

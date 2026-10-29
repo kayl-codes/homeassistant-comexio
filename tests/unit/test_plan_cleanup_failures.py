@@ -1,6 +1,7 @@
 """Plan cleanup steps that did not complete count as a failed sync step: (y) coordinator, (z) button, (ag) visualize."""
 
 import asyncio
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -516,12 +517,79 @@ GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing 
             },
             ([], [], [7], []),
         ),
+        # A WebIO element another connection uses too is shared plan logic: it stays with its command.
+        (
+            {
+                "elements": {"11": _marker_element(7), "12": LOGIC_BLOCK, "13": _web_io_element(40)},
+                "connections": {"0": _conn("11", "13"), "1": _conn("13", "12")},
+            },
+            ([], [], [7], []),
+        ),
+        (
+            {
+                "elements": {"11": _marker_element(7), "12": _marker_element(8), "13": _web_io_element(40)},
+                "connections": {"0": _conn("11", "13"), "1": _conn("12", "13")},
+            },
+            ([], [], [7], []),
+        ),
+        # A connection whose ends cannot be read may touch the source or its WebIO: everything stays.
+        *(
+            (
+                {
+                    "elements": {"11": _marker_element(7), "13": _web_io_element(40)},
+                    "connections": {"0": _conn("11", "13"), "1": broken},
+                },
+                ([], [], [7], []),
+            )
+            for broken in (
+                "broken",
+                {"input": None, "output": [{"FubElementId": "13"}]},
+                {"input": {}, "output": [{"FubElementId": "13"}]},
+                {"input": {"FubElementId": None}, "output": [{"FubElementId": "13"}]},
+                {"input": {"FubElementId": "11"}, "output": [{"IOPos": 0}]},
+                {"input": {"FubElementId": "11"}, "output": ["x"]},
+                {"input": {"FubElementId": "11"}, "output": 5},
+            )
+        ),
+        # Comexio may serialize the targets as a dict: read the same as the list.
+        (
+            {
+                "elements": {"11": _marker_element(7), "13": _web_io_element(40)},
+                "connections": {"0": {"input": {"FubElementId": "11"}, "output": {"0": {"FubElementId": "13"}}}},
+            },
+            ([13, 11], [40], [], []),
+        ),
         ({"elements": {"11": _marker_element(8)}, "connections": {}}, ([], [], [], [7])),
     ],
-    ids=["web-io-and-logic", "stray-duplicate", "unwired", "fed-by-logic", "unreadable-web-io-id", "gone"],
+    ids=[
+        "web-io-and-logic",
+        "stray-duplicate",
+        "unwired",
+        "fed-by-logic",
+        "unreadable-web-io-id",
+        "web-io-feeds-logic",
+        "web-io-fed-twice",
+        "connection-not-a-dict",
+        "connection-start-none",
+        "connection-start-empty",
+        "connection-start-id-none",
+        "connection-target-without-id",
+        "connection-target-not-a-dict",
+        "connection-targets-not-a-list",
+        "targets-as-dict",
+        "gone",
+    ],
 )
 def test_cleanup_selects_every_element_of_the_source(plan_data: dict[str, Any], selected: tuple) -> None:
     assert ComexioSyncButton._select_plan_cleanup(ComexioAPI, plan_data, [7]) == selected
+
+
+def test_an_unreadable_connection_is_named_in_the_log(caplog: pytest.LogCaptureFixture) -> None:
+    # Otherwise the kept source reads as plan logic, and the corrupt wire shows up nowhere.
+    plan = {"elements": {"11": _marker_element(7)}, "connections": {"c9": {"input": None, "output": []}}}
+    with caplog.at_level(logging.WARNING):
+        assert ComexioSyncButton._select_plan_cleanup(ComexioAPI, plan, [7]) == ([], [], [7], [])
+    assert "connection c9 has an unreadable end" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -785,6 +853,27 @@ def test_an_unreadable_command_is_reported_even_without_a_command_to_check() -> 
         del coordinator.data["webio_commands"][name]
     assert _deletable(coordinator, [7], []) == ([], [], ["HA M7 kaputt"], [])
     coordinator.api.function_plan_load_all_plans.assert_not_awaited()
+
+
+def test_a_matching_command_without_a_cmd_id_is_reported(caplog: pytest.LogCaptureFixture) -> None:
+    # Nothing can delete it, but leaving it unnamed would read as a complete cleanup.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    coordinator.data["webio_commands"]["HA M7 ohne Id"] = {"webIoId": 45, "webioClass": "marker"}
+    with caplog.at_level(logging.WARNING):
+        assert _deletable(coordinator, [7], [900]) == ([900, 901, 902], [], ["HA M7 kaputt", "HA M7 ohne Id"], [])
+    assert "'HA M7 ohne Id' has no readable cmdId" in caplog.text
+    assert "'HA M7 kaputt' has no readable webIoId" in caplog.text
+
+
+@pytest.mark.parametrize(("ref_id", "matches"), [(7, True), ("7", True), (7.0, True), (7.9, False), ("7.9", False)])
+def test_a_fractional_reference_id_matches_no_source(ref_id: Any, matches: bool) -> None:
+    # int() would truncate 7.9 into marker 7 and hand its element to the cleanup.
+    elements = {"11": {"reference": {"type": 2, "ref_id": ref_id}}}
+    assert ComexioAPI._find_source_element_ids(elements, 7) == (["11"] if matches else [])
+
+
+def test_a_boolean_reference_id_matches_no_source() -> None:
+    assert ComexioAPI._find_source_element_ids({"11": {"reference": {"type": 2, "ref_id": True}}}, 1) == []
 
 
 def test_a_plan_with_an_unreadable_web_io_element_keeps_every_command() -> None:
