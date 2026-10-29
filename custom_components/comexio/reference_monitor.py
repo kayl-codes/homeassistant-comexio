@@ -169,11 +169,7 @@ class ReferenceCatalogMonitor:
             )
 
     async def _async_integration_version(self) -> str | None:
-        try:
-            version = (await async_get_integration(self._hass, DOMAIN)).version
-        except IntegrationNotFound:
-            return None
-        return str(version) if version is not None else None
+        return await async_integration_version(self._hass)
 
     def _issue_url(self) -> str:
         context = IssueContext(
@@ -480,6 +476,15 @@ def build_issue_report(
         refs = [format_plan_ref(ref, context.unchecked_plans) for ref in context.unknown_plan_refs]
         lines += ["", "### Plan elements with unknown block types", "```", *_capped(refs), "```"]
     return title, "\n".join(lines)
+
+
+async def async_integration_version(hass: HomeAssistant) -> str | None:
+    """This integration's version from its manifest, None if HA cannot tell."""
+    try:
+        version = (await async_get_integration(hass, DOMAIN)).version
+    except IntegrationNotFound:
+        return None
+    return str(version) if version is not None else None
 
 
 def github_issue_url(issues_url: str, title: str, body: str, max_chars: int = ISSUE_URL_MAX_CHARS) -> str:

@@ -120,6 +120,12 @@ ISSUE_KNX_PRERELEASE_CLEANUP = "knx_prerelease_cleanup"
 # One issue per source category whose import is switched off while its Web-IO commands,
 # managed plans or Web-IO device still exist on the server; id "{key}_{class}_{server_id}".
 ISSUE_IMPORT_DISABLED = "import_disabled"
+# IOs of a type the integration has no entity for yet (unsupported_ios.py); id "{key}_{server_id}".
+ISSUE_UNSUPPORTED_IO_TYPES = "unsupported_io_types"
+# Units of meter readings no output can be set to. Comexio's type table marks some of them as
+# outputs ($IOInputTypes input false: the Smart Meter's E1-E3 in Wh, S in VA, Q and DQ in var);
+# as a writable number such an IO would offer a set point, so it gets no entity yet (#196).
+IO_MEASUREMENT_ONLY_UNITS = frozenset({"Wh", "kWh", "VA", "var"})
 # Web-IO classes (values) the user chose "Ignore" for in that repair; a class leaves this
 # list again once its import is switched back on (see prune_import_disabled_ignored).
 CONF_IMPORT_DISABLED_IGNORED = "import_disabled_ignored"
@@ -558,6 +564,11 @@ FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD = 3
 # Working bulk loads in a row that left out a plan the poll still lists before a persistent notification
 # names it (Comexio skips a plan it cannot deliver without an error). Dismissed once every plan loads again.
 FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD = 3
+# Plans a link check (ignored-source audit, cleanups) misses in the plan cache before it loads them in
+# one bulk request instead of one by one — at startup, before the first backup cycle, that is every
+# managed plan. The bulk load of all plans costs about three single loads (measured 2026-10-29:
+# 30 plans in 2.2 s, a single plan 0.2–2 s, 15 managed plans one by one 11.5 s).
+FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES = 3
 
 # Operation durations for progress calculation (seconds)
 SYNC_DURATION_DELETE = 4

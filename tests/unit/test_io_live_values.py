@@ -89,7 +89,7 @@ def _poll(
     else:
         fetch = io_live if isinstance(io_live, AsyncMock) else AsyncMock(return_value=io_live)
         api.get_io_live_states = fetch
-    _raw, parsed, _knx = asyncio.run(coordinator._async_fetch_parsed_config(entry_conf or {}))
+    _raw, parsed, _knx, _tables = asyncio.run(coordinator._async_fetch_parsed_config(entry_conf or {}))
     coordinator._merge_polled_states(
         {"markers": parsed["markers"], "io": parsed["io"], QUICKBUS_IO_DATA_KEY: parsed[QUICKBUS_IO_DATA_KEY]}
     )
@@ -121,6 +121,26 @@ def api(parsing_api: ComexioAPI) -> ComexioAPI:
     parsing_api._client = MagicMock()
     parsing_api._client_credentials = parsing_api._credentials()
     return parsing_api
+
+
+def test_the_poll_keeps_the_type_tables_its_config_page_came_with(api: ComexioAPI) -> None:
+    """A fetch elsewhere (a service) rebinding the API's tables during the live fetch leaves the poll's snapshot."""
+    coordinator = _coordinator(api)
+    fetched_types, fetched_input_types = api.io_types, api.io_input_types
+    api.get_raw_config = AsyncMock(return_value=_config())
+
+    async def _live_states_while_another_fetch_lands(*_args: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+        api.io_types, api.io_input_types = {"81": "NEW-FETCH"}, {"81": "NEW-FETCH"}
+        return {}, {}
+
+    api.get_live_states = AsyncMock(side_effect=_live_states_while_another_fetch_lands)
+    api.get_io_live_states = AsyncMock(return_value={})
+
+    *_rest, tables = asyncio.run(coordinator._async_fetch_parsed_config({}))
+
+    assert tables.io_types == fetched_types
+    assert tables.io_input_types == fetched_input_types
+    assert api.io_types == {"81": "NEW-FETCH"}  # the rebinding did happen
 
 
 def test_live_values_replace_the_config_page_default(api: ComexioAPI) -> None:

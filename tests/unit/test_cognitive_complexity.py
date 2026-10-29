@@ -21,7 +21,7 @@ MAX_COMPLEXITY = 15
 
 # "<path below custom_components/comexio>::<function>": complexipy score at the time it was listed.
 BASELINE = {
-    "__init__.py::async_setup_entry": 122,
+    "__init__.py::async_setup_entry": 110,
     "api.py::ComexioAPI::ensure_knx_loopback_webio": 16,
     "api.py::ComexioAPI::function_plan_add_knx_bridge_pairs": 18,
     "api.py::ComexioAPI::_function_plan_trigger_wired_source_ids": 16,
@@ -37,7 +37,7 @@ BASELINE = {
     "coordinator.py::ComexioCoordinator::_plan_knx_bridge_pairs": 18,
     "coordinator.py::ComexioCoordinator::_audit_trigger_pairs": 34,
     "ha_address.py::HaAddressResolver::_async_known_host": 16,
-    "number.py::async_setup_entry": 18,
+    "number.py::async_setup_entry": 16,
     "plan_watchdog.py::ManagedPlanWatchdog::async_check": 17,
     "reference_monitor.py::ReferenceCatalogMonitor::check_plans": 17,
     "repairs.py::ComexioRepairFlow::async_step_select_action": 174,

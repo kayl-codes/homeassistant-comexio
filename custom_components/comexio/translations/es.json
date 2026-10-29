@@ -593,6 +593,10 @@
       "title": "No se ejecutó la comprobación de bloques funcionales de Comexio ({server_id})",
       "description": "La integración no pudo comprobar qué bloques funcionales proporciona Comexio {version} en este servidor ({reason}). Hasta que la comprobación tenga éxito, las funciones que colocan el/los bloque(s) **{blocks}** en los planes funcionales (marcadores disparadores `[TRIG]`) están desactivadas para que no se creen elementos defectuosos.\n\nEsto no indica un firmware incompatible. La comprobación se repite en cada consulta y esta reparación desaparece en cuanto tenga éxito. Si persiste, revise el registro de Home Assistant e **[infórmelo en GitHub]({issue_url})**."
     },
+    "unsupported_io_types": {
+      "title": "IO de Comexio sin entidad ({server_id})",
+      "description": "Comexio indica estas IO como salidas aunque contienen un valor medido (unidad {units}): **{ios}**. Como número modificable ofrecerían una consigna para una medición, por eso esta versión no crea ninguna entidad para ellas.\n\n**[Informar en GitHub]({issue_url})**: abre una nueva incidencia con los tipos de IO ya rellenados (solo versiones, identificadores de tipo y de IO, sin nombres ni datos personales). Adjunte el archivo de diagnóstico (Ajustes → Dispositivos y servicios → Comexio → ⋮ → Descargar diagnósticos) y un registro de depuración (misma página: menú ⋮ superior → Activar el registro de depuración, después ⋮ de la entrada → Recargar, espere a que la integración esté cargada y luego menú ⋮ superior → Desactivar el registro de depuración: Home Assistant descarga el registro; puede contener nombres y direcciones de su instalación, revíselo). Después revise la incidencia y envíela; se necesita una cuenta de GitHub. Una versión posterior admitirá estas IO."
+    },
     "import_disabled": {
       "title": "Importación de {category} desactivada — restos en Comexio ({server_id})",
       "fix_flow": {

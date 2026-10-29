@@ -47,6 +47,29 @@ def test_com_map_prefers_the_exact_name_and_groups_by_key() -> None:
 
 
 @pytest.mark.parametrize(
+    ("full_name", "key"),
+    [
+        # The whole extension name: "Plant Room" + "AI1", where the positional split reads "Plant" + "Room".
+        ("HA IO Plant Room AI1 Alt", io_audit_key("Plant Room", "AI1")),
+        ("HA IO Ext1 I1 Alt", io_audit_key("Ext1", "I1")),
+        # Only after a space: I10 is no stale name of I1.
+        ("HA IO Ext1 I10", io_audit_key("Ext1", "I10")),
+        # Fits "Ext1" + "I1" and "Ext1 I1" + "AI1": no guess, it stays out of the audit.
+        ("HA IO Ext1 I1 AI1 Alt", None),
+    ],
+)
+def test_com_map_keys_a_stale_io_name_by_the_whole_current_name(full_name: str, key: str | None) -> None:
+    ha_map = {
+        io_audit_key(ext, ident): {"name": f"HA IO {ext} {ident}", "type": "digital"}
+        for ext, ident in [("Plant Room", "AI1"), ("Ext1", "I1"), ("Ext1 I1", "AI1")]
+    }
+
+    com_map = _build_com_audit_map({full_name: {"cmdId": 1, "typeId": 1}}, ha_map)
+
+    assert list(com_map) == ([key] if key else [])
+
+
+@pytest.mark.parametrize(
     ("fub_modules", "expected"),
     [
         ({"2": {"1": {"Id": 4}, "2": {"Id": 9}}, "11": [{"Id": 3}, "kaputt", {"Id": None}]}, (9, 3)),

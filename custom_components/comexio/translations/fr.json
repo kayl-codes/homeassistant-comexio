@@ -593,6 +593,10 @@
       "title": "Vérification des blocs fonctionnels Comexio non effectuée ({server_id})",
       "description": "L'intégration n'a pas pu vérifier quels blocs fonctionnels Comexio {version} fournit sur ce serveur ({reason}). Tant que la vérification n'aboutit pas, les fonctions qui placent le(s) bloc(s) **{blocks}** dans les plans fonctionnels (marqueurs déclencheurs `[TRIG]`) sont désactivées afin qu'aucun élément défectueux ne soit créé.\n\nCe n'est pas le signe d'un firmware incompatible. La vérification est relancée à chaque interrogation et cette réparation disparaît dès qu'elle aboutit. Si elle persiste, consultez le journal de Home Assistant et **[signalez-le sur GitHub]({issue_url})**."
     },
+    "unsupported_io_types": {
+      "title": "IO Comexio sans entité ({server_id})",
+      "description": "Comexio signale ces IO comme des sorties alors qu'elles portent une valeur mesurée (unité {units}) : **{ios}**. En tant que nombre modifiable, elles proposeraient une consigne pour une mesure ; cette version ne crée donc aucune entité pour elles.\n\n**[Signaler sur GitHub]({issue_url})** — ouvre un nouveau ticket avec les types d'IO déjà remplis (uniquement les versions, les identifiants de type et d'IO, aucun nom ni donnée personnelle). Joignez le fichier de diagnostic (Paramètres → Appareils et services → Comexio → ⋮ → Télécharger les diagnostics) et un journal de débogage (même page : menu ⋮ du haut → Activer la journalisation de débogage, puis ⋮ de l'entrée → Recharger, attendez que l'intégration soit chargée, puis menu ⋮ du haut → Désactiver la journalisation de débogage — Home Assistant télécharge le journal ; il peut contenir des noms et adresses de votre installation, vérifiez-le). Vérifiez ensuite le ticket puis envoyez-le ; un compte GitHub est requis. Une version ultérieure prendra ces IO en charge."
+    },
     "import_disabled": {
       "title": "Import {category} désactivé — restes sur Comexio ({server_id})",
       "fix_flow": {

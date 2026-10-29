@@ -100,7 +100,7 @@ def test_unreadable_plan_keys() -> None:
 
 def test_the_plan_map_is_not_pruned_by_a_plan_list_with_an_unreadable_entry() -> None:
     coordinator = _coordinator(MALFORMED_FUBS)
-    coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Markers": 8}})
+    coordinator.config_entry = SimpleNamespace(data={}, options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - Markers": 8}})
 
     assert coordinator._stale_plan_map_entries(MALFORMED_FUBS) == {}
 
@@ -378,7 +378,7 @@ def _column_plan_coordinator(fub_data: dict, membership: dict[int, list[str]]) -
     """A coordinator for resolve_io_clusters with these managed column plans (origins faked)."""
     coordinator = _coordinator(fub_data)
     coordinator.data = None
-    coordinator.config_entry = SimpleNamespace(options={})
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
     coordinator._function_plan_prefix = lambda: "HA"
     coordinator._function_plan_cluster_size = lambda: 100
     coordinator._stale_plan_map_entries = lambda _fub_data: {}
@@ -462,7 +462,7 @@ def test_the_pre_change_backup_skips_a_plan_whose_list_entry_is_unreadable(entry
 )
 def test_a_restore_keeps_the_bare_pick_while_the_old_id_entry_is_unreadable(fub_data: dict, still_live: bool) -> None:
     coordinator = _coordinator(fub_data)
-    coordinator.config_entry = SimpleNamespace(options={})
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
     with patch.object(coordinator_module, "repointed_watchdog_user_plan_picks", return_value=None) as repoint:
         coordinator._repoint_vanished_pick("Pumps", 5, 6)
 
@@ -492,7 +492,7 @@ def test_the_trigger_audit_waits_while_the_trigger_plan_may_be_an_unreadable_ent
     """Unknown, not "every trigger source missing": a sync would only try to create a second trigger plan."""
     coordinator = _coordinator(fub_data)
     coordinator.api = SimpleNamespace(fub_data=fub_data, flanke_ref_id=lambda: 5)
-    coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 9}})
+    coordinator.config_entry = SimpleNamespace(data={}, options={CONF_FUNCTION_PLAN_PLAN_MAP: {"HA - TRIGGER": 9}})
 
     assert coordinator._audit_trigger_pairs([1], 2) == audit
 
@@ -609,7 +609,7 @@ def _audit_coordinator(fub_data: dict) -> ComexioCoordinator:
     coordinator._cleanup_entity_ids = []
     coordinator._cleanup_function_plan_count = 0
     coordinator._ignored_ids_for = MagicMock(return_value=set())
-    coordinator.config_entry = SimpleNamespace(options={})
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
     coordinator.offline_extensions = set()
     coordinator._build_ha_audit_map = MagicMock(return_value=({}, {}))
     coordinator._update_import_disabled_issues = MagicMock()
@@ -887,7 +887,7 @@ def _cleanup_coordinator(fub_data: dict) -> ComexioCoordinator:
     coordinator.api.function_plan_name = lambda fub_id: str(function_plan_info(fub_data, fub_id).get("Name") or fub_id)
     coordinator.function_plan_plans = {7: {"elements": {}}, 12: {"elements": {}}}
     coordinator._function_plan_check_fub_ids = lambda: [7, 12]
-    coordinator.config_entry = SimpleNamespace(options={})
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
     return coordinator
 
 
@@ -961,7 +961,7 @@ def test_the_ignored_source_audit_counts_wiring_in_a_plan_with_an_unreadable_ent
     coordinator = _cleanup_coordinator(
         {"7": {"Name": "HA - Marker 1-50"}, "12": {"Id": "13", "Name": "HA - Marker 51-100"}}
     )
-    coordinator.config_entry = SimpleNamespace(options={CONF_FUNCTION_PLAN_PLAN_MAP: plan_map})
+    coordinator.config_entry = SimpleNamespace(data={}, options={CONF_FUNCTION_PLAN_PLAN_MAP: plan_map})
     load_failures: list[int] = []
     plans = asyncio.run(coordinator._load_managed_plan_check_data(load_failures, include_unknown=include_unknown))
 

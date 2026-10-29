@@ -62,7 +62,7 @@ def _qb_io(result: dict[str, Any], io_id: str) -> dict[str, Any]:
 
 def _coordinator(options: dict[str, Any], data: dict[str, Any], offline: set[str] | None = None) -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
-    coordinator.config_entry = SimpleNamespace(options=options)
+    coordinator.config_entry = SimpleNamespace(data={}, options=options)
     coordinator.data = data
     coordinator.offline_extensions = offline or set()
     coordinator.server_id = "test"

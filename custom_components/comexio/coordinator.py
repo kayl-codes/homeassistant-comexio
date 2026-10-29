@@ -83,6 +83,7 @@ from .const import (
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_HOST,
     CONF_IMPORT_DISABLED_IGNORED,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
@@ -107,6 +108,7 @@ from .const import (
     FIRMWARE_CHECK_MINUTE,
     FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
     FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD,
+    FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES,
     FUNCTION_PLAN_FUB_ID_AUTO,
     FUNCTION_PLAN_KNX_CLUSTER_SIZE,
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
@@ -263,6 +265,7 @@ from .plan_watchdog import (
 )
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
+from .unsupported_ios import IoTypeTableSnapshot, UnsupportedIoMonitor, io_has_entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -592,7 +595,8 @@ def _fallback_audit_key(full_name: str) -> str:
 
     Registry-driven: any range_clustered category ("HA <prefix><ID> <Name>", e.g. Marker/KNX)
     is identified by its audit_key_prefix, so a further range_clustered category needs no new
-    branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces.
+    branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces; a
+    stale name of a known IO is matched before, by _stale_io_command_keys.
     """
     parts = full_name.split(" ")
     if len(parts) < 3:
@@ -633,6 +637,29 @@ def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
     return parts[1], parts[-1]
 
 
+def _stale_io_command_keys(full_name: str, io_name_to_key: Mapping[str, str]) -> list[str]:
+    """Audit keys of the IOs an IO command "HA IO <ext> <identifier> <more>" may serve (an old description).
+
+    Matched against the IOs' whole current command names, so an extension name with spaces still
+    pins the IO where _fallback_audit_key's positional split would not. More than one key: the name
+    fits two IOs (extensions "EXT1" and "EXT1 I1") and tells neither.
+    """
+    return [key for command, key in io_name_to_key.items() if full_name.startswith(f"{command} ")]
+
+
+def _inexact_command_key(
+    full_name: str, quickbus_ref_to_key: Mapping[tuple[str, str], str], io_name_to_key: Mapping[str, str]
+) -> str | None:
+    """Audit key of a command whose name is no current one (see _build_com_audit_map); None if it fits two IOs."""
+    ref = _quickbus_command_ref(full_name)
+    if ref and (key := quickbus_ref_to_key.get(ref)):
+        return key
+    stale_keys = _stale_io_command_keys(full_name, io_name_to_key)
+    if len(stale_keys) > 1:
+        return None
+    return stale_keys[0] if stale_keys else _fallback_audit_key(full_name)
+
+
 def _build_com_audit_map(
     com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -640,22 +667,25 @@ def _build_com_audit_map(
 
     Exact reverse lookup first: ha_map's "name" values are built from the same extension names
     that may contain spaces, so a positional full_name.split(" ") would misparse
-    "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole extension name). Only
-    commands with no current HA counterpart (renamed/deleted markers or extensions) fall back
-    to the positional heuristic, purely for grouping.
+    "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole extension name). A name
+    that extends exactly one known IO's command name (an old description appended) goes to that IO;
+    one that extends two stays out of the audit, so neither a rename hands one IO's command and its
+    wiring to the other nor a sync deletes it as an orphan. Only commands with no current HA
+    counterpart (renamed/deleted markers or extensions) fall back to the positional heuristic,
+    purely for grouping.
     """
     name_to_key = {info["name"]: key for key, info in ha_map.items()}
     # A renamed Quickbus device changes its command names but not the device id + identifier:
     # grouped under the IO's key, the audit reports a rename that keeps the command (and the
     # user's wiring of its webIoId) instead of an orphan to delete plus a new command.
     quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
+    io_name_to_key = {info["name"]: key for key, info in ha_map.items() if classify_audit_key(key) is WebioClass.IO}
     com_map: dict[str, list[dict[str, Any]]] = {}
     for full_name, info in com_commands.items():
-        key = name_to_key.get(full_name, full_name)
-        if key == full_name:
-            ref = _quickbus_command_ref(full_name)
-            key = quickbus_ref_to_key.get(ref) if ref else None
-            key = key or _fallback_audit_key(full_name)
+        key = name_to_key.get(full_name) or _inexact_command_key(full_name, quickbus_ref_to_key, io_name_to_key)
+        if key is None:
+            _LOGGER.debug("Web-IO audit: command '%s' fits several IOs, left as it is", one_line(full_name))
+            continue
         com_map.setdefault(key, []).append(
             {
                 "name": full_name,
@@ -859,6 +889,11 @@ def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
+    # Plans the ignored-source audit of this poll loaded live, so the KNX audit reuses what the
+    # marker audit fetched instead of a second bulk request. None outside that audit block; only
+    # the read-only audit passes it on (memo=), a cleanup or unwire meanwhile loads live.
+    _audit_plan_memo: dict[int, dict] | None = None
+
     def __init__(self, hass: HomeAssistant, api: ComexioAPI, entry: ConfigEntry) -> None:
         super().__init__(
             hass,
@@ -873,6 +908,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
+        self.unsupported_ios = UnsupportedIoMonitor(hass, api, self.server_id)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
@@ -1338,7 +1374,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Precompute cover keywords once per update
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
 
-        raw_config, parsed_data, knx_live_states = await self._async_fetch_parsed_config(conf)
+        raw_config, parsed_data, knx_live_states, io_type_tables = await self._async_fetch_parsed_config(conf)
         # Unfiltered per-category counts — parsed_data carries every category regardless of
         # import_* opt-in, unlike final_data below. See available_source_counts docstring.
         # Held locally and only published to self.available_source_counts right before the
@@ -1364,6 +1400,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._prune_deleted_plans_from_snapshot()
 
         final_data = _imported_data(parsed_data, conf)
+        await self.unsupported_ios.async_update(raw_config, final_data["io"], tables=io_type_tables)
         self._merge_polled_states(final_data)
         self._merge_polled_knx_states(final_data["knx"], knx_live_states)
 
@@ -1385,10 +1422,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # rather than overwriting, so neither category's contribution clobbers the other's.
         self._cleanup_entity_ids = []
         self._cleanup_function_plan_count = 0
-        await self.async_check_ignored_markers(conf, final_data, options_at_poll)
-        # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
-        # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
-        await self.async_check_ignored_knx(conf, final_data, options_at_poll)
+        await self._async_audit_ignored_categories(conf, final_data, options_at_poll)
 
         # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
         if await self._async_audit_webio(conf, final_data, parsed_data):
@@ -1414,14 +1448,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        """Fetch the raw config and live states and parse them: (raw_config, parsed_data, knx_live_states)."""
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], IoTypeTableSnapshot]:
+        """Fetch the raw config and live states and parse them.
+
+        Returns (raw_config, parsed_data, knx_live_states, io_type_tables): the IO type tables as the
+        fetch left them, before a fetch elsewhere (a service, a sync) rebinds the API's during an await.
+        """
         import_knx = conf.get("import_knx", False)
         # Fetch current raw configuration from the Comexio API. A plan HA starts or stops
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
         mismatches_before = self.api.certificate_mismatch_count
         raw_config = await self.api.get_raw_config()
+        # Taken before anything yields: the tables of the page raw_config is — or, when a newer fetch failed
+        # meanwhile, of the last applied page, as such a fetch applies nothing (see get_raw_config).
+        io_type_tables = IoTypeTableSnapshot.of(self.api)
         self._fail_poll_on_certificate_mismatch(mismatches_before)
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
         if self.api.config_relogin_unreachable:
@@ -1482,7 +1523,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         else:
             # IO and Quickbus import off: nobody shows these IOs, so no Comexio round-trip and no warnings for them.
             self._reset_io_live_tracking()
-        return raw_config, parsed_data, knx_live_states
+        return raw_config, parsed_data, knx_live_states, io_type_tables
 
     def _reset_io_live_tracking(self) -> None:
         """Forget what the IO live path logged, so a re-enabled IO import reports afresh."""
@@ -1676,11 +1717,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         False if a Web-IO class is missing on the server: the audit then only raises that
         repair issue (see _report_missing_webio_classes) and the poll ends early.
         """
-        ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
-        audited_commands, disabled_commands = _split_disabled_commands(
-            final_data["webio_commands"], active_webio_classes(conf)
-        )
-        com_map = _build_com_audit_map(audited_commands, ha_map)
+        ha_map, io_meta_by_key, com_map, disabled_commands = self._build_audit_maps(conf, final_data)
 
         webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
@@ -1831,7 +1868,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         glue with no HA entity and no Web-IO command of their own (see
         project_knx_write_path_design memory) — without this they permanently show up as
         "Fehlend" since no webIO is ever expected to exist for them.
-        IOs have their own composite ext_name+identifier key shape.
+        IOs have their own composite ext_name+identifier key shape; only IOs with an entity are
+        expected (webio_source_data), the others are held (_build_com_audit_map_without_held).
         """
         ha_map: dict[str, dict[str, Any]] = {}
         for cat in SOURCE_CATEGORIES.values():
@@ -1847,23 +1885,63 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 }
 
         io_meta_by_key: dict[str, dict[str, Any]] = {}
-        for io in final_data["io"]:
-            key = io_audit_key(io["ext_name"], io["identifier"])
+        for key, io, name in self._io_audit_entries(self.webio_source_data(final_data)):
             # api.py provides 'is_binary'; the audit type ('digital'/'analog') derives from it.
-            mapped_type = "digital" if io.get("is_binary") else "analog"
-            ha_map[key] = {"name": io_command_name(io), "type": mapped_type}
-            io_meta_by_key[key] = io
-        # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); their io_meta entry
-        # feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).
-        quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
-        for io in webio_quickbus_ios(self.config_entry.options, final_data):
-            key = source_audit_key(quickbus_cat, io["id"])
-            ha_map[key] = {
-                "name": quickbus_command_name(io),
-                "type": "digital" if io.get("is_binary") else "analog",
-            }
+            ha_map[key] = {"name": name, "type": "digital" if io.get("is_binary") else "analog"}
             io_meta_by_key[key] = io
         return ha_map, io_meta_by_key
+
+    def _io_audit_entries(self, data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, Any], str]]:
+        """(audit key, IO, Web-IO command name) of data's IOs and of its Quickbus IOs of selected devices.
+
+        Quickbus IOs are keyed by their IO Id (identifiers repeat per device); their io_meta entry
+        feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).
+        """
+        for io in data.get("io", []):
+            yield io_audit_key(io["ext_name"], io["identifier"]), io, io_command_name(io)
+        quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
+        for io in webio_quickbus_ios(self.config_entry.options, data):
+            yield source_audit_key(quickbus_cat, io["id"]), io, quickbus_command_name(io)
+
+    def _build_audit_maps(
+        self, conf: Mapping[str, Any], final_data: dict[str, Any]
+    ) -> tuple[
+        dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], dict[WebioClass, int]
+    ]:
+        """ha_map, io_meta_by_key, com_map and the per-class count of switched-off commands of an audit."""
+        ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
+        audited_commands, disabled_commands = _split_disabled_commands(
+            final_data["webio_commands"], active_webio_classes(conf)
+        )
+        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map)
+        return ha_map, io_meta_by_key, com_map, disabled_commands
+
+    def _build_com_audit_map_without_held(
+        self, com_commands: dict[str, Any], final_data: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """_build_com_audit_map less the commands of held IOs: imported IOs without an entity.
+
+        Those are an offline extension's IOs while include_offline_extensions is off and IOs of an
+        unsupported type (io_has_entity). HA expects no command for them, and the ones Comexio has
+        stay as they are: grouped under their IO's key, then dropped, so they are neither checked
+        nor reported as orphans a delta sync would delete — with the extension back online or the
+        option turned on, the same command serves the IO again, wiring included. A Fast-Track
+        recreate uploads no command for them; it runs only once Comexio let the class's device be
+        deleted, which it refuses while a command is wired, so only unwired ones go.
+        """
+        held_map = {key: {"name": name} for key, _io, name in self._io_audit_entries(final_data) if key not in ha_map}
+        com_map = _build_com_audit_map(com_commands, ha_map | held_map)
+        held = [key for key in held_map if key in com_map]
+        for key in held:
+            del com_map[key]
+        if held:
+            _LOGGER.debug(
+                "[%s] Web-IO audit: %d of %d IOs without an entity keep their existing commands",
+                self.server_id,
+                len(held),
+                len(held_map),
+            )
+        return com_map
 
     def _update_import_disabled_issues(
         self,
@@ -3160,6 +3238,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # on snapshot_changed (not just the pending flag) keeps a relevant plan that the
             # bulk endpoint can never deliver (e.g. a persistently malformed entry) from
             # retriggering this refresh every single cycle forever.
+            _LOGGER.info(
+                "[%s] Refresh after plan snapshot: missing-plan recheck %s, referenced markers changed %s",
+                self.server_id,
+                self._lp_missing_recheck_pending and snapshot_changed,
+                markers_changed,
+            )
             self._lp_missing_recheck_pending = False
             await self.async_request_refresh()
 
@@ -5028,6 +5112,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             result[RANGE_CHECK_CORRECTION_FAILED] += 1
             _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", one_line(name))
 
+    def _webio_range_targets(self) -> dict[str, dict[str, Any]]:
+        """The range check's target command by name, as build_webio_commands would create it today.
+
+        include_held: a command kept for an IO without an entity still gets its range checked.
+        """
+        return {
+            cmd["Name"]: cmd
+            for cmd in self.api.build_webio_commands(
+                self.server_id,
+                self.webio_source_data(include_held=True),
+                None,
+                self.ignored_marker_ids,
+                self.ignored_knx_ids,
+            )
+        }
+
     async def _async_webio_range_check_tick(self, _now: datetime | None = None) -> dict[str, int]:
         """Check and correct analog Web-IO command Min/Max drift against the target range.
 
@@ -5068,12 +5168,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         async with self._sync_lock:
             webio_commands = self.data.get("webio_commands", {})
             webio_devices = self.data.get("webio_devices", {})
-            target_by_name = {
-                cmd["Name"]: cmd
-                for cmd in self.api.build_webio_commands(
-                    self.server_id, self.webio_source_data(), None, self.ignored_marker_ids, self.ignored_knx_ids
-                )
-            }
+            target_by_name = self._webio_range_targets()
 
             for name, cmd in webio_commands.items():
                 if cmd.get("typeId") not in {2, "2"}:
@@ -7004,6 +7099,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         )
 
+    async def _async_audit_ignored_categories(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
+        """Marker, then KNX ignored-source audit, sharing the plans they load live (_audit_plan_memo)."""
+        self._audit_plan_memo = {}
+        try:
+            await self.async_check_ignored_markers(conf, final_data, options_at_poll)
+            # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
+            # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
+            await self.async_check_ignored_knx(conf, final_data, options_at_poll)
+        finally:
+            self._audit_plan_memo = None
+
     async def async_check_ignored_sources(
         self,
         conf: dict[str, Any],
@@ -7090,7 +7198,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         # A plan whose list entry is unreadable may be managed: its wiring counts (unknown, not clean).
         load_failures: list[int] = []
-        lp_plans = await self._load_managed_plan_check_data(load_failures=load_failures, include_unknown=True)
+        lp_plans = await self._load_managed_plan_check_data(
+            load_failures=load_failures, include_unknown=True, memo=self._audit_plan_memo
+        )
         unaudited = self._unaudited_plans(load_failures, lp_plans)
         last_links = self._ignored_plan_links.get(webio_class, {})
         links: dict[int, set[int]] = {}
@@ -7802,10 +7912,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 reason,
             )
 
-    def webio_source_data(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """data (default: coordinator.data) as the Web-IO builders get it: Quickbus IOs of selected devices only."""
+    def webio_source_data(self, data: dict[str, Any] | None = None, *, include_held: bool = False) -> dict[str, Any]:
+        """data (default: coordinator.data) as the Web-IO builders get it: only IOs with an entity.
+
+        IOs per io_has_entity, Quickbus IOs of selected devices on an online extension (or with
+        include_offline_extensions on) — the same rule as their entities. An IO without an entity
+        gets no command: nothing would show the value it pushes. include_held keeps those held IOs
+        (see _build_com_audit_map_without_held), for checks of the commands Comexio already has.
+        """
         data = (self.data if data is None else data) or {}
-        return {**data, QUICKBUS_IO_DATA_KEY: webio_quickbus_ios(self.config_entry.options, data)}
+        options = self.config_entry.options
+        quickbus_ios = webio_quickbus_ios(options, data)
+        if include_held:
+            return {**data, QUICKBUS_IO_DATA_KEY: quickbus_ios}
+        include_offline = {**self.config_entry.data, **options}.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
+        return {
+            **data,
+            "io": [io for io in data.get("io", []) if io_has_entity(io, include_offline)],
+            QUICKBUS_IO_DATA_KEY: [io for io in quickbus_ios if include_offline or not io.get("offline")],
+        }
 
     def managed_column_plan(self, fub_id: int) -> tuple[IoPlanKind, list[str]] | None:
         """(kind, members) when fub_id is an HA-managed IO or Quickbus column plan, else None.
@@ -8358,7 +8483,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_ids.update(int(v) for v in plan_map.values())
         return fub_ids
 
-    async def _load_function_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
+    async def _load_function_plan_check_data(
+        self, load_failures: list[int] | None = None, *, memo: dict[int, dict] | None = None
+    ) -> dict[int, dict]:
         """Load wiring data of all managed function plans for batch marker checks.
 
         Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
@@ -8373,25 +8500,71 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cache miss here too — this method feeds marker-cleanup/unwire lookups that need to see
         whatever was actually wired into the plan afterward, not the seed's now-possibly-stale
         empty snapshot.
+
+        Several cache misses (every managed plan at startup, before the first backup cycle) are
+        fetched in one bulk request; a plan the bulk answer lacks (or holds empty) is fetched on its own.
+        memo (only the read-only ignored-source audit passes one, _audit_plan_memo) serves a miss an
+        earlier call loaded and keeps what this one loads; a failed plan is tried again.
         """
-        plans: dict[int, dict] = {}
-        for fub_id in self._function_plan_check_fub_ids():
-            plan_data = self.function_plan_plans.get(fub_id)
-            if plan_data is None or plan_data.get(_SEEDED_EMPTY_PLAN_MARKER):
-                try:
-                    plan_data = await self.api.function_plan_load_elements(fub_id)
-                except Exception:
-                    _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
-                    plan_data = None
-                if not plan_data and load_failures is not None:
-                    load_failures.append(fub_id)
-            if plan_data:
-                plans[fub_id] = plan_data
+        cached = {fub_id: self.function_plan_plans.get(fub_id) for fub_id in self._function_plan_check_fub_ids()}
+        misses = [fub_id for fub_id, data in cached.items() if data is None or data.get(_SEEDED_EMPTY_PLAN_MARKER)]
+        fetched = await self._fetch_check_plans(misses, load_failures, memo)
+        plans = {fub_id: plan_data for fub_id, plan_data in {**cached, **fetched}.items() if plan_data}
         if load_failures is not None:
             load_failures.extend(self._plans_without_readable_entry(plans))
         if not plans:
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
+
+    async def _fetch_check_plans(
+        self, fub_ids: list[int], load_failures: list[int] | None, memo: dict[int, dict] | None
+    ) -> dict[int, dict | None]:
+        """Live wiring data of fub_ids for a link check, None for a plan that failed (appended to load_failures).
+
+        Plans already in memo are reused; memo then also keeps every plan this call loaded.
+        """
+        fetched: dict[int, dict | None] = {}
+        if memo is not None:
+            fetched = {fub_id: memo[fub_id] for fub_id in fub_ids if fub_id in memo}
+        to_load = [fub_id for fub_id in fub_ids if fub_id not in fetched]
+        bulk = await self._bulk_load_check_plans(to_load)
+        for fub_id in to_load:
+            plan_data = bulk.get(fub_id) or await self._load_check_plan(fub_id)
+            if not plan_data and load_failures is not None:
+                load_failures.append(fub_id)
+            fetched[fub_id] = plan_data
+        if memo is not None:
+            memo.update({fub_id: plan_data for fub_id, plan_data in fetched.items() if plan_data})
+        return fetched
+
+    async def _load_check_plan(self, fub_id: int) -> dict | None:
+        """One plan's live wiring data for a link check, None on a failure (logged).
+
+        strict: a payload without real elements and connections collections is a failure too, not
+        a plan without wiring that would let the audit read the plan as clean.
+        """
+        try:
+            return await self.api.function_plan_load_elements(fub_id, strict=True)
+        except Exception:
+            _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
+            return None
+
+    async def _bulk_load_check_plans(self, fub_ids: list[int]) -> dict[int, dict]:
+        """All plans in one request once fub_ids reach FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES, else {}.
+
+        {} on a failure as well (function_plan_load_all_plans logs a ComexioError): the caller then
+        loads every plan on its own, as it does for a plan the bulk answer lacks. strict drops an
+        entry without real elements and connections collections (an empty plan stays), so such a
+        plan is loaded on its own (strict too, see _load_check_plan) instead of counting as a plan
+        without wiring.
+        """
+        if len(fub_ids) < FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES:
+            return {}
+        try:
+            return await self.api.function_plan_load_all_plans(strict=True)
+        except Exception:
+            _LOGGER.exception("[%s] Error bulk-loading the function plans for link check", self.server_id)
+            return {}
 
     def _plans_without_readable_entry(self, fub_ids: Iterable[int]) -> list[int]:
         """The fub_ids without a readable plan list entry, [] while the list has no unreadable entries."""
@@ -8400,9 +8573,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return [fub_id for fub_id in fub_ids if not function_plan_info(self.api.fub_data, fub_id)]
 
     async def _load_managed_plan_check_data(
-        self, load_failures: list[int] | None = None, *, include_unknown: bool = False
+        self,
+        load_failures: list[int] | None = None,
+        *,
+        include_unknown: bool = False,
+        memo: dict[int, dict] | None = None,
     ) -> dict[int, dict]:
-        """_load_function_plan_check_data without the plans outside HA's naming and the trigger plan.
+        """_load_function_plan_check_data (memo passed on) without the plans outside HA's naming and the trigger plan.
 
         include_unknown keeps the cluster plans HA mapped whose plan list entry is unreadable
         (managed by name is unknown then, see _plans_without_readable_entry): the read-only audit
@@ -8418,7 +8595,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         and removed as a whole — the generic cleanup would only see the source wired to its
         Flanke, keep it, and flag it again on every audit.
         """
-        plans = await self._load_function_plan_check_data(load_failures)
+        plans = await self._load_function_plan_check_data(load_failures, memo=memo)
         unknown = set(self._plans_without_readable_entry(plans)) if include_unknown else set()
         unknown &= self._mapped_cluster_plan_ids()
         return {

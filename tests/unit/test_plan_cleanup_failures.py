@@ -415,18 +415,23 @@ def test_cleanup_finds_every_managed_plan_holding_the_source() -> None:
         42: {"elements": {"3": _marker_element(7)}},
     }
 
-    async def _load(load_failures: list[int] | None = None) -> dict[int, Any]:
+    memos: list[Any] = []
+
+    async def _load(load_failures: list[int] | None = None, *, memo: dict[int, dict] | None = None) -> dict[int, Any]:
+        memos.append(memo)
         if load_failures is not None:
             load_failures.append(38)  # a managed plan that could not be loaded
         return plans
 
     coordinator = _coordinator(_api(_find_source_element_id=ComexioAPI._find_source_element_id))
     coordinator._load_function_plan_check_data = _load  # type: ignore[method-assign]
+    coordinator._audit_plan_memo = {}  # an open audit block must not hand the cleanup its plans
     load_failures: list[int] = []
     with patch.object(ComexioCoordinator, "_is_managed_function_plan", lambda _self, fub_id: fub_id != 5):
         result = asyncio.run(coordinator.resolve_source_cleanup_plans([253, 254], load_failures=load_failures))
     assert result == {36: [253, 254], 37: [253]}
     assert load_failures == [38]
+    assert memos == [None]  # the cleanup loads live
 
 
 def test_cleanup_scans_a_plan_behind_a_stale_trigger_mapping() -> None:

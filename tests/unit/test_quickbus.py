@@ -102,7 +102,7 @@ def test_quickbus_audit_map_names_match_the_web_io_commands(
     """The audit expects exactly the commands the sync creates — else every poll reports them missing."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
-    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
+    coordinator.config_entry = SimpleNamespace(data={}, options={})  # QB device selection never saved: all devices
 
     ha_map, io_meta_by_key = coordinator._build_ha_audit_map(quickbus_result)
 
@@ -372,7 +372,7 @@ def _audit(ha_map: dict[str, Any], com_commands: dict[str, Any]) -> dict[str, li
 def test_synced_quickbus_commands_audit_clean(parsing_api: ComexioAPI, quickbus_result: dict[str, Any]) -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
-    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
+    coordinator.config_entry = SimpleNamespace(data={}, options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
 
     found = _audit(ha_map, _comexio_commands(parsing_api, quickbus_result))
@@ -385,7 +385,7 @@ def test_a_quickbus_command_of_a_renamed_device_is_an_orphan(
 ) -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
-    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
+    coordinator.config_entry = SimpleNamespace(data={}, options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
     commands = _comexio_commands(parsing_api, quickbus_result)
     commands["HA QB9 Old G1"] = {"typeId": 1, "cmdId": "99", "webioClass": WebioClass.QUICKBUS}
@@ -402,7 +402,7 @@ def test_a_quickbus_command_of_a_renamed_device_is_renamed_in_place(
     """Device id + identifier still pin the IO: rename the command, never delete and recreate it."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
-    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
+    coordinator.config_entry = SimpleNamespace(data={}, options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
     commands = _comexio_commands(parsing_api, quickbus_result)
     commands["HA QB1 Old Name G1"] = commands.pop("HA QB1 MT Flur G1")
@@ -421,7 +421,7 @@ def test_a_missing_quickbus_command_is_created_in_the_quickbus_class(
 ) -> None:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.ignored_ids_for = lambda _cls: set()
-    coordinator.config_entry = SimpleNamespace(options={})  # QB device selection never saved: all devices
+    coordinator.config_entry = SimpleNamespace(data={}, options={})  # QB device selection never saved: all devices
     ha_map, _meta = coordinator._build_ha_audit_map(quickbus_result)
     commands = _comexio_commands(parsing_api, quickbus_result)
     del commands["HA QB1 MT Flur G1"]
