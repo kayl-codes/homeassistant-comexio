@@ -9,7 +9,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
-## [0.30.0] — 2026-10-27
+## [0.30.0] — 2026-10-29
 
 Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and v0.20.0-rc1 … rc3.
 
@@ -30,6 +30,7 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - **Block settings in the plan preview:** hovering a block lists its settings as "Name: Value" lines, e.g. `t1: 0,5 Sek.`. A live preview shows the current settings; a backup preview, also of a deleted plan, shows the settings as they were when the backup was taken (#242).
 - **Repair for switched-off imports:** with `import_markers`, `import_ios` or `import_knx` off, its Web-IO commands no longer count as orphans; a repair offers **Clean up**, **Ignore** or **Switch import on** (#160).
 - **Ignore lists during the initial setup:** with marker or KNX import on, the setup asks for the marker and KNX ignore lists in a second step, so unwanted IDs never get entities or Web-IO commands. The options dialog shows an ignore list only while its category is imported and keeps the hidden list unchanged; an invalid list shows a translated error (#243).
+- **Unsupported IO types are reported:** an IO whose type Home Assistant cannot map (e.g. Smart Meter readings) gets no entity instead of a wrongly typed one. The repair *Unsupported IO types* lists those IOs and links to a prefilled GitHub issue. A new diagnostics download holds Comexio's raw IO and type-table data of the last poll, without credentials, host, descriptions, values or serials (#196, #245).
 
 ### 🛠️ Core & Stability Improvements
 - **All Comexio communication through aiocomexio:** parsing, scraping, Web-IO building, login, reads and writes run through the [aiocomexio](https://github.com/kayl-codes/aiocomexio) library. A valid session is reused, concurrent logins collapse into one, and a lapsed session is no longer read as "Web-IO class absent" (#107, #108, #110, #111, #112, #114, #143, #200, #236, #242).
@@ -43,13 +44,16 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - **Quicker sync wiring checks:** the KNX and trigger re-checks at the end of a sync share one config and plan fetch when nothing was written in between. The status shows each wiring step, and the result says "no changes needed" instead of `+0 … -0` (#104).
 - **KNX Web-IO bulk prestage:** all KNX bridge Markers are allocated and the API-Loopback Web-IO class is created with all its commands before the first KNX plan is wired (#103).
 - **Skipped sync checks are reported:** a trigger or KNX bridge/loopback re-check that could not read Comexio's current state adds a warning line to the sync result (#105).
+- **Faster startup with ignore lists:** the startup check of ignored markers and KNX objects loads all managed plans in one bulk request instead of one request per plan and category — on a test installation about 2 s instead of 23 s (#247).
 - **Plan preview retries failed loads** with backoff (2 s up to 60 s), one fetch in flight at a time (#102).
-- **Tests and review guards:** Home Assistant integration tests in their own CI job, a stable-entity_id check for every entity class, a local cognitive-complexity guard, and a review checklist that catches more bug classes before review (#134, #135, #223, #225–#231 and the checklist PRs).
+- **Tests and review guards:** Home Assistant integration tests in their own CI job, a stable-entity_id check for every entity class, a local cognitive-complexity guard, and a review checklist that catches more bug classes before review (#134, #135, #223, #225–#231, #241 and the checklist PRs).
 
 ### 🐛 Bug Fixes & Refactoring
 - **Switched-on outputs shown as off after a poll:** IO and Quickbus IO values came from the config page, which only holds a placeholder `0`, so a poll could reset a real reading to 0/off. They now come from Comexio's live refresh. An IO without a known reading yet shows *unknown* instead of off, and a failed live fetch keeps the last real values (from the live refresh or a webhook push). Reported by **@mexpert71** (#175, #239).
 - **`marker_delete` never deletes a placed marker**, not even with `force`; if a plan cannot be read, nothing is deleted (#186).
-- **Ignore lists:** the ignored-source cleanup searches every managed plan (#141); an ignored `[TRIG]` source loses its trigger pair and KNX bridge markers can no longer be ignored (#152, #164); ranges like `300-399` are kept as written and also cover IDs created later (#198).
+- **Ignore lists:** the ignored-source cleanup searches every managed plan (#141); an ignored `[TRIG]` source loses its trigger pair and KNX bridge markers can no longer be ignored (#152, #164); ranges like `300-399` are kept as written and also cover IDs created later (#198). The cleanup now handles every element of an ignored source, removes only the Web-IO elements it feeds while other logic stays wired, deletes leftover commands without a plan element, and keeps everything when a plan cannot be read (#244).
+- **Web-IO audit counted IOs without an entity:** IOs on an offline extension (with *include offline extensions* off) or of an unsupported type were reported as missing commands, and a sync would have created commands that push into no entity. Their existing commands are now kept and neither checked nor deleted (#246).
+- **Number platform failed on an IO type without a range:** one such IO took down every number entity, so only part of the markers appeared (#245).
 - **Temperature markers** accept −273 to 10,000 °C on the 0.1 grid, a bare "Soll" no longer counts as a temperature, and `markise` / `awning` join the cover keywords. Reported by **@mexpert71** (#179, #191, #218).
 - **Sync failing with `bad operand type for abs(): 'str'`** on an IO type with an unusable min/max (fixed in aiocomexio 0.7.0). Reported by **@Segelbootsfan** (#196).
 - **"Add missing pairs" for unnamed wired markers** no longer fails with `not found in fresh config`. Reported by **@fabbrab** (#161, #197).
@@ -76,6 +80,7 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - **HTTPS switch:** an existing entry switches to HTTPS at its next start when Comexio serves it; a notification names the pinned fingerprint.
 - **Home Assistant address:** a configured `internal_url` now outranks a guessed `homeassistant.<domain>` name. Behind NAT or a Docker bridge, set `internal_url` to the address Comexio reaches Home Assistant under.
 - **Markers named only "Soll …"** lose their °C unit; Home Assistant raises its own "units changed" repair for their statistics.
+- **Meter readings Comexio marks as outputs** (units Wh, kWh, VA, var) no longer get a writable number entity; an existing one is removed as orphaned (#245).
 - **Plan card:** the bundled card was updated; if its help dialog still shows an old version, clear the browser cache.
 
 ---
