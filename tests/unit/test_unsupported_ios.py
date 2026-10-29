@@ -189,7 +189,7 @@ def test_the_report_names_types_and_identifiers_but_no_names_or_serials() -> Non
     assert '"min": "-2147483648"' in body
     assert '"input": {"id": 81, "input": false}' in body
     assert "- Integration: 0.30.0" in body
-    assert "- Comexio: 11.0.2" in body
+    assert r"- Comexio: 11\.0\.2" in body
     assert "Download diagnostics" in body
     assert "Enable debug logging" in body
     # The user files it in either language: the steps come in English and German.
@@ -219,6 +219,22 @@ def test_the_report_and_the_repair_show_comexio_text_literally(
     assert f"IO type 81: {escaped}" in body
     listed = issue_registry.async_create_issue.call_args.kwargs["translation_placeholders"]["ios"]
     assert listed == rf"Meter\_\*Garage\*: {escaped}"
+
+
+def test_the_report_shows_the_versions_and_type_ids_of_comexio_literally() -> None:
+    """A version or type id read from Comexio adds no link or image to the report either."""
+    api = _api()
+    api.comexio_version = "11.0 ![x](https://evil.example)"
+    io = {**_io("E1", "Wh"), "type_id_raw": "81](https://evil.example)"}
+    extensions = {"Meter Garage": {"TypeId": "[31](https://evil.example)"}}
+
+    title, body = build_unsupported_io_report([io], extensions, api, None, tables=api)  # type: ignore[arg-type]
+
+    assert r"- Comexio: 11\.0 \!\[x\]\(https\://evil\.example\)" in body
+    assert r"- Extension type \[31\]\(https\://evil\.example\), IO type 81\]\(https\://evil\.example\): E1" in body
+    assert "](" not in body
+    # GitHub shows an issue title as plain text, not Markdown: it keeps the raw type id.
+    assert title == "Comexio IO types not supported (extension type [31](https://evil.example))"
 
 
 def test_markdown_text_escapes_every_markdown_character() -> None:
