@@ -444,12 +444,12 @@ class ManagedPlanWatchdog:
             self._track_running(managed, run_state)
             stopped = next_stopped_plans(managed, run_state, previous)
             self._log_transitions(previous, stopped, managed)
-            to_start = {
+            if to_start := {
                 fub_id: name for fub_id, name in stopped.items() if auto_start and self._auto_start_enabled(fub_id)
-            }
-            auto_started: dict[int, str] = {}
-            if to_start:
+            }:
                 auto_started = await self._async_auto_start(to_start)
+            else:
+                auto_started = {}
             if self._closed:
                 # Unloaded while Auto-Start awaited Comexio: the reloaded watchdog owns the shared repairs now,
                 # this check's snapshot would delete the ones it raised meanwhile.

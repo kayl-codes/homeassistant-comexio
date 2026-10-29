@@ -344,8 +344,7 @@ def _build_connect_poc_summary(
         lines += [f"\n**{len(errors)} errors:**"] + [f"- {e}" for e in errors]
 
     act_note = _plan_activation_note(was_active, activated, has_changes=bool(results), fub_id=fub_id)
-    lines.append(f"\n{act_note}")
-    lines.append(f"Duration: {duration:.1f}s")
+    lines.extend((f"\n{act_note}", f"Duration: {duration:.1f}s"))
 
     title = f"Function Plan Connect — {len(results)} OK / {len(skipped)} Skip / {len(errors)} Errors"
     return "\n".join(lines), title

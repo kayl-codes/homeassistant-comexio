@@ -24,8 +24,7 @@ def stable_statistic_id_pattern(server_slug: str, extension_slugs: Iterable[str]
     suffix is accepted. Use with ``fullmatch``.
     """
     alternatives = [r"m\d+", r"k\d+(?:_k\d+)?"]
-    ext = sorted({slug for slug in extension_slugs if slug}, key=len, reverse=True)
-    if ext:
+    if ext := sorted({slug for slug in extension_slugs if slug}, key=len, reverse=True):
         alternatives.append(f"(?:{'|'.join(map(re.escape, ext))})_[a-z0-9]+(?:_[a-z0-9]+)*?")
     return re.compile(rf"sensor\.{re.escape(server_slug)}_(?:{'|'.join(alternatives)})(?:_\d+)?")
 

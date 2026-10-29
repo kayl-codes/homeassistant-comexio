@@ -254,11 +254,10 @@ def _backup_entry(key: str, plan_name: str, slot: int, snap: dict[str, Any]) -> 
 
 def _list_backup_entries(data: dict[str, dict[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
     """Flatten one store's {fub_id: {plan_name: [snap, ...]}} into sorted metadata entries."""
-    entries = []
+    entries: list[dict[str, Any]] = []
     for key, identities in data.items():
         for plan_name, history in identities.items():
-            for slot, snap in enumerate(history):
-                entries.append(_backup_entry(key, plan_name, slot, snap))
+            entries.extend(_backup_entry(key, plan_name, slot, snap) for slot, snap in enumerate(history))
     entries.sort(key=lambda e: e.get("captured_at") or "", reverse=True)
     return entries
 
@@ -1279,12 +1278,11 @@ class FunctionPlanBackupManager:
         await self._async_ensure_loaded()
         if fub_data is None:
             return None
-        stale = {
+        if stale := {
             (fub_id, name)
             for fub_id, name in self._kept
             if not is_orphaned_identity(fub_data, fub_id, name) or not self._snapshot_total(fub_id, name)
-        }
-        if stale:
+        }:
             self._kept -= stale
             await self._async_save_kept()
         return [

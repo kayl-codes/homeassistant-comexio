@@ -237,15 +237,13 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # Marker + KNX share the same schema/import/ignored-ids field shape (registry-driven
         # via ignore_list_categories — the source categories that support an ignore-list);
         # IO keeps its own fields since its unique_id/no-ignore-list shape differs.
-        schema_dict: dict = {}
-        for cat in source_cats:
+        schema_dict: dict = {
+            vol.Optional(cat.schema_conf_key, default=conf.get(cat.schema_conf_key, cat.schema_default)): str
+            for cat in source_cats
             # Same visibility as the opt-in toggle below — a naming-schema field for a category
             # the user can't even opt into would be a dead field.
-            if cat.key in hidden_cats:
-                continue
-            schema_dict[
-                vol.Optional(cat.schema_conf_key, default=conf.get(cat.schema_conf_key, cat.schema_default))
-            ] = str
+            if cat.key not in hidden_cats
+        }
         schema_dict[vol.Optional(CONF_SCHEMA_IO, default=conf.get(CONF_SCHEMA_IO, DEFAULT_SCHEMA_IO))] = str
         for cat in source_cats:
             if cat.key in hidden_cats:

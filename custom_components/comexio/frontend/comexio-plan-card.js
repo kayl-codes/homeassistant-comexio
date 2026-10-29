@@ -1258,7 +1258,7 @@ class ComexioPlanCard extends HTMLElement {
     }
     const seq = ++this._fetchSeq;
     const identity = this._previewIdentity(stamp);
-    const entity = this._config.entity;
+    const { entity } = this._config;
     this._cancelRetry(); // this fetch supersedes a pending retry
     this._refetchOnConnect = false;
     this._inFlight = true;
@@ -1347,7 +1347,7 @@ class ComexioPlanCard extends HTMLElement {
       newSvg.dataset.planId !== undefined &&
       oldSvg.dataset.planId === newSvg.dataset.planId &&
       oldSvg.getAttribute("viewBox") === newSvg.getAttribute("viewBox");
-    const scrollLeft = this._planEl.scrollLeft;
+    const { scrollLeft } = this._planEl;
     this._applyZoom(newSvg);
     this._planEl.replaceChildren(tpl.content);
     if (samePlan) {
@@ -1468,7 +1468,7 @@ class ComexioPlanCard extends HTMLElement {
     if (!st) {
       return null;
     }
-    const entities = this._hass.entities;
+    const { entities } = this._hass;
     const deviceId = entities[st.entity_id]?.device_id;
     // A full card whose entity has no device on record counts too: fail-safe, it may show this image.
     const cards = [..._shownPreviewCards].filter((card) => {

@@ -8,6 +8,12 @@ rule_settings:
     # snapshots and service data before they reach aiocomexio. Those values are often strings
     # at runtime even where the annotation says int, so the casts are not redundant.
     - remove-unnecessary-cast
+    # Lifting the code after an early return into an else is what ruff's RET505 forbids;
+    # ruff wins, so the suggestion can never be applied here.
+    - reintroduce-else
+    # sum(1 for x in xs if cond) reads as "count the matches"; sum(bool(cond) for x in xs)
+    # hides that intent behind a bool-to-int cast.
+    - simplify-constant-sum
 
 ignore:
   - ".github/"

@@ -513,8 +513,7 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
             "manufacturer": "Comexio",
             "model": "IO-Server",
         }
-        version = self.coordinator.api.comexio_version
-        if version:
+        if version := self.coordinator.api.comexio_version:
             info["sw_version"] = version
         return info
 

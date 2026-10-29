@@ -760,6 +760,27 @@ def test_ip_audit_compares_ipv4_and_ipv6_addresses(dns, ha: str, stored: str, mi
     assert asyncio.run(_device_ip_mismatch(HaAddressResolver(_FakeHass()), ha, stored, "7")) is mismatch
 
 
+@pytest.mark.parametrize(
+    ("stored", "device_id"),
+    [
+        (f"{FOREIGN_IP}:8123", ""),  # no Web-IO device in Comexio
+        (f"{FOREIGN_IP}:8123", None),
+        ("", "7"),  # the device stores no address
+        (None, "7"),
+    ],
+)
+def test_ip_audit_reports_no_mismatch_without_a_device_or_a_stored_address(
+    dns, stored: str | None, device_id: str | None
+) -> None:
+    """Nothing to compare: a missing device or stored address is never a mismatch, even against a foreign IP."""
+    from custom_components.comexio.coordinator import _device_ip_mismatch
+
+    dns({OWN_IP: OWN_IP, FOREIGN_IP: FOREIGN_IP})
+
+    resolver = HaAddressResolver(_FakeHass())
+    assert asyncio.run(_device_ip_mismatch(resolver, f"{OWN_IP}:8123", stored, device_id)) is False
+
+
 def test_ip_audit_survives_an_invalid_stored_hostname() -> None:
     # coordinator._device_ip_mismatch resolves the stored name too; "ha..lan" raised UnicodeError there.
     from custom_components.comexio.coordinator import _device_ip_mismatch
