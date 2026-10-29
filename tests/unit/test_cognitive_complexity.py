@@ -38,7 +38,7 @@ BASELINE = {
     "coordinator.py::ComexioCoordinator::_audit_trigger_pairs": 34,
     "ha_address.py::HaAddressResolver::_async_known_host": 16,
     "number.py::async_setup_entry": 16,
-    "plan_watchdog.py::ManagedPlanWatchdog::async_check": 19,
+    "plan_watchdog.py::ManagedPlanWatchdog::async_check": 17,
     "reference_monitor.py::ReferenceCatalogMonitor::check_plans": 17,
     "repairs.py::ComexioRepairFlow::async_step_select_action": 174,
     "sensor.py::async_setup_entry": 18,

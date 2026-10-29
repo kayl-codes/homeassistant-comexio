@@ -83,8 +83,7 @@ def _rewrite_services_yaml_plans(
         _LOGGER.warning("services.yaml missing or invalid, skipping plan option rewrite: %s", exc)
         return
     for svc in FUNCTION_PLAN_SERVICE_NAMES:
-        fub_field = content.get(svc, {}).get("fields", {}).get("fub_id")
-        if fub_field:
+        if fub_field := content.get(svc, {}).get("fields", {}).get("fub_id"):
             options = sortable_plan_options if svc == _SORT_SERVICE_NAME else plan_options
             fub_field["selector"] = {"select": {"options": options, "custom_value": True}}
     _apply_single_instance_default(content, entry_ids)
@@ -182,7 +181,7 @@ def _snapshot_option_row(kind: str, entry: dict) -> tuple[str, float, dict]:
     # Some operations embed a full marker-ID list (e.g. add_marker_pairs) — that's
     # useful in the log but far too long for a dropdown label, so truncate it here.
     if len(operation) > _SNAPSHOT_OPTION_MAX_OP_LEN:
-        operation = operation[: _SNAPSHOT_OPTION_MAX_OP_LEN - 1] + "…"
+        operation = f"{operation[: _SNAPSHOT_OPTION_MAX_OP_LEN - 1]}…"
     op_suffix = f" ({operation})" if kind == "change" and operation else ""
     label = (
         f"{distinct_one_line(entry.get('plan_name'))} — fub {entry.get('fub_id')} — "
@@ -211,8 +210,7 @@ def _set_yaml_field_options(
     # restore-related services): with custom_value=True, HA's frontend shows the raw
     # submitted value instead of the matching label once an option is picked — acceptable
     # for the plain-string options elsewhere, but defeats the point of a readable label here.
-    target_field = content.get(service, {}).get("fields", {}).get(field)
-    if target_field:
+    if target_field := content.get(service, {}).get("fields", {}).get(field):
         target_field["selector"] = {"select": {"options": options, "custom_value": custom_value}}
 
 

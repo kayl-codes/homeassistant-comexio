@@ -751,7 +751,7 @@ async def _device_ip_mismatch(
     Never for a loopback ha_address (the resolver's last resort, already warned about): the sync
     would refuse to write it, so the repair could only offer a fix that cannot work.
     """
-    if not (com_dev_id and com_ip and com_ip != ha_address) or is_loopback_address(ha_address):
+    if not com_dev_id or not com_ip or com_ip == ha_address or is_loopback_address(ha_address):
         return False
     try:
         ha_port = ha_address.rsplit(":", 1)[1]
@@ -1839,7 +1839,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         mismatches.difference_update({key for key in mismatches if key.startswith(_PLAN_AUDIT_KEY_PREFIXES)})
         if self._plan_audit_buckets is None:
             return False
-        results.update(self._plan_audit_buckets)
+        results |= self._plan_audit_buckets
         mismatches.update(self._plan_audit_mismatches)
         return True
 
@@ -2470,7 +2470,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         missing_detail = self._function_plan_missing_detail(audit["function_plan_missing"], ha_map, io_meta_by_key)
         if open_counts:
-            issue_data_counts.update(open_counts)
+            issue_data_counts |= open_counts
             missing_detail = open_detail
         ir.async_create_issue(
             self.hass,
@@ -2841,10 +2841,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _followed_pick_name(self, fub_id: int, old_name: str) -> str | None:
         """The watchdog pick a rename of old_name carries along: old_name, or the name an earlier follow gave it."""
-        for name in (old_name, self._rename_move_pending.get((fub_id, old_name))):
-            if name is not None and self._pick_present(fub_id, name):
-                return name
-        return None
+        return next(
+            (
+                name
+                for name in (old_name, self._rename_move_pending.get((fub_id, old_name)))
+                if name is not None and self._pick_present(fub_id, name)
+            ),
+            None,
+        )
 
     def _log_rename_follow_failed(self, attempt: tuple[int, str, str], what: str) -> None:
         """Log a failed rename follow-up: retried every check and cycle, its traceback once per kind, then debug."""
@@ -2932,7 +2936,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         if self._restore_lock.locked():
             _LOGGER.info("[%s] Reload waits for the running function plan restore to finish", self.server_id)
-            if self.in_sync and not (self.sync_error or self.sync_failed_writes):
+            if self.in_sync and not self.sync_error and not self.sync_failed_writes:
                 self.sync_progress_text = "Waiting for the running function plan restore before reloading…"
                 self.async_update_listeners()
         async with self._restore_lock:

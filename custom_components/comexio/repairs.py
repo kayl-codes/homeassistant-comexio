@@ -1660,12 +1660,12 @@ class ComexioRepairFlow(RepairsFlow):
         can be found by (a bare-ID pick its backups name ambiguously has no backup identity), and not
         for a suspected rename: the restored copy would run beside the renamed original.
         """
-        if holder is not None and coordinator is not None:
-            if await self._async_rename_suspected(coordinator, fub_id, name, holder):
-                return [ACTION_TAKE_OVER_RENAME, ACTION_UNWATCH]
-            holder_actions = [ACTION_WATCH_HOLDER]
-        else:
+        if holder is None or coordinator is None:
             holder_actions = []
+        elif await self._async_rename_suspected(coordinator, fub_id, name, holder):
+            return [ACTION_TAKE_OVER_RENAME, ACTION_UNWATCH]
+        else:
+            holder_actions = [ACTION_WATCH_HOLDER]
         restore = [ACTION_RESTORE] if vanished_plan_restorable(fub_id, name) else []
         return [*restore, *holder_actions, ACTION_UNWATCH]
 

@@ -1049,7 +1049,7 @@ class ComexioAPI:
             generation,
             sorted(missing),
         )
-        return {**fubs, **missing}
+        return fubs | missing
 
     def run_state_mark(self) -> int:
         """Mark to take before a config or run-state fetch; pass it on as `since` when applying the result."""

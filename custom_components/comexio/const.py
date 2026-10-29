@@ -395,8 +395,7 @@ def prune_import_disabled_ignored(options: Mapping[str, Any], data: Mapping[str,
     """
     pruned = dict(options)
     active = {cls.value for cls in active_webio_classes({**data, **pruned})}
-    remaining = [value for value in pruned.get(CONF_IMPORT_DISABLED_IGNORED) or [] if value not in active]
-    if remaining:
+    if remaining := [value for value in pruned.get(CONF_IMPORT_DISABLED_IGNORED) or [] if value not in active]:
         pruned[CONF_IMPORT_DISABLED_IGNORED] = remaining
     else:
         pruned.pop(CONF_IMPORT_DISABLED_IGNORED, None)
@@ -1838,7 +1837,7 @@ class IgnoredIds(AbstractSet[int]):
     def isdisjoint(self, other: Iterable[Any]) -> bool:
         if isinstance(other, IgnoredIds):
             return not self & other
-        return not any(i in self for i in other)
+        return all(i not in self for i in other)
 
     def __repr__(self) -> str:
         return f"IgnoredIds({format_ignored_ids(set(), set(self._intervals))!r})"

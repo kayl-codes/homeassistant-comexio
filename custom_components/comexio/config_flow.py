@@ -588,7 +588,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         fingerprint = await async_read_fingerprint(merged[CONF_HOST])
         if fingerprint is not None:
             pinned = {**user_input, CONF_CERTIFICATE_FINGERPRINT: fingerprint}
-            errors = await self._connection_errors(entry, {**merged, **pinned})
+            errors = await self._connection_errors(entry, merged | pinned)
             if not errors:
                 notify_https_enabled(self.hass, entry.data[CONF_SERVER_ID], merged[CONF_HOST], fingerprint)
                 return pinned, errors

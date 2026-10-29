@@ -2103,7 +2103,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             for gap_key, cat in gap_keys.items():
                 if gap_key in item:
                     source_ids_by_cat.setdefault(cat.key, []).append(item[gap_key])
-        return [item for item in gap_items if not any(k in item for k in gap_keys)]
+        return [item for item in gap_items if all(k not in item for k in gap_keys)]
 
     async def _wire_created_pairs(
         self, ctx: _SyncContext, created_names: list[str], gap_items: list[dict]
@@ -2265,10 +2265,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         """
         suffix = f"[K{k_id}]"
         markers = ctx.fresh_markers if ctx.fresh_markers is not None else self.coordinator.data.get("markers", [])
-        for m in markers:
-            if m.get("kind") == MarkerKind.KNX_BRIDGE and (m.get("title") or "").rstrip().endswith(suffix):
-                return int(m["id"])
-        return None
+        return next(
+            (
+                int(m["id"])
+                for m in markers
+                if m.get("kind") == MarkerKind.KNX_BRIDGE and (m.get("title") or "").rstrip().endswith(suffix)
+            ),
+            None,
+        )
 
     async def _add_trigger_pairs(self, ctx: _SyncContext, missing_ids: list[int], ref_type: int = 2) -> str:
         """Resolve/create the trigger plan and add the missing source+Flanke pairs.

@@ -1050,22 +1050,23 @@ def _new_plan_activation_line(run_ok: bool | None, auto_start: bool, start_error
 
 def _aligned_properties_line(apply: dict, plan_name: str) -> str:
     """The restore result's line on aligning the live plan's name/paper with the snapshot ("" when nothing changed)."""
-    line = ""
     if (unsettable := apply.get("unsettable_format")) is not None:
         line = (
             f"Paper format: {ICON_WARNING} the backup's {format_paper_format(unsettable)} cannot be set on a plan "
             "— the plan keeps its own\n"
         )
+    else:
+        line = ""
     if not apply["properties_changed"]:
         return line
     if apply["paper"] is None:
-        return line + (
-            f"Name not aligned with snapshot ('{one_line(plan_name)}'): {ICON_ERROR} "
+        return (
+            f"{line}Name not aligned with snapshot ('{one_line(plan_name)}'): {ICON_ERROR} "
             "neither the backup nor the plan states "
             "a paper format a plan can be set to, and renaming would overwrite it — rename the plan in Comexio Studio\n"
         )
-    return line + (
-        f"Aligned with snapshot: name '{one_line(plan_name)}', paper {apply['paper']} @ {apply['dpi']} DPI, "
+    return (
+        f"{line}Aligned with snapshot: name '{one_line(plan_name)}', paper {apply['paper']} @ {apply['dpi']} DPI, "
         f"{apply['orientation']} — "
         f"{ICON_SUCCESS if apply['paper_ok'] else f'{ICON_ERROR} failed, restore may look wrong'}\n"
     )
@@ -1413,8 +1414,7 @@ async def _resolve_restore_params(
 
     Returns None if resolution failed — the error notification has already been shown.
     """
-    snapshot_raw = call.data.get("snapshot")
-    if snapshot_raw:
+    if snapshot_raw := call.data.get("snapshot"):
         parsed = _parse_snapshot_field(str(snapshot_raw))
         if parsed is None:
             persistent_notification.async_create(
