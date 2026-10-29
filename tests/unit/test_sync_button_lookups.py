@@ -9,7 +9,12 @@ import pytest
 from custom_components.comexio.button import ComexioSyncButton, _SyncContext
 from custom_components.comexio.const import MarkerKind, WebioClass
 
-_CACHED_BRIDGE = {"id": 9, "kind": MarkerKind.KNX_BRIDGE, "title": "Cached [K1]"}
+
+def _marker(marker_id: int, title: str | None, kind: MarkerKind = MarkerKind.KNX_BRIDGE) -> dict[str, Any]:
+    return {"id": marker_id, "kind": kind, "title": title}
+
+
+_CACHED_BRIDGE = _marker(9, "Cached [K1]")
 
 
 def _button(markers: list[dict[str, Any]], fresh_markers: list[dict[str, Any]] | None) -> tuple:
@@ -33,15 +38,15 @@ def _button(markers: list[dict[str, Any]], fresh_markers: list[dict[str, Any]] |
     [
         (
             [
-                {"id": 1, "kind": MarkerKind.KNX_BRIDGE, "title": "Light [K1] old"},  # suffix not at the end
-                {"id": 2, "kind": MarkerKind.NORMAL, "title": "Light [K1]"},  # not a bridge Marker
-                {"id": 3, "kind": MarkerKind.KNX_BRIDGE, "title": "Light [K11]"},  # other K id
-                {"id": 4, "kind": MarkerKind.KNX_BRIDGE, "title": "Light [K1]  "},  # trailing blanks
-                {"id": 5, "kind": MarkerKind.KNX_BRIDGE, "title": "Dimmer [K1]"},
+                _marker(1, "Light [K1] old"),  # suffix not at the end
+                _marker(2, "Light [K1]", MarkerKind.NORMAL),  # not a bridge Marker
+                _marker(3, "Light [K11]"),  # other K id
+                _marker(4, "Light [K1]  "),  # trailing blanks
+                _marker(5, "Dimmer [K1]"),
             ],
             4,
         ),
-        ([{"id": 6, "kind": MarkerKind.KNX_BRIDGE, "title": None}], None),
+        ([_marker(6, None)], None),
         ([], None),
         (None, 9),  # no fresh list: the coordinator's cached one
     ],
