@@ -473,6 +473,30 @@ def test_a_backup_freezes_its_keys_and_is_read_with_todays_ids(
     assert (_ref_id(resolved, "4"), _ref_id(resolved, "7")) == (6, 24)
 
 
+def test_a_snapshot_read_hands_back_the_slot_as_it_is_once_the_catalog_answered(
+    stores: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    """The visualize service reads the slot's settings and paper format right after: both must match its elements."""
+    catalog = _catalog(FUB_BASE)
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, catalog)
+    plan = {"elements": snapshot["elements"], "connections": snapshot["connections"]}
+    newer = {**copy.deepcopy(snapshot), "captured_at": "1999-01-01T00:00:00+00:00"}  # never a capture time of now
+
+    async def a_backup_rotates_the_slots_meanwhile() -> tuple[dict[str, Any], str]:
+        manager._change_data["1"]["Lights"].insert(0, newer)
+        return FUB_BASE, CHANGED_AT
+
+    async def run() -> dict[str, Any] | None:
+        await manager.async_change_backup(1, plan, "Lights", "sort")
+        catalog.async_get_fub_base.side_effect = a_backup_rotates_the_slots_meanwhile
+        return await manager.async_get_snapshot("change", 1, "Lights")
+
+    resolved = asyncio.run(run())
+
+    assert resolved is not None
+    assert resolved["captured_at"] == newer["captured_at"]
+
+
 def test_an_auto_backup_freezes_its_keys(stores: dict[str, Any], snapshot: dict[str, Any]) -> None:
     catalog = _catalog(FUB_BASE)
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, catalog)
