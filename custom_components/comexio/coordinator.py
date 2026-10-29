@@ -595,7 +595,7 @@ def _fallback_audit_key(full_name: str) -> str:
     Registry-driven: any range_clustered category ("HA <prefix><ID> <Name>", e.g. Marker/KNX)
     is identified by its audit_key_prefix, so a further range_clustered category needs no new
     branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces; a
-    stale name of a known IO is matched before, by _stale_io_command_key.
+    stale name of a known IO is matched before, by _stale_io_command_keys.
     """
     parts = full_name.split(" ")
     if len(parts) < 3:
@@ -623,14 +623,27 @@ def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
     return parts[1], parts[-1]
 
 
-def _stale_io_command_key(full_name: str, io_name_to_key: Mapping[str, str]) -> str | None:
-    """Audit key of an IO command named "HA IO <ext> <identifier> <more>", e.g. after an old description.
+def _stale_io_command_keys(full_name: str, io_name_to_key: Mapping[str, str]) -> list[str]:
+    """Audit keys of the IOs an IO command "HA IO <ext> <identifier> <more>" may serve (an old description).
 
     Matched against the IOs' whole current command names, so an extension name with spaces still
-    pins the IO where _fallback_audit_key's positional split would not; the longest match wins.
+    pins the IO where _fallback_audit_key's positional split would not. More than one key: the name
+    fits two IOs (extensions "EXT1" and "EXT1 I1") and tells neither.
     """
-    matches = [command for command in io_name_to_key if full_name.startswith(f"{command} ")]
-    return io_name_to_key[max(matches, key=len)] if matches else None
+    return [key for command, key in io_name_to_key.items() if full_name.startswith(f"{command} ")]
+
+
+def _inexact_command_key(
+    full_name: str, quickbus_ref_to_key: Mapping[tuple[str, str], str], io_name_to_key: Mapping[str, str]
+) -> str | None:
+    """Audit key of a command whose name is no current one (see _build_com_audit_map); None if it fits two IOs."""
+    ref = _quickbus_command_ref(full_name)
+    if ref and (key := quickbus_ref_to_key.get(ref)):
+        return key
+    stale_keys = _stale_io_command_keys(full_name, io_name_to_key)
+    if len(stale_keys) > 1:
+        return None
+    return stale_keys[0] if stale_keys else _fallback_audit_key(full_name)
 
 
 def _build_com_audit_map(
@@ -641,9 +654,11 @@ def _build_com_audit_map(
     Exact reverse lookup first: ha_map's "name" values are built from the same extension names
     that may contain spaces, so a positional full_name.split(" ") would misparse
     "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole extension name). A name
-    that extends a known IO's command name (an old description appended) goes to that IO. Only
-    commands with no current HA counterpart (renamed/deleted markers or extensions) fall back
-    to the positional heuristic, purely for grouping.
+    that extends exactly one known IO's command name (an old description appended) goes to that IO;
+    one that extends two stays out of the audit, so neither a rename hands one IO's command and its
+    wiring to the other nor a sync deletes it as an orphan. Only commands with no current HA
+    counterpart (renamed/deleted markers or extensions) fall back to the positional heuristic,
+    purely for grouping.
     """
     name_to_key = {info["name"]: key for key, info in ha_map.items()}
     # A renamed Quickbus device changes its command names but not the device id + identifier:
@@ -653,11 +668,10 @@ def _build_com_audit_map(
     io_name_to_key = {info["name"]: key for key, info in ha_map.items() if classify_audit_key(key) is WebioClass.IO}
     com_map: dict[str, list[dict[str, Any]]] = {}
     for full_name, info in com_commands.items():
-        key = name_to_key.get(full_name, full_name)
-        if key == full_name:
-            ref = _quickbus_command_ref(full_name)
-            key = quickbus_ref_to_key.get(ref) if ref else None
-            key = key or _stale_io_command_key(full_name, io_name_to_key) or _fallback_audit_key(full_name)
+        key = name_to_key.get(full_name) or _inexact_command_key(full_name, quickbus_ref_to_key, io_name_to_key)
+        if key is None:
+            _LOGGER.debug("Web-IO audit: command '%s' fits several IOs, left as it is", one_line(full_name))
+            continue
         com_map.setdefault(key, []).append(
             {
                 "name": full_name,
@@ -1660,11 +1674,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         False if a Web-IO class is missing on the server: the audit then only raises that
         repair issue (see _report_missing_webio_classes) and the poll ends early.
         """
-        ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
-        audited_commands, disabled_commands = _split_disabled_commands(
-            final_data["webio_commands"], active_webio_classes(conf)
-        )
-        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map)
+        ha_map, io_meta_by_key, com_map, disabled_commands = self._build_audit_maps(conf, final_data)
 
         webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
@@ -1849,6 +1859,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
         for io in webio_quickbus_ios(self.config_entry.options, data):
             yield source_audit_key(quickbus_cat, io["id"]), io, quickbus_command_name(io)
+
+    def _build_audit_maps(
+        self, conf: Mapping[str, Any], final_data: dict[str, Any]
+    ) -> tuple[
+        dict[str, dict[str, Any]], dict[str, dict[str, Any]], dict[str, list[dict[str, Any]]], dict[WebioClass, int]
+    ]:
+        """ha_map, io_meta_by_key, com_map and the per-class count of switched-off commands of an audit."""
+        ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
+        audited_commands, disabled_commands = _split_disabled_commands(
+            final_data["webio_commands"], active_webio_classes(conf)
+        )
+        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map)
+        return ha_map, io_meta_by_key, com_map, disabled_commands
 
     def _build_com_audit_map_without_held(
         self, com_commands: dict[str, Any], final_data: dict[str, Any], ha_map: dict[str, dict[str, Any]]
@@ -5036,6 +5059,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
             result[RANGE_CHECK_CORRECTION_FAILED] += 1
             _LOGGER.error("Failed to correct Web-IO command '%s' Min/Max drift.", one_line(name))
 
+    def _webio_range_targets(self) -> dict[str, dict[str, Any]]:
+        """The range check's target command by name, as build_webio_commands would create it today.
+
+        include_held: a command kept for an IO without an entity still gets its range checked.
+        """
+        return {
+            cmd["Name"]: cmd
+            for cmd in self.api.build_webio_commands(
+                self.server_id,
+                self.webio_source_data(include_held=True),
+                None,
+                self.ignored_marker_ids,
+                self.ignored_knx_ids,
+            )
+        }
+
     async def _async_webio_range_check_tick(self, _now: datetime | None = None) -> dict[str, int]:
         """Check and correct analog Web-IO command Min/Max drift against the target range.
 
@@ -5076,17 +5115,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         async with self._sync_lock:
             webio_commands = self.data.get("webio_commands", {})
             webio_devices = self.data.get("webio_devices", {})
-            # include_held: a command kept for an IO without an entity still gets its range checked.
-            target_by_name = {
-                cmd["Name"]: cmd
-                for cmd in self.api.build_webio_commands(
-                    self.server_id,
-                    self.webio_source_data(include_held=True),
-                    None,
-                    self.ignored_marker_ids,
-                    self.ignored_knx_ids,
-                )
-            }
+            target_by_name = self._webio_range_targets()
 
             for name, cmd in webio_commands.items():
                 if cmd.get("typeId") not in {2, "2"}:

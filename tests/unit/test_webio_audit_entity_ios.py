@@ -176,10 +176,9 @@ def test_io_has_entity(io: dict[str, Any], include_offline: bool, expected: bool
 def _audit(
     coordinator: ComexioCoordinator, commands: dict[str, Any], data: dict[str, Any] | None = None
 ) -> dict[str, list[dict[str, Any]]]:
-    """missing / orphan / ... of the audit, as the repair and the sync see them."""
-    data = data or _data()
-    ha_map, io_meta_by_key = coordinator._build_ha_audit_map(data)
-    com_map = coordinator._build_com_audit_map_without_held(commands, data, ha_map)
+    """missing / orphan / ... of the audit, as the repair and the sync see them (_async_audit_webio's maps)."""
+    data = {**(data or _data()), "webio_commands": commands}
+    ha_map, io_meta_by_key, com_map, _disabled = coordinator._build_audit_maps({}, data)
     return coordinator._compare_audit_maps(ha_map, com_map, {}, (None, None, None), io_meta_by_key, set(), set())
 
 
@@ -215,6 +214,22 @@ def test_a_stale_name_on_an_extension_with_spaces_is_a_rename_not_an_orphan() ->
     assert found["missing"] == []
 
 
+@pytest.mark.parametrize(("offline", "missing"), [(False, ["HA IO EXT-1 I1 AI1"]), (True, [])])
+def test_a_stale_name_of_two_ios_is_neither_renamed_nor_an_orphan(offline: bool, missing: list[str]) -> None:
+    """It fits EXT-1 I1 and "EXT-1 I1" AI1: no guess hands its wiring over, no sync deletes it.
+
+    Offline, one of the two is held: its command must not turn into an orphan either.
+    """
+    data = _data()
+    data["io"] = [*data["io"], _io("EXT-1 I1", "AI1", offline=offline)]
+    commands = {**EVERY_COMMAND, "HA IO EXT-1 I1 AI1 Alt": _command(7)}
+
+    found = _audit(_coordinator(), commands, data)
+
+    assert (found["rename"], found["orphan"]) == ([], [])
+    assert [item["name"] for item in found["missing"]] == missing
+
+
 def test_include_offline_extensions_from_the_entry_data_counts_too() -> None:
     """Same merge of entry data and options as the entity platforms."""
     source = _coordinator(entry_data={CONF_INCLUDE_OFFLINE_EXTENSIONS: True}).webio_source_data(_data())
@@ -232,6 +247,32 @@ def test_the_source_with_held_ios_keeps_every_io() -> None:
     assert source["io"] == [ONLINE_IO, OFFLINE_IO, UNSUPPORTED_IO]
     assert source[QUICKBUS_IO_DATA_KEY] == [ONLINE_QB_IO, OFFLINE_QB_IO]
     assert len(data["io"]) == 3
+
+
+def test_the_range_check_targets_the_commands_of_held_ios() -> None:
+    """A held IO's command keeps a target, so the range check does not count it as excluded."""
+    coordinator = _coordinator()
+    coordinator.data = _data()
+    calls: list[tuple[Any, ...]] = []
+
+    def build_webio_commands(*args: Any) -> list[dict[str, Any]]:
+        calls.append(args)
+        source = args[1]
+        return [{"Name": f"HA IO {io['ext_name']} {io['identifier']}"} for io in source["io"]] + [
+            {"Name": f"HA QB {io['id']}"} for io in source[QUICKBUS_IO_DATA_KEY]
+        ]
+
+    coordinator.api = SimpleNamespace(build_webio_commands=build_webio_commands)
+
+    assert set(coordinator._webio_range_targets()) == {
+        "HA IO EXT-1 I1",
+        "HA IO vDS1 I1",
+        "HA IO EXT-1 Q1",
+        "HA QB 201",
+        "HA QB 301",
+    }
+    # Every class (webio_class None), less the ignored markers and KNX objects.
+    assert [(args[0], *args[2:]) for args in calls] == [("test", None, set(), set())]
 
 
 def _class_coordinator(**options: Any) -> ComexioCoordinator:
