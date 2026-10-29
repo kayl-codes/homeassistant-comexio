@@ -29,9 +29,18 @@ def _coordinator(
     coordinator.api = SimpleNamespace(  # type: ignore[assignment]
         fub_data={},
         function_plan_load_all_plans=load_all,
-        function_plan_load_elements=AsyncMock(side_effect=(single or {}).get),
+        function_plan_load_elements=AsyncMock(side_effect=_answers(single or {})),
     )
     return coordinator
+
+
+def _answers(answers: dict[int, Any]) -> Any:
+    """A function_plan_load_elements stand-in answering from answers (missing: None)."""
+
+    def _load(fub_id: int, *, strict: bool = False) -> Any:
+        return answers.get(fub_id)
+
+    return _load
 
 
 def _check(coordinator: ComexioCoordinator, memo: dict[int, dict] | None = None) -> tuple[dict[int, dict], list[int]]:
@@ -41,7 +50,10 @@ def _check(coordinator: ComexioCoordinator, memo: dict[int, dict] | None = None)
 
 
 def _single_loads(coordinator: ComexioCoordinator) -> list[int]:
-    return sorted(call.args[0] for call in coordinator.api.function_plan_load_elements.await_args_list)
+    """The plans loaded on their own; each load is strict (a payload without collections fails)."""
+    calls = coordinator.api.function_plan_load_elements.await_args_list
+    assert all(call.kwargs == {"strict": True} for call in calls)
+    return sorted(call.args[0] for call in calls)
 
 
 def test_startup_loads_every_managed_plan_in_one_bulk_request() -> None:
@@ -52,10 +64,25 @@ def test_startup_loads_every_managed_plan_in_one_bulk_request() -> None:
 
     assert plans == {fub_id: _plan(fub_id) for fub_id in MANAGED}
     assert load_failures == []
-    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with()
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
     assert _single_loads(coordinator) == []
 
 
+@pytest.mark.parametrize("from_bulk", [True, False], ids=["bulk", "single"])
+def test_an_empty_plan_is_used_as_it_is(from_bulk: bool) -> None:
+    """strict keeps a plan with real but empty collections: a plan without wiring, no load failure."""
+    empty = {"elements": {}, "connections": {}}
+    bulk = {fub_id: _plan(fub_id) for fub_id in MANAGED[:-1]}
+    coordinator = _coordinator(bulk={**bulk, 37: empty} if from_bulk else bulk, single={37: empty})
+
+    plans, load_failures = _check(coordinator)
+
+    assert plans[37] == empty
+    assert load_failures == []
+    assert _single_loads(coordinator) == ([] if from_bulk else [37])
+
+
+# "empty": a falsy entry, which the strict bulk answer never holds; kept as a guard of the fallback.
 @pytest.mark.parametrize("bulk_extra", [{}, {36: {}, 37: {}}], ids=["missing", "empty"])
 def test_a_plan_the_bulk_answer_lacks_is_loaded_on_its_own(bulk_extra: dict[int, Any]) -> None:
     coordinator = _coordinator(bulk={34: _plan(34), 35: _plan(35), **bulk_extra}, single={36: _plan(36)})
@@ -64,11 +91,12 @@ def test_a_plan_the_bulk_answer_lacks_is_loaded_on_its_own(bulk_extra: dict[int,
 
     assert plans == {34: _plan(34), 35: _plan(35), 36: _plan(36)}
     assert load_failures == [37]  # neither answer has it
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
     assert _single_loads(coordinator) == [36, 37]
 
 
 def test_a_single_load_that_raises_fails_only_its_own_plan() -> None:
-    def _load(fub_id: int) -> dict[str, Any]:
+    def _load(fub_id: int, *, strict: bool = False) -> dict[str, Any]:
         if fub_id == 36:
             raise RuntimeError("boom")
         return _plan(fub_id)
@@ -80,6 +108,8 @@ def test_a_single_load_that_raises_fails_only_its_own_plan() -> None:
 
     assert plans == {34: _plan(34), 35: _plan(35), 37: _plan(37)}
     assert load_failures == [36]
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
+    assert _single_loads(coordinator) == [36, 37]
 
 
 def test_a_caller_without_load_failures_gets_the_loaded_plans() -> None:
@@ -89,6 +119,7 @@ def test_a_caller_without_load_failures_gets_the_loaded_plans() -> None:
     plans = asyncio.run(coordinator._load_function_plan_check_data())
 
     assert plans == {34: _plan(34), 35: _plan(35), 36: _plan(36)}
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
     assert _single_loads(coordinator) == [37]
 
 
@@ -100,6 +131,7 @@ def test_a_failed_bulk_load_falls_back_to_loading_each_plan(bulk: Any) -> None:
 
     assert plans == {fub_id: _plan(fub_id) for fub_id in MANAGED}
     assert load_failures == []
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
     assert _single_loads(coordinator) == MANAGED
 
 
@@ -125,7 +157,7 @@ def test_the_second_audit_category_reuses_the_plans_the_first_one_loaded() -> No
 
     assert second == first == {fub_id: _plan(fub_id) for fub_id in MANAGED}
     assert load_failures == []
-    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with()
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
     assert _single_loads(coordinator) == []
 
 
@@ -134,14 +166,15 @@ def test_a_plan_the_first_audit_category_failed_is_tried_again() -> None:
     memo: dict[int, dict] = {}
     _, first_failures = _check(coordinator, memo)
     assert 37 not in memo  # a failure is not remembered
-    coordinator.api.function_plan_load_elements.side_effect = {37: _plan(37)}.get
+    coordinator.api.function_plan_load_elements.side_effect = _answers({37: _plan(37)})
 
     second, second_failures = _check(coordinator, memo)
 
     assert first_failures == [37]
     assert second == {fub_id: _plan(fub_id) for fub_id in MANAGED}
     assert second_failures == []
-    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with()  # one miss left: loaded on its own
+    # 37 failed in the first run and is loaded on its own again in the second, no second bulk request
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with(strict=True)
     assert _single_loads(coordinator) == [37, 37]
 
 

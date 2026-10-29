@@ -2591,10 +2591,9 @@ class ComexioAPI:
         Uses the loadallelements endpoint (bulk variant of loadelements) instead of one
         request per plan — Comexio serializes requests server-side anyway, so N sequential
         per-plan calls gain nothing over a single bulk call. Result is filtered down to the
-        fub list cached by parse_config (self._fub_data). strict=True drops entries without a
-        real elements collection instead of treating them as empty plans. Unlike
-        function_plan_load_elements(strict=True) it does not check connections, so a result here
-        is no source for run_fup (a restore or rewrite).
+        fub list cached by parse_config (self._fub_data). strict=True drops entries without
+        real elements and connections collections (an empty one is real) instead of treating
+        them as empty plans, as function_plan_load_elements(strict=True) refuses them.
         Returns {fub_id: {"elements": {...}, "connections": {...}}}, {} on failure — or, with
         raise_errors=True, raises the ComexioError, so a caller can tell a failure from no plans.
         """

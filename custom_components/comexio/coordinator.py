@@ -8534,9 +8534,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return fetched
 
     async def _load_check_plan(self, fub_id: int) -> dict | None:
-        """One plan's live wiring data for a link check, None on a failure (logged)."""
+        """One plan's live wiring data for a link check, None on a failure (logged).
+
+        strict: a payload without real elements and connections collections is a failure too, not
+        a plan without wiring that would let the audit read the plan as clean.
+        """
         try:
-            return await self.api.function_plan_load_elements(fub_id)
+            return await self.api.function_plan_load_elements(fub_id, strict=True)
         except Exception:
             _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
             return None
@@ -8545,12 +8549,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """All plans in one request once fub_ids reach FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES, else {}.
 
         {} on a failure as well (function_plan_load_all_plans logs a ComexioError): the caller then
-        loads every plan on its own, as it does for a plan the bulk answer lacks.
+        loads every plan on its own, as it does for a plan the bulk answer lacks. strict drops an
+        entry without real elements and connections collections (an empty plan stays), so such a
+        plan is loaded on its own (strict too, see _load_check_plan) instead of counting as a plan
+        without wiring.
         """
         if len(fub_ids) < FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES:
             return {}
         try:
-            return await self.api.function_plan_load_all_plans()
+            return await self.api.function_plan_load_all_plans(strict=True)
         except Exception:
             _LOGGER.exception("[%s] Error bulk-loading the function plans for link check", self.server_id)
             return {}
