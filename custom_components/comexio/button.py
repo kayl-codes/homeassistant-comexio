@@ -86,10 +86,10 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import (
+    COMMAND_NOT_CHECKED,
     PLAN_LOAD_FAILED,
     ComexioCoordinator,
     _device_ip_mismatch,
-    plan_cleanup_outcome,
     webio_still_present,
 )
 from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity
@@ -1142,8 +1142,16 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         lp_count, webio_cmd_ids, stopped_plans, stop_failures, notes = await self._cleanup_function_plan_plans(
             ctx, ids, category
         )
+        # The commands unwired above and those of these sources never wired: each is deleted only once
+        # every plan is checked and none holds its WebIO element (a user's own plan may use it).
+        check = await self.coordinator.deletable_source_command_ids(category, ids, webio_cmd_ids)
+        ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in check.plan_failures)
+        ctx.failed_writes.extend(
+            f"cleanup {category.label}: Web-IO command '{one_line(name)}' {COMMAND_NOT_CHECKED}"
+            for name in check.unchecked
+        )
         plan_failed = len(ctx.failed_writes) > failures_before
-        webio_removed, webio_failed = await self._delete_webio_commands(api, dev_id, webio_cmd_ids, category)
+        webio_removed, webio_failed = await self._delete_webio_commands(api, dev_id, check.deletable, category)
 
         lines = self._build_cleanup_summary_lines(
             ids,
@@ -1152,9 +1160,13 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             webio_removed,
             webio_failed,
             category,
-            has_plan_findings=bool(stop_failures or notes) or plan_failed,
+            has_plan_findings=bool(stop_failures or notes or check.in_use) or plan_failed,
         )
         lines.extend(notes)
+        lines.extend(
+            f"{ICON_INFO} Web-IO command '{one_line(name)}' stays — a function plan still uses its WebIO element"
+            for name in check.in_use
+        )
         lines.extend(self._notify_stopped_plans(stopped_plans))
         lines.extend(self._build_stop_failure_lines(stop_failures))
         if webio_failed:
@@ -1228,8 +1240,8 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
     ) -> list[str]:
         """Build the base result lines for the cleanup-entities summary notification.
 
-        has_plan_findings: a plan step failed or a plan reported a source it kept or no
-        longer holds — the result is then never "nothing to clean up".
+        has_plan_findings: a plan step failed, a plan reported a source it kept or no longer
+        holds, or a plan still uses a command — the result is then never "nothing to clean up".
         """
         ids_str = ", ".join(f"{category.audit_key_prefix}{eid}" for eid in ids)
         if (
@@ -1278,7 +1290,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return [
             *(
                 f"{ICON_WARNING} {prefix}{source_id} stays in {plan} — it is wired to other plan logic there, "
-                "which the cleanup leaves in place"
+                "or its plan data could not be read (see the log); the cleanup leaves it in place"
                 for source_id in kept_ids
             ),
             *(
@@ -1298,76 +1310,60 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         ]
 
     @staticmethod
-    def _resolve_plan_webio_and_unwired(
+    def _select_plan_cleanup(
         api: Any, plan_data: dict, cleanup_ids: list[int], ref_type: int = 2
     ) -> tuple[list[int], list[int], list[int], list[int]]:
-        """For each marker in cleanup_ids, collect its wired WebIO ids in this plan — or,
-        if it has no wiring at all, its element id for direct deletion (see
-        _delete_unwired_marker_elements). A marker wired to something OTHER than a WebIO
-        (a timer, logic block, etc.) is left untouched entirely: it still participates in
-        plan logic unrelated to this ignored-marker Web-IO cleanup, so it's neither queued
-        for unwiring (nothing WebIO-related to unwire) nor for deletion (would break that
-        other wiring).
+        """Pick what the cleanup removes from one plan for the given markers/KNX objects.
 
-        Returns (webio ids, unwired element ids, kept marker ids, gone marker ids). A kept
-        marker is the untouched case above; a gone one was found by the plan scan (which may
-        read the cached plan snapshot), but this live load no longer holds it — both get
-        reported, neither is a failure.
+        Every element of a source counts, a stray duplicate included. Each one loses the WebIO
+        elements it feeds; the source element itself goes too unless something else is wired to it
+        (a logic block, a timer, a connection into it) — that wiring is plan logic the cleanup
+        leaves in place, so it keeps the element and reports the source as kept.
+
+        Returns (element ids to delete, webIoIds they unwire, kept source ids, gone source ids). A
+        gone source was found by the plan scan (which may read the cached plan snapshot), but this
+        live load no longer holds it — kept and gone get reported, neither is a failure.
         """
+        elem_ids: list[int] = []
         webio_ids: list[int] = []
-        unwired_marker_elem_ids: list[int] = []
         kept: list[int] = []
         gone: list[int] = []
-        for marker_id in cleanup_ids:
-            marker_elem_id = api._find_source_element_id(plan_data.get("elements", {}), marker_id, ref_type)
-            if not marker_elem_id:
-                gone.append(marker_id)
+        for source_id in cleanup_ids:
+            source_elem_ids = api._find_source_element_ids(plan_data.get("elements", {}), source_id, ref_type)
+            if not source_elem_ids:
+                gone.append(source_id)
                 continue
-            marker_webio_ids = api._find_wired_webio_ids_for_marker(marker_id, marker_elem_id, plan_data)
-            if marker_webio_ids:
-                webio_ids.extend(marker_webio_ids)
-            elif api._element_has_any_wiring(marker_elem_id, plan_data):
-                kept.append(marker_id)
-            else:
-                unwired_marker_elem_ids.append(int(marker_elem_id))
-        return webio_ids, unwired_marker_elem_ids, kept, gone
+            if ComexioSyncButton._select_source_cleanup(api, plan_data, source_elem_ids, elem_ids, webio_ids):
+                kept.append(source_id)
+        return elem_ids, list(dict.fromkeys(webio_ids)), kept, gone
 
     @staticmethod
-    async def _delete_unwired_marker_elements(
-        ctx: _SyncContext,
-        fub_id: int,
-        unwired_marker_elem_ids: list[int],
-        stopped_plans: list[tuple[str, int]],
-        stop_failures: list[tuple[str, int]],
-    ) -> int:
-        """Delete marker elements with no WebIO counterpart directly — unwire_webio_commands
-        only ever touches elements it finds wired to one of the given webio_ids, so a marker
-        with no wiring at all would otherwise be left behind in the plan forever.
+    def _select_source_cleanup(
+        api: Any, plan_data: dict, source_elem_ids: list[str], elem_ids: list[int], webio_ids: list[int]
+    ) -> bool:
+        """Add one source's elements to delete to elem_ids and their webIoIds to webio_ids; True if one stays.
 
-        Appends a stopped plan / stop failure to the given lists and a failed deletion to
-        ctx.failed_writes (see coordinator.plan_cleanup_outcome); returns the deleted count.
+        See _select_plan_cleanup: an element with other wiring stays, its WebIO elements go.
         """
-        api = ctx.api
-        result = await api._delete_plan_elements_and_restart(
-            fub_id, unwired_marker_elem_ids, [], api.function_plan_name(fub_id)
-        )
-        stopped_plan, stop_failure, failure = plan_cleanup_outcome(result, fub_id)
-        if stopped_plan:
-            stopped_plans.append(stopped_plan)
-        if stop_failure:
-            stop_failures.append(stop_failure)
-        if failure:
-            ctx.failed_writes.append(_plan_failure(*failure))
-        return result.get("deleted_elem_count", 0)
+        kept = False
+        for source_elem_id in source_elem_ids:
+            webio, other_wiring = api._source_element_wiring(source_elem_id, plan_data)
+            elem_ids.extend(int(webio_elem_id) for webio_elem_id, _ in webio)
+            webio_ids.extend(webio_id for _, webio_id in webio)
+            if other_wiring:
+                kept = True
+            else:
+                elem_ids.append(int(source_elem_id))
+        return kept
 
     async def _cleanup_function_plan_plans(
         self, ctx: _SyncContext, source_ids: list[int], category: SourceCategory
     ) -> tuple[int, list[int], list[tuple[str, int]], list[tuple[str, int]], list[str]]:
         """Run the Function Plan cleanup for every managed plan that holds the markers/KNX objects.
 
-        Returns (deleted element count, WebIO command ids to delete, stopped plans and stop
-        failures as (name, fub_id) tuples, summary lines for sources a plan kept or no longer
-        holds). Plans that could not be loaded and element deletions that failed go straight
+        Returns (deleted element count, WebIO command ids it unwired — deleted once no plan holds
+        them —, stopped plans and stop failures as (name, fub_id) tuples, summary lines for sources a
+        plan kept or no longer holds). Plans that could not be loaded and element deletions that failed go straight
         to ctx.failed_writes.
         """
         api = ctx.api
@@ -1377,6 +1373,9 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         ctx.failed_writes.extend(
             _plan_failure(name, detail) for name, detail in self.coordinator.plan_load_failures(load_failures)
         )
+        # webIoId -> real cmdId, resolved by the coordinator — never guessed out of a plan
+        # element's ref_id (that field IS the webIoId, not the WebCommandId).
+        webio_id_to_cmd_id = self.coordinator.webio_id_to_cmd_id()
         lp_count = 0
         webio_cmd_ids: list[int] = []
         stopped_plans: list[tuple[str, int]] = []
@@ -1386,31 +1385,24 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             await self.coordinator.async_function_plan_change_backup(
                 fub_id, f"cleanup_ignored {[f'{category.audit_key_prefix}{m}' for m in cleanup_ids]}"
             )
-            # Resolve which WebIO commands are actually wired to these markers/KNX objects in this
-            # plan, then hand off to the same unwire mechanism the orphan-delete sync path uses —
-            # it owns the webIoId -> real cmdId resolution, so callers never have to guess it
-            # out of a plan element's ref_id (that field IS the webIoId, not the WebCommandId).
             plan_data = await api.function_plan_load_elements(fub_id, strict=True)
             plan_name = api.function_plan_name(fub_id)
             if not plan_data:
                 ctx.failed_writes.append(_plan_failure(plan_name, PLAN_LOAD_FAILED))
                 continue
-            webio_ids, unwired_marker_elem_ids, kept_ids, gone_ids = self._resolve_plan_webio_and_unwired(
-                api, plan_data, cleanup_ids, ref_type
-            )
+            elem_ids, webio_ids, kept_ids, gone_ids = self._select_plan_cleanup(api, plan_data, cleanup_ids, ref_type)
             notes.extend(self._plan_note_lines(plan_name, fub_id, kept_ids, gone_ids, category))
-            if unwired_marker_elem_ids:
-                lp_count += await self._delete_unwired_marker_elements(
-                    ctx, fub_id, unwired_marker_elem_ids, stopped_plans, stop_failures
-                )
-            if not webio_ids:
-                continue
-            unwired = await self.coordinator.unwire_webio_commands(webio_ids, preferred_fub_id=fub_id)
-            lp_count += unwired["deleted_elem_count"]
-            webio_cmd_ids.extend(unwired["cmd_ids"])
-            stopped_plans.extend(unwired["stopped_plans"])
-            stop_failures.extend(unwired["stop_failures"])
-            ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in unwired["failures"])
+            # One stop/delete/restart per plan for every element of every source.
+            result = await self.coordinator.delete_plan_elements_for_commands(
+                fub_id, elem_ids, webio_ids, webio_id_to_cmd_id
+            )
+            lp_count += result["deleted_elem_count"]
+            webio_cmd_ids.extend(result["cmd_ids"])
+            if result["stopped_plan"]:
+                stopped_plans.append(result["stopped_plan"])
+            if result["stop_failure"]:
+                stop_failures.append(result["stop_failure"])
+            ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in result["failures"])
         # A WebIO command could in principle be collected from more than one plan (e.g. a
         # marker anomalously wired into multiple managed plans); dedupe before deletion so
         # the same command isn't attempted twice.

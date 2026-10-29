@@ -1191,6 +1191,8 @@ WEBHOOK_FORMER_IO_LOG_MSG = "[%s] Webhook push for %s (value %r) is for the IO t
 # Marker for a comment element the restore-as-new path adds to a rebuilt plan, so a user
 # opening it in Comexio Studio immediately understands why it exists and shouldn't hand-edit it.
 FUNCTION_PLAN_MANAGED_PLAN_COMMENT = "! Administrated by HomeAssistant, dont delete or rename !"
+# reference.type of a plan element that stands for a Web-IO command.
+FUNCTION_PLAN_REF_TYPE_WEBIO = 10
 
 
 # Function Plan canvas grid layout — shared by the function plan services (sorting) and the
