@@ -181,6 +181,9 @@ def test_the_report_names_types_and_identifiers_but_no_names_or_serials() -> Non
     # The user files it in either language: the steps come in English and German.
     assert "Diagnosedaten herunterladen" in body
     assert "Debug-Protokollierung aktivieren" in body
+    # The diagnostics keep the extension names: the user is asked to review the file first.
+    assert "It contains the extension names of your installation" in body
+    assert "Sie enthält die Namen der Erweiterungen der Installation" in body
     assert "Meter Garage" not in body
     assert SERIAL not in body
 

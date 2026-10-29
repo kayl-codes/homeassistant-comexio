@@ -48,13 +48,16 @@ DIAGNOSTICS_IO_KEYS = (
     "offline",
     "inactive",
 )
+SKIPPED_OFFLINE_EXTENSION = "offline extension, include_offline_extensions off"
 
 
-def _io_diagnostics(io: Mapping[str, Any]) -> dict[str, Any]:
+def _io_diagnostics(io: Mapping[str, Any], include_offline: bool) -> dict[str, Any]:
+    """An IO as HA reads it: the platform of its entity, or why it gets none (the type reason first)."""
+    offline_skipped = bool(io.get("offline")) and not include_offline
     return {
         **{key: io.get(key) for key in DIAGNOSTICS_IO_KEYS},
-        "platform": io_platform(io),
-        "skipped": unsupported_io_reason(io),
+        "platform": None if offline_skipped else io_platform(io),
+        "skipped": unsupported_io_reason(io) or (SKIPPED_OFFLINE_EXTENSION if offline_skipped else None),
     }
 
 
@@ -86,5 +89,10 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "io_types": coordinator.api.io_types,
             "io_input_types": coordinator.api.io_input_types,
         },
-        "home_assistant": {"ios": [_io_diagnostics(io) for io in coordinator.data.get("io", [])]},
+        "home_assistant": {
+            "ios": [
+                _io_diagnostics(io, conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False))
+                for io in coordinator.data.get("io", [])
+            ]
+        },
     }
