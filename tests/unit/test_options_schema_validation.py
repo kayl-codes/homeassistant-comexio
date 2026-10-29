@@ -10,12 +10,17 @@ from custom_components.comexio.const import (
     ignore_list_categories,
     is_valid_entity_name_schema,
 )
-from custom_components.comexio.options_flow import ComexioOptionsFlow
+from custom_components.comexio.options_flow import (
+    ComexioOptionsFlow,
+    _hidden_ignore_lists,
+    import_enabled_ignore_list_categories,
+    normalize_ignore_lists,
+)
 
 
 def _normalize(user_input: dict) -> dict:
     errors: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, {}, errors, set())
+    ComexioOptionsFlow._normalize_user_input(user_input, errors, set())
     return errors
 
 
@@ -52,17 +57,56 @@ def test_non_string_schema_is_invalid_not_an_exception(schema: object) -> None:
 
 def test_an_emptied_ignore_list_is_saved_empty() -> None:
     """HA sends no key for an emptied optional field; it must not bring the old list back."""
-    conf = {cat.ignored_conf_key: "5" for cat in ignore_list_categories()}
     user_input: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, conf, {}, set())
+    ComexioOptionsFlow._normalize_user_input(user_input, {}, set())
     assert all(user_input[cat.ignored_conf_key] == "" for cat in ignore_list_categories())
 
 
 def test_a_hidden_category_keeps_its_ignore_list() -> None:
-    """A hidden category had no field in the form, so its saved list stays."""
+    """A hidden category had no field in the form: its list stays out of the input, so the entry keeps it."""
     hidden, visible = ignore_list_categories()[0], ignore_list_categories()[1]
-    conf = {hidden.ignored_conf_key: "5,7", visible.ignored_conf_key: "9"}
     user_input: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, conf, {}, {hidden.key})
-    assert user_input[hidden.ignored_conf_key] == "5,7"
+    ComexioOptionsFlow._normalize_user_input(user_input, {}, {hidden.key})
+    assert hidden.ignored_conf_key not in user_input
     assert user_input[visible.ignored_conf_key] == ""
+
+
+def test_an_ignore_list_hidden_for_its_import_keeps_its_list() -> None:
+    """A category shown in the form but not imported had no ignore-list field, so its saved list stays."""
+    off, on = ignore_list_categories()[0], ignore_list_categories()[1]
+    user_input: dict = {}
+    ComexioOptionsFlow._normalize_user_input(user_input, {}, set(), {off.key})
+    assert off.ignored_conf_key not in user_input
+    assert user_input[on.ignored_conf_key] == ""
+
+
+def test_an_invalid_hidden_list_does_not_block_the_form() -> None:
+    """A hidden list is never re-validated: its error would sit on a field nobody sees."""
+    hidden, visible = ignore_list_categories()
+    user_input: dict = {visible.ignored_conf_key: "x"}
+    errors: dict[str, str] = {}
+    ComexioOptionsFlow._normalize_user_input(user_input, errors, set(), {hidden.key})
+    assert hidden.ignored_conf_key not in user_input
+    assert set(errors) == {visible.ignored_conf_key}  # the visible field is still validated
+
+
+def test_ignore_list_fields_follow_the_import_flags() -> None:
+    """Only an imported category's list acts on anything; a category the form hides stays hidden."""
+    marker, knx = ignore_list_categories()
+    cats = ignore_list_categories()
+    # Defaults: markers imported, KNX not.
+    assert _hidden_ignore_lists(cats, {}, set()) == {knx.key}
+    assert _hidden_ignore_lists(cats, {knx.import_conf_key: True}, set()) == set()
+    assert _hidden_ignore_lists(cats, {marker.import_conf_key: False}, set()) == {marker.key, knx.key}
+    assert _hidden_ignore_lists(cats, {knx.import_conf_key: True}, {knx.key}) == {knx.key}
+    assert import_enabled_ignore_list_categories({knx.import_conf_key: True}) == [marker, knx]
+
+
+def test_normalize_ignore_lists_reports_each_invalid_list() -> None:
+    marker, knx = ignore_list_categories()
+    user_input = {marker.ignored_conf_key: "m3; 1-2, 3", knx.ignored_conf_key: "K4, x"}
+    errors: dict[str, str] = {}
+    normalize_ignore_lists(user_input, [marker, knx], errors)
+    assert user_input[marker.ignored_conf_key] == "1-2,3"
+    # A translation key, not a message: the form shows it in the user's language.
+    assert errors == {knx.ignored_conf_key: "invalid_ignored_ids"}

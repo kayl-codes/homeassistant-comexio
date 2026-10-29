@@ -13,10 +13,14 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
+    CONF_IGNORED_KNX,
     CONF_IGNORED_MARKERS,
     CONF_IMPORT_DISABLED_IGNORED,
+    CONF_WEBHOOK_ADDRESS_MODE,
+    CONF_WEBHOOK_URL,
     DOMAIN,
     FUNCTION_PLAN_TRIGGER_PLAN_NAME,
+    WEBHOOK_ADDRESS_CUSTOM,
 )
 from custom_components.comexio.repairs import ComexioRepairFlow
 from tests.common import load_json_fixture
@@ -362,6 +366,139 @@ async def test_options_flow_keeps_a_submitted_ignore_list(
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert entry.options[CONF_IGNORED_MARKERS] == "1,2"  # normalized
+
+
+async def test_options_flow_shows_an_invalid_ignore_list_again_with_the_input(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """An invalid list: a translated field error, the typed text stays to be corrected, the stored list is kept."""
+    entry = _with_options(mock_config_entry, {CONF_IGNORED_MARKERS: "2"})
+    await _setup(hass, entry)
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {CONF_IGNORED_MARKERS: "3, abc"})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_IGNORED_MARKERS: "invalid_ignored_ids"}
+    suggested = {
+        str(key): key.description.get("suggested_value") for key in result["data_schema"].schema if key.description
+    }
+    assert suggested[CONF_IGNORED_MARKERS] == "3, abc"
+    assert entry.options[CONF_IGNORED_MARKERS] == "2"
+
+
+async def test_options_flow_hides_the_ignore_list_of_a_category_not_imported(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """KNX not imported: no KNX ignore-list field, and saving keeps the stored list unvalidated.
+
+    The stored list is invalid on purpose: re-validating a hidden list would block the form
+    with an error on a field nobody sees.
+    """
+    entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "not a list"})
+    await _setup(hass, entry)
+    # No counts known: no category is hidden for lack of objects, so only the import flag hides the list.
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    fields = {str(key) for key in result["data_schema"].schema}
+
+    assert {"import_knx", CONF_IGNORED_MARKERS} <= fields  # the KNX category itself is shown
+    assert CONF_IGNORED_KNX not in fields
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IGNORED_KNX] == "not a list"
+
+
+async def test_options_flow_empties_a_shown_list_and_keeps_a_hidden_one_in_one_save(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The marker list was shown and emptied, the KNX list was hidden: one goes, the other stays.
+
+    Switching the KNX import on in the same save brings its stored list back into effect, as before it was hidden.
+    """
+    entry = _with_options(mock_config_entry, {CONF_IGNORED_MARKERS: "2", "import_knx": False, CONF_IGNORED_KNX: "4"})
+    await _setup(hass, entry)
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"import_knx": True})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert CONF_IGNORED_MARKERS not in entry.options
+    assert entry.options[CONF_IGNORED_KNX] == "4"
+    assert entry.options["import_knx"] is True
+
+
+async def test_options_flow_shows_the_ignore_list_of_an_imported_category(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Counterpart of the hiding test: with KNX imported, the same setup shows the KNX ignore list."""
+    entry = _with_options(mock_config_entry, {"import_knx": True, CONF_IGNORED_KNX: "4"})
+    await _setup(hass, entry)
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+
+    assert CONF_IGNORED_KNX in {str(key) for key in result["data_schema"].schema}
+
+
+async def test_options_flow_keeps_a_list_its_form_hid_when_another_dialog_switched_the_import_on(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The form hid the KNX list; a second dialog switches KNX on before this one is submitted.
+
+    The submit must go by what this form showed: judged by the entry as it is now, the missing
+    KNX field would read as emptied and the stored list would be deleted.
+    """
+    entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "4"})
+    await _setup(hass, entry)
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert CONF_IGNORED_KNX not in {str(key) for key in result["data_schema"].schema}
+
+    hass.config_entries.async_update_entry(entry, options={**entry.options, "import_knx": True})
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {"import_knx": False})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IGNORED_KNX] == "4"
+
+
+async def test_options_flow_keeps_a_hidden_list_another_dialog_saved_during_the_webhook_url_step(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The form hid the KNX list; while it waits at the webhook URL step, a second dialog saves a new one.
+
+    The hidden list is no input of this dialog, so saving it must keep the list the entry holds by then.
+    """
+    entry = _with_options(mock_config_entry, {"import_knx": False, CONF_IGNORED_KNX: "4"})
+    await _setup(hass, entry)
+    hass.data[DOMAIN][entry.entry_id].available_source_counts = {}
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_WEBHOOK_ADDRESS_MODE: WEBHOOK_ADDRESS_CUSTOM}
+    )
+    assert result["step_id"] == "webhook_url"
+
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_IGNORED_KNX: "8"})
+    await hass.async_block_till_done()
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"], {CONF_WEBHOOK_URL: "http://192.168.0.5:8123"}
+    )
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert entry.options[CONF_IGNORED_KNX] == "8"
 
 
 async def test_an_unreadable_scrape_keeps_the_issue(

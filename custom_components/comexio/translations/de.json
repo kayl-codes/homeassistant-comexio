@@ -8,7 +8,8 @@
       "unknown": "Unerwarteter Fehler aufgetreten.",
       "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
       "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
-      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches."
+      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches.",
+      "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben."
     },
     "step": {
       "user": {
@@ -27,6 +28,18 @@
           "import_quickbus": "Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) als Entitäten anlegen",
           "scan_interval": "Abfrageintervall (Minuten)",
           "cover_keywords": "Schlüsselwörter für Rollladen-Erkennung"
+        }
+      },
+      "ignore_lists": {
+        "title": "Ignorier-Listen",
+        "description": "Optional: Die hier eingetragenen IDs werden ausgelassen — keine Entität in Home Assistant, kein Web-IO-Befehl, keine Logikplan-Verbindung. Leer lassen, um alles zu importieren; die Listen lassen sich später in den Optionen der Integration ändern.",
+        "data": {
+          "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen",
+          "ignored_knx": "KNX-Objekt-IDs von der Logikplan-Verbindung ausschließen"
+        },
+        "data_description": {
+          "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
+          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs."
         }
       },
       "reconfigure": {
@@ -63,7 +76,8 @@
     },
     "abort": {
       "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
-      "reauth_successful": "Erneute Anmeldung erfolgreich."
+      "reauth_successful": "Erneute Anmeldung erfolgreich.",
+      "already_configured": "Dieser Comexio-Server oder Instanzname wurde inzwischen eingerichtet."
     }
   },
   "selector": {
@@ -215,7 +229,9 @@
       "loopback_url": "Eine Loopback-Adresse (localhost, 127.x, 0.0.0.0) ist von Comexio aus nicht erreichbar.",
       "insecure_url": "Eine http://-Adresse ist nur im lokalen Netz erlaubt: sonst gingen die Werte unverschlüsselt übers Internet. Verwende https://.",
       "insecure_external_url": "Die externe URL von Home Assistant ist eine http://-Adresse außerhalb des lokalen Netzes: die Werte gingen unverschlüsselt übers Internet. Lege zuerst eine https://-URL fest.",
-      "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest."
+      "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest.",
+      "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben.",
+      "unknown": "Unerwarteter Fehler aufgetreten."
     }
   },
   "entity": {

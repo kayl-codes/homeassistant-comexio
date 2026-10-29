@@ -109,9 +109,48 @@ def _issue(hass: HomeAssistant, entry: MockConfigEntry) -> ir.IssueEntry | None:
 # Config flow
 
 
-async def _submit_user(hass: HomeAssistant) -> dict[str, Any]:
+async def _submit_user_step(hass: HomeAssistant) -> dict[str, Any]:
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
     return await hass.config_entries.flow.async_configure(result["flow_id"], dict(USER_INPUT))
+
+
+async def _submit_user(hass: HomeAssistant) -> dict[str, Any]:
+    """The user step, then the ignore lists step with nothing typed."""
+    result = await _submit_user_step(hass)
+    assert result.get("step_id") == "ignore_lists", result
+    return await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "no_auto_discovery", "mock_comexio_api")
+async def test_an_abandoned_setup_announces_no_https(
+    hass: HomeAssistant, certificate_handshake: AsyncMock, notify: MagicMock
+) -> None:
+    """The HTTPS notification waits for the entry: a setup left at the ignore lists step creates none."""
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = PINNED
+
+    result = await _submit_user_step(hass)
+
+    assert result["step_id"] == "ignore_lists"
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "no_auto_discovery", "mock_comexio_api")
+async def test_a_setup_without_ignore_lists_step_announces_https(
+    hass: HomeAssistant, certificate_handshake: AsyncMock, notify: MagicMock
+) -> None:
+    """Neither Markers nor KNX imported: the entry is created by the user step, and announced once."""
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = PINNED
+
+    result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**USER_INPUT, "import_markers": False, "import_knx": False}
+    )
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert result["data"][CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    notify.assert_called_once()
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "no_auto_discovery")
@@ -169,7 +208,7 @@ async def test_a_failed_login_test_names_its_cause(
     api_returns["fetch_replaced_fingerprint"] = replaced
     api_attributes["last_login_error"] = login_error
 
-    result = await _submit_user(hass)
+    result = await _submit_user_step(hass)
 
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": error}

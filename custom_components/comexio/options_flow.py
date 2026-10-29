@@ -1,5 +1,5 @@
 # Version: 0.8.0
-from collections.abc import Collection, Mapping
+from collections.abc import Collection, Iterable, Mapping, Set as AbstractSet
 import logging
 from typing import Any
 
@@ -62,8 +62,11 @@ from .ha_address import webhook_url_error
 
 _LOGGER = logging.getLogger(__name__)
 
+# Form error of an ignore-list field that does not parse (translations: config.error and options.error).
+INVALID_IGNORED_IDS = "invalid_ignored_ids"
 
-def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", category_label: str = "Merker") -> str:
+
+def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", category_label: str = "marker") -> str:
     """Normalize and validate user input for ignored marker/KNX IDs before saving.
 
     Accepts: comma/semicolon/space/dot separators, an optional leading letter prefix
@@ -88,13 +91,33 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
             ints.add(parsed)
 
     if invalid_tokens:
-        example_prefix = prefix_chars[0]
-        raise vol.Invalid(
-            f"Ungültige {category_label}-IDs: {', '.join(repr(t) for t in invalid_tokens[:3])}. "
-            f"Zahlen (z.B. '3', '{example_prefix}12'), Bereiche (z.B. '8-12') oder Listen (z.B. '1, 3, 5') eingeben."
-        )
+        raise vol.Invalid(f"Invalid {category_label} IDs: {', '.join(repr(t) for t in invalid_tokens[:3])}")
 
     return format_ignored_ids(ints, ranges)
+
+
+def normalize_ignore_lists(user_input: dict, categories: Iterable[SourceCategory], errors: dict[str, str]) -> None:
+    """Normalize the ignore-list of every category in user_input in place; a field error for each invalid one."""
+    for cat in categories:
+        try:
+            ignored_raw = user_input.get(cat.ignored_conf_key, "").strip()
+            prefix_chars = cat.audit_key_prefix + cat.audit_key_prefix.lower()
+            user_input[cat.ignored_conf_key] = _normalize_ignored_ids(ignored_raw, prefix_chars, cat.label)
+        except vol.Invalid as e:
+            # Logged at debug only: the translated form error already tells the user what to fix.
+            _LOGGER.debug(
+                "Invalid ignore list %s=%r: %s", cat.ignored_conf_key, user_input.get(cat.ignored_conf_key), e
+            )
+            errors[cat.ignored_conf_key] = INVALID_IGNORED_IDS
+        except Exception:
+            # A defect, not the user's input: no "invalid list" on a list that may be fine.
+            _LOGGER.exception("Unexpected error validating %s", cat.ignored_conf_key)
+            errors[cat.ignored_conf_key] = "unknown"
+
+
+def import_enabled_ignore_list_categories(conf: Mapping[str, Any]) -> list[SourceCategory]:
+    """The categories with an ignore-list whose import conf switches on: only their lists act on anything."""
+    return [cat for cat in ignore_list_categories() if conf.get(cat.import_conf_key, cat.import_default)]
 
 
 def _saved_user_plan_pick(value: Any, candidates: dict[int, str]) -> str:
@@ -156,6 +179,18 @@ def _hidden_categories(
     }
 
 
+def _hidden_ignore_lists(
+    source_cats: list[SourceCategory], conf: Mapping[str, Any], hidden_cats: set[WebioClass]
+) -> set[WebioClass]:
+    """The categories whose ignore-list field the init step hides: hidden ones and those with their import off.
+
+    The list of a category that is not imported acts on nothing, so its field would only confuse. The
+    saved list stays (see _fill_emptied_ignore_lists) and applies again once the import is back on.
+    """
+    enabled = {cat.key for cat in import_enabled_ignore_list_categories(conf)}
+    return hidden_cats | ({cat.key for cat in source_cats} - enabled)
+
+
 class ComexioOptionsFlow(config_entries.OptionsFlow):
     """Handle options for the component."""
 
@@ -166,6 +201,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         self._pending_input: dict[str, Any] = {}
         # The Quickbus selection the form last showed, to tell an untouched default from a pick.
         self._quickbus_shown: list[str] = []
+        # The hidden categories and hidden ignore-list fields of the init form last shown (see async_step_init).
+        self._form_hidden: tuple[set[WebioClass], set[WebioClass]] | None = None
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -181,9 +218,13 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # below (keep already-saved selections choosable even once no longer "current").
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
-        hidden_cats = _hidden_categories(source_cats, available_counts, conf)
+        hidden_cats, hidden_ignore_lists = self._init_form_hidden(
+            source_cats, available_counts, conf, submitting=user_input is not None
+        )
 
-        if user_input is not None and (result := await self._async_submit_init(user_input, conf, errors, hidden_cats)):
+        if user_input is not None and (
+            result := await self._async_submit_init(user_input, conf, errors, hidden_cats, hidden_ignore_lists)
+        ):
             return result
 
         # Extension names for the IO cluster multi-select: live coordinator data first,
@@ -263,15 +304,17 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         schema_dict[
             vol.Optional(CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
         ] = str
+        # After an error, the lists as submitted: an invalid one stays in its field to be corrected.
+        shown = conf if user_input is None else {**conf, **user_input}
         for cat in source_cats:
-            # Same visibility as the opt-in toggle above — an ignore-list for a category the
-            # user can't even opt into would be a dead field.
-            if cat.key in hidden_cats:
+            # Hidden with the opt-in toggle above, and while the category's import is off: an
+            # ignore-list for a category that is not imported would be a dead field.
+            if cat.key in hidden_ignore_lists:
                 continue
             # suggested_value, not default: HA sends no key for a field the user emptied, and a
             # default would fill the old list back in — the last entry could never be removed.
             schema_dict[
-                vol.Optional(cat.ignored_conf_key, description={"suggested_value": conf.get(cat.ignored_conf_key, "")})
+                vol.Optional(cat.ignored_conf_key, description={"suggested_value": shown.get(cat.ignored_conf_key, "")})
             ] = str
         schema_dict[
             vol.Optional(
@@ -345,6 +388,19 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
 
+    def _init_form_hidden(
+        self, source_cats: list[SourceCategory], available_counts: dict, conf: dict[str, Any], *, submitting: bool
+    ) -> tuple[set[WebioClass], set[WebioClass]]:
+        """The hidden categories and hidden ignore-list fields of the init form.
+
+        On a submit, those of the form shown, not of the entry as it is now: another dialog can switch an
+        import on meanwhile, and a list field this form hid would then read as emptied.
+        """
+        if not submitting or self._form_hidden is None:
+            hidden_cats = _hidden_categories(source_cats, available_counts, conf)
+            self._form_hidden = (hidden_cats, _hidden_ignore_lists(source_cats, conf, hidden_cats))
+        return self._form_hidden
+
     async def async_step_webhook_url(self, user_input=None):
         """Ask for the custom webhook address (only reached with the "custom" webhook address mode)."""
         errors: dict[str, str] = {}
@@ -364,10 +420,17 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             description_placeholders={"example_url": WEBHOOK_URL_EXAMPLE},
         )
 
-    async def _async_submit_init(self, user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]):
+    async def _async_submit_init(
+        self,
+        user_input: dict,
+        conf: dict,
+        errors: dict,
+        hidden_cats: set[WebioClass],
+        hidden_ignore_lists: AbstractSet[WebioClass] = frozenset(),
+    ):
         """Save the init step's input, or open the custom webhook URL step; None: the form again with the errors."""
         _drop_unchanged_quickbus_default(user_input, conf, self._quickbus_shown)
-        self._normalize_user_input(user_input, conf, errors, hidden_cats)
+        self._normalize_user_input(user_input, errors, hidden_cats, hidden_ignore_lists)
         self._validate_webhook_address_mode(user_input, errors)
         if errors:
             return None
@@ -386,23 +449,34 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             )
 
     @staticmethod
-    def _restore_missing_ignored_fields(
-        user_input: dict, conf: dict, source_cats: list[SourceCategory], hidden_cats: set[WebioClass]
+    def _fill_emptied_ignore_lists(
+        user_input: dict, source_cats: list[SourceCategory], hidden_cats: AbstractSet[WebioClass]
     ) -> None:
-        """Fill in the ignored_conf_key value of every category user_input has none for.
+        """Set the ignore list of every shown category user_input has none for to "" (emptied).
 
-        A visible field the user emptied is sent without its key, so it reads as an emptied
-        list. Only a hidden category (see async_step_init) had no field and keeps its old list.
+        A visible field the user emptied is sent without its key, so it reads as an emptied list.
+        A hidden list (see _hidden_ignore_lists) stays out of user_input: _create_options_entry then
+        keeps the value the entry holds when it is saved, which another dialog may have changed while
+        this one waited at the webhook URL step.
         """
         for cat in source_cats:
-            if cat.ignored_conf_key not in user_input:
-                user_input[cat.ignored_conf_key] = conf.get(cat.ignored_conf_key, "") if cat.key in hidden_cats else ""
+            if cat.key not in hidden_cats:
+                user_input.setdefault(cat.ignored_conf_key, "")
 
     @staticmethod
-    def _normalize_user_input(user_input: dict, conf: dict, errors: dict, hidden_cats: set[WebioClass]) -> None:
-        """Validate and normalize user_input in-place; populate errors on failure."""
+    def _normalize_user_input(
+        user_input: dict,
+        errors: dict,
+        hidden_cats: set[WebioClass],
+        hidden_ignore_lists: AbstractSet[WebioClass] = frozenset(),
+    ) -> None:
+        """Validate and normalize user_input in-place; populate errors on failure.
+
+        hidden_ignore_lists: the categories whose ignore-list field the form hid on top of hidden_cats.
+        """
         source_cats = ignore_list_categories()
-        ComexioOptionsFlow._restore_missing_ignored_fields(user_input, conf, source_cats, hidden_cats)
+        hidden_lists = hidden_cats | hidden_ignore_lists
+        ComexioOptionsFlow._fill_emptied_ignore_lists(user_input, source_cats, hidden_lists)
 
         numeric_option_keys = (
             "scan_interval",
@@ -429,16 +503,9 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             if key in user_input and not is_valid_entity_name_schema(user_input[key]):
                 errors[key] = "invalid_schema"
 
-        for cat in source_cats:
-            try:
-                ignored_raw = user_input.get(cat.ignored_conf_key, "").strip()
-                prefix_chars = cat.audit_key_prefix + cat.audit_key_prefix.lower()
-                user_input[cat.ignored_conf_key] = _normalize_ignored_ids(ignored_raw, prefix_chars, cat.german_label)
-            except vol.Invalid as e:
-                errors[cat.ignored_conf_key] = str(e)
-            except Exception as e:
-                _LOGGER.exception("Unexpected error validating %s: %s", cat.ignored_conf_key, e)
-                errors[cat.ignored_conf_key] = f"Fehler bei Validierung: {e}"
+        # A hidden list keeps its stored value as it is: an error there would sit on a field the
+        # form does not show, and block every other option.
+        normalize_ignore_lists(user_input, [cat for cat in source_cats if cat.key not in hidden_lists], errors)
 
     def _create_options_entry(self, user_input: dict):
         """Merge new options with existing entry options and create the config entry.
