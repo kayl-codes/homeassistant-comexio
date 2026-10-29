@@ -20,7 +20,7 @@ from custom_components.comexio.options_flow import (
 
 def _normalize(user_input: dict) -> dict:
     errors: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, {}, errors, set())
+    ComexioOptionsFlow._normalize_user_input(user_input, errors, set())
     return errors
 
 
@@ -57,40 +57,36 @@ def test_non_string_schema_is_invalid_not_an_exception(schema: object) -> None:
 
 def test_an_emptied_ignore_list_is_saved_empty() -> None:
     """HA sends no key for an emptied optional field; it must not bring the old list back."""
-    conf = {cat.ignored_conf_key: "5" for cat in ignore_list_categories()}
     user_input: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, conf, {}, set())
+    ComexioOptionsFlow._normalize_user_input(user_input, {}, set())
     assert all(user_input[cat.ignored_conf_key] == "" for cat in ignore_list_categories())
 
 
 def test_a_hidden_category_keeps_its_ignore_list() -> None:
-    """A hidden category had no field in the form, so its saved list stays."""
+    """A hidden category had no field in the form: its list stays out of the input, so the entry keeps it."""
     hidden, visible = ignore_list_categories()[0], ignore_list_categories()[1]
-    conf = {hidden.ignored_conf_key: "5,7", visible.ignored_conf_key: "9"}
     user_input: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, conf, {}, {hidden.key})
-    assert user_input[hidden.ignored_conf_key] == "5,7"
+    ComexioOptionsFlow._normalize_user_input(user_input, {}, {hidden.key})
+    assert hidden.ignored_conf_key not in user_input
     assert user_input[visible.ignored_conf_key] == ""
 
 
 def test_an_ignore_list_hidden_for_its_import_keeps_its_list() -> None:
     """A category shown in the form but not imported had no ignore-list field, so its saved list stays."""
     off, on = ignore_list_categories()[0], ignore_list_categories()[1]
-    conf = {off.ignored_conf_key: "5,7", on.ignored_conf_key: "9"}
     user_input: dict = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, conf, {}, set(), {off.key})
-    assert user_input[off.ignored_conf_key] == "5,7"
+    ComexioOptionsFlow._normalize_user_input(user_input, {}, set(), {off.key})
+    assert off.ignored_conf_key not in user_input
     assert user_input[on.ignored_conf_key] == ""
 
 
 def test_an_invalid_hidden_list_does_not_block_the_form() -> None:
-    """A hidden list is kept as stored, never re-validated: its error would sit on a field nobody sees."""
+    """A hidden list is never re-validated: its error would sit on a field nobody sees."""
     hidden, visible = ignore_list_categories()
-    conf = {hidden.ignored_conf_key: "not a list"}
     user_input: dict = {visible.ignored_conf_key: "x"}
     errors: dict[str, str] = {}
-    ComexioOptionsFlow._normalize_user_input(user_input, conf, errors, set(), {hidden.key})
-    assert user_input[hidden.ignored_conf_key] == "not a list"
+    ComexioOptionsFlow._normalize_user_input(user_input, errors, set(), {hidden.key})
+    assert hidden.ignored_conf_key not in user_input
     assert set(errors) == {visible.ignored_conf_key}  # the visible field is still validated
 
 

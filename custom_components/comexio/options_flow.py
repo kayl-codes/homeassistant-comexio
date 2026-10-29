@@ -185,7 +185,7 @@ def _hidden_ignore_lists(
     """The categories whose ignore-list field the init step hides: hidden ones and those with their import off.
 
     The list of a category that is not imported acts on nothing, so its field would only confuse. The
-    saved list stays (see _restore_missing_ignored_fields) and applies again once the import is back on.
+    saved list stays (see _fill_emptied_ignore_lists) and applies again once the import is back on.
     """
     enabled = {cat.key for cat in import_enabled_ignore_list_categories(conf)}
     return hidden_cats | ({cat.key for cat in source_cats} - enabled)
@@ -430,7 +430,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
     ):
         """Save the init step's input, or open the custom webhook URL step; None: the form again with the errors."""
         _drop_unchanged_quickbus_default(user_input, conf, self._quickbus_shown)
-        self._normalize_user_input(user_input, conf, errors, hidden_cats, hidden_ignore_lists)
+        self._normalize_user_input(user_input, errors, hidden_cats, hidden_ignore_lists)
         self._validate_webhook_address_mode(user_input, errors)
         if errors:
             return None
@@ -449,22 +449,23 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             )
 
     @staticmethod
-    def _restore_missing_ignored_fields(
-        user_input: dict, conf: dict, source_cats: list[SourceCategory], hidden_cats: set[WebioClass]
+    def _fill_emptied_ignore_lists(
+        user_input: dict, source_cats: list[SourceCategory], hidden_cats: AbstractSet[WebioClass]
     ) -> None:
-        """Fill in the ignored_conf_key value of every category user_input has none for.
+        """Set the ignore list of every shown category user_input has none for to "" (emptied).
 
-        A visible field the user emptied is sent without its key, so it reads as an emptied
-        list. Only a category whose field was hidden (see _hidden_ignore_lists) keeps its old list.
+        A visible field the user emptied is sent without its key, so it reads as an emptied list.
+        A hidden list (see _hidden_ignore_lists) stays out of user_input: _create_options_entry then
+        keeps the value the entry holds when it is saved, which another dialog may have changed while
+        this one waited at the webhook URL step.
         """
         for cat in source_cats:
-            if cat.ignored_conf_key not in user_input:
-                user_input[cat.ignored_conf_key] = conf.get(cat.ignored_conf_key, "") if cat.key in hidden_cats else ""
+            if cat.key not in hidden_cats:
+                user_input.setdefault(cat.ignored_conf_key, "")
 
     @staticmethod
     def _normalize_user_input(
         user_input: dict,
-        conf: dict,
         errors: dict,
         hidden_cats: set[WebioClass],
         hidden_ignore_lists: AbstractSet[WebioClass] = frozenset(),
@@ -475,7 +476,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         """
         source_cats = ignore_list_categories()
         hidden_lists = hidden_cats | hidden_ignore_lists
-        ComexioOptionsFlow._restore_missing_ignored_fields(user_input, conf, source_cats, hidden_lists)
+        ComexioOptionsFlow._fill_emptied_ignore_lists(user_input, source_cats, hidden_lists)
 
         numeric_option_keys = (
             "scan_interval",
