@@ -208,10 +208,6 @@ class SourceCategory:
     audit_key_prefix: str  # coordinator audit-map key prefix
     webio_name_suffix: str  # appended to the configured webio_name (" [M]"/" [IO]"/" [KNX]"/" [QB]")
     label: str  # short display label for sync/audit messages (English — used in UI/log text)
-    german_label: str  # German equivalent, used only in options_flow.py's German-only inline
-    # validation errors ("Merker" is the correct German automation term, distinct from the
-    # English/code "Marker" — see [[feedback_persistent_notification_language]] for why
-    # everything else stays English)
     schema_conf_key: str  # entry.options key for the entity-name schema
     schema_default: str  # default entity-name schema
     id_placeholder: str  # entity-name schema format key for the id
@@ -236,7 +232,6 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         audit_key_prefix=_MARKER_AUDIT_KEY_PREFIX,
         webio_name_suffix=" [M]",
         label="Marker",
-        german_label="Merker",
         schema_conf_key=CONF_SCHEMA_MARKER,
         schema_default=DEFAULT_SCHEMA_MARKER,
         id_placeholder="MarkerId",
@@ -255,7 +250,6 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         audit_key_prefix=_IO_AUDIT_KEY_PREFIX,
         webio_name_suffix=" [IO]",
         label="IO",
-        german_label="IO",
         schema_conf_key=CONF_SCHEMA_IO,
         schema_default=DEFAULT_SCHEMA_IO,
         id_placeholder="IoId",
@@ -274,7 +268,6 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         audit_key_prefix=_KNX_AUDIT_KEY_PREFIX,
         webio_name_suffix=" [KNX]",
         label="KNX",
-        german_label="KNX-Objekt",
         schema_conf_key=CONF_SCHEMA_KNX,
         schema_default=DEFAULT_SCHEMA_KNX,
         id_placeholder="KnxId",
@@ -298,7 +291,6 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         audit_key_prefix=_QUICKBUS_AUDIT_KEY_PREFIX,
         webio_name_suffix=" [QB]",
         label="Quickbus",
-        german_label="Quickbus",
         schema_conf_key=CONF_SCHEMA_IO,
         schema_default=DEFAULT_SCHEMA_IO,
         id_placeholder="IoId",

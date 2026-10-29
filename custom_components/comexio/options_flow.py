@@ -62,8 +62,11 @@ from .ha_address import webhook_url_error
 
 _LOGGER = logging.getLogger(__name__)
 
+# Form error of an ignore-list field that does not parse (translations: config.error and options.error).
+INVALID_IGNORED_IDS = "invalid_ignored_ids"
 
-def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", category_label: str = "Merker") -> str:
+
+def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", category_label: str = "marker") -> str:
     """Normalize and validate user input for ignored marker/KNX IDs before saving.
 
     Accepts: comma/semicolon/space/dot separators, an optional leading letter prefix
@@ -88,11 +91,7 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
             ints.add(parsed)
 
     if invalid_tokens:
-        example_prefix = prefix_chars[0]
-        raise vol.Invalid(
-            f"Ungültige {category_label}-IDs: {', '.join(repr(t) for t in invalid_tokens[:3])}. "
-            f"Zahlen (z.B. '3', '{example_prefix}12'), Bereiche (z.B. '8-12') oder Listen (z.B. '1, 3, 5') eingeben."
-        )
+        raise vol.Invalid(f"Invalid {category_label} IDs: {', '.join(repr(t) for t in invalid_tokens[:3])}")
 
     return format_ignored_ids(ints, ranges)
 
@@ -103,12 +102,17 @@ def normalize_ignore_lists(user_input: dict, categories: Iterable[SourceCategory
         try:
             ignored_raw = user_input.get(cat.ignored_conf_key, "").strip()
             prefix_chars = cat.audit_key_prefix + cat.audit_key_prefix.lower()
-            user_input[cat.ignored_conf_key] = _normalize_ignored_ids(ignored_raw, prefix_chars, cat.german_label)
+            user_input[cat.ignored_conf_key] = _normalize_ignored_ids(ignored_raw, prefix_chars, cat.label)
         except vol.Invalid as e:
-            errors[cat.ignored_conf_key] = str(e)
-        except Exception as e:
-            _LOGGER.exception("Unexpected error validating %s: %s", cat.ignored_conf_key, e)
-            errors[cat.ignored_conf_key] = f"Fehler bei Validierung: {e}"
+            # Logged at debug only: the translated form error already tells the user what to fix.
+            _LOGGER.debug(
+                "Invalid ignore list %s=%r: %s", cat.ignored_conf_key, user_input.get(cat.ignored_conf_key), e
+            )
+            errors[cat.ignored_conf_key] = INVALID_IGNORED_IDS
+        except Exception:
+            # A defect, not the user's input: no "invalid list" on a list that may be fine.
+            _LOGGER.exception("Unexpected error validating %s", cat.ignored_conf_key)
+            errors[cat.ignored_conf_key] = "unknown"
 
 
 def import_enabled_ignore_list_categories(conf: Mapping[str, Any]) -> list[SourceCategory]:
@@ -197,6 +201,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         self._pending_input: dict[str, Any] = {}
         # The Quickbus selection the form last showed, to tell an untouched default from a pick.
         self._quickbus_shown: list[str] = []
+        # The hidden categories and hidden ignore-list fields of the init form last shown (see async_step_init).
+        self._form_hidden: tuple[set[WebioClass], set[WebioClass]] | None = None
 
     async def async_step_init(self, user_input=None):
         """Manage the options."""
@@ -212,8 +218,9 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # below (keep already-saved selections choosable even once no longer "current").
         coordinator = self.hass.data.get(DOMAIN, {}).get(self._config_entry.entry_id)
         available_counts = getattr(coordinator, "available_source_counts", None) or {}
-        hidden_cats = _hidden_categories(source_cats, available_counts, conf)
-        hidden_ignore_lists = _hidden_ignore_lists(source_cats, conf, hidden_cats)
+        hidden_cats, hidden_ignore_lists = self._init_form_hidden(
+            source_cats, available_counts, conf, submitting=user_input is not None
+        )
 
         if user_input is not None and (
             result := await self._async_submit_init(user_input, conf, errors, hidden_cats, hidden_ignore_lists)
@@ -297,6 +304,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         schema_dict[
             vol.Optional(CONF_COVER_KEYWORDS, default=conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
         ] = str
+        # After an error, the lists as submitted: an invalid one stays in its field to be corrected.
+        shown = conf if user_input is None else {**conf, **user_input}
         for cat in source_cats:
             # Hidden with the opt-in toggle above, and while the category's import is off: an
             # ignore-list for a category that is not imported would be a dead field.
@@ -305,7 +314,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             # suggested_value, not default: HA sends no key for a field the user emptied, and a
             # default would fill the old list back in — the last entry could never be removed.
             schema_dict[
-                vol.Optional(cat.ignored_conf_key, description={"suggested_value": conf.get(cat.ignored_conf_key, "")})
+                vol.Optional(cat.ignored_conf_key, description={"suggested_value": shown.get(cat.ignored_conf_key, "")})
             ] = str
         schema_dict[
             vol.Optional(
@@ -378,6 +387,19 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         schema_dict[vol.Optional(CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS, default=saved_user_plans)] = user_plan_selector
 
         return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_dict), errors=errors)
+
+    def _init_form_hidden(
+        self, source_cats: list[SourceCategory], available_counts: dict, conf: dict[str, Any], *, submitting: bool
+    ) -> tuple[set[WebioClass], set[WebioClass]]:
+        """The hidden categories and hidden ignore-list fields of the init form.
+
+        On a submit, those of the form shown, not of the entry as it is now: another dialog can switch an
+        import on meanwhile, and a list field this form hid would then read as emptied.
+        """
+        if not submitting or self._form_hidden is None:
+            hidden_cats = _hidden_categories(source_cats, available_counts, conf)
+            self._form_hidden = (hidden_cats, _hidden_ignore_lists(source_cats, conf, hidden_cats))
+        return self._form_hidden
 
     async def async_step_webhook_url(self, user_input=None):
         """Ask for the custom webhook address (only reached with the "custom" webhook address mode)."""

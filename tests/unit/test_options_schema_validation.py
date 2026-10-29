@@ -112,4 +112,5 @@ def test_normalize_ignore_lists_reports_each_invalid_list() -> None:
     errors: dict[str, str] = {}
     normalize_ignore_lists(user_input, [marker, knx], errors)
     assert user_input[marker.ignored_conf_key] == "1-2,3"
-    assert list(errors) == [knx.ignored_conf_key]
+    # A translation key, not a message: the form shows it in the user's language.
+    assert errors == {knx.ignored_conf_key: "invalid_ignored_ids"}

@@ -8,7 +8,8 @@
       "unknown": "Unerwarteter Fehler aufgetreten.",
       "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
       "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
-      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches."
+      "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches.",
+      "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben."
     },
     "step": {
       "user": {
@@ -228,7 +229,9 @@
       "loopback_url": "Eine Loopback-Adresse (localhost, 127.x, 0.0.0.0) ist von Comexio aus nicht erreichbar.",
       "insecure_url": "Eine http://-Adresse ist nur im lokalen Netz erlaubt: sonst gingen die Werte unverschlüsselt übers Internet. Verwende https://.",
       "insecure_external_url": "Die externe URL von Home Assistant ist eine http://-Adresse außerhalb des lokalen Netzes: die Werte gingen unverschlüsselt übers Internet. Lege zuerst eine https://-URL fest.",
-      "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest."
+      "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest.",
+      "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben.",
+      "unknown": "Unerwarteter Fehler aufgetreten."
     }
   },
   "entity": {

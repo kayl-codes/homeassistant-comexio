@@ -155,7 +155,7 @@ async def test_an_invalid_ignore_list_shows_the_step_again_with_the_input(hass: 
 
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "ignore_lists"
-    assert list(result["errors"]) == [CONF_IGNORED_MARKERS]
+    assert result["errors"] == {CONF_IGNORED_MARKERS: "invalid_ignored_ids"}  # a translation key
     assert _form_suggested(result, CONF_IGNORED_MARKERS) == "3, abc"  # what the user typed, to correct it
     assert hass.config_entries.async_entries(DOMAIN) == []
 
