@@ -3,7 +3,9 @@
 "comexio" holds the raw data of the last readable poll — every IO row of $FubModules["1"] (also
 those HA does not import), the extensions, when they were read and why the last check failed —
 plus the IO type tables, so an unknown IO type can be supported from it. "home_assistant" holds
-HA's reading of each imported IO.
+HA's reading of each imported IO: the entity a setup with the current data makes of it. An
+extension that went offline after the setup keeps its IOs' entities, unavailable, until the
+next reload; its IOs already read as skipped here.
 
 Built from an allow-list, not by redaction: no credentials, host, certificate, webhook, serial
 numbers, locations, IO descriptions or values — the file is meant to be attached to a public
@@ -48,11 +50,11 @@ DIAGNOSTICS_IO_KEYS = (
     "offline",
     "inactive",
 )
-SKIPPED_OFFLINE_EXTENSION = "offline extension, include_offline_extensions off"
+SKIPPED_OFFLINE_EXTENSION = "offline extension, include_offline_extensions off: no entity at setup"
 
 
 def _io_diagnostics(io: Mapping[str, Any], include_offline: bool) -> dict[str, Any]:
-    """An IO as HA reads it: the platform of its entity, or why it gets none (the type reason first)."""
+    """An IO as a setup reads it: the platform of its entity, or why it gets none (the type reason first)."""
     offline_skipped = bool(io.get("offline")) and not include_offline
     return {
         **{key: io.get(key) for key in DIAGNOSTICS_IO_KEYS},
