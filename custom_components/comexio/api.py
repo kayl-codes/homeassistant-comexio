@@ -5431,11 +5431,14 @@ class ComexioAPI:
 
     @staticmethod
     def _connection_ends(conn_data: Any) -> tuple[str, list[str]] | None:
-        """(element id a connection starts at, element ids it feeds), None when either end is unreadable."""
+        """(element id a connection starts at, element ids it feeds), None when either end is unreadable.
+
+        A missing or null output is unreadable too: it may hide a target, unlike an empty list.
+        """
         source = conn_data.get("input") if isinstance(conn_data, dict) else None
         if not isinstance(source, dict) or source.get("FubElementId") is None:
             return None
-        outputs = conn_data.get("output") or []
+        outputs = conn_data.get("output")
         if isinstance(outputs, dict):
             outputs = list(outputs.values())
         if not isinstance(outputs, list):

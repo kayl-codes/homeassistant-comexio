@@ -475,8 +475,11 @@ def test_source_links_name_every_plan_wiring_the_source_to_a_web_io() -> None:
     [
         {"input": {"FubElementId": "2"}, "output": [{"FubElementId": "3"}]},  # the WebIO feeds logic
         {"input": {"FubElementId": "3"}, "output": [{"FubElementId": "2"}]},  # a second wire feeds it
+        # An unreadable connection may be such a wire: the cleanup keeps everything, so no finding either.
+        {"input": {"FubElementId": "1"}, "output": None},
+        {"input": None, "output": None},
     ],
-    ids=["web-io-feeds-logic", "web-io-fed-twice"],
+    ids=["web-io-feeds-logic", "web-io-fed-twice", "unreadable-targets", "unreadable-elsewhere"],
 )
 def test_a_shared_web_io_element_raises_no_cleanup_finding(extra: dict[str, Any]) -> None:
     # The cleanup keeps a WebIO element other wiring uses too, so the audit must not flag it on every poll.

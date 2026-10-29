@@ -549,7 +549,17 @@ GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing 
                 {"input": {"FubElementId": "11"}, "output": [{"IOPos": 0}]},
                 {"input": {"FubElementId": "11"}, "output": ["x"]},
                 {"input": {"FubElementId": "11"}, "output": 5},
+                {"input": {"FubElementId": "11"}},
+                {"input": {"FubElementId": "11"}, "output": None},
             )
+        ),
+        # An empty target list feeds nothing: a readable connection, nothing to keep.
+        (
+            {
+                "elements": {"11": _marker_element(7), "13": _web_io_element(40)},
+                "connections": {"0": _conn("11", "13"), "1": {"input": {"FubElementId": "11"}, "output": []}},
+            },
+            ([13, 11], [40], [], []),
         ),
         # Comexio may serialize the targets as a dict: read the same as the list.
         (
@@ -576,6 +586,9 @@ GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing 
         "connection-target-without-id",
         "connection-target-not-a-dict",
         "connection-targets-not-a-list",
+        "connection-targets-missing",
+        "connection-targets-none",
+        "connection-without-targets",
         "targets-as-dict",
         "gone",
     ],
