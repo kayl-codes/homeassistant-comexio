@@ -585,10 +585,14 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
 
 def test_the_audit_loads_the_plans_whose_list_entry_is_unreadable_too() -> None:
     # Managed or not is unknown for them: a leftover wired there stays a finding (the cleanup reports them skipped).
+    # Plan 36 stands for such a plan: the loader hands it over with include_unknown (pinned on the
+    # real loader in test_malformed_plan_keys), and its wiring counts.
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
-    _check_ignored(coordinator, {"markers": [*MARKERS, {"id": 335, "name": "Rollo"}]})
+    _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
 
     coordinator._load_managed_plan_check_data.assert_awaited_once_with(load_failures=[], include_unknown=True)
+    assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335)]
+    assert coordinator._cleanup_function_plan_count == 1
 
 
 def _plan_with_marker_335(*targets: tuple[str, dict[str, Any]]) -> dict[str, Any]:

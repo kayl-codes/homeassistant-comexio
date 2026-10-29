@@ -1164,7 +1164,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         )
         lines.extend(notes)
         lines.extend(
-            f"{ICON_INFO} Web-IO command '{one_line(name)}' stays — a plan still uses its WebIO element"
+            f"{ICON_INFO} Web-IO command '{one_line(name)}' stays — a function plan still uses its WebIO element"
             for name in check.in_use
         )
         lines.extend(self._notify_stopped_plans(stopped_plans))

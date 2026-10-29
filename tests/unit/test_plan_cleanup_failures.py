@@ -1039,6 +1039,7 @@ def test_a_command_check_that_kept_commands_is_never_nothing_to_clean_up(unplann
             button._cleanup_entities_for_category(_ctx(), SOURCE_CATEGORIES[WebioClass.MARKER], [7], "12")
         )
     assert f"{ICON_CHECK} 0 WebIO commands deleted" in lines
+    assert not [line for line in lines if line.startswith("Nothing to clean up")]
 
 
 def test_a_command_a_plan_still_uses_is_named_in_the_result() -> None:
@@ -1051,7 +1052,7 @@ def test_a_command_a_plan_still_uses_is_named_in_the_result() -> None:
         patch.object(ComexioSyncButton, "_delete_webio_commands", AsyncMock(return_value=(0, 0))) as delete,
     ):
         lines = asyncio.run(button._cleanup_entities_for_category(ctx, SOURCE_CATEGORIES[WebioClass.MARKER], [7], "12"))
-    stays = "stays — a plan still uses its WebIO element"
+    stays = "stays — a function plan still uses its WebIO element"
     assert f"{ICON_INFO} Web-IO command 'HA M7 Licht' {stays}" in lines
     assert f"{ICON_INFO} Web-IO command 'HA M7 Licht alt' {stays}" in lines
     assert delete.await_args.args[2] == []  # the unwired 900 is still in use: not deleted

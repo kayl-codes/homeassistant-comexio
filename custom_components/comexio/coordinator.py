@@ -8609,7 +8609,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         in_use = [name for name, _cmd_id, webio_id in candidates if webio_id in placed]
         if in_use:
             _LOGGER.info(
-                "[%s] cleanup %s: a plan still holds the WebIO element of Web-IO command(s) %s — kept",
+                "[%s] cleanup %s: a function plan still holds the WebIO element of Web-IO command(s) %s — kept",
                 self.server_id,
                 category.label,
                 [one_line(name) for name in in_use],
