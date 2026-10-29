@@ -491,6 +491,15 @@ def test_a_shared_web_io_element_raises_no_cleanup_finding(extra: dict[str, Any]
     assert _coordinator()._source_function_plan_links(12, {3: plan}) == []
 
 
+def test_a_web_io_element_id_that_is_not_a_number_raises_no_cleanup_finding(caplog: pytest.LogCaptureFixture) -> None:
+    # The cleanup cannot delete such an element by id and keeps it, so the audit must not flag it on every poll.
+    plan = _wired_plan(("w2", WEBIO_TARGET[1]))
+
+    assert not ComexioCoordinator._source_webio_wired_in_plan(12, plan)
+    assert _coordinator()._source_function_plan_links(12, {3: plan}) == []
+    assert "'w2' is not a number" in caplog.text
+
+
 def test_a_stray_duplicate_element_wired_to_a_web_io_counts() -> None:
     plan = _wired_plan()
     plan["elements"]["9"] = {"reference": {"type": "2", "ref_id": "12"}}

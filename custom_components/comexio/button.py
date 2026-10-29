@@ -1290,7 +1290,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         return [
             *(
                 f"{ICON_WARNING} {prefix}{source_id} stays in {plan} — it is wired to other plan logic there, "
-                "which the cleanup leaves in place"
+                "or its plan data could not be read (see the log); the cleanup leaves it in place"
                 for source_id in kept_ids
             ),
             *(

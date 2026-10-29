@@ -480,7 +480,7 @@ MIXED_PLAN = {
 
 KEPT_LINE = (
     f"⚠️ M7 stays in Function Plan '{PLAN}' (ID 5) — it is wired to other plan logic there, "
-    "which the cleanup leaves in place"
+    "or its plan data could not be read (see the log); the cleanup leaves it in place"
 )
 GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing to remove there"
 
@@ -561,6 +561,36 @@ GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing 
             },
             ([13, 11], [40], [], []),
         ),
+        # An element id that is not a number cannot be deleted by id: that element stays, the rest goes.
+        (
+            {
+                "elements": {"a1": _marker_element(7), "13": _web_io_element(40)},
+                "connections": {"0": _conn("a1", "13")},
+            },
+            ([13], [40], [7], []),
+        ),
+        (
+            {
+                "elements": {"11": _marker_element(7), "w3": _web_io_element(40)},
+                "connections": {"0": _conn("11", "w3")},
+            },
+            ([], [], [7], []),
+        ),
+        # int() would read these as element 11 / 13 — another element's id: they stay as well.
+        (
+            {
+                "elements": {"011": _marker_element(7), "13": _web_io_element(40)},
+                "connections": {"0": _conn("011", "13")},
+            },
+            ([13], [40], [7], []),
+        ),
+        (
+            {
+                "elements": {"11": _marker_element(7), "١٣": _web_io_element(40)},
+                "connections": {"0": _conn("11", "١٣")},
+            },
+            ([], [], [7], []),
+        ),
         # Comexio may serialize the targets as a dict: read the same as the list.
         (
             {
@@ -589,6 +619,10 @@ GONE_LINE = f"💡 M7 is no longer in Function Plan '{PLAN}' (ID 5) — nothing 
         "connection-targets-missing",
         "connection-targets-none",
         "connection-without-targets",
+        "source-element-id-not-a-number",
+        "web-io-element-id-not-a-number",
+        "source-element-id-zero-padded",
+        "web-io-element-id-non-ascii-digits",
         "targets-as-dict",
         "gone",
     ],
@@ -607,8 +641,13 @@ def test_an_unreadable_connection_is_named_in_the_log(caplog: pytest.LogCaptureF
 
 @pytest.mark.parametrize(
     ("plan_data", "line"),
-    [(MIXED_PLAN, KEPT_LINE), ({"elements": {}, "connections": {}}, GONE_LINE)],
-    ids=["kept-for-other-logic", "gone-from-plan"],
+    [
+        (MIXED_PLAN, KEPT_LINE),
+        # An element id the delete request cannot carry: reported as kept instead of raising out of the cleanup.
+        ({"elements": {"a1": _marker_element(7)}, "connections": {}}, KEPT_LINE),
+        ({"elements": {}, "connections": {}}, GONE_LINE),
+    ],
+    ids=["kept-for-other-logic", "kept-for-an-unreadable-element-id", "gone-from-plan"],
 )
 def test_cleanup_reports_what_a_plan_kept_or_no_longer_holds(plan_data: dict[str, Any], line: str) -> None:
     # Neither is a failure (gone: the scan may read the cached snapshot), but neither is a silent 0.

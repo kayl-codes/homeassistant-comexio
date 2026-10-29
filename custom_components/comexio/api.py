@@ -5406,11 +5406,12 @@ class ComexioAPI:
         other connection uses too (shared plan logic: it stays, and its command with it). Such a source
         element still takes part in plan logic, so a cleanup may remove its WebIO elements but not the element.
         A connection whose ends cannot be read may be any of these, so it counts as other wiring too.
+        An element whose plan-local id is not a canonical number cannot be deleted by id: it stays as well.
         """
         elements = plan_data.get("elements", {})
         connections = plan_data.get("connections", {})
         webio: list[tuple[str, int]] = []
-        other = False
+        other = not ComexioAPI._deletable_element_id(source_elem_id)
         for conn_id, conn_data in connections.items():
             if (ends := ComexioAPI._connection_ends(conn_data)) is None:
                 _LOGGER.warning("Function plan connection %s has an unreadable end — its elements stay", conn_id)
@@ -5423,11 +5424,26 @@ class ComexioAPI:
                 continue
             for out_elem_id in ends[1]:
                 webio_id = ComexioAPI._webio_element_id(elements.get(out_elem_id), out_elem_id)
-                if webio_id is None or ComexioAPI._wired_elsewhere(out_elem_id, conn_id, connections):
+                if (
+                    webio_id is None
+                    or not ComexioAPI._deletable_element_id(out_elem_id)
+                    or ComexioAPI._wired_elsewhere(out_elem_id, conn_id, connections)
+                ):
                     other = True
                 else:
                     webio.append((out_elem_id, webio_id))
         return webio, other
+
+    @staticmethod
+    def _deletable_element_id(elem_id: str) -> bool:
+        """Whether a plan-local element id is a number a delete request can carry (logged when not).
+
+        Only the canonical spelling counts: int() reads "013" or Arabic-Indic digits as another element's id.
+        """
+        if elem_id.isascii() and elem_id.isdecimal() and str(int(elem_id)) == elem_id:
+            return True
+        _LOGGER.warning("Function plan element id %r is not a number — the element stays", elem_id)
+        return False
 
     @staticmethod
     def _connection_ends(conn_data: Any) -> tuple[str, list[str]] | None:
