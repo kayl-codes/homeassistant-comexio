@@ -3,7 +3,8 @@
 "comexio" holds the raw data of the last readable poll — every IO row of $FubModules["1"] (also
 those HA does not import), the extensions, when they were read and why the last check failed —
 plus the IO type tables, so an unknown IO type can be supported from it. "home_assistant" holds
-HA's reading of each imported IO: the entity a setup with the current data makes of it. An
+HA's reading of each imported IO, Quickbus IOs apart (read-only by their own rule, their device
+named by id): the entity a setup with the current data makes of it. An
 extension that went offline after the setup keeps its IOs' entities, unavailable, until the
 next reload; its IOs already read as skipped here.
 
@@ -24,7 +25,13 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
+from .const import (
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
+    DOMAIN,
+    QUICKBUS_IO_DATA_KEY,
+    quickbus_device_id,
+    quickbus_io_platform,
+)
 from .coordinator import ComexioCoordinator
 from .reference_monitor import async_integration_version
 from .unsupported_ios import io_platform, unsupported_io_reason
@@ -63,6 +70,21 @@ def _io_diagnostics(io: Mapping[str, Any], include_offline: bool) -> dict[str, A
     }
 
 
+def _quickbus_io_diagnostics(io: Mapping[str, Any], include_offline: bool) -> dict[str, Any]:
+    """A Quickbus IO as a setup reads it: always read-only (quickbus_io_platform), skipped only offline.
+
+    The device is named by its id: its name is text of the installation.
+    """
+    offline_skipped = bool(io.get("offline")) and not include_offline
+    return {
+        **{key: io.get(key) for key in DIAGNOSTICS_IO_KEYS},
+        "id": io.get("id"),
+        "quickbus_device_id": quickbus_device_id(io),
+        "platform": None if offline_skipped else quickbus_io_platform(io),
+        "skipped": SKIPPED_OFFLINE_EXTENSION if offline_skipped else None,
+    }
+
+
 async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     """Diagnostics of one Comexio entry; without a loaded coordinator only versions and options."""
     conf = {**entry.data, **entry.options}
@@ -81,6 +103,7 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
     }
     if coordinator is None or not coordinator.data:
         return diagnostics
+    include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     return {
         **diagnostics,
         "comexio": {
@@ -92,9 +115,9 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "io_input_types": coordinator.api.io_input_types,
         },
         "home_assistant": {
-            "ios": [
-                _io_diagnostics(io, conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False))
-                for io in coordinator.data.get("io", [])
-            ]
+            "ios": [_io_diagnostics(io, include_offline) for io in coordinator.data.get("io", [])],
+            "quickbus_ios": [
+                _quickbus_io_diagnostics(io, include_offline) for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])
+            ],
         },
     }
