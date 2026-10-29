@@ -594,7 +594,8 @@ def _fallback_audit_key(full_name: str) -> str:
 
     Registry-driven: any range_clustered category ("HA <prefix><ID> <Name>", e.g. Marker/KNX)
     is identified by its audit_key_prefix, so a further range_clustered category needs no new
-    branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces.
+    branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces; a
+    stale name of a known IO is matched before, by _stale_io_command_key.
     """
     parts = full_name.split(" ")
     if len(parts) < 3:
@@ -622,6 +623,16 @@ def _quickbus_command_ref(full_name: str) -> tuple[str, str] | None:
     return parts[1], parts[-1]
 
 
+def _stale_io_command_key(full_name: str, io_name_to_key: Mapping[str, str]) -> str | None:
+    """Audit key of an IO command named "HA IO <ext> <identifier> <more>", e.g. after an old description.
+
+    Matched against the IOs' whole current command names, so an extension name with spaces still
+    pins the IO where _fallback_audit_key's positional split would not; the longest match wins.
+    """
+    matches = [command for command in io_name_to_key if full_name.startswith(f"{command} ")]
+    return io_name_to_key[max(matches, key=len)] if matches else None
+
+
 def _build_com_audit_map(
     com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
 ) -> dict[str, list[dict[str, Any]]]:
@@ -629,7 +640,8 @@ def _build_com_audit_map(
 
     Exact reverse lookup first: ha_map's "name" values are built from the same extension names
     that may contain spaces, so a positional full_name.split(" ") would misparse
-    "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole extension name). Only
+    "HA IO <Ext With Space> <Ident>" (parts[2] wouldn't be the whole extension name). A name
+    that extends a known IO's command name (an old description appended) goes to that IO. Only
     commands with no current HA counterpart (renamed/deleted markers or extensions) fall back
     to the positional heuristic, purely for grouping.
     """
@@ -638,13 +650,14 @@ def _build_com_audit_map(
     # grouped under the IO's key, the audit reports a rename that keeps the command (and the
     # user's wiring of its webIoId) instead of an orphan to delete plus a new command.
     quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
+    io_name_to_key = {info["name"]: key for key, info in ha_map.items() if classify_audit_key(key) is WebioClass.IO}
     com_map: dict[str, list[dict[str, Any]]] = {}
     for full_name, info in com_commands.items():
         key = name_to_key.get(full_name, full_name)
         if key == full_name:
             ref = _quickbus_command_ref(full_name)
             key = quickbus_ref_to_key.get(ref) if ref else None
-            key = key or _fallback_audit_key(full_name)
+            key = key or _stale_io_command_key(full_name, io_name_to_key) or _fallback_audit_key(full_name)
         com_map.setdefault(key, []).append(
             {
                 "name": full_name,

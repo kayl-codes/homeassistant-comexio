@@ -110,16 +110,26 @@ def test_commands_of_held_ios_are_neither_checked_nor_orphans() -> None:
     assert [com["name"] for coms in com_map.values() for com in coms] == ["HA IO EXT-1 I1", "HA QB1 MT1 G201"]
 
 
-def test_a_held_io_command_with_a_stale_name_is_held_too() -> None:
+@pytest.mark.parametrize(
+    "stale_name",
+    [
+        "HA IO vDS1 I1 Alt",
+        # An extension name with spaces: the positional fallback would key it IO_Plant_Room, an orphan.
+        "HA IO Plant Room AI1 Alt",
+    ],
+)
+def test_a_held_io_command_with_a_stale_name_is_held_too(stale_name: str) -> None:
     """A command Comexio still names after the IO's old description falls back to the IO's key."""
     coordinator = _coordinator()
-    ha_map, _meta = coordinator._build_ha_audit_map(_data())
-    commands = {**EVERY_COMMAND, "HA IO vDS1 I1 Alt": EVERY_COMMAND["HA IO vDS1 I1"]}
+    data = _data()
+    data["io"] = [*data["io"], _io("Plant Room", "AI1", offline=True)]
+    ha_map, _meta = coordinator._build_ha_audit_map(data)
+    commands = {**EVERY_COMMAND, stale_name: _command(6)}
 
-    com_map = coordinator._build_com_audit_map_without_held(commands, _data(), ha_map)
+    com_map = coordinator._build_com_audit_map_without_held(commands, data, ha_map)
 
     assert set(com_map) == set(ha_map)
-    assert "HA IO vDS1 I1 Alt" not in {com["name"] for coms in com_map.values() for com in coms}
+    assert stale_name not in {com["name"] for coms in com_map.values() for com in coms}
 
 
 def test_an_unselected_quickbus_device_stays_an_orphan() -> None:
@@ -163,10 +173,13 @@ def test_io_has_entity(io: dict[str, Any], include_offline: bool, expected: bool
     assert io_has_entity(io, include_offline) is expected
 
 
-def _audit(coordinator: ComexioCoordinator, commands: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _audit(
+    coordinator: ComexioCoordinator, commands: dict[str, Any], data: dict[str, Any] | None = None
+) -> dict[str, list[dict[str, Any]]]:
     """missing / orphan / ... of the audit, as the repair and the sync see them."""
-    ha_map, io_meta_by_key = coordinator._build_ha_audit_map(_data())
-    com_map = coordinator._build_com_audit_map_without_held(commands, _data(), ha_map)
+    data = data or _data()
+    ha_map, io_meta_by_key = coordinator._build_ha_audit_map(data)
+    com_map = coordinator._build_com_audit_map_without_held(commands, data, ha_map)
     return coordinator._compare_audit_maps(ha_map, com_map, {}, (None, None, None), io_meta_by_key, set(), set())
 
 
@@ -187,6 +200,19 @@ def test_the_audit_still_reports_an_expected_io_as_missing() -> None:
 
     assert [item["name"] for item in found["missing"]] == ["HA IO EXT-1 I1"]
     assert found["orphan"] == []
+
+
+def test_a_stale_name_on_an_extension_with_spaces_is_a_rename_not_an_orphan() -> None:
+    """The command keeps its webIoId (and the user's wiring): renamed, neither deleted nor created anew."""
+    data = _data()
+    data["io"] = [*data["io"], _io("Plant Room", "AI1")]
+    commands = {**EVERY_COMMAND, "HA IO Plant Room AI1 Alt": _command(6)}
+
+    found = _audit(_coordinator(), commands, data)
+
+    assert [item["name"] for item in found["rename"]] == ["HA IO Plant Room AI1"]
+    assert found["orphan"] == []
+    assert found["missing"] == []
 
 
 def test_include_offline_extensions_from_the_entry_data_counts_too() -> None:
