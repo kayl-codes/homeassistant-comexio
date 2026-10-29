@@ -83,6 +83,7 @@ from .const import (
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
     CONF_HOST,
     CONF_IMPORT_DISABLED_IGNORED,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_KNX_PRERELEASE_CLEANUP_PENDING,
     CONF_PASSWORD,
@@ -263,7 +264,7 @@ from .plan_watchdog import (
 )
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
-from .unsupported_ios import UnsupportedIoMonitor
+from .unsupported_ios import UnsupportedIoMonitor, io_has_entity
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1650,7 +1651,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         audited_commands, disabled_commands = _split_disabled_commands(
             final_data["webio_commands"], active_webio_classes(conf)
         )
-        com_map = _build_com_audit_map(audited_commands, ha_map)
+        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map)
 
         webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
@@ -1801,7 +1802,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         glue with no HA entity and no Web-IO command of their own (see
         project_knx_write_path_design memory) — without this they permanently show up as
         "Fehlend" since no webIO is ever expected to exist for them.
-        IOs have their own composite ext_name+identifier key shape.
+        IOs have their own composite ext_name+identifier key shape; only IOs with an entity are
+        expected (webio_source_data), the others are held (_build_com_audit_map_without_held).
         """
         ha_map: dict[str, dict[str, Any]] = {}
         for cat in SOURCE_CATEGORIES.values():
@@ -1817,23 +1819,50 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 }
 
         io_meta_by_key: dict[str, dict[str, Any]] = {}
-        for io in final_data["io"]:
-            key = io_audit_key(io["ext_name"], io["identifier"])
+        for key, io, name in self._io_audit_entries(self.webio_source_data(final_data)):
             # api.py provides 'is_binary'; the audit type ('digital'/'analog') derives from it.
-            mapped_type = "digital" if io.get("is_binary") else "analog"
-            ha_map[key] = {"name": io_command_name(io), "type": mapped_type}
-            io_meta_by_key[key] = io
-        # Quickbus IOs: keyed by their IO Id (identifiers repeat per device); their io_meta entry
-        # feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).
-        quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
-        for io in webio_quickbus_ios(self.config_entry.options, final_data):
-            key = source_audit_key(quickbus_cat, io["id"])
-            ha_map[key] = {
-                "name": quickbus_command_name(io),
-                "type": "digital" if io.get("is_binary") else "analog",
-            }
+            ha_map[key] = {"name": name, "type": "digital" if io.get("is_binary") else "analog"}
             io_meta_by_key[key] = io
         return ha_map, io_meta_by_key
+
+    def _io_audit_entries(self, data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, Any], str]]:
+        """(audit key, IO, Web-IO command name) of data's IOs and of its Quickbus IOs of selected devices.
+
+        Quickbus IOs are keyed by their IO Id (identifiers repeat per device); their io_meta entry
+        feeds the wiring check of the managed Quickbus plans (io_plan_kind_of tells them apart).
+        """
+        for io in data.get("io", []):
+            yield io_audit_key(io["ext_name"], io["identifier"]), io, io_command_name(io)
+        quickbus_cat = SOURCE_CATEGORIES[WebioClass.QUICKBUS]
+        for io in webio_quickbus_ios(self.config_entry.options, data):
+            yield source_audit_key(quickbus_cat, io["id"]), io, quickbus_command_name(io)
+
+    def _build_com_audit_map_without_held(
+        self, com_commands: dict[str, Any], final_data: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+    ) -> dict[str, list[dict[str, Any]]]:
+        """_build_com_audit_map less the commands of held IOs: imported IOs without an entity.
+
+        Those are an offline extension's IOs while include_offline_extensions is off and IOs of an
+        unsupported type (io_has_entity). HA expects no command for them, and the ones Comexio has
+        stay as they are: grouped under their IO's key, then dropped, so they are neither checked
+        nor reported as orphans a delta sync would delete — with the extension back online or the
+        option turned on, the same command serves the IO again, wiring included. A Fast-Track
+        recreate uploads no command for them; it runs only once Comexio let the class's device be
+        deleted, which it refuses while a command is wired, so only unwired ones go.
+        """
+        held_map = {key: {"name": name} for key, _io, name in self._io_audit_entries(final_data) if key not in ha_map}
+        com_map = _build_com_audit_map(com_commands, ha_map | held_map)
+        held = [key for key in held_map if key in com_map]
+        for key in held:
+            del com_map[key]
+        if held:
+            _LOGGER.debug(
+                "[%s] Web-IO audit: %d of %d IOs without an entity keep their existing commands",
+                self.server_id,
+                len(held),
+                len(held_map),
+            )
+        return com_map
 
     def _update_import_disabled_issues(
         self,
@@ -5034,10 +5063,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         async with self._sync_lock:
             webio_commands = self.data.get("webio_commands", {})
             webio_devices = self.data.get("webio_devices", {})
+            # include_held: a command kept for an IO without an entity still gets its range checked.
             target_by_name = {
                 cmd["Name"]: cmd
                 for cmd in self.api.build_webio_commands(
-                    self.server_id, self.webio_source_data(), None, self.ignored_marker_ids, self.ignored_knx_ids
+                    self.server_id,
+                    self.webio_source_data(include_held=True),
+                    None,
+                    self.ignored_marker_ids,
+                    self.ignored_knx_ids,
                 )
             }
 
@@ -7724,10 +7758,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 reason,
             )
 
-    def webio_source_data(self, data: dict[str, Any] | None = None) -> dict[str, Any]:
-        """data (default: coordinator.data) as the Web-IO builders get it: Quickbus IOs of selected devices only."""
+    def webio_source_data(self, data: dict[str, Any] | None = None, *, include_held: bool = False) -> dict[str, Any]:
+        """data (default: coordinator.data) as the Web-IO builders get it: only IOs with an entity.
+
+        IOs per io_has_entity, Quickbus IOs of selected devices on an online extension (or with
+        include_offline_extensions on) — the same rule as their entities. An IO without an entity
+        gets no command: nothing would show the value it pushes. include_held keeps those held IOs
+        (see _build_com_audit_map_without_held), for checks of the commands Comexio already has.
+        """
         data = (self.data if data is None else data) or {}
-        return {**data, QUICKBUS_IO_DATA_KEY: webio_quickbus_ios(self.config_entry.options, data)}
+        options = self.config_entry.options
+        quickbus_ios = webio_quickbus_ios(options, data)
+        if include_held:
+            return {**data, QUICKBUS_IO_DATA_KEY: quickbus_ios}
+        include_offline = {**self.config_entry.data, **options}.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
+        return {
+            **data,
+            "io": [io for io in data.get("io", []) if io_has_entity(io, include_offline)],
+            QUICKBUS_IO_DATA_KEY: [io for io in quickbus_ios if include_offline or not io.get("offline")],
+        }
 
     def managed_column_plan(self, fub_id: int) -> tuple[IoPlanKind, list[str]] | None:
         """(kind, members) when fub_id is an HA-managed IO or Quickbus column plan, else None.

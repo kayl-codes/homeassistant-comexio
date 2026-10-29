@@ -79,6 +79,12 @@ def io_platform(io: Mapping[str, Any]) -> str | None:
     return "sensor" if is_input else "number"
 
 
+def io_has_entity(io: Mapping[str, Any], include_offline: bool) -> bool:
+    """Whether HA makes an entity of an imported IO: a supported type, on an online extension
+    unless include_offline_extensions is on. Only these IOs get a Web-IO command."""
+    return (include_offline or not io.get("offline")) and io_platform(io) is not None
+
+
 def _raw_extensions(raw_config: Mapping[str, Any]) -> Mapping[str, Any]:
     """The raw $FubModules["1"] (extension id -> extension meta and IO rows), empty if unreadable."""
     modules = raw_config.get("FubModules")
