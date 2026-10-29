@@ -34,9 +34,9 @@ def _coordinator(
     return coordinator
 
 
-def _check(coordinator: ComexioCoordinator) -> tuple[dict[int, dict], list[int]]:
+def _check(coordinator: ComexioCoordinator, memo: dict[int, dict] | None = None) -> tuple[dict[int, dict], list[int]]:
     load_failures: list[int] = []
-    plans = asyncio.run(coordinator._load_function_plan_check_data(load_failures))
+    plans = asyncio.run(coordinator._load_function_plan_check_data(load_failures, memo=memo))
     return plans, load_failures
 
 
@@ -113,6 +113,86 @@ def test_few_cache_misses_are_loaded_one_by_one() -> None:
     assert plans == {fub_id: _plan(fub_id) for fub_id in MANAGED}
     coordinator.api.function_plan_load_all_plans.assert_not_awaited()
     assert _single_loads(coordinator) == misses
+
+
+def test_the_second_audit_category_reuses_the_plans_the_first_one_loaded() -> None:
+    """Marker and KNX audit run one after the other in a poll: one bulk request serves both."""
+    coordinator = _coordinator(bulk={fub_id: _plan(fub_id) for fub_id in MANAGED})
+    memo: dict[int, dict] = {}
+
+    first, _ = _check(coordinator, memo)
+    second, load_failures = _check(coordinator, memo)
+
+    assert second == first == {fub_id: _plan(fub_id) for fub_id in MANAGED}
+    assert load_failures == []
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with()
+    assert _single_loads(coordinator) == []
+
+
+def test_a_plan_the_first_audit_category_failed_is_tried_again() -> None:
+    coordinator = _coordinator(bulk={34: _plan(34), 35: _plan(35), 36: _plan(36)})
+    memo: dict[int, dict] = {}
+    _, first_failures = _check(coordinator, memo)
+    assert 37 not in memo  # a failure is not remembered
+    coordinator.api.function_plan_load_elements.side_effect = {37: _plan(37)}.get
+
+    second, second_failures = _check(coordinator, memo)
+
+    assert first_failures == [37]
+    assert second == {fub_id: _plan(fub_id) for fub_id in MANAGED}
+    assert second_failures == []
+    coordinator.api.function_plan_load_all_plans.assert_awaited_once_with()  # one miss left: loaded on its own
+    assert _single_loads(coordinator) == [37, 37]
+
+
+def test_a_check_outside_the_audit_loads_live_every_time() -> None:
+    """A cleanup or unwire passes no memo, even while the audit holds one: it must see the plans as they are now."""
+    coordinator = _coordinator(bulk={fub_id: _plan(fub_id) for fub_id in MANAGED})
+    coordinator._audit_plan_memo = {fub_id: _plan(fub_id) for fub_id in MANAGED}
+
+    _check(coordinator)
+    _check(coordinator)
+
+    assert coordinator.api.function_plan_load_all_plans.await_count == 2
+
+
+def _audit_coordinator(marker_audit: AsyncMock) -> tuple[ComexioCoordinator, list[Any]]:
+    """Coordinator whose two audit categories record the memo they ran with."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    seen: list[Any] = []
+
+    async def _knx(*_: Any) -> None:
+        seen.append(coordinator._audit_plan_memo)
+
+    async def _marker(*args: Any) -> None:
+        seen.append(coordinator._audit_plan_memo)
+        await marker_audit(*args)
+
+    coordinator.async_check_ignored_markers = _marker  # type: ignore[method-assign]
+    coordinator.async_check_ignored_knx = _knx  # type: ignore[method-assign]
+    return coordinator, seen
+
+
+def test_both_audit_categories_share_one_memo_that_ends_with_the_audit() -> None:
+    coordinator, seen = _audit_coordinator(AsyncMock())
+
+    asyncio.run(coordinator._async_audit_ignored_categories({}, {}, {}))
+
+    assert len(seen) == 2
+    assert seen[0] == {}
+    assert seen[0] is seen[1]
+    assert coordinator._audit_plan_memo is None
+
+
+def test_a_failing_audit_still_drops_the_memo() -> None:
+    coordinator, seen = _audit_coordinator(AsyncMock(side_effect=RuntimeError("boom")))
+    audit = coordinator._async_audit_ignored_categories({}, {}, {})
+
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(audit)
+
+    assert len(seen) == 1  # the KNX audit did not run
+    assert coordinator._audit_plan_memo is None
 
 
 def test_a_seeded_empty_plan_counts_as_a_miss_and_a_cached_plan_is_kept() -> None:

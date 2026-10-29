@@ -889,6 +889,11 @@ def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
 class ComexioCoordinator(DataUpdateCoordinator):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
 
+    # Plans the ignored-source audit of this poll loaded live, so the KNX audit reuses what the
+    # marker audit fetched instead of a second bulk request. None outside that audit block; only
+    # the read-only audit passes it on (memo=), a cleanup or unwire meanwhile loads live.
+    _audit_plan_memo: dict[int, dict] | None = None
+
     def __init__(self, hass: HomeAssistant, api: ComexioAPI, entry: ConfigEntry) -> None:
         super().__init__(
             hass,
@@ -1417,10 +1422,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # rather than overwriting, so neither category's contribution clobbers the other's.
         self._cleanup_entity_ids = []
         self._cleanup_function_plan_count = 0
-        await self.async_check_ignored_markers(conf, final_data, options_at_poll)
-        # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
-        # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
-        await self.async_check_ignored_knx(conf, final_data, options_at_poll)
+        await self._async_audit_ignored_categories(conf, final_data, options_at_poll)
 
         # A missing Web-IO class ends the audit early: no plan checks, and the counts stay unpublished.
         if await self._async_audit_webio(conf, final_data, parsed_data):
@@ -3232,6 +3234,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # on snapshot_changed (not just the pending flag) keeps a relevant plan that the
             # bulk endpoint can never deliver (e.g. a persistently malformed entry) from
             # retriggering this refresh every single cycle forever.
+            _LOGGER.info(
+                "[%s] Refresh after plan snapshot: missing-plan recheck %s, referenced markers changed %s",
+                self.server_id,
+                self._lp_missing_recheck_pending and snapshot_changed,
+                markers_changed,
+            )
             self._lp_missing_recheck_pending = False
             await self.async_request_refresh()
 
@@ -7087,6 +7095,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         )
 
+    async def _async_audit_ignored_categories(
+        self, conf: dict[str, Any], final_data: dict[str, Any], options_at_poll: Mapping[str, Any]
+    ) -> None:
+        """Marker, then KNX ignored-source audit, sharing the plans they load live (_audit_plan_memo)."""
+        self._audit_plan_memo = {}
+        try:
+            await self.async_check_ignored_markers(conf, final_data, options_at_poll)
+            # A marker prune writes the options, which the KNX audit then cannot tell from a user save:
+            # its stale pruning waits for the next poll — accepted, a stale K-ID costs nothing meanwhile.
+            await self.async_check_ignored_knx(conf, final_data, options_at_poll)
+        finally:
+            self._audit_plan_memo = None
+
     async def async_check_ignored_sources(
         self,
         conf: dict[str, Any],
@@ -7173,7 +7194,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # plan selector shows), so wiring there must not raise a repair it cannot resolve.
         # A plan whose list entry is unreadable may be managed: its wiring counts (unknown, not clean).
         load_failures: list[int] = []
-        lp_plans = await self._load_managed_plan_check_data(load_failures=load_failures, include_unknown=True)
+        lp_plans = await self._load_managed_plan_check_data(
+            load_failures=load_failures, include_unknown=True, memo=self._audit_plan_memo
+        )
         unaudited = self._unaudited_plans(load_failures, lp_plans)
         last_links = self._ignored_plan_links.get(webio_class, {})
         links: dict[int, set[int]] = {}
@@ -8456,7 +8479,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fub_ids.update(int(v) for v in plan_map.values())
         return fub_ids
 
-    async def _load_function_plan_check_data(self, load_failures: list[int] | None = None) -> dict[int, dict]:
+    async def _load_function_plan_check_data(
+        self, load_failures: list[int] | None = None, *, memo: dict[int, dict] | None = None
+    ) -> dict[int, dict]:
         """Load wiring data of all managed function plans for batch marker checks.
 
         Prefers the bulk snapshot from the backup cycle; plans missing there are fetched
@@ -8474,10 +8499,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Several cache misses (every managed plan at startup, before the first backup cycle) are
         fetched in one bulk request; a plan the bulk answer lacks (or holds empty) is fetched on its own.
+        memo (only the read-only ignored-source audit passes one, _audit_plan_memo) serves a miss an
+        earlier call loaded and keeps what this one loads; a failed plan is tried again.
         """
         cached = {fub_id: self.function_plan_plans.get(fub_id) for fub_id in self._function_plan_check_fub_ids()}
         misses = [fub_id for fub_id, data in cached.items() if data is None or data.get(_SEEDED_EMPTY_PLAN_MARKER)]
-        fetched = await self._fetch_check_plans(misses, load_failures)
+        fetched = await self._fetch_check_plans(misses, load_failures, memo)
         plans = {fub_id: plan_data for fub_id, plan_data in {**cached, **fetched}.items() if plan_data}
         if load_failures is not None:
             load_failures.extend(self._plans_without_readable_entry(plans))
@@ -8485,22 +8512,34 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
 
-    async def _fetch_check_plans(self, fub_ids: list[int], load_failures: list[int] | None) -> dict[int, dict | None]:
-        """Live wiring data of fub_ids for a link check, None for a plan that failed (appended to load_failures)."""
-        bulk = await self._bulk_load_check_plans(fub_ids)
+    async def _fetch_check_plans(
+        self, fub_ids: list[int], load_failures: list[int] | None, memo: dict[int, dict] | None
+    ) -> dict[int, dict | None]:
+        """Live wiring data of fub_ids for a link check, None for a plan that failed (appended to load_failures).
+
+        Plans already in memo are reused; memo then also keeps every plan this call loaded.
+        """
         fetched: dict[int, dict | None] = {}
-        for fub_id in fub_ids:
-            plan_data = bulk.get(fub_id)
-            if not plan_data:
-                try:
-                    plan_data = await self.api.function_plan_load_elements(fub_id)
-                except Exception:
-                    _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
-                    plan_data = None
+        if memo is not None:
+            fetched = {fub_id: memo[fub_id] for fub_id in fub_ids if fub_id in memo}
+        to_load = [fub_id for fub_id in fub_ids if fub_id not in fetched]
+        bulk = await self._bulk_load_check_plans(to_load)
+        for fub_id in to_load:
+            plan_data = bulk.get(fub_id) or await self._load_check_plan(fub_id)
             if not plan_data and load_failures is not None:
                 load_failures.append(fub_id)
             fetched[fub_id] = plan_data
+        if memo is not None:
+            memo.update({fub_id: plan_data for fub_id, plan_data in fetched.items() if plan_data})
         return fetched
+
+    async def _load_check_plan(self, fub_id: int) -> dict | None:
+        """One plan's live wiring data for a link check, None on a failure (logged)."""
+        try:
+            return await self.api.function_plan_load_elements(fub_id)
+        except Exception:
+            _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
+            return None
 
     async def _bulk_load_check_plans(self, fub_ids: list[int]) -> dict[int, dict]:
         """All plans in one request once fub_ids reach FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES, else {}.
@@ -8523,9 +8562,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return [fub_id for fub_id in fub_ids if not function_plan_info(self.api.fub_data, fub_id)]
 
     async def _load_managed_plan_check_data(
-        self, load_failures: list[int] | None = None, *, include_unknown: bool = False
+        self,
+        load_failures: list[int] | None = None,
+        *,
+        include_unknown: bool = False,
+        memo: dict[int, dict] | None = None,
     ) -> dict[int, dict]:
-        """_load_function_plan_check_data without the plans outside HA's naming and the trigger plan.
+        """_load_function_plan_check_data (memo passed on) without the plans outside HA's naming and the trigger plan.
 
         include_unknown keeps the cluster plans HA mapped whose plan list entry is unreadable
         (managed by name is unknown then, see _plans_without_readable_entry): the read-only audit
@@ -8541,7 +8584,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         and removed as a whole — the generic cleanup would only see the source wired to its
         Flanke, keep it, and flag it again on every audit.
         """
-        plans = await self._load_function_plan_check_data(load_failures)
+        plans = await self._load_function_plan_check_data(load_failures, memo=memo)
         unknown = set(self._plans_without_readable_entry(plans)) if include_unknown else set()
         unknown &= self._mapped_cluster_plan_ids()
         return {

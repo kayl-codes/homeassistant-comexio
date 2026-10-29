@@ -596,9 +596,21 @@ def test_the_audit_loads_the_plans_whose_list_entry_is_unreadable_too() -> None:
     coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
     _check_ignored(coordinator, {"markers": ROLLO}, plans={36: _plan_with_marker_335(WEB_IO)})
 
-    coordinator._load_managed_plan_check_data.assert_awaited_once_with(load_failures=[], include_unknown=True)
+    coordinator._load_managed_plan_check_data.assert_awaited_once_with(
+        load_failures=[], include_unknown=True, memo=None
+    )
     assert coordinator._cleanup_entity_ids == [(WebioClass.MARKER.value, 335)]
     assert coordinator._cleanup_function_plan_count == 1
+
+
+def test_the_audit_hands_the_poll_s_plan_memo_to_the_loader() -> None:
+    """The marker and KNX audit share one bulk load only if the audit passes the memo the poll opened."""
+    coordinator = _coordinator({CONF_IGNORED_MARKERS: "335"})
+    memo: dict[int, dict] = {}
+    coordinator._audit_plan_memo = memo
+    _check_ignored(coordinator, {"markers": ROLLO})
+
+    assert coordinator._load_managed_plan_check_data.await_args.kwargs["memo"] is memo
 
 
 def _plan_with_marker_335(*targets: tuple[str, dict[str, Any]]) -> dict[str, Any]:
