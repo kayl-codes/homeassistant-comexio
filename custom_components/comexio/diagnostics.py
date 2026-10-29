@@ -111,8 +111,8 @@ async def async_get_config_entry_diagnostics(hass: HomeAssistant, entry: ConfigE
             "check_error": coordinator.unsupported_ios.last_error_type,
             "extensions": coordinator.unsupported_ios.extensions,
             "ios": coordinator.unsupported_ios.raw_ios,
-            "io_types": coordinator.api.io_types,
-            "io_input_types": coordinator.api.io_input_types,
+            "io_types": coordinator.unsupported_ios.io_types,
+            "io_input_types": coordinator.unsupported_ios.io_input_types,
         },
         "home_assistant": {
             "ios": [_io_diagnostics(io, include_offline) for io in coordinator.data.get("io", [])],

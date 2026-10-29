@@ -1,6 +1,7 @@
 """IOs of an unsupported type (#196) in a real setup: no entity, the Repair, the diagnostics download."""
 
 import json
+import logging
 from typing import Any
 
 from aiocomexio import __version__ as AIOCOMEXIO_VERSION
@@ -131,6 +132,7 @@ async def test_the_setup_logs_the_versions(
         return "9.8.7"
 
     monkeypatch.setattr(comexio_init, "async_integration_version", _version)
+    caplog.set_level(logging.INFO, logger="custom_components.comexio")
 
     await _setup(hass, mock_config_entry)
 

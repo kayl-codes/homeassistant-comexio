@@ -42,7 +42,8 @@ def test_an_io_is_reported_with_the_entity_ha_makes_of_it(
 ) -> None:
     diagnostics = _io_diagnostics(_io(**fields), include_offline)
 
-    assert (diagnostics["platform"], diagnostics["skipped"]) == (platform, skipped)
+    assert diagnostics["platform"] == platform
+    assert diagnostics["skipped"] == skipped
 
 
 def _quickbus_io(**fields: Any) -> dict[str, Any]:
@@ -65,8 +66,10 @@ def test_a_quickbus_io_is_reported_with_its_read_only_entity(
 ) -> None:
     diagnostics = _quickbus_io_diagnostics(_quickbus_io(**fields), include_offline)
 
-    assert (diagnostics["platform"], diagnostics["skipped"]) == (platform, skipped)
-    assert (diagnostics["id"], diagnostics["quickbus_device_id"]) == ("204", "2")
+    assert diagnostics["platform"] == platform
+    assert diagnostics["skipped"] == skipped
+    assert diagnostics["id"] == "204"
+    assert diagnostics["quickbus_device_id"] == "2"
     # The device name is text of the installation: it stays out.
     assert "MT Bad" not in str(diagnostics)
 
@@ -78,8 +81,16 @@ def _hass_with_offline_io() -> SimpleNamespace:
         # Analog and no input: a sensor only by the Quickbus rule, unlike the physical IO.
         QUICKBUS_IO_DATA_KEY: [_quickbus_io(offline=True, is_binary=False, is_input=False)],
     }
-    coordinator.api = SimpleNamespace(comexio_version="11.0.2", io_types={}, io_input_types={})
-    coordinator.unsupported_ios = SimpleNamespace(raw_read_at=None, last_error_type=None, extensions={}, raw_ios=[])
+    # The API's tables of a later config fetch differ from the ones read with the raw rows.
+    coordinator.api = SimpleNamespace(comexio_version="11.0.2", io_types={"81": "api"}, io_input_types={"81": "api"})
+    coordinator.unsupported_ios = SimpleNamespace(
+        raw_read_at=None,
+        last_error_type=None,
+        extensions={},
+        raw_ios=[],
+        io_types={"81": "rows"},
+        io_input_types={"81": "rows"},
+    )
     return SimpleNamespace(data={DOMAIN: {"entry": coordinator}})
 
 
@@ -111,3 +122,16 @@ def test_the_diagnostics_read_include_offline_like_the_entity_platforms(
     assert [io["platform"] for io in diagnostics["home_assistant"]["ios"]] == [platform]
     assert [io["platform"] for io in diagnostics["home_assistant"]["quickbus_ios"]] == [quickbus_platform]
     assert "MT Bad" not in str(diagnostics)
+
+
+def test_the_diagnostics_show_the_type_tables_read_with_the_raw_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _version(_hass: Any) -> str:
+        return "0.30.0"
+
+    monkeypatch.setattr(diagnostics_module, "async_integration_version", _version)
+    entry = SimpleNamespace(entry_id="entry", data={}, options={})
+
+    diagnostics = asyncio.run(async_get_config_entry_diagnostics(_hass_with_offline_io(), entry))  # type: ignore[arg-type]
+
+    assert diagnostics["comexio"]["io_types"] == {"81": "rows"}
+    assert diagnostics["comexio"]["io_input_types"] == {"81": "rows"}
