@@ -22,6 +22,7 @@ from custom_components.comexio.const import (
     source_category,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.unsupported_ios import IoTypeTableSnapshot
 
 BRIDGE_MARKER_ID = 333
 TRIGGER_FUB_ID = 39
@@ -554,6 +555,7 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
     coordinator = _coordinator(polled)
     coordinator.function_plan_catalog = MagicMock(async_update_from_raw_config=AsyncMock())
     coordinator.reference_monitor = MagicMock(async_check=AsyncMock())
+    coordinator.unsupported_ios = MagicMock(async_update=AsyncMock())
     coordinator.api = MagicMock(comexio_version="2.0")
     coordinator.async_check_orphaned_statistics = AsyncMock()
     for name in (
@@ -565,9 +567,11 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
     ):
         setattr(coordinator, name, MagicMock())
 
-    async def _fetch_while_the_user_saves(_conf: dict[str, Any]) -> tuple[dict, dict, dict]:
+    fetched_tables = IoTypeTableSnapshot({"81": "fetched"}, {"81": "fetched"})
+
+    async def _fetch_while_the_user_saves(_conf: dict[str, Any]) -> tuple[dict, dict, dict, IoTypeTableSnapshot]:
         coordinator.config_entry.options = {CONF_IGNORED_MARKERS: "33"}  # type: ignore[misc]
-        return {}, {"markers": [], "io": [], "knx": []}, {}
+        return {}, {"markers": [], "io": [], "knx": []}, {}, fetched_tables
 
     coordinator._async_fetch_parsed_config = _fetch_while_the_user_saves  # type: ignore[method-assign]
     coordinator.async_check_ignored_markers = AsyncMock()  # type: ignore[method-assign]
@@ -581,6 +585,8 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
         conf, _final_data, options_at_poll = audit.await_args.args
         assert options_at_poll is polled
         assert conf[CONF_IGNORED_MARKERS] == "33,999"
+    # The unsupported-IO check gets the tables of the poll's config page, not the API's of a later fetch.
+    assert coordinator.unsupported_ios.async_update.await_args.kwargs["tables"] is fetched_tables
 
 
 def test_the_audit_loads_the_plans_whose_list_entry_is_unreadable_too() -> None:
