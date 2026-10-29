@@ -21,6 +21,7 @@ from ..const import (
     FUNCTION_PLAN_LAYOUT_Y_START as _LAYOUT_Y_START,
     FUNCTION_PLAN_LAYOUT_Y_STEP as _LAYOUT_Y_STEP,
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
+    FUNCTION_PLAN_REF_TYPE_WEBIO as _REF_TYPE_WEBIO,
     IO_PLAN_KIND_IO,
     IoPlanKind,
     snap_to_grid,
@@ -32,7 +33,6 @@ _LOGGER = logging.getLogger(__name__)
 # reference type codes for element kinds this module's sort logic distinguishes
 _REF_TYPE_MARKER = 2
 _REF_TYPE_KNX = 11
-_REF_TYPE_WEBIO = 10
 
 # Comment-element (type=14) reference type, and the pinned managed-plan marker comment.
 _COMMENT_REF_TYPE = "14"

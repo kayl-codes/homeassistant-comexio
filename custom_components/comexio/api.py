@@ -62,6 +62,7 @@ from .const import (
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_PAIR_RELOAD_INITIAL_DELAY,
     FUNCTION_PLAN_PAIR_RELOAD_MAX_ATTEMPTS,
+    FUNCTION_PLAN_REF_TYPE_WEBIO,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_FLANKE,
     FUNCTION_PLAN_TRIGGER_LAYOUT_X_MARKER,
     FUNCTION_PLAN_TRIGGER_LAYOUT_Y_STEP,
@@ -5320,14 +5321,40 @@ class ComexioAPI:
         return str(meta.get("Name") or fub_id)
 
     @staticmethod
-    def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:
-        """Return the plan-local element id of the given source ref (marker=2/KNX=11), or None if not wired."""
-        for elem_id, elem_data in elements.items():
-            ref = elem_data.get("reference", {})
+    def _find_source_element_ids(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> list[str]:
+        """Plan-local ids of every element of the given source ref (marker=2/KNX=11), a stray duplicate included."""
+        return [
+            str(elem_id)
+            for elem_id, elem_data in elements.items()
             # reference.type comes back as int or str depending on the response shape — normalize.
-            if str(ref.get("type")) == str(ref_type) and int(ref.get("ref_id", -1)) == source_id:
-                return str(elem_id)
-        return None
+            if str((ref := ComexioAPI._element_reference(elem_data)).get("type")) == str(ref_type)
+            and ComexioAPI._reference_id(ref) == source_id
+        ]
+
+    @staticmethod
+    def _element_reference(elem_data: Any) -> dict[str, Any]:
+        """An element's reference, {} for an element without a readable one."""
+        ref = elem_data.get("reference") if isinstance(elem_data, dict) else None
+        return ref if isinstance(ref, dict) else {}
+
+    @staticmethod
+    def _reference_id(ref: dict[str, Any]) -> int | None:
+        """reference.ref_id as int (it comes as int or str), None when missing or malformed.
+
+        A fractional or boolean ref_id is malformed too: int() would truncate it into another id.
+        """
+        ref_id = ref.get("ref_id")
+        if ref_id is None or isinstance(ref_id, bool) or (isinstance(ref_id, float) and not ref_id.is_integer()):
+            return None
+        try:
+            return int(ref_id)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _find_source_element_id(elements: dict[str, Any], source_id: int, ref_type: int = 2) -> str | None:
+        """The first of _find_source_element_ids, or None if the plan holds no element of the source."""
+        return next(iter(ComexioAPI._find_source_element_ids(elements, source_id, ref_type)), None)
 
     @staticmethod
     def _connection_output_ids(conn_data: dict[str, Any]) -> list[str]:
@@ -5338,45 +5365,118 @@ class ComexioAPI:
         return [str(o.get("FubElementId")) for o in outputs if isinstance(o, dict)]
 
     @staticmethod
-    def _element_has_any_wiring(elem_id: str, plan_data: dict) -> bool:
-        """True if elem_id is a source (input) or sink (output) of any connection in this plan.
+    def _webio_element_id(elem_data: Any, elem_id: str) -> int | None:
+        """webIoId of a WebIO element (reference.type 10, int or str), None for any other element.
 
-        Broader than a WebIO-specific check — used to tell "not wired to a WebIO" apart from
-        "not wired at all", since only the latter is safe to delete outright.
+        A WebIO element without a readable webIoId is None too (logged): nothing can resolve its command.
         """
-        for conn_data in plan_data.get("connections", {}).values():
-            if str(conn_data.get("input", {}).get("FubElementId", -1)) == elem_id:
-                return True
-            if elem_id in ComexioAPI._connection_output_ids(conn_data):
-                return True
+        ref = ComexioAPI._element_reference(elem_data)
+        if not ComexioAPI._is_webio_reference(ref):
+            return None
+        if (webio_id := ComexioAPI._reference_id(ref)) is None:
+            _LOGGER.warning("WebIO element %s carries a malformed webIoId %r", elem_id, ref.get("ref_id"))
+        return webio_id
+
+    @staticmethod
+    def _is_webio_reference(ref: dict[str, Any]) -> bool:
+        """Whether a reference stands for a Web-IO command (type 10, int or str)."""
+        return str(ref.get("type")) == str(FUNCTION_PLAN_REF_TYPE_WEBIO)
+
+    @staticmethod
+    def plan_webio_ids(plan_data: dict) -> tuple[set[int], bool]:
+        """(webIoIds of the plan's WebIO elements, whether one of them has no readable webIoId)."""
+        webio_ids: set[int] = set()
+        unreadable = False
+        for elem_data in plan_data.get("elements", {}).values():
+            ref = ComexioAPI._element_reference(elem_data)
+            if not ComexioAPI._is_webio_reference(ref):
+                continue
+            if (webio_id := ComexioAPI._reference_id(ref)) is None:
+                unreadable = True
+            else:
+                webio_ids.add(webio_id)
+        return webio_ids, unreadable
+
+    @staticmethod
+    def _source_element_wiring(source_elem_id: str, plan_data: dict) -> tuple[list[tuple[str, int]], bool]:
+        """(WebIO elements the source element feeds, as (element id, webIoId); whether anything else is wired to it).
+
+        Anything else: a connection feeding the source element, or one feeding a non-WebIO element (a
+        logic block, a timer), a WebIO element without a readable webIoId, or a WebIO element some
+        other connection uses too (shared plan logic: it stays, and its command with it). Such a source
+        element still takes part in plan logic, so a cleanup may remove its WebIO elements but not the element.
+        A connection whose ends cannot be read may be any of these, so it counts as other wiring too.
+        An element whose plan-local id is not a canonical number cannot be deleted by id: it stays as well.
+        """
+        elements = plan_data.get("elements", {})
+        connections = plan_data.get("connections", {})
+        webio: list[tuple[str, int]] = []
+        other = not ComexioAPI._deletable_element_id(source_elem_id)
+        for conn_id, conn_data in connections.items():
+            if (ends := ComexioAPI._connection_ends(conn_data)) is None:
+                _LOGGER.warning("Function plan connection %s has an unreadable end — its elements stay", conn_id)
+                other = True
+                continue
+            if source_elem_id in ends[1]:
+                other = True
+                continue
+            if ends[0] != source_elem_id:
+                continue
+            for out_elem_id in ends[1]:
+                webio_id = ComexioAPI._webio_element_id(elements.get(out_elem_id), out_elem_id)
+                if (
+                    webio_id is None
+                    or not ComexioAPI._deletable_element_id(out_elem_id)
+                    or ComexioAPI._wired_elsewhere(out_elem_id, conn_id, connections)
+                ):
+                    other = True
+                else:
+                    webio.append((out_elem_id, webio_id))
+        return webio, other
+
+    @staticmethod
+    def _deletable_element_id(elem_id: str) -> bool:
+        """Whether a plan-local element id is a number a delete request can carry (logged when not).
+
+        Only the canonical spelling counts: int() reads "013" or Arabic-Indic digits as another element's id.
+        """
+        if elem_id.isascii() and elem_id.isdecimal() and str(int(elem_id)) == elem_id:
+            return True
+        _LOGGER.warning("Function plan element id %r is not a number — the element stays", elem_id)
         return False
 
     @staticmethod
-    def _find_wired_webio_ids_for_marker(marker_id: int, marker_elem_id: str, plan_data: dict) -> list[int]:
-        """Return the webIoIds of all WebIO elements directly wired to the given marker element."""
-        elements = plan_data.get("elements", {})
-        webio_ids: list[int] = []
-        for conn_data in plan_data.get("connections", {}).values():
-            input_elem = conn_data.get("input", {})
-            if str(input_elem.get("FubElementId", -1)) != marker_elem_id:
-                continue
-            for out_elem_id in ComexioAPI._connection_output_ids(conn_data):
-                ref = elements.get(out_elem_id, {}).get("reference", {})
-                if ref.get("type") != 10:
-                    continue
-                raw_ref_id = ref.get("ref_id")
-                if raw_ref_id is None:
-                    continue
-                try:
-                    webio_ids.append(int(raw_ref_id))
-                except (TypeError, ValueError):
-                    _LOGGER.warning(
-                        "_find_wired_webio_ids_for_marker: malformed WebIO ref_id %r on elem=%s (M%d)",
-                        raw_ref_id,
-                        out_elem_id,
-                        marker_id,
-                    )
-        return webio_ids
+    def _connection_ends(conn_data: Any) -> tuple[str, list[str]] | None:
+        """(element id a connection starts at, element ids it feeds), None when either end is unreadable.
+
+        A missing or null output is unreadable too: it may hide a target, unlike an empty list.
+        """
+        source = conn_data.get("input") if isinstance(conn_data, dict) else None
+        if not isinstance(source, dict) or source.get("FubElementId") is None:
+            return None
+        outputs = conn_data.get("output")
+        if isinstance(outputs, dict):
+            outputs = list(outputs.values())
+        if not isinstance(outputs, list):
+            return None
+        targets = [o.get("FubElementId") if isinstance(o, dict) else None for o in outputs]
+        if None in targets:
+            return None
+        return str(source["FubElementId"]), [str(target) for target in targets]
+
+    @staticmethod
+    def _wired_elsewhere(elem_id: str, conn_id: Any, connections: dict[str, Any]) -> bool:
+        """Whether the element takes part in a connection other than conn_id, at either end.
+
+        Fails closed: an unreadable connection counts, and so does a second wire from another ignored
+        source (or a stray duplicate of the same one), so such a WebIO element stays rather than being
+        judged shared or not.
+        """
+        return any(
+            (ends := ComexioAPI._connection_ends(other)) is None or elem_id == ends[0] or elem_id in ends[1]
+            for other_id, other in connections.items()
+            if other_id != conn_id
+        )
 
     @staticmethod
     def _find_webio_wiring(webio_id: int, plan_data: dict) -> list[int] | None:

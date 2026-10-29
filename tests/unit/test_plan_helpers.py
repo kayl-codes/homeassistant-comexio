@@ -442,14 +442,71 @@ def test_superseded_plan_map_names(plan_map: object, superseded: set[str]) -> No
     assert coordinator._superseded_plan_map_names({5: "HA - QB [1,2]"}) == superseded
 
 
-def test_source_link_names_the_first_plan_wiring_the_source() -> None:
-    coordinator = _coordinator()
-    wired_in = {5, 8}
-    coordinator._source_wired_in_plan = lambda _source, plan, _ref_type: plan["fub"] in wired_in  # type: ignore[method-assign]
-    plans = {3: {"fub": 3}, 5: {"fub": 5}, 8: {"fub": 8}}
+def _wired_plan(*targets: tuple[str, dict[str, Any]], source: int = 12) -> dict[str, Any]:
+    """A plan whose marker element "1" (ref source) feeds each target element."""
+    elements = {"1": {"reference": {"type": 2, "ref_id": source}}, **dict(targets)}
+    connections = {
+        str(i): {"input": {"FubElementId": "1"}, "output": [{"FubElementId": elem_id}]}
+        for i, (elem_id, _) in enumerate(targets)
+    }
+    return {"elements": elements, "connections": connections}
 
-    assert coordinator._check_source_function_plan_link(12, plans) == 5
-    assert coordinator._check_source_function_plan_link(12, {3: {"fub": 3}}) is None
+
+WEBIO_TARGET = ("2", {"reference": {"type": 10, "ref_id": 40}})
+LOGIC_TARGET = ("3", {"reference": {"type": 5, "ref_id": 1}})
+
+
+def test_source_links_name_every_plan_wiring_the_source_to_a_web_io() -> None:
+    # (bj): only the first plan counted, and logic-only wiring flagged a source the cleanup keeps.
+    coordinator = _coordinator()
+    plans = {
+        3: _wired_plan(LOGIC_TARGET),
+        5: _wired_plan(WEBIO_TARGET),
+        7: _wired_plan(source=13),
+        8: _wired_plan(LOGIC_TARGET, WEBIO_TARGET),
+    }
+
+    assert coordinator._source_function_plan_links(12, plans) == [5, 8]
+    assert coordinator._source_function_plan_links(12, {3: plans[3]}) == []
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"input": {"FubElementId": "2"}, "output": [{"FubElementId": "3"}]},  # the WebIO feeds logic
+        {"input": {"FubElementId": "3"}, "output": [{"FubElementId": "2"}]},  # a second wire feeds it
+        # An unreadable connection may be such a wire: the cleanup keeps everything, so no finding either.
+        {"input": {"FubElementId": "1"}, "output": None},
+        {"input": None, "output": None},
+    ],
+    ids=["web-io-feeds-logic", "web-io-fed-twice", "unreadable-targets", "unreadable-elsewhere"],
+)
+def test_a_shared_web_io_element_raises_no_cleanup_finding(extra: dict[str, Any]) -> None:
+    # The cleanup keeps a WebIO element other wiring uses too, so the audit must not flag it on every poll.
+    plan = _wired_plan(WEBIO_TARGET)
+    plan["elements"]["3"] = LOGIC_TARGET[1]
+    plan["connections"]["x"] = extra
+
+    assert not ComexioCoordinator._source_webio_wired_in_plan(12, plan)
+    assert _coordinator()._source_function_plan_links(12, {3: plan}) == []
+
+
+def test_a_web_io_element_id_that_is_not_a_number_raises_no_cleanup_finding(caplog: pytest.LogCaptureFixture) -> None:
+    # The cleanup cannot delete such an element by id and keeps it, so the audit must not flag it on every poll.
+    plan = _wired_plan(("w2", WEBIO_TARGET[1]))
+
+    assert not ComexioCoordinator._source_webio_wired_in_plan(12, plan)
+    assert _coordinator()._source_function_plan_links(12, {3: plan}) == []
+    assert "'w2' is not a number" in caplog.text
+
+
+def test_a_stray_duplicate_element_wired_to_a_web_io_counts() -> None:
+    plan = _wired_plan()
+    plan["elements"]["9"] = {"reference": {"type": "2", "ref_id": "12"}}
+    plan["elements"]["10"] = WEBIO_TARGET[1]
+    plan["connections"]["x"] = {"input": {"FubElementId": 9}, "output": {"0": {"FubElementId": "10"}}}
+
+    assert ComexioCoordinator._source_webio_wired_in_plan(12, plan)
 
 
 def test_knx_bridge_pairs_count_only_marker_to_knx() -> None:

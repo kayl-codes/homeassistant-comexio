@@ -24,6 +24,7 @@ from custom_components.comexio.const import (
     SOURCE_CATEGORIES,
     WebioClass,
 )
+from custom_components.comexio.coordinator import SourceCommandCheck
 
 MARKER = SOURCE_CATEGORIES[WebioClass.MARKER]
 
@@ -34,7 +35,13 @@ def _ctx() -> SimpleNamespace:
 
 def _button(**coordinator: object) -> ComexioSyncButton:
     button = ComexioSyncButton.__new__(ComexioSyncButton)
-    button.coordinator = SimpleNamespace(cancel_sync=False, **coordinator)  # type: ignore[assignment]
+    button.coordinator = SimpleNamespace(  # type: ignore[assignment]
+        **{
+            "cancel_sync": False,
+            "deletable_source_command_ids": AsyncMock(return_value=SourceCommandCheck([], [], [], [])),
+            **coordinator,
+        }
+    )
     button.server_id = "iosrv1"
     return button
 
