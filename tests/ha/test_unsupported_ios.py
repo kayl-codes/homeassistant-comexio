@@ -159,7 +159,8 @@ async def test_the_repair_goes_once_the_io_is_gone(
     await _setup(hass, mock_config_entry)
     assert ir.async_get(hass).async_get_issue(DOMAIN, ISSUE_ID) is not None
 
-    mock_comexio_api[0].get_raw_config.return_value = load_json_fixture("config_basic.json")  # type: ignore[attr-defined]
+    api = mock_comexio_api[0]
+    api.get_raw_config.return_value = load_json_fixture("config_basic.json")  # type: ignore[attr-defined]
     await hass.data[DOMAIN][mock_config_entry.entry_id].async_refresh()
     await hass.async_block_till_done()
 

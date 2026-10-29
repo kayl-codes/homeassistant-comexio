@@ -263,7 +263,7 @@ from .plan_watchdog import (
 )
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
-from .unsupported_ios import UnsupportedIoMonitor
+from .unsupported_ios import IoTypeTableSnapshot, UnsupportedIoMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1307,7 +1307,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Precompute cover keywords once per update
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
 
-        raw_config, parsed_data, knx_live_states = await self._async_fetch_parsed_config(conf)
+        raw_config, parsed_data, knx_live_states, io_type_tables = await self._async_fetch_parsed_config(conf)
         # Unfiltered per-category counts — parsed_data carries every category regardless of
         # import_* opt-in, unlike final_data below. See available_source_counts docstring.
         # Held locally and only published to self.available_source_counts right before the
@@ -1333,7 +1333,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._prune_deleted_plans_from_snapshot()
 
         final_data = _imported_data(parsed_data, conf)
-        await self.unsupported_ios.async_update(raw_config, final_data["io"])
+        await self.unsupported_ios.async_update(raw_config, final_data["io"], tables=io_type_tables)
         self._merge_polled_states(final_data)
         self._merge_polled_knx_states(final_data["knx"], knx_live_states)
 
@@ -1384,14 +1384,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
-    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-        """Fetch the raw config and live states and parse them: (raw_config, parsed_data, knx_live_states)."""
+    ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], IoTypeTableSnapshot]:
+        """Fetch the raw config and live states and parse them.
+
+        Returns (raw_config, parsed_data, knx_live_states, io_type_tables): the IO type tables as the
+        fetch left them, before a fetch elsewhere (a service, a sync) rebinds the API's during an await.
+        """
         import_knx = conf.get("import_knx", False)
         # Fetch current raw configuration from the Comexio API. A plan HA starts or stops
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
         mismatches_before = self.api.certificate_mismatch_count
         raw_config = await self.api.get_raw_config()
+        # Taken before anything yields: the tables of the page raw_config is — or, when a newer fetch failed
+        # meanwhile, of the last applied page, as such a fetch applies nothing (see get_raw_config).
+        io_type_tables = IoTypeTableSnapshot.of(self.api)
         self._fail_poll_on_certificate_mismatch(mismatches_before)
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
         if self.api.config_relogin_unreachable:
@@ -1452,7 +1459,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         else:
             # IO and Quickbus import off: nobody shows these IOs, so no Comexio round-trip and no warnings for them.
             self._reset_io_live_tracking()
-        return raw_config, parsed_data, knx_live_states
+        return raw_config, parsed_data, knx_live_states, io_type_tables
 
     def _reset_io_live_tracking(self) -> None:
         """Forget what the IO live path logged, so a re-enabled IO import reports afresh."""

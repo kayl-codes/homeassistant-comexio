@@ -26,6 +26,7 @@ from custom_components.comexio.unsupported_ios import (
     RAW_IO_PRIVATE_KEYS,
     REASON_MEASUREMENT_OUTPUT,
     REPAIR_IO_LIST_LIMIT,
+    IoTypeTableSnapshot,
     UnsupportedIoMonitor,
     build_unsupported_io_report,
     extension_metas,
@@ -174,7 +175,13 @@ def test_the_report_names_types_and_identifiers_but_no_names_or_serials() -> Non
     ios = [_io("E1", "Wh"), _io("E2", "Wh")]
 
     api = _api()
-    title, body = build_unsupported_io_report(ios, extension_metas(RAW_CONFIG), api, "0.30.0", tables=api)  # type: ignore[arg-type]
+    title, body = build_unsupported_io_report(
+        ios,
+        extension_metas(RAW_CONFIG),
+        api,  # type: ignore[arg-type]
+        "0.30.0",
+        tables=api,  # type: ignore[arg-type]
+    )
 
     assert title == "Comexio IO types not supported (extension type 31)"
     assert "- Extension type 31, IO type 81: E1, E2" in body
@@ -206,7 +213,7 @@ def test_the_report_and_the_repair_show_comexio_text_literally(
 
     api = _api()
     _title, body = build_unsupported_io_report(ios, {}, api, None, tables=api)  # type: ignore[arg-type]
-    asyncio.run(monitor.async_update(RAW_CONFIG, ios))
+    asyncio.run(_update(monitor, RAW_CONFIG, ios))
 
     escaped = r"E1\]\(https\://evil\.example\) \[x"
     assert f"IO type 81: {escaped}" in body
@@ -255,10 +262,42 @@ def monitor(monkeypatch: pytest.MonkeyPatch) -> UnsupportedIoMonitor:
     return UnsupportedIoMonitor(MagicMock(), _api(), "srv")  # type: ignore[arg-type]
 
 
+async def _update(monitor: UnsupportedIoMonitor, raw_config: dict[str, Any], ios: list[dict[str, Any]]) -> None:
+    """A poll whose config page came with the tables the API holds now."""
+    await monitor.async_update(raw_config, ios, tables=monitor._api)
+
+
+def test_the_monitor_takes_the_type_tables_of_the_poll_not_the_api_s(
+    monitor: UnsupportedIoMonitor, issue_registry: MagicMock
+) -> None:
+    """A fetch elsewhere rebinds the API's tables; the poll's own snapshot is what its rows came with."""
+    monitor._api.io_types, monitor._api.io_input_types = {"81": "NEW-FETCH"}, {"81": "NEW-FETCH"}
+    tables = IoTypeTableSnapshot(IO_TYPES, IO_INPUT_TYPES)
+
+    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")], tables=tables))
+
+    assert monitor.io_types == IO_TYPES
+    assert monitor.io_input_types == IO_INPUT_TYPES
+    url = issue_registry.async_create_issue.call_args.kwargs["learn_more_url"]
+    body = parse_qs(urlsplit(url).query)["body"][0]
+    assert '"unit": "Wh"' in body
+    assert "NEW-FETCH" not in body
+
+
+def test_a_snapshot_keeps_its_tables_when_the_api_s_change_in_place() -> None:
+    api_tables = SimpleNamespace(io_types={"81": {"unit": "Wh"}}, io_input_types={"81": {"input": False}})
+
+    snapshot = IoTypeTableSnapshot.of(api_tables)
+    api_tables.io_types["81"] = api_tables.io_input_types["81"] = "CHANGED"
+
+    assert snapshot.io_types == {"81": {"unit": "Wh"}}
+    assert snapshot.io_input_types == {"81": {"input": False}}
+
+
 def test_an_unsupported_io_raises_the_repair_with_a_prefilled_issue(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock
 ) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh"), _io("AO1", "V")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh"), _io("AO1", "V")]))
 
     args, kwargs = issue_registry.async_create_issue.call_args
     assert args[1:] == (DOMAIN, f"{ISSUE_UNSUPPORTED_IO_TYPES}_srv")
@@ -277,9 +316,9 @@ def test_an_unsupported_io_raises_the_repair_with_a_prefilled_issue(
 def test_the_repair_goes_once_no_unsupported_io_is_left(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
     with caplog.at_level(logging.INFO):
-        asyncio.run(monitor.async_update(RAW_CONFIG, [_io("AO1", "V")]))
+        asyncio.run(_update(monitor, RAW_CONFIG, [_io("AO1", "V")]))
 
     issue_registry.async_delete_issue.assert_called_once_with(monitor._hass, DOMAIN, monitor.issue_id)
     assert "Repair cleared: no imported IO of an unsupported type left" in caplog.text
@@ -288,7 +327,7 @@ def test_the_repair_goes_once_no_unsupported_io_is_left(
 def test_a_fresh_monitor_clears_a_repair_raised_before_the_reload(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock
 ) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("AO1", "V")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("AO1", "V")]))
 
     issue_registry.async_delete_issue.assert_called_once_with(monitor._hass, DOMAIN, monitor.issue_id)
 
@@ -298,10 +337,10 @@ def test_a_poll_without_an_io_type_table_keeps_the_repair(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, table: str
 ) -> None:
     """Without $IOTypesBinary no IO has a unit, without $IOInputTypes every IO is an input: no news on the types."""
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
     setattr(monitor._api, table, {})
 
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "", is_input=True)]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "", is_input=True)]))
 
     issue_registry.async_delete_issue.assert_not_called()
     assert issue_registry.async_create_issue.call_count == 1
@@ -316,11 +355,11 @@ def test_a_failing_check_does_not_fail_the_poll(
 
     with caplog.at_level(logging.DEBUG):
         for _ in range(3):
-            asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+            asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
         issue_registry.async_create_issue.side_effect = None
-        asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+        asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
         issue_registry.async_create_issue.side_effect = ValueError("bad row")
-        asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+        asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
 
     # The traceback once per cause; a success in between makes the next failure news again.
     tracebacks = [r for r in caplog.records if r.levelno == logging.ERROR]
@@ -330,12 +369,12 @@ def test_a_failing_check_does_not_fail_the_poll(
     # The diagnostics get the type only: the exception text may quote a row.
     assert monitor.last_error_type == "ValueError"
     issue_registry.async_create_issue.side_effect = None
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
     assert monitor.last_error_type is None
 
 
 def test_the_repair_names_the_units_of_the_rule(monitor: UnsupportedIoMonitor, issue_registry: MagicMock) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
 
     placeholders = issue_registry.async_create_issue.call_args.kwargs["translation_placeholders"]
     assert placeholders["units"] == "VA, Wh, kWh, var"
@@ -348,7 +387,7 @@ def test_the_repair_names_the_units_of_the_rule(monitor: UnsupportedIoMonitor, i
 def test_the_issue_link_of_many_ios_stays_within_the_url_limit(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock
 ) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io(f"E{n}", "Wh", type_id_raw=n) for n in range(200)]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io(f"E{n}", "Wh", type_id_raw=n) for n in range(200)]))
 
     url = issue_registry.async_create_issue.call_args.kwargs["learn_more_url"]
     assert len(url) <= ISSUE_URL_MAX_CHARS
@@ -359,8 +398,8 @@ def test_a_failed_scrape_keeps_the_repair_and_the_extensions(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock
 ) -> None:
     """An empty IO list from a failed scrape says nothing about the types: no flashing Repair."""
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
-    asyncio.run(monitor.async_update({}, []))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, {}, []))
 
     issue_registry.async_delete_issue.assert_not_called()
     assert issue_registry.async_create_issue.call_count == 1
@@ -376,16 +415,16 @@ def _raw_data(monitor: UnsupportedIoMonitor) -> tuple[Any, ...]:
 def test_a_failed_scrape_keeps_the_raw_data_for_the_diagnostics(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, failed_scrape: dict[str, Any]
 ) -> None:
-    asyncio.run(monitor.async_update(failed_scrape, []))
+    asyncio.run(_update(monitor, failed_scrape, []))
     assert monitor.raw_ios == []
     assert monitor.raw_read_at is None
 
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
     read = _raw_data(monitor)
     assert monitor.raw_ios
     assert monitor.raw_read_at is not None
 
-    asyncio.run(monitor.async_update(failed_scrape, []))
+    asyncio.run(_update(monitor, failed_scrape, []))
 
     assert _raw_data(monitor) == read
 
@@ -393,13 +432,13 @@ def test_a_failed_scrape_keeps_the_raw_data_for_the_diagnostics(
 def test_a_failed_check_keeps_the_last_raw_data_and_its_error_across_a_failed_scrape(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
     read = _raw_data(monitor)
     monkeypatch.setattr(unsupported_ios, "raw_io_rows", MagicMock(side_effect=ValueError("ROW-SECRET")))
 
-    asyncio.run(monitor.async_update({"FubModules": {"1": {}}}, []))
+    asyncio.run(_update(monitor, {"FubModules": {"1": {}}}, []))
     # A failed scrape runs no check: the error of the last one stays visible.
-    asyncio.run(monitor.async_update({}, []))
+    asyncio.run(_update(monitor, {}, []))
 
     # The extensions, read before the failure, are not stored without their IO rows.
     assert _raw_data(monitor) == read
@@ -411,7 +450,7 @@ def test_a_poll_without_the_io_type_table_still_reads_the_raw_data(
 ) -> None:
     monitor._api.io_types = {}
 
-    asyncio.run(monitor.async_update(RAW_CONFIG, []))
+    asyncio.run(_update(monitor, RAW_CONFIG, []))
 
     assert [row["Identifier"] for row in monitor.raw_ios] == ["E1"]
     assert monitor.raw_read_at is not None
@@ -420,7 +459,7 @@ def test_a_poll_without_the_io_type_table_still_reads_the_raw_data(
 def test_the_diagnostics_keep_the_type_tables_of_the_poll_of_their_rows(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock
 ) -> None:
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
 
     # A later config fetch, without a check of its own, changes the API's tables: in place or anew.
     monitor._api.io_types["81"] = {"unit": "NEW"}
@@ -441,7 +480,7 @@ def test_the_report_takes_the_type_rows_read_with_the_ios(
 
     monkeypatch.setattr(unsupported_ios, "async_integration_version", _version_during_a_fetch)
 
-    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+    asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
 
     url = issue_registry.async_create_issue.call_args.kwargs["learn_more_url"]
     body = parse_qs(urlsplit(url).query)["body"][0]
@@ -453,9 +492,9 @@ def test_the_warning_is_logged_only_when_the_ios_change(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
     with caplog.at_level(logging.WARNING):
-        asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
-        asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
-        asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh"), _io("E2", "Wh")]))
+        asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
+        asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh")]))
+        asyncio.run(_update(monitor, RAW_CONFIG, [_io("E1", "Wh"), _io("E2", "Wh")]))
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert warnings == [
@@ -468,7 +507,7 @@ def test_the_warning_is_logged_only_when_the_ios_change(
 def test_a_long_repair_list_counts_the_rest(monitor: UnsupportedIoMonitor, issue_registry: MagicMock) -> None:
     ios = [_io(f"E{n}", "Wh") for n in range(REPAIR_IO_LIST_LIMIT + 2)]
 
-    asyncio.run(monitor.async_update(RAW_CONFIG, ios))
+    asyncio.run(_update(monitor, RAW_CONFIG, ios))
 
     listed = issue_registry.async_create_issue.call_args.kwargs["translation_placeholders"]["ios"]
     assert listed.endswith(f"E{REPAIR_IO_LIST_LIMIT - 1}; … 2 more")

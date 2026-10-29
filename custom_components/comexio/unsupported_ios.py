@@ -10,6 +10,7 @@ Repair names those IOs; its link opens a GitHub issue pre-filled with the extens
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 import json
 import logging
 import re
@@ -136,13 +137,25 @@ def extension_metas(raw_config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 class IoTypeTables(Protocol):
-    """Comexio's IO type tables: the API's of its last config fetch, or a monitor's of its last poll."""
+    """Comexio's IO type tables: the API's of its last config fetch, a poll's snapshot, or a monitor's."""
 
     @property
     def io_types(self) -> Mapping[str, Any]: ...
 
     @property
     def io_input_types(self) -> Mapping[str, Any]: ...
+
+
+@dataclass(frozen=True)
+class IoTypeTableSnapshot:
+    """Copies of the API's IO type tables, taken when its config fetch returned the page they came with."""
+
+    io_types: Mapping[str, Any]
+    io_input_types: Mapping[str, Any]
+
+    @classmethod
+    def of(cls, tables: IoTypeTables) -> IoTypeTableSnapshot:
+        return cls(dict(tables.io_types), dict(tables.io_input_types))
 
 
 def io_type_rows(tables: IoTypeTables, type_id: Any) -> dict[str, Any]:
@@ -239,7 +252,7 @@ class UnsupportedIoMonitor:
         self.extensions: dict[str, dict[str, Any]] = {}
         self.raw_ios: list[dict[str, Any]] = []
         self.raw_read_at: str | None = None
-        # The IO type tables of that poll (copies: the API's change with every later config fetch).
+        # The IO type tables of that poll's config page (copies: the API's change with every later fetch).
         self.io_types: dict[str, Any] = {}
         self.io_input_types: dict[str, Any] = {}
         # The exception type of the last failed check (None: it succeeded); its text may quote a row.
@@ -249,7 +262,9 @@ class UnsupportedIoMonitor:
     def issue_id(self) -> str:
         return unsupported_io_issue_id(self._server_id)
 
-    async def async_update(self, raw_config: Mapping[str, Any], ios: Iterable[Mapping[str, Any]]) -> None:
+    async def async_update(
+        self, raw_config: Mapping[str, Any], ios: Iterable[Mapping[str, Any]], *, tables: IoTypeTables
+    ) -> None:
         """Raise, refresh or clear the Repair from this poll's IOs; never raises.
 
         A side check: a malformed row must not fail the poll that delivers every entity's value. A
@@ -259,7 +274,7 @@ class UnsupportedIoMonitor:
             _LOGGER.debug("[%s] No module list on the config page, keeping the last state", self._server_id)
             return
         try:
-            await self._async_update(raw_config, ios)
+            await self._async_update(raw_config, ios, tables)
         except Exception as err:
             # Once per cause with the traceback: a row broken on every poll must not flood the log.
             if (cause := f"{type(err).__name__}: {err}") != self._last_error:
@@ -270,7 +285,9 @@ class UnsupportedIoMonitor:
         else:
             self._last_error = self.last_error_type = None
 
-    async def _async_update(self, raw_config: Mapping[str, Any], ios: Iterable[Mapping[str, Any]]) -> None:
+    async def _async_update(
+        self, raw_config: Mapping[str, Any], ios: Iterable[Mapping[str, Any]], tables: IoTypeTables
+    ) -> None:
         """A poll missing either IO type table keeps the last Repair state, but still reads the raw data.
 
         Its IO list says nothing about the types (no $IOTypesBinary: no units; no $IOInputTypes: every
@@ -279,9 +296,9 @@ class UnsupportedIoMonitor:
         # Both read before either is stored: a failure leaves the last poll's pair intact.
         extensions, raw_ios = extension_metas(raw_config), raw_io_rows(raw_config)
         self.extensions, self.raw_ios = extensions, raw_ios
-        # Taken with the rows, before anything yields: the Repair report and the diagnostics pair
-        # them with these, not with what a config fetch during the version lookup below brought.
-        self.io_types, self.io_input_types = dict(self._api.io_types), dict(self._api.io_input_types)
+        # The tables of the config page these rows came from (the poll's snapshot, see the coordinator):
+        # the Repair report and the diagnostics pair them with these, not with a later fetch's.
+        self.io_types, self.io_input_types = dict(tables.io_types), dict(tables.io_input_types)
         self.raw_read_at = dt_util.utcnow().isoformat()
         if not self.io_types or not self.io_input_types:
             _LOGGER.debug("[%s] No IO type tables on the config page, keeping the last state", self._server_id)
