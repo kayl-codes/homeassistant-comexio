@@ -83,12 +83,17 @@ bring the plan back, so the integration never deletes them on its own:
    appears, one per plan. It shows the former ID, the plan that holds this ID now (if
    any), the number of backups and the date of the newest one.
 
-   A plan **renamed** in Comexio counts as deleted too: its backups from before the rename
-   keep the old name, the new ones are stored under the new name. If the plan now holding
-   the ID is your renamed plan, the repair is about its older history.
+   A plan **renamed** in Comexio with its content unchanged (same ID, same content as its
+   newest backup) is followed: its backups move to the new name and none of them become
+   orphaned. Only a rename together with a content change (or a move that failed) counts as
+   deleted: its backups from before the rename keep the old name, the new ones are stored
+   under the new name. If the plan now holding the ID is your renamed plan, the repair is
+   about its older history.
 3. **Your decision:**
    - **Load into the plan preview** switches the plan card to **Orphaned plans** and shows
-     the plan's newest backup. It decides nothing — the repair stays open.
+     the plan's newest backup. It decides nothing — the repair stays open. If another plan
+     is picked in the plan selectors while it waits, that pick wins and the repair reports
+     that the backups could not be loaded.
    - **Keep** keeps the backups for good and never asks again for this plan.
    - **Delete** removes all backups of this plan.
    - **Ignore** (Home Assistant's own button) hides the repair and deletes nothing.
@@ -97,6 +102,14 @@ bring the plan back, so the integration never deletes them on its own:
 5. **In the plan card**, the **Orphaned plans** view has buttons next to **Restore**:
    delete the selected backup, delete all backups of the plan, and keep them (the pin) —
    pressed again on a kept plan, it takes that decision back. Each asks for confirmation.
+
+   The buttons act on the row picked in the **Backup** selector, not on the picture. When
+   the preview does not show that row — it has not loaded it yet, it still shows another
+   plan, or (for deleting one backup) it shows another backup of the plan — the button
+   gets an orange border, and its tooltip and the confirmation dialog name what the preview
+   shows instead. A compact card (only `backup_entity`, no `entity`) checks the preview of
+   the full plan card for the same Comexio server on the dashboard, or, without one, the
+   newest render.
 
 The repair closes by itself when the plan exists again under the same ID and name, or when
 its backups are deleted with one of the actions below. If the plan list cannot be read
@@ -122,7 +135,7 @@ To delete backups without waiting for a repair:
 | `comexio.function_plan_purge_orphaned_backups` | Delete the expired backups of all deleted plans (`include_recent: true`: of any age). |
 | `comexio.function_plan_keep_backups` | Keep a deleted plan's backups for good, or take that back (`keep: false`). |
 | `sensor` **Backups** (diagnostic) | Number of stored snapshots, details per plan as attributes. |
-| `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted or renamed plans, the plans as attributes. |
+| `sensor` **Backups (deleted plans)** (diagnostic) | Number of snapshots of deleted plans (and of plans renamed with a content change), the plans as attributes. |
 | `select` **Backup** | Picks the snapshot the plan preview shows; in the **Orphaned plans** view, a deleted plan's backup. |
 
 ---
@@ -219,13 +232,17 @@ sich der Plan zurückholen, deshalb löscht die Integration sie nie von selbst:
    diese ID jetzt belegt (falls vorhanden), die Anzahl der Backups und das Datum des
    neuesten.
 
-   Ein in Comexio **umbenannter** Plan zählt ebenfalls als gelöscht: Seine Backups von vor
-   der Umbenennung tragen den alten Namen, die neuen liegen unter dem neuen Namen. Ist der
-   Plan, der die ID jetzt belegt, dein umbenannter Plan, geht es in der Meldung um seine
-   ältere Historie.
+   Ein in Comexio **umbenannter** Plan mit unverändertem Inhalt (gleiche ID, gleicher Inhalt
+   wie sein neuestes Backup) wird übernommen: Seine Backups wandern zum neuen Namen, keines
+   wird verwaist. Nur eine Umbenennung zusammen mit einer Inhaltsänderung (oder eine
+   fehlgeschlagene Übernahme) zählt als gelöscht: Seine Backups von vor der Umbenennung
+   tragen den alten Namen, die neuen liegen unter dem neuen Namen. Ist der Plan, der die ID
+   jetzt belegt, dein umbenannter Plan, geht es in der Meldung um seine ältere Historie.
 3. **Deine Entscheidung:**
    - **In Vorschau laden** schaltet die Plan-Karte auf **Orphaned plans** und zeigt das
-     neueste Backup des Plans. Es entscheidet nichts — die Meldung bleibt offen.
+     neueste Backup des Plans. Es entscheidet nichts — die Meldung bleibt offen. Wird
+     währenddessen in den Plan-Auswahlen ein anderer Plan gewählt, gilt diese Wahl, und die
+     Meldung sagt, dass die Backups nicht geladen werden konnten.
    - **Behalten** bewahrt die Backups dauerhaft auf und fragt für diesen Plan nicht mehr.
    - **Löschen** entfernt alle Backups dieses Plans.
    - **Ignorieren** (Home Assistants eigener Knopf) blendet die Meldung aus und löscht
@@ -236,6 +253,14 @@ sich der Plan zurückholen, deshalb löscht die Integration sie nie von selbst:
    gewählte Backup löschen, alle Backups des Plans löschen und sie behalten (die
    Stecknadel) — bei einem behaltenen Plan nimmt sie die Entscheidung zurück. Jeder Knopf
    fragt vorher nach.
+
+   Die Knöpfe wirken auf die Zeile, die in der Auswahl **Backup** gewählt ist, nicht auf das
+   Bild. Zeigt die Vorschau diese Zeile nicht — sie hat sie noch nicht geladen, zeigt noch
+   einen anderen Plan oder (beim Löschen eines einzelnen Backups) ein anderes Backup des
+   Plans —, bekommt der Knopf einen orangen Rand, und sein Tooltip und der
+   Bestätigungsdialog nennen, was die Vorschau stattdessen zeigt. Eine kompakte Karte (nur
+   `backup_entity`, ohne `entity`) prüft die Vorschau der vollen Plan-Karte desselben
+   Comexio-Servers auf dem Dashboard, ohne eine solche das neueste Rendering.
 
 Die Meldung schließt sich von selbst, wenn es den Plan unter derselben ID und demselben
 Namen wieder gibt oder wenn seine Backups mit einer der Aktionen unten gelöscht werden.
@@ -262,5 +287,5 @@ Backups löschen, ohne auf eine Meldung zu warten:
 | `comexio.function_plan_purge_orphaned_backups` | Die abgelaufenen Backups aller gelöschten Pläne löschen (`include_recent: true`: jeden Alters). |
 | `comexio.function_plan_keep_backups` | Die Backups eines gelöschten Plans dauerhaft behalten oder das zurücknehmen (`keep: false`). |
 | `sensor` **Backups** (Diagnose) | Anzahl gespeicherter Snapshots, Details je Plan als Attribute. |
-| `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter oder umbenannter Pläne, die Pläne als Attribute. |
+| `sensor` **Backups (gelöschter Pläne)** (Diagnose) | Anzahl der Snapshots gelöschter Pläne (und mit Inhaltsänderung umbenannter Pläne), die Pläne als Attribute. |
 | `select` **Backup** | Wählt den Snapshot, den die Plan-Vorschau zeigt; in der Ansicht **Orphaned plans** ein Backup eines gelöschten Plans. |

@@ -61,6 +61,10 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   HA", "created in Studio") — markers from the Studio plan editor carry CategoryId 1 like API-created ones (#186).
 - **Concurrency:** Web-IO syncs run under the coordinator's `_sync_lock`; webhook values arriving during a config
   fetch must win over the stale API snapshot (guard R1). Flag changes that weaken these guards.
+- **Reloads:** every reload of the entry goes through `coordinator.async_reload_entry`, which waits for a running
+  sync, restore or plan edit instead of cutting into it (#219). HA's own `config_entries.async_reload` /
+  `async_schedule_reload` is allowed only where that guard cannot apply, with the reason in `ALLOWED` of
+  `tests/unit/test_guarded_reloads.py`; flag an `ALLOWED` entry whose reason does not hold for the new code path.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
   often — webhook pushes, plan preview refreshes, periodic ticks — must not call it, otherwise frequent calls keep
   postponing the poll indefinitely (#122). Notify only the listeners that need the update: webhook values through

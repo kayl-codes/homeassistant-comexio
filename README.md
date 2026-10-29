@@ -87,10 +87,11 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 1. In Home Assistant, go to **Settings > Devices & Services**.
 2. Click **Add Integration** in the bottom right corner and search for **Comexio**.
 3. Fill in your connection details:
-   - **Host:** IP address of your Comexio server.
+   - **Host:** IP address or hostname of your Comexio server. Pre-filled with a server found as `comexio.<domain>` that is not set up yet; a server already set up is refused.
    - **Username / Password:** Your credentials for the web interface (Admin).
    - **API User / Pass (Optional):** For faster API calls via Basic Auth.
-4. After the setup, the integration logs into Comexio and downloads the configuration.
+4. **Ignore lists (optional):** with marker or KNX import on, a second step asks which marker or KNX object IDs to leave out — no entity, no Web-IO command, no function plan connection. Leave the fields empty to import everything; the lists can be changed later in the options.
+5. After the setup, the integration logs into Comexio and downloads the configuration.
 
 > [!TIP]
 > **Initial Setup:** When the integration starts for the first time, it will propose to automatically create the Web-IO device class in Comexio via the Home Assistant "Repairs" menu. Confirm this to activate full webhook functionality!
@@ -101,7 +102,7 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 > **Admin password changed in Comexio:** If Comexio rejects the stored admin credentials of an existing entry — when the integration starts or on a poll — Home Assistant shows a *Re-authenticate Comexio* prompt under *Settings → Devices & Services*. Enter the current username and password there. Until then, the configuration poll stops and the integration does not try the rejected credentials again — only a Home Assistant restart or a reload of the entry tries them once more, and asks for reauth again if Comexio still refuses them. While you are first adding the integration, rejected credentials show an error in the setup form instead.
 
 > [!NOTE]
-> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, and cover detection keywords.
+> **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, cover detection keywords, managed function plans (prefix, size, IO extensions, Quickbus devices), ignore lists, backup retention, and the bus-load and function plan watchdogs.
 
 📖 **[Full configuration guide with screenshots →](CONFIGURATION.md)**
 
@@ -197,6 +198,8 @@ User plans that should always run can be added in the options (**Function plan w
 
 A picked user plan Comexio no longer has under its ID and name raises a repair and an alarm push. If its ID now holds another plan — the plan was renamed, or deleted and Comexio gave its ID to a new plan — both name that plan, and the repair offers to **watch it instead**. A plan renamed with its content unchanged (same ID, same content as its last backup) is followed on its own, watched or not: its backups continue under the new name instead of turning into orphaned backups, and a watchdog pick takes the new name — no alarm, no repair. The repair offers **take over the rename** only when that failed. A rename together with a content change is not recognised as one.
 
+For a deleted plan, repair and push offer **Restore**: it rebuilds the plan from its newest backup as a new plan and starts it, and the pick follows it to its new ID. Before that, Comexio's plan list is read afresh. If the ID meanwhile holds a plan with the deleted plan's content — most likely the plan renamed — the Restore is refused, so no copy is built beside it; take the rename over in the repair instead. If the plan list cannot be read, the Restore fails and its notification names the cause.
+
 📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
 ### 🗂️ Automatic Backups & Restore
@@ -213,6 +216,8 @@ Function plans are backed up automatically — no configuration needed:
 ### 🧱 Managed Cluster Plans
 
 For large installations, marker/Web-IO pairs can be distributed across auto-managed plans named like `HA - Marker [1-100]`. The plan name prefix and the maximum number of marker pairs per plan are configurable in the integration options. Managed plans are labelled with a comment element inside Comexio so they are easy to recognise.
+
+The same applies to IOs and Quickbus devices: each extension picked under **Extensions managed as IO cluster plans** gets a column in a plan `HA - IO [<ext>,...]`, and the devices picked under **Quickbus devices managed as QB cluster plans** stack in the columns of a plan `HA - QB [<device id>,...]`. The pairs-per-plan setting gives the column count (50 / 100 / 150 → 1 / 2 / 3). KNX objects get plans of their own (`HA - KNX [...]`, always 50 pairs). Marker and KNX object IDs listed in the options' ignore lists get no entity and no wiring, see [CONFIGURATION.md](CONFIGURATION.md#3-settings).
 
 ## 🔌 KNX Objects
 
@@ -350,10 +355,11 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 1. Gehe in Home Assistant zu **Einstellungen > Geräte & Dienste**.
 2. Klicke unten rechts auf **Integration hinzufügen** und suche nach **Comexio**.
 3. Fülle die Verbindungsdaten aus:
-   - **Host:** IP-Adresse deines Comexio-Servers.
+   - **Host:** IP-Adresse oder Hostname deines Comexio-Servers. Vorbelegt mit einem als `comexio.<domain>` gefundenen Server, der noch nicht eingerichtet ist; ein bereits eingerichteter Server wird abgewiesen.
    - **Benutzername / Passwort:** Deine Zugangsdaten für die Weboberfläche (Admin).
    - **API User / Pass (Optional):** Für schnellere API-Aufrufe via Basic Auth.
-4. Nach dem Setup meldet sich die Integration in Comexio an und lädt die Konfiguration herunter.
+4. **Ignore-Listen (optional):** Ist der Import von Markern oder KNX-Objekten eingeschaltet, fragt ein zweiter Schritt, welche Marker- bzw. KNX-Objekt-IDs ausgelassen werden — keine Entität, kein Web-IO-Command, keine Logikplan-Verbindung. Felder leer lassen, um alles zu importieren; die Listen lassen sich später in den Optionen ändern.
+5. Nach dem Setup meldet sich die Integration in Comexio an und lädt die Konfiguration herunter.
 
 > [!TIP]
 > **Verbindungsdaten nachträglich ändern:** Wenn sich IP-Adresse oder Passwörter ändern, musst du die Integration **nicht** neu einrichten. Öffne die Integration unter *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu konfigurieren* und passe Host, Benutzername und Passwörter direkt an. Felder für Passwörter leer lassen bedeutet "bestehendes Passwort beibehalten".
@@ -361,7 +367,7 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 > **Admin-Passwort in Comexio geändert:** Lehnt Comexio die gespeicherten Admin-Zugangsdaten einer bestehenden Integration ab — beim Start der Integration oder bei einer Abfrage —, zeigt Home Assistant unter *Einstellungen → Geräte & Dienste* die Aufforderung *Comexio erneut anmelden*. Dort den aktuellen Benutzernamen und das Passwort eingeben. Bis dahin ruht die Konfigurationsabfrage, und die Integration versucht die abgelehnten Zugangsdaten nicht erneut — nur ein Neustart von Home Assistant oder ein Neuladen der Integration versucht sie noch einmal und fordert erneut zur Anmeldung auf, wenn Comexio sie weiter ablehnt. Beim erstmaligen Hinzufügen der Integration erscheint bei abgelehnten Zugangsdaten stattdessen eine Fehlermeldung im Einrichtungsformular.
 
 > [!NOTE]
-> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen und Rollladen-Schlüsselwörter.
+> **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen, Rollladen-Schlüsselwörter, verwaltete Logikpläne (Präfix, Größe, IO-Erweiterungen, Quickbus-Geräte), Ignorier-Listen, Aufbewahrung verwaister Backups sowie Busauslastungs- und Logikplan-Watchdog.
 
 📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](CONFIGURATION.md)**
 
@@ -460,6 +466,8 @@ Eigene Pläne, die immer laufen sollen, lassen sich in den Optionen hinzufügen 
 
 Findet Comexio einen gewählten User-Plan unter seiner ID und seinem Namen nicht mehr, gibt es eine Reparaturmeldung und einen Alarm-Push. Trägt seine ID inzwischen einen anderen Plan — der Plan wurde umbenannt, oder er wurde gelöscht und Comexio hat seine ID neu vergeben —, nennen beide diesen Plan, und die Reparaturmeldung bietet an, **stattdessen ihn zu überwachen**. Ein umbenannter Plan mit unverändertem Inhalt (gleiche ID, gleicher Inhalt wie sein letztes Backup) wird von selbst übernommen, überwacht oder nicht: Seine Backups laufen unter dem neuen Namen weiter, statt zu verwaisten Backups zu werden, und eine Watchdog-Auswahl übernimmt den neuen Namen — kein Alarm, keine Reparaturmeldung. **Umbenennung übernehmen** bietet die Reparaturmeldung nur an, wenn das fehlschlug. Eine Umbenennung zusammen mit einer Inhaltsänderung wird nicht als solche erkannt.
 
+Für einen gelöschten Plan bieten Reparaturmeldung und Push **Restore** an: Der Plan wird aus seinem neuesten Backup als neuer Plan aufgebaut und gestartet, die Watchdog-Auswahl folgt ihm auf seine neue ID. Vorher wird die Planliste frisch aus Comexio gelesen. Trägt die ID inzwischen einen Plan mit dem Inhalt des gelöschten — höchstwahrscheinlich der umbenannte Plan —, wird der Restore verweigert, damit keine Kopie daneben entsteht; übernimm dann stattdessen die Umbenennung in der Reparaturmeldung. Lässt sich die Planliste nicht lesen, schlägt der Restore fehl, und seine Benachrichtigung nennt die Ursache.
+
 📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
 ### 🗂️ Automatische Backups & Restore
@@ -477,6 +485,8 @@ Funktionspläne werden automatisch gesichert — ganz ohne Konfiguration:
 
 Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltete Pläne mit Namen wie `HA - Marker [1-100]` verteilt werden. Präfix und maximale Paar-Anzahl je Plan sind in den Integrations-Optionen einstellbar. Verwaltete Pläne werden in Comexio mit einem Kommentar-Element gekennzeichnet und sind so leicht erkennbar.
 
+Dasselbe gilt für IOs und Quickbus-Geräte: Jede unter **Als IO-Cluster-Pläne verwaltete Erweiterungen** gewählte Erweiterung erhält eine Spalte in einem Plan `HA - IO [<Ext>,...]`, und die unter **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** gewählten Geräte stapeln sich in den Spalten eines Plans `HA - QB [<Geräte-ID>,...]`. Die Einstellung Paare pro Plan bestimmt die Spaltenzahl (50 / 100 / 150 → 1 / 2 / 3). KNX-Objekte erhalten eigene Pläne (`HA - KNX [...]`, immer 50 Paare). In den Ignorier-Listen der Optionen eingetragene Merker- und KNX-Objekt-IDs erhalten keine Entität und keine Verdrahtung, siehe [CONFIGURATION.md](CONFIGURATION.md#3-einstellungen).
+
 ## 🔌 KNX-Objekte
 
 Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs als HA-Entitäten importieren — Opt-in über **KNX-Objekte als Entitäten anlegen** in den Integrations-Optionen (standardmäßig aus). Digitale Objekte werden automatisch anhand ihres KNX-Datenpunkttyps klassifiziert, für echte mehrdeutige DPTs gibt es einen Repair-Issue-gestützten Flow.
@@ -489,7 +499,7 @@ Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt
 
 Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Die Integration sendet dann nichts mehr an Comexio und legt eine Reparatur an, die den gepinnten und den neuen Fingerabdruck zeigt; erst wenn du dort bestätigst, wird das neue Zertifikat gepinnt. Die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste bekommen dazu einen dringenden Push (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“), der die Reparaturen öffnet; er verschwindet vom Handy, sobald die Reparatur erledigt ist; ein noch nicht erreichbarer Dienst (etwa direkt nach einem Neustart) wird bei der nächsten Prüfung erneut versucht. Ein geändertes Zertifikat wird auch dann nie automatisch übernommen, wenn die Seriennummer des Servers passt: Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten an den, der an Comexios Stelle antwortet.
 
-*Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Vor deiner Bestätigung wird nichts gesendet — auch nicht der Login-Test.
+*Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Bis auf den TLS-Handshake, der das Zertifikat ausliest, wird vor deiner Bestätigung nichts gesendet — auch nicht der Login-Test.
 
 Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist; nach einem Neustart, der auf ein geändertes Zertifikat traf, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
 
