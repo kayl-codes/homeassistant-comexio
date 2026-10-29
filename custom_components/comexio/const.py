@@ -565,6 +565,11 @@ FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD = 3
 # Working bulk loads in a row that left out a plan the poll still lists before a persistent notification
 # names it (Comexio skips a plan it cannot deliver without an error). Dismissed once every plan loads again.
 FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD = 3
+# Plans a link check (ignored-source audit, cleanups) misses in the plan cache before it loads them in
+# one bulk request instead of one by one — at startup, before the first backup cycle, that is every
+# managed plan. The bulk load of all plans costs about three single loads (measured 2026-10-29:
+# 30 plans in 2.2 s, a single plan 0.2–2 s, 15 managed plans one by one 11.5 s).
+FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES = 3
 
 # Operation durations for progress calculation (seconds)
 SYNC_DURATION_DELETE = 4

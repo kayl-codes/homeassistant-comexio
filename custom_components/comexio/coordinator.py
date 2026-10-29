@@ -108,6 +108,7 @@ from .const import (
     FIRMWARE_CHECK_MINUTE,
     FUNCTION_PLAN_BACKUP_CYCLE_TIMEOUT_SEC,
     FUNCTION_PLAN_BULK_LOAD_FAIL_NOTIFY_THRESHOLD,
+    FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES,
     FUNCTION_PLAN_FUB_ID_AUTO,
     FUNCTION_PLAN_KNX_CLUSTER_SIZE,
     FUNCTION_PLAN_LAYOUT_COMMENT_Y,
@@ -8470,25 +8471,50 @@ class ComexioCoordinator(DataUpdateCoordinator):
         cache miss here too — this method feeds marker-cleanup/unwire lookups that need to see
         whatever was actually wired into the plan afterward, not the seed's now-possibly-stale
         empty snapshot.
+
+        Several cache misses (every managed plan at startup, before the first backup cycle) are
+        fetched in one bulk request; a plan the bulk answer lacks is fetched on its own.
         """
-        plans: dict[int, dict] = {}
-        for fub_id in self._function_plan_check_fub_ids():
-            plan_data = self.function_plan_plans.get(fub_id)
-            if plan_data is None or plan_data.get(_SEEDED_EMPTY_PLAN_MARKER):
-                try:
-                    plan_data = await self.api.function_plan_load_elements(fub_id)
-                except Exception:
-                    _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
-                    plan_data = None
-                if not plan_data and load_failures is not None:
-                    load_failures.append(fub_id)
-            if plan_data:
-                plans[fub_id] = plan_data
+        cached = {fub_id: self.function_plan_plans.get(fub_id) for fub_id in self._function_plan_check_fub_ids()}
+        misses = [fub_id for fub_id, data in cached.items() if data is None or data.get(_SEEDED_EMPTY_PLAN_MARKER)]
+        fetched = await self._fetch_check_plans(misses, load_failures)
+        plans = {fub_id: plan_data for fub_id, plan_data in {**cached, **fetched}.items() if plan_data}
         if load_failures is not None:
             load_failures.extend(self._plans_without_readable_entry(plans))
         if not plans:
             _LOGGER.debug("[%s] No function plans available for link check", self.server_id)
         return plans
+
+    async def _fetch_check_plans(self, fub_ids: list[int], load_failures: list[int] | None) -> dict[int, dict | None]:
+        """Live wiring data of fub_ids for a link check, None for a plan that failed (appended to load_failures)."""
+        bulk = await self._bulk_load_check_plans(fub_ids)
+        fetched: dict[int, dict | None] = {}
+        for fub_id in fub_ids:
+            plan_data = bulk.get(fub_id)
+            if plan_data is None:
+                try:
+                    plan_data = await self.api.function_plan_load_elements(fub_id)
+                except Exception:
+                    _LOGGER.exception("[%s] Error loading function plan %s for link check", self.server_id, fub_id)
+                    plan_data = None
+            if not plan_data and load_failures is not None:
+                load_failures.append(fub_id)
+            fetched[fub_id] = plan_data
+        return fetched
+
+    async def _bulk_load_check_plans(self, fub_ids: list[int]) -> dict[int, dict]:
+        """All plans in one request once fub_ids reach FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES, else {}.
+
+        {} on a failure as well (function_plan_load_all_plans logs a ComexioError): the caller then
+        loads every plan on its own, as it does for a plan the bulk answer lacks.
+        """
+        if len(fub_ids) < FUNCTION_PLAN_CHECK_BULK_LOAD_MIN_MISSES:
+            return {}
+        try:
+            return await self.api.function_plan_load_all_plans()
+        except Exception:
+            _LOGGER.exception("[%s] Error bulk-loading the function plans for link check", self.server_id)
+            return {}
 
     def _plans_without_readable_entry(self, fub_ids: Iterable[int]) -> list[int]:
         """The fub_ids without a readable plan list entry, [] while the list has no unreadable entries."""
