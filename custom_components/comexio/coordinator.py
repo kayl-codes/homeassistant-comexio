@@ -263,6 +263,7 @@ from .plan_watchdog import (
 )
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
+from .unsupported_ios import UnsupportedIoMonitor
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -843,6 +844,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
+        self.unsupported_ios = UnsupportedIoMonitor(hass, api, self.server_id)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
@@ -1331,6 +1333,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._prune_deleted_plans_from_snapshot()
 
         final_data = _imported_data(parsed_data, conf)
+        await self.unsupported_ios.async_update(raw_config, final_data["io"])
         self._merge_polled_states(final_data)
         self._merge_polled_knx_states(final_data["knx"], knx_live_states)
 

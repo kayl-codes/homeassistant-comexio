@@ -5,8 +5,10 @@ from datetime import timedelta
 import logging
 from typing import Any
 
+from aiocomexio import __version__ as AIOCOMEXIO_VERSION
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
@@ -51,7 +53,9 @@ from .const import (
 from .coordinator import ComexioCoordinator
 from .entity import track_quickbus_devices
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
+from .reference_monitor import async_integration_version
 from .services import async_setup_services
+from .unsupported_ios import io_platform, unsupported_io_issue_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -107,10 +111,16 @@ SERVER_LEVEL_UNIQUE_ID_SUFFIXES = (
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
-    _LOGGER.info("Comexio__init__: Entered async_setup_entry")
-
     hass.data.setdefault(DOMAIN, {})
     server_id = entry.data[CONF_SERVER_ID]
+    # Versions first, so every shared debug log tells what it was recorded with (#196).
+    _LOGGER.info(
+        "Comexio__init__: Entered async_setup_entry for %s (integration %s, aiocomexio %s, Home Assistant %s)",
+        server_id,
+        await async_integration_version(hass) or "?",
+        AIOCOMEXIO_VERSION,
+        HA_VERSION,
+    )
 
     # Initialize API (an entry still on plain HTTP is switched to HTTPS here when Comexio serves it)
     try:
@@ -366,7 +376,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
     for io in coordinator.data.get("io", []):
-        if not io.get("offline") or include_offline:
+        # An IO of an unsupported type has no entity: an earlier one (a writable number) goes (#196).
+        if (not io.get("offline") or include_offline) and io_platform(io):
             active_unique_ids.add(io_unique_id(server_id, io))
     quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
     active_unique_ids |= quickbus_platforms.keys()
@@ -429,14 +440,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             else:
                 expected_platform[uid] = "switch" if src["type"] == "digital" else "number"
     for io in coordinator.data.get("io", []):
-        if not io.get("offline") or include_offline:
-            uid = io_unique_id(server_id, io)
-            is_binary = io.get("is_binary", False)
-            is_input = io.get("is_input", True)
-            if is_binary:
-                expected_platform[uid] = "binary_sensor" if is_input else "switch"
-            else:
-                expected_platform[uid] = "sensor" if is_input else "number"
+        if (not io.get("offline") or include_offline) and (platform := io_platform(io)):
+            expected_platform[io_unique_id(server_id, io)] = platform
     expected_platform.update(quickbus_platforms)
     # The run-state sensors were binary sensors before they became enum sensors.
     expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
@@ -738,8 +743,10 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
 # HA awaits async_remove_entry, so it stays a coroutine without an await of its own (S7503 false positive).
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:  # NOSONAR
-    """Drop the entry's certificate_changed repair, which has nothing left to fix, and its push on the phones."""
+    """Drop the entry's repairs that have nothing left to fix, and the certificate push on the phones."""
     async_remove_certificate_pushes(hass, entry)
+    if server_id := entry.data.get(CONF_SERVER_ID):
+        ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):

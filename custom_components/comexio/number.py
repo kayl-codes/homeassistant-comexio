@@ -23,6 +23,7 @@ from .const import (
 )
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
+from .unsupported_ios import io_platform
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -64,7 +65,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioIONumber(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if not io.get("is_binary") and not io.get("is_input", True) and (not io.get("offline") or include_offline)
+            # io_platform leaves out the outputs of an unsupported type (meter readings, #196).
+            if io_platform(io) == "number" and (not io.get("offline") or include_offline)
         )
 
     async_add_entities(entities)
@@ -187,7 +189,10 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         super().__init__(coordinator, server_id, io)
         self._identifier = io["identifier"]
         self._attr_mode = NumberMode.AUTO
-        self._attr_native_min_value = float(io.get("min", 0))
+        # aiocomexio sets both bounds None when the IO type table has no usable range: an exception
+        # here would take down the whole platform, every analog marker included (#196).
+        _raw_min = io.get("min")
+        self._attr_native_min_value = float(_raw_min) if _raw_min is not None else 0.0
         _raw_max = io.get("max")
         self._attr_native_max_value = float(_raw_max) if _raw_max is not None else 100.0
         self._attr_native_step = 0.1

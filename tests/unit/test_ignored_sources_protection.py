@@ -552,6 +552,7 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
     coordinator = _coordinator(polled)
     coordinator.function_plan_catalog = MagicMock(async_update_from_raw_config=AsyncMock())
     coordinator.reference_monitor = MagicMock(async_check=AsyncMock())
+    coordinator.unsupported_ios = MagicMock(async_update=AsyncMock())
     coordinator.api = MagicMock(comexio_version="2.0")
     coordinator.async_check_orphaned_statistics = AsyncMock()
     for name in (

@@ -593,6 +593,10 @@
       "title": "Comexio function block check did not run ({server_id})",
       "description": "The integration could not check which function blocks Comexio {version} on this server provides ({reason}). Until the check succeeds, features that place the block(s) **{blocks}** in function plans (trigger markers `[TRIG]`) are disabled so no broken elements are written.\n\nThis is not a sign of an incompatible firmware. The check runs again on every poll and this repair disappears once it succeeds. If it stays, check the Home Assistant log and **[report it on GitHub]({issue_url})**."
     },
+    "unsupported_io_types": {
+      "title": "Comexio IOs without an entity ({server_id})",
+      "description": "Comexio reports these IOs as outputs although they carry a meter reading (unit {units}): **{ios}**. As a writable number they would offer a set point for a reading, so this version creates no entity for them.\n\n**[Report this on GitHub]({issue_url})** — opens a new issue with the IO types already filled in (versions, type ids and IO identifiers only, no names or personal data). Please attach the diagnostics file (Settings → Devices & services → Comexio → ⋮ → Download diagnostics) and a debug log (same page: the top ⋮ menu → Enable debug logging, then the entry's ⋮ → Reload, wait until the integration is loaded, then the top ⋮ menu → Disable debug logging — Home Assistant downloads the log; it may contain names and addresses of your installation, please review it). Then review the issue and submit it; a GitHub account is required. A later version will support these IOs."
+    },
     "import_disabled": {
       "title": "{category} import switched off — leftovers on Comexio ({server_id})",
       "fix_flow": {
