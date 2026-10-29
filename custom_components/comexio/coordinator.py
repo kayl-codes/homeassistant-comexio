@@ -8473,7 +8473,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         empty snapshot.
 
         Several cache misses (every managed plan at startup, before the first backup cycle) are
-        fetched in one bulk request; a plan the bulk answer lacks is fetched on its own.
+        fetched in one bulk request; a plan the bulk answer lacks (or holds empty) is fetched on its own.
         """
         cached = {fub_id: self.function_plan_plans.get(fub_id) for fub_id in self._function_plan_check_fub_ids()}
         misses = [fub_id for fub_id, data in cached.items() if data is None or data.get(_SEEDED_EMPTY_PLAN_MARKER)]
@@ -8491,7 +8491,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         fetched: dict[int, dict | None] = {}
         for fub_id in fub_ids:
             plan_data = bulk.get(fub_id)
-            if plan_data is None:
+            if not plan_data:
                 try:
                     plan_data = await self.api.function_plan_load_elements(fub_id)
                 except Exception:

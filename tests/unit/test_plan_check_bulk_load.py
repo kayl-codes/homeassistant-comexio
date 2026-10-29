@@ -56,8 +56,9 @@ def test_startup_loads_every_managed_plan_in_one_bulk_request() -> None:
     assert _single_loads(coordinator) == []
 
 
-def test_a_plan_the_bulk_answer_lacks_is_loaded_on_its_own() -> None:
-    coordinator = _coordinator(bulk={34: _plan(34), 35: _plan(35)}, single={36: _plan(36)})
+@pytest.mark.parametrize("bulk_extra", [{}, {36: {}, 37: {}}], ids=["missing", "empty"])
+def test_a_plan_the_bulk_answer_lacks_is_loaded_on_its_own(bulk_extra: dict[int, Any]) -> None:
+    coordinator = _coordinator(bulk={34: _plan(34), 35: _plan(35), **bulk_extra}, single={36: _plan(36)})
 
     plans, load_failures = _check(coordinator)
 
