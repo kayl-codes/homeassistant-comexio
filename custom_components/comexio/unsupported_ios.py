@@ -189,13 +189,13 @@ def build_unsupported_io_report(
         f"- Integration: {integration_version or '?'}",
         f"- aiocomexio: {AIOCOMEXIO_VERSION}",
         f"- Home Assistant: {HA_VERSION}",
-        f"- Comexio: {api.comexio_version or '?'}",
+        f"- Comexio: {markdown_text(api.comexio_version or '?')}",
         "",
         "### IOs without an entity / IOs ohne Entität",
     ]
     for (ext_type, type_id), identifiers in groups.items():
         lines += [
-            f"- Extension type {ext_type}, IO type {type_id}: {', '.join(identifiers)}",
+            f"- Extension type {markdown_text(ext_type)}, IO type {markdown_text(type_id)}: {', '.join(identifiers)}",
             f"  - `{_code_span_json(io_type_rows(tables, type_id))}`",
         ]
     lines += [
