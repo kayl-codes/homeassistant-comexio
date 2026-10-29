@@ -12,6 +12,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 import json
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from aiocomexio import __version__ as AIOCOMEXIO_VERSION
@@ -55,6 +56,18 @@ RAW_IO_OTHER_KEYS = "other_keys"
 RAW_SCALAR_TYPES = (str, int, float, bool, type(None))
 # IOs the Repair text lists by name; the rest is counted.
 REPAIR_IO_LIST_LIMIT = 30
+# Characters that would turn text of Comexio into a link, an image, emphasis, code, a table or HTML;
+# ":" and "." too, or a bare "https://..." / "www...." still becomes a link (GitHub autolinks), "&" an entity.
+MARKDOWN_SPECIAL_RE = re.compile(r"([\\`*_\[\]()<>!#|~:.&])")
+
+
+def markdown_text(text: object) -> str:
+    """Text from Comexio as literal Markdown: one_line, then each Markdown character escaped.
+
+    The Repair and the GitHub report render Markdown: an identifier or extension name set in Comexio
+    must not add a link or reformat the text the user reviews before filing.
+    """
+    return MARKDOWN_SPECIAL_RE.sub(r"\\\1", one_line(text))
 
 
 def unsupported_io_issue_id(server_id: str) -> str:
@@ -141,7 +154,7 @@ def build_unsupported_io_report(
     groups: dict[tuple[Any, Any], list[str]] = {}
     for io in ios:
         ext_type = extensions.get(str(io.get("ext_name")), {}).get("TypeId")
-        groups.setdefault((ext_type, io.get("type_id_raw")), []).append(one_line(io.get("identifier")))
+        groups.setdefault((ext_type, io.get("type_id_raw")), []).append(markdown_text(io.get("identifier")))
     ext_types = sorted({str(group_key[0]) for group_key in groups})
     lines = [
         '_Created from the Home Assistant repair "Comexio IOs without an entity"._',
@@ -190,7 +203,7 @@ def _repair_io_list(ios: list[Mapping[str, Any]]) -> str:
     """The IOs by extension, e.g. "SmartMeter: E1, E2; EO1: Q3", for the Repair text."""
     by_extension: dict[str, list[str]] = {}
     for io in ios[:REPAIR_IO_LIST_LIMIT]:
-        by_extension.setdefault(one_line(io.get("ext_name")), []).append(one_line(io.get("identifier")))
+        by_extension.setdefault(markdown_text(io.get("ext_name")), []).append(markdown_text(io.get("identifier")))
     text = "; ".join(f"{ext}: {', '.join(identifiers)}" for ext, identifiers in by_extension.items())
     return text if len(ios) <= REPAIR_IO_LIST_LIMIT else f"{text}; … {len(ios) - REPAIR_IO_LIST_LIMIT} more"
 

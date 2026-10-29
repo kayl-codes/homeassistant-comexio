@@ -10,6 +10,7 @@ from homeassistant.helpers import entity_registry as er, issue_registry as ir
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+import custom_components.comexio as comexio_init
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import DOMAIN, ISSUE_UNSUPPORTED_IO_TYPES
 from custom_components.comexio.diagnostics import async_get_config_entry_diagnostics
@@ -93,7 +94,7 @@ async def test_a_meter_reading_marked_as_output_gets_no_entity_and_a_repair(
     numbers = _unique_ids(hass, mock_config_entry, "number")
     assert E1_UNIQUE_ID not in numbers
     assert E1_UNIQUE_ID not in _unique_ids(hass, mock_config_entry, "sensor")
-    # The platform survived the unusable range: the output keeps its number with the default range.
+    # The platform survived the unusable range: the output keeps its number (range: test_unsupported_ios unit test).
     assert f"comexio_{SERVER_ID}_meter_q2" in numbers
     assert f"comexio_{SERVER_ID}_meter_p1" in _unique_ids(hass, mock_config_entry, "sensor")
 
@@ -121,12 +122,22 @@ async def test_an_earlier_entity_of_such_an_io_is_removed(
 
 @pytest.mark.usefixtures("mock_comexio_api")
 async def test_the_setup_logs_the_versions(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    async def _version(_hass: HomeAssistant) -> str:
+        return "9.8.7"
+
+    monkeypatch.setattr(comexio_init, "async_integration_version", _version)
+
     await _setup(hass, mock_config_entry)
 
-    assert f"Entered async_setup_entry for {SERVER_ID} (integration " in caplog.text
-    assert f"aiocomexio {AIOCOMEXIO_VERSION}, Home Assistant {HA_VERSION})" in caplog.text
+    assert (
+        f"Entered async_setup_entry for {SERVER_ID} (integration 9.8.7, "
+        f"aiocomexio {AIOCOMEXIO_VERSION}, Home Assistant {HA_VERSION})"
+    ) in caplog.text
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

@@ -190,11 +190,13 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         self._identifier = io["identifier"]
         self._attr_mode = NumberMode.AUTO
         # aiocomexio sets both bounds None when the IO type table has no usable range: an exception
-        # here would take down the whole platform, every analog marker included (#196).
+        # here would take down the whole platform, every analog marker included (#196). Not HA's
+        # 0-100 default then, which would reject real set points: the value range Comexio itself
+        # holds, as for markers (WEBIO_MARKER_ANALOG_MIN/MAX); AUTO mode shows it as a box.
         _raw_min = io.get("min")
-        self._attr_native_min_value = float(_raw_min) if _raw_min is not None else 0.0
+        self._attr_native_min_value = float(_raw_min if _raw_min is not None else WEBIO_MARKER_ANALOG_MIN)
         _raw_max = io.get("max")
-        self._attr_native_max_value = float(_raw_max) if _raw_max is not None else 100.0
+        self._attr_native_max_value = float(_raw_max if _raw_max is not None else WEBIO_MARKER_ANALOG_MAX)
         self._attr_native_step = 0.1
 
         unit = io.get("unit", "")
