@@ -13,7 +13,12 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from custom_components.comexio import number, unsupported_ios
-from custom_components.comexio.const import DOMAIN, ISSUE_UNSUPPORTED_IO_TYPES
+from custom_components.comexio.const import (
+    DOMAIN,
+    ISSUE_UNSUPPORTED_IO_TYPES,
+    WEBIO_MARKER_ANALOG_MAX,
+    WEBIO_MARKER_ANALOG_MIN,
+)
 from custom_components.comexio.reference_monitor import ISSUE_URL_MAX_CHARS
 from custom_components.comexio.unsupported_ios import (
     EXTENSION_META_KEYS,
@@ -25,6 +30,7 @@ from custom_components.comexio.unsupported_ios import (
     build_unsupported_io_report,
     extension_metas,
     io_platform,
+    markdown_text,
     raw_io_rows,
     unsupported_io_reason,
 )
@@ -186,6 +192,30 @@ def test_the_report_names_types_and_identifiers_but_no_names_or_serials() -> Non
     assert "Sie enthält die Namen der Erweiterungen der Installation" in body
     assert "Meter Garage" not in body
     assert SERIAL not in body
+
+
+INJECTED_IDENTIFIER = "E1](https://evil.example) [x"
+
+
+def test_the_report_and_the_repair_show_comexio_text_literally(
+    monitor: UnsupportedIoMonitor, issue_registry: MagicMock
+) -> None:
+    """Text set in Comexio adds no link or formatting to what the user reviews before filing."""
+    ios = [_io(INJECTED_IDENTIFIER, "Wh", ext_name="Meter_*Garage*")]
+
+    _title, body = build_unsupported_io_report(ios, {}, _api(), None)  # type: ignore[arg-type]
+    asyncio.run(monitor.async_update(RAW_CONFIG, ios))
+
+    escaped = r"E1\]\(https\://evil\.example\) \[x"
+    assert f"IO type 81: {escaped}" in body
+    listed = issue_registry.async_create_issue.call_args.kwargs["translation_placeholders"]["ios"]
+    assert listed == rf"Meter\_\*Garage\*: {escaped}"
+
+
+def test_markdown_text_escapes_every_markdown_character() -> None:
+    assert markdown_text("a\\b`c*d_e[f]g(h)i<j>k!l#m|n~o") == r"a\\b\`c\*d\_e\[f\]g\(h\)i\<j\>k\!l\#m\|n\~o"
+    # No bare autolink and no entity either.
+    assert markdown_text("https://www.evil.example &amp;") == r"https\://www\.evil\.example \&amp;"
 
 
 def test_the_report_marks_an_unknown_integration_version() -> None:
@@ -396,12 +426,24 @@ def _number_setup(ios: list[dict[str, Any]]) -> list[Any]:
     return added
 
 
-def test_an_output_without_a_usable_range_gets_the_default_range() -> None:
-    """Both bounds None (unusable type row) once raised in the constructor and took down every number (#196)."""
-    (entity,) = _number_setup([_io("AO1", "W")])
+@pytest.mark.parametrize(
+    ("bounds", "expected"),
+    [
+        ({}, (WEBIO_MARKER_ANALOG_MIN, WEBIO_MARKER_ANALOG_MAX)),
+        ({"max": 50}, (WEBIO_MARKER_ANALOG_MIN, 50)),
+        ({"min": -5}, (-5, WEBIO_MARKER_ANALOG_MAX)),
+    ],
+)
+def test_an_output_without_a_usable_range_gets_comexios_value_range(
+    bounds: dict[str, Any], expected: tuple[float, float]
+) -> None:
+    """A bound None (unusable type row) once raised in the constructor and took down every number (#196).
 
-    assert entity.native_min_value == pytest.approx(0.0)
-    assert entity.native_max_value == pytest.approx(100.0)
+    Not HA's 0-100 default: it would reject real set points of the output.
+    """
+    (entity,) = _number_setup([_io("AO1", "W", **bounds)])
+
+    assert (entity.native_min_value, entity.native_max_value) == pytest.approx(expected)
 
 
 def test_the_number_platform_skips_meter_readings_marked_as_outputs() -> None:
