@@ -13,7 +13,7 @@ from collections.abc import Iterable, Mapping
 import json
 import logging
 import re
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from aiocomexio import __version__ as AIOCOMEXIO_VERSION
 from homeassistant.const import __version__ as HA_VERSION
@@ -135,9 +135,19 @@ def extension_metas(raw_config: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     return metas
 
 
-def io_type_rows(api: ComexioAPI, type_id: Any) -> dict[str, Any]:
+class IoTypeTables(Protocol):
+    """Comexio's IO type tables: the API's of its last config fetch, or a monitor's of its last poll."""
+
+    @property
+    def io_types(self) -> Mapping[str, Any]: ...
+
+    @property
+    def io_input_types(self) -> Mapping[str, Any]: ...
+
+
+def io_type_rows(tables: IoTypeTables, type_id: Any) -> dict[str, Any]:
     """The IO type's rows as Comexio delivers them ($IOTypesBinary, $IOInputTypes), unparsed."""
-    return {"type": api.io_types.get(str(type_id)), "input": api.io_input_types.get(str(type_id))}
+    return {"type": tables.io_types.get(str(type_id)), "input": tables.io_input_types.get(str(type_id))}
 
 
 def build_unsupported_io_report(
@@ -145,8 +155,10 @@ def build_unsupported_io_report(
     extensions: Mapping[str, Mapping[str, Any]],
     api: ComexioAPI,
     integration_version: str | None,
+    *,
+    tables: IoTypeTables,
 ) -> tuple[str, str]:
-    """(title, markdown body) of a GitHub issue about IOs without an entity.
+    """(title, markdown body) of a GitHub issue about IOs without an entity; the type rows from tables.
 
     Holds versions, type ids and identifiers (E1, Q2, ...) only — no extension or IO names, host or
     credentials — so the user can submit it as-is after reviewing.
@@ -171,7 +183,7 @@ def build_unsupported_io_report(
     for (ext_type, type_id), identifiers in groups.items():
         lines += [
             f"- Extension type {ext_type}, IO type {type_id}: {', '.join(identifiers)}",
-            f"  - `{json.dumps(io_type_rows(api, type_id), ensure_ascii=False, default=str)}`",
+            f"  - `{_code_span_json(io_type_rows(tables, type_id))}`",
         ]
     lines += [
         "",
@@ -199,6 +211,11 @@ def build_unsupported_io_report(
     return f"Comexio IO types not supported (extension type {', '.join(ext_types)})", "\n".join(lines)
 
 
+def _code_span_json(value: Any) -> str:
+    """value as JSON for a Markdown code span: a backtick from Comexio would end it; its JSON escape is the same."""
+    return json.dumps(value, ensure_ascii=False, default=str).replace("`", "\\u0060")
+
+
 def _repair_io_list(ios: list[Mapping[str, Any]]) -> str:
     """The IOs by extension, e.g. "SmartMeter: E1, E2; EO1: Q3", for the Repair text."""
     by_extension: dict[str, list[str]] = {}
@@ -222,6 +239,9 @@ class UnsupportedIoMonitor:
         self.extensions: dict[str, dict[str, Any]] = {}
         self.raw_ios: list[dict[str, Any]] = []
         self.raw_read_at: str | None = None
+        # The IO type tables of that poll (copies: the API's change with every later config fetch).
+        self.io_types: dict[str, Any] = {}
+        self.io_input_types: dict[str, Any] = {}
         # The exception type of the last failed check (None: it succeeded); its text may quote a row.
         self.last_error_type: str | None = None
 
@@ -251,17 +271,20 @@ class UnsupportedIoMonitor:
             self._last_error = self.last_error_type = None
 
     async def _async_update(self, raw_config: Mapping[str, Any], ios: Iterable[Mapping[str, Any]]) -> None:
-        """A poll without the IO type table keeps the last Repair state, but still reads the raw data.
+        """A poll missing either IO type table keeps the last Repair state, but still reads the raw data.
 
-        Its IO list says nothing about the types (no table: no units, every IO an input), and
-        clearing the Repair would only flash it until the next poll.
+        Its IO list says nothing about the types (no $IOTypesBinary: no units; no $IOInputTypes: every
+        IO an input), and clearing the Repair would only flash it until the next poll.
         """
         # Both read before either is stored: a failure leaves the last poll's pair intact.
         extensions, raw_ios = extension_metas(raw_config), raw_io_rows(raw_config)
         self.extensions, self.raw_ios = extensions, raw_ios
+        # Taken with the rows, before anything yields: the Repair report and the diagnostics pair
+        # them with these, not with what a config fetch during the version lookup below brought.
+        self.io_types, self.io_input_types = dict(self._api.io_types), dict(self._api.io_input_types)
         self.raw_read_at = dt_util.utcnow().isoformat()
-        if not self._api.io_types:
-            _LOGGER.debug("[%s] No IO type table on the config page, keeping the last state", self._server_id)
+        if not self.io_types or not self.io_input_types:
+            _LOGGER.debug("[%s] No IO type tables on the config page, keeping the last state", self._server_id)
             return
         unsupported = [io for io in ios if unsupported_io_reason(io)]
         labels = tuple(f"{one_line(io.get('ext_name'))} {one_line(io.get('identifier'))}" for io in unsupported)
@@ -275,7 +298,9 @@ class UnsupportedIoMonitor:
             return
         if self._integration_version is None:
             self._integration_version = await async_integration_version(self._hass)
-        title, body = build_unsupported_io_report(unsupported, self.extensions, self._api, self._integration_version)
+        title, body = build_unsupported_io_report(
+            unsupported, self.extensions, self._api, self._integration_version, tables=self
+        )
         issue_url = github_issue_url(ISSUE_TRACKER_URL, title, body)
         # Re-created on every poll: async_create_issue updates the existing issue in place.
         ir.async_create_issue(

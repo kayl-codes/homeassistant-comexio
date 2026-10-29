@@ -173,7 +173,8 @@ def _api() -> SimpleNamespace:
 def test_the_report_names_types_and_identifiers_but_no_names_or_serials() -> None:
     ios = [_io("E1", "Wh"), _io("E2", "Wh")]
 
-    title, body = build_unsupported_io_report(ios, extension_metas(RAW_CONFIG), _api(), "0.30.0")  # type: ignore[arg-type]
+    api = _api()
+    title, body = build_unsupported_io_report(ios, extension_metas(RAW_CONFIG), api, "0.30.0", tables=api)  # type: ignore[arg-type]
 
     assert title == "Comexio IO types not supported (extension type 31)"
     assert "- Extension type 31, IO type 81: E1, E2" in body
@@ -203,7 +204,8 @@ def test_the_report_and_the_repair_show_comexio_text_literally(
     """Text set in Comexio adds no link or formatting to what the user reviews before filing."""
     ios = [_io(INJECTED_IDENTIFIER, "Wh", ext_name="Meter_*Garage*")]
 
-    _title, body = build_unsupported_io_report(ios, {}, _api(), None)  # type: ignore[arg-type]
+    api = _api()
+    _title, body = build_unsupported_io_report(ios, {}, api, None, tables=api)  # type: ignore[arg-type]
     asyncio.run(monitor.async_update(RAW_CONFIG, ios))
 
     escaped = r"E1\]\(https\://evil\.example\) \[x"
@@ -218,8 +220,22 @@ def test_markdown_text_escapes_every_markdown_character() -> None:
     assert markdown_text("https://www.evil.example &amp;") == r"https\://www\.evil\.example \&amp;"
 
 
+def test_a_backtick_in_the_type_rows_cannot_end_their_code_span() -> None:
+    api = _api()
+    api.io_types["81"] = {**IO_TYPES["81"], "unit": "W`h](https://evil.example)"}
+
+    _title, body = build_unsupported_io_report([_io("E1", "Wh")], {}, api, None, tables=api)  # type: ignore[arg-type]
+
+    (row,) = [line for line in body.splitlines() if line.startswith("  - `")]
+    span = row.removeprefix("  - `").removesuffix("`")
+    assert "`" not in span
+    # Still the row as delivered: the JSON escape stands for the same character.
+    assert json.loads(span)["type"]["unit"] == "W`h](https://evil.example)"
+
+
 def test_the_report_marks_an_unknown_integration_version() -> None:
-    _title, body = build_unsupported_io_report([_io("E1", "Wh")], {}, _api(), None)  # type: ignore[arg-type]
+    api = _api()
+    _title, body = build_unsupported_io_report([_io("E1", "Wh")], {}, api, None, tables=api)  # type: ignore[arg-type]
 
     assert "- Integration: ?" in body
     assert "- Extension type None, IO type 81: E1" in body
@@ -277,17 +293,20 @@ def test_a_fresh_monitor_clears_a_repair_raised_before_the_reload(
     issue_registry.async_delete_issue.assert_called_once_with(monitor._hass, DOMAIN, monitor.issue_id)
 
 
-def test_a_poll_without_the_io_type_table_keeps_the_repair(
-    monitor: UnsupportedIoMonitor, issue_registry: MagicMock
+@pytest.mark.parametrize("table", ["io_types", "io_input_types"])
+def test_a_poll_without_an_io_type_table_keeps_the_repair(
+    monitor: UnsupportedIoMonitor, issue_registry: MagicMock, table: str
 ) -> None:
-    """Without the table no IO has a unit and every IO is an input: that says nothing about the types."""
+    """Without $IOTypesBinary no IO has a unit, without $IOInputTypes every IO is an input: no news on the types."""
     asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
-    monitor._api.io_types = {}
+    setattr(monitor._api, table, {})
 
     asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "", is_input=True)]))
 
     issue_registry.async_delete_issue.assert_not_called()
     assert issue_registry.async_create_issue.call_count == 1
+    # The diagnostics show the poll's tables, the missing one too.
+    assert getattr(monitor, table) == {}
 
 
 def test_a_failing_check_does_not_fail_the_poll(
@@ -348,28 +367,34 @@ def test_a_failed_scrape_keeps_the_repair_and_the_extensions(
     assert "Meter Garage" in monitor.extensions
 
 
+def _raw_data(monitor: UnsupportedIoMonitor) -> tuple[Any, ...]:
+    """What the diagnostics show of the last raw read."""
+    return monitor.extensions, monitor.raw_ios, monitor.raw_read_at
+
+
 @pytest.mark.parametrize("failed_scrape", [{}, {"FubModules": {}}])
 def test_a_failed_scrape_keeps_the_raw_data_for_the_diagnostics(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, failed_scrape: dict[str, Any]
 ) -> None:
     asyncio.run(monitor.async_update(failed_scrape, []))
-    assert (monitor.raw_ios, monitor.raw_read_at) == ([], None)
+    assert monitor.raw_ios == []
+    assert monitor.raw_read_at is None
 
     asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
-    read = (monitor.extensions, monitor.raw_ios, monitor.raw_read_at)
+    read = _raw_data(monitor)
     assert monitor.raw_ios
     assert monitor.raw_read_at is not None
 
     asyncio.run(monitor.async_update(failed_scrape, []))
 
-    assert (monitor.extensions, monitor.raw_ios, monitor.raw_read_at) == read
+    assert _raw_data(monitor) == read
 
 
 def test_a_failed_check_keeps_the_last_raw_data_and_its_error_across_a_failed_scrape(
     monitor: UnsupportedIoMonitor, issue_registry: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
-    read = (monitor.extensions, monitor.raw_ios, monitor.raw_read_at)
+    read = _raw_data(monitor)
     monkeypatch.setattr(unsupported_ios, "raw_io_rows", MagicMock(side_effect=ValueError("ROW-SECRET")))
 
     asyncio.run(monitor.async_update({"FubModules": {"1": {}}}, []))
@@ -377,7 +402,7 @@ def test_a_failed_check_keeps_the_last_raw_data_and_its_error_across_a_failed_sc
     asyncio.run(monitor.async_update({}, []))
 
     # The extensions, read before the failure, are not stored without their IO rows.
-    assert (monitor.extensions, monitor.raw_ios, monitor.raw_read_at) == read
+    assert _raw_data(monitor) == read
     assert monitor.last_error_type == "ValueError"
 
 
@@ -390,6 +415,38 @@ def test_a_poll_without_the_io_type_table_still_reads_the_raw_data(
 
     assert [row["Identifier"] for row in monitor.raw_ios] == ["E1"]
     assert monitor.raw_read_at is not None
+
+
+def test_the_diagnostics_keep_the_type_tables_of_the_poll_of_their_rows(
+    monitor: UnsupportedIoMonitor, issue_registry: MagicMock
+) -> None:
+    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+
+    # A later config fetch, without a check of its own, changes the API's tables: in place or anew.
+    monitor._api.io_types["81"] = {"unit": "NEW"}
+    monitor._api.io_input_types = {"99": {}}
+
+    assert monitor.io_types == IO_TYPES
+    assert monitor.io_input_types == IO_INPUT_TYPES
+
+
+def test_the_report_takes_the_type_rows_read_with_the_ios(
+    monitor: UnsupportedIoMonitor, issue_registry: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config fetch while the first Repair looks up the integration version brings rows of another poll."""
+
+    async def _version_during_a_fetch(_hass: Any) -> str:
+        monitor._api.io_types = {"81": {**IO_TYPES["81"], "unit": "NEW-FETCH"}}
+        return "0.30.0"
+
+    monkeypatch.setattr(unsupported_ios, "async_integration_version", _version_during_a_fetch)
+
+    asyncio.run(monitor.async_update(RAW_CONFIG, [_io("E1", "Wh")]))
+
+    url = issue_registry.async_create_issue.call_args.kwargs["learn_more_url"]
+    body = parse_qs(urlsplit(url).query)["body"][0]
+    assert '"unit": "Wh"' in body
+    assert "NEW-FETCH" not in body
 
 
 def test_the_warning_is_logged_only_when_the_ios_change(
@@ -443,7 +500,8 @@ def test_an_output_without_a_usable_range_gets_comexios_value_range(
     """
     (entity,) = _number_setup([_io("AO1", "W", **bounds)])
 
-    assert (entity.native_min_value, entity.native_max_value) == pytest.approx(expected)
+    assert entity.native_min_value == pytest.approx(expected[0])
+    assert entity.native_max_value == pytest.approx(expected[1])
 
 
 def test_the_number_platform_skips_meter_readings_marked_as_outputs() -> None:
