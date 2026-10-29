@@ -796,9 +796,9 @@ PLAN_WEBIO_ID_UNREADABLE = "holds a WebIO element without a readable webIoId, no
 # A Web-IO command of an ignored source without a readable webIoId, or an unwired one the last poll
 # does not list: it cannot be checked against the plans.
 COMMAND_NOT_CHECKED = "could not be checked against the plans, not deleted"
-# No poll has read the plan list yet: a plan holding a command may be missing from the cache.
+# Comexio's plan list could not be read: a plan holding a command may be missing from the cache.
 PLAN_LIST_NAME = "plan list"
-PLAN_LIST_NOT_READ = "not read by a poll yet, no Web-IO command deleted"
+PLAN_LIST_NOT_READ = "could not be read, no Web-IO command deleted"
 
 
 class SourceCommandCheck(NamedTuple):
@@ -8620,17 +8620,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def _placed_webio_ids(self) -> tuple[set[int], list[tuple[str, str]]]:
         """(webIoIds with an element in any plan, (name, detail) of each plan that could not be checked).
 
-        Only a plan list a poll has read ($Fubs, see scraped_plan_ids) names every plan; before that
-        the cache may lack a user's plan holding the command, so nothing counts as checked. All plans
-        are read fresh in one bulk request — the plan cleanup has just changed some, and a user may
-        have placed the command since the backup cycle's snapshot; a listed plan the bulk answer lacks
-        is loaded on its own. An unreadable plan list entry may be a plan holding the command: it counts
-        as a plan that could not be checked. A managed plan the list lacks (a plan map entry no sync has
-        pruned yet) is gone and not loaded. Plans HA created since the poll are in the list (the plan
-        creation adds them); a plan the user created in Comexio since the last poll is not — an accepted
-        window of at most one poll interval, as re-reading $Fubs here would cost a full config fetch.
+        The plan list ($Fubs) is read fresh first: the one the last poll read lacks a plan the user
+        created in Comexio since, which may hold the command. If it cannot be read, nothing counts as
+        checked. All plans are read fresh in one bulk request — the plan cleanup has just changed some,
+        and a user may have placed the command since the backup cycle's snapshot; a listed plan the bulk
+        answer lacks is loaded on its own. An unreadable plan list entry may be a plan holding the
+        command: it counts as a plan that could not be checked. A managed plan the list lacks (a plan
+        map entry no sync has pruned yet) is gone and not loaded.
         """
-        if self.scraped_plan_ids is None:
+        if not await self._refresh_plan_list():
             return set(), [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)]
         fresh = await self.api.function_plan_load_all_plans(strict=True)
         placed: set[int] = set()
@@ -8645,6 +8643,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 failures.append((self.api.function_plan_name(fub_id), PLAN_WEBIO_ID_UNREADABLE))
             placed |= webio_ids
         return placed, failures
+
+    async def _refresh_plan_list(self) -> bool:
+        """Read Comexio's plan list ($Fubs) into the cache api.fub_data; False if it could not be read."""
+        try:
+            raw_config = await self.api.get_raw_config()
+        except UNREACHABLE_ERRORS as err:
+            _LOGGER.warning("[%s] Plan list not read for the Web-IO command cleanup: %r", self.server_id, err)
+            return False
+        # aiocomexio decodes each page variable on its own: a page whose $Fubs did not decode keeps the stale list.
+        if not isinstance(fubs := raw_config.get("Fubs"), dict):
+            _LOGGER.warning("[%s] Plan list not read for the Web-IO command cleanup: no $Fubs", self.server_id)
+            return False
+        # Takes the fresh plan list into the cache, or keeps a newer one a later fetch cached meanwhile.
+        self.api._replace_fub_data(fubs)
+        return True
 
     def _source_commands(
         self, category: SourceCategory, source_ids: list[int], unwired_cmd_ids: AbstractSet[Any]

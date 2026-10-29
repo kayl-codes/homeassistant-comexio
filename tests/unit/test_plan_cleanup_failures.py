@@ -623,10 +623,11 @@ def _command_coordinator(
     markers: list[dict[str, Any]] | None = None,
     listed: set[int] | None = None,
 ) -> ComexioCoordinator:
-    """plans: the single-plan loads; bulk: the bulk answer; listed: Comexio's plan list, read by a poll.
+    """plans: the single-plan loads; bulk: the bulk answer; listed: Comexio's plan list, read fresh.
 
-    The list names plan 6 and every plan of plans and bulk unless given. A stale snapshot of each
-    plan sits in the cache and must never count.
+    The list names plan 6 and every plan of plans and bulk unless given; api.comexio_fubs is what the
+    fresh config fetch returns as $Fubs. The cached plan list is a stale one naming plan 6 only, and a
+    stale snapshot of each plan sits in the cache: neither may count.
     """
 
     async def _load(fub_id: int, strict: bool = False) -> Any:
@@ -640,15 +641,16 @@ def _command_coordinator(
     if listed is None:
         listed = {6, *plans, *(bulk or {})}
     stale = {"elements": {"1": _web_io_element(41)}, "connections": {}}
-    coordinator = _coordinator(
-        _api(
-            function_plan_load_elements=AsyncMock(side_effect=_load),
-            function_plan_load_all_plans=AsyncMock(side_effect=_load_all),
-            fub_data={str(fub_id): {"Name": f"Plan {fub_id}"} for fub_id in listed},
-        ),
-        dict.fromkeys([6, 9, 12], stale),
+    api = _api(
+        function_plan_load_elements=AsyncMock(side_effect=_load),
+        function_plan_load_all_plans=AsyncMock(side_effect=_load_all),
+        fub_data={"6": {"Name": "Plan 6"}},
+        comexio_fubs={str(fub_id): {"Name": f"Plan {fub_id}"} for fub_id in listed},
     )
-    coordinator.scraped_plan_ids = set(listed)
+    api.get_raw_config = AsyncMock(side_effect=lambda: {"Fubs": api.comexio_fubs})
+    api._replace_fub_data = MagicMock(side_effect=lambda fubs: setattr(api, "fub_data", fubs))
+    coordinator = _coordinator(api, dict.fromkeys([6, 9, 12], stale))
+    coordinator.scraped_plan_ids = {6}  # the plan list the last poll read
     coordinator.data = {
         "markers": markers or [{"id": 7, "name": "M7 Licht"}, {"id": 8, "name": "M8 Rollo"}],
         "webio_commands": {
@@ -737,18 +739,35 @@ def test_a_managed_plan_the_plan_list_lacks_is_gone(listed: set[int]) -> None:
     assert _loaded_plans(coordinator) == []
 
 
-def test_a_plan_list_no_poll_has_read_keeps_every_command() -> None:
-    # Before it the cache may lack a user's plan that holds a command: nothing counts as checked.
+@pytest.mark.parametrize(
+    "fetch",
+    [
+        AsyncMock(side_effect=TimeoutError),
+        AsyncMock(return_value={}),
+        AsyncMock(return_value={"FubModules": {}, "Fubs": None}),
+    ],
+    ids=["unreachable", "scrape-failed", "fubs-not-decoded"],
+)
+def test_a_plan_list_that_cannot_be_read_keeps_every_command(fetch: AsyncMock) -> None:
+    # The cached list may lack a user's plan that holds a command: nothing counts as checked.
     coordinator = _command_coordinator({6: EMPTY_PLAN})
-    coordinator.scraped_plan_ids = None
+    coordinator.api.get_raw_config = fetch
     assert _deletable(coordinator, [7], [900]) == ([], [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)], ["HA M7 kaputt"], [])
     coordinator.api.function_plan_load_all_plans.assert_not_awaited()
+    coordinator.api._replace_fub_data.assert_not_called()
+
+
+def test_a_plan_list_no_poll_has_read_yet_is_read_fresh() -> None:
+    # Right after setup no poll has read the plan list: the fresh read alone decides.
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    coordinator.scraped_plan_ids = None
+    assert _deletable(coordinator, [7], [900]) == ([900, 901, 902], [], ["HA M7 kaputt"], [])
 
 
 def test_an_unreadable_plan_list_entry_keeps_every_command() -> None:
     # The entry may be a plan that holds the command, and it cannot even be loaded.
     coordinator = _command_coordinator({6: EMPTY_PLAN})
-    coordinator.api.fub_data = {"x7": {"Name": "Broken"}}
+    coordinator.api.comexio_fubs = {"x7": {"Name": "Broken"}}
     assert _deletable(coordinator, [7], [900]) == ([], [("x7", PLAN_ENTRY_UNREADABLE)], ["HA M7 kaputt"], [])
 
 
@@ -813,13 +832,15 @@ def test_an_unwired_command_without_a_readable_web_io_id_is_kept() -> None:
     assert _deletable(coordinator, [7], [903]) == ([900, 901, 902], [], ["HA M8 Rollo", "HA M7 kaputt"], [])
 
 
-def test_a_plan_ha_created_since_the_poll_is_checked() -> None:
-    # HA adds the plans it creates to the plan list cache; the list the poll read does not name them yet.
+def test_a_plan_created_since_the_poll_is_checked() -> None:
+    # The cached list the last poll read names plan 6 only; the user has since created plan 15 in
+    # Comexio and placed command 900 there. The fresh plan list names it: 900 stays.
     plan_15 = {"elements": {"1": _web_io_element(40)}, "connections": {}}
-    coordinator = _command_coordinator({6: EMPTY_PLAN, 15: plan_15}, listed={6})
-    coordinator.api.fub_data["15"] = {"Name": "Plan 15"}
+    coordinator = _command_coordinator({6: EMPTY_PLAN, 15: plan_15})
+    assert coordinator.api.fub_data.keys() == {"6"}
     assert _deletable(coordinator, [7], [900]) == ([901, 902], [], ["HA M7 kaputt"], ["HA M7 Licht"])
     assert _loaded_plans(coordinator) == [6, 15]
+    coordinator.api.get_raw_config.assert_awaited_once()
 
 
 def _run_cleanup_action(button: ComexioSyncButton, plan_result: Any) -> tuple[SimpleNamespace, MagicMock]:
