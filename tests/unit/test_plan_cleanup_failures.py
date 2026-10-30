@@ -26,6 +26,7 @@ from custom_components.comexio.const import (
     WebioClass,
 )
 from custom_components.comexio.coordinator import (
+    COMMAND_IN_USER_PLAN,
     COMMAND_NOT_CHECKED,
     PLAN_CMD_NOT_FOUND,
     PLAN_DELETE_FAILED,
@@ -1231,3 +1232,115 @@ def test_a_command_a_plan_still_uses_is_named_in_the_result() -> None:
     assert f"{ICON_INFO} Web-IO command 'HA M7 Licht alt' {stays}" in lines
     assert delete.await_args.args[2] == []  # the unwired 900 is still in use: not deleted
     assert ctx.failed_writes == []
+
+
+def _managed_9(_self: ComexioCoordinator, fub_id: int) -> bool:
+    return fub_id == 9
+
+
+def test_only_a_users_own_plan_keeps_an_orphan_of_the_delta_sync() -> None:
+    """Plan 6 is the user's: its element keeps 42. Plan 9 is managed: a leftover element there (43) is
+    the dangling-element cleanup's and must not block the delete, or the orphan would never go."""
+    plan_6 = {"elements": {"1": _web_io_element(42)}, "connections": {}}
+    plan_9 = {"elements": {"1": _web_io_element(43)}, "connections": {}}
+    coordinator = _command_coordinator({}, bulk={6: plan_6, 9: plan_9})
+
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", _managed_9):
+        assert asyncio.run(coordinator.webio_ids_in_user_plans([42, 43, 44])) == ({42}, [])
+
+
+def test_a_users_plan_that_cannot_be_loaded_keeps_every_orphan() -> None:
+    """Plan 6 may hold any of them; the managed plan 9 failing to load is no reason to keep one."""
+    coordinator = _command_coordinator({}, listed={6, 9})
+
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", _managed_9):
+        result = asyncio.run(coordinator.webio_ids_in_user_plans([42, 43]))
+
+    assert result == ({42, 43}, [("Plan 6", PLAN_LOAD_FAILED)])
+
+
+def test_an_unread_plan_list_keeps_every_orphan_of_the_delta_sync() -> None:
+    # Leaving the managed plans out must not turn an unread list into "no user's plan uses them".
+    coordinator = _command_coordinator({6: EMPTY_PLAN})
+    coordinator.api.get_raw_config = AsyncMock(side_effect=TimeoutError)
+
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", _managed_9):
+        result = asyncio.run(coordinator.webio_ids_in_user_plans([42, 43]))
+
+    assert result == ({42, 43}, [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)])
+
+
+def test_the_delta_cleanup_unwires_the_webio_ids_of_its_delete_tasks_only() -> None:
+    outcome = {"touched_fub_ids": [], "deleted_elem_count": 0, "cmd_ids": [], "stopped_plans": []}
+    outcome |= {"stop_failures": [], "failures": []}
+    unwire = AsyncMock(return_value=outcome)
+    button = _button(unwire_webio_commands=unwire, delete_dangling_plan_elements=AsyncMock(return_value=outcome))
+    tasks = [
+        {"type": "delete", "item": {"webIoId": 40}},
+        {"type": "delete", "item": {"webIoId": "41"}},
+        {"type": "delete", "item": {"name": "HA M9 ohne webIoId"}},
+        {"type": "rename", "item": {"webIoId": 42}},
+    ]
+
+    asyncio.run(button._cleanup_delta_debris(_ctx(), WebioClass.MARKER, tasks, [{"ref_id": "7"}]))
+
+    assert unwire.await_args.args[0] == [40, 41]
+
+
+def test_a_cancelled_delta_sync_checks_no_plan() -> None:
+    check = AsyncMock(return_value=(set(), []))
+    button = _button(webio_ids_in_user_plans=check, cancel_sync=True)
+    button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
+    api = SimpleNamespace(delete_single_command=AsyncMock(return_value=True))
+    ctx = SimpleNamespace(failed_writes=[], api=api, update_status=MagicMock())
+    tasks = [{"type": "delete", "item": {"id": 900, "webIoId": 40, "name": "HA M7 Licht"}}]
+
+    asyncio.run(button._execute_delta_tasks(ctx, WebioClass.MARKER, "7", "3", tasks, [], MagicMock(), "Marker", 10))
+
+    check.assert_not_awaited()
+    api.delete_single_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("in_use", "plan_failures", "deleted", "failed_writes"),
+    [
+        ({40}, [], [(901, "7"), (903, "7")], [f"delete HA M7 Licht: {COMMAND_IN_USER_PLAN}"]),
+        (
+            {40, 41},
+            [("Plan 6", PLAN_LOAD_FAILED)],
+            [(903, "7")],
+            [
+                f"function plan 'Plan 6': {PLAN_LOAD_FAILED}",
+                f"delete HA M7 Licht: {COMMAND_NOT_CHECKED}",
+                f"delete HA M8 Rollo: {COMMAND_NOT_CHECKED}",
+            ],
+        ),
+        (set(), [], [(900, "7"), (901, "7"), (903, "7")], []),
+    ],
+    ids=["used in a user's plan", "plan not checked", "no user's plan uses them"],
+)
+def test_the_delta_sync_deletes_no_orphan_a_users_plan_may_use(
+    in_use: set[int], plan_failures: list[tuple[str, str]], deleted: list[tuple[int, str]], failed_writes: list[str]
+) -> None:
+    """A kept orphan is a failed step: the sync ends partial and says why the command is still there (#252)."""
+    check = AsyncMock(return_value=(in_use, plan_failures))
+    button = _button(webio_ids_in_user_plans=check)
+    button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
+    api = SimpleNamespace(delete_single_command=AsyncMock(return_value=True))
+    ctx = SimpleNamespace(failed_writes=[], api=api, update_status=MagicMock())
+    tasks = [
+        {"type": "delete", "item": {"id": 900, "webIoId": 40, "name": "HA M7 Licht"}},
+        {"type": "delete", "item": {"id": 901, "webIoId": "41", "name": "HA M8 Rollo"}},
+        {"type": "delete", "item": {"id": 903, "name": "HA M9 ohne webIoId"}},  # no webIoId: never checked, deleted
+        {"type": "rename", "item": {"id": 902, "webIoId": 42, "name": "HA M9", "payload": {}}},
+    ]
+    api.save_single_command = AsyncMock(return_value=True)
+
+    result = asyncio.run(
+        button._execute_delta_tasks(ctx, WebioClass.MARKER, "7", "3", tasks, [], MagicMock(), "Marker", 10)
+    )
+
+    check.assert_awaited_once_with({40, 41})
+    assert [call.args for call in api.delete_single_command.await_args_list] == deleted
+    assert (result["removed"], result["renamed"]) == (len(deleted), 1)
+    assert ctx.failed_writes == failed_writes

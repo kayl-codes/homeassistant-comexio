@@ -857,6 +857,11 @@ PLAN_WEBIO_ID_UNREADABLE = "holds a WebIO element without a readable webIoId, no
 # A Web-IO command of an ignored source without a readable webIoId, or an unwired one the last poll
 # does not list: it cannot be checked against the plans.
 COMMAND_NOT_CHECKED = "could not be checked against the plans, not deleted"
+# A Web-IO command the delta sync would delete as an orphan, but a plan outside the managed ones uses.
+COMMAND_IN_USER_PLAN = (
+    "a function plan outside the managed ones still uses it, not deleted"
+    " — remove its WebIO element there, then sync again"
+)
 # Comexio's plan list could not be read: a plan holding a command may be missing from the cache.
 PLAN_LIST_NAME = "plan list"
 PLAN_LIST_NOT_READ = "could not be read, no Web-IO command deleted"
@@ -8852,8 +8857,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
         deletable = [cmd_id for _name, cmd_id, webio_id in candidates if webio_id not in placed]
         return SourceCommandCheck(deletable, [], unchecked, in_use)
 
-    async def _placed_webio_ids(self) -> tuple[set[int], list[tuple[str, str]]]:
+    async def webio_ids_in_user_plans(self, webio_ids: Iterable[int]) -> tuple[set[int], list[tuple[str, str]]]:
+        """(the webio_ids a plan outside the managed ones holds a WebIO element of, plans not checked).
+
+        The delta sync unwires its orphans from the managed plans only — a leftover element there is the
+        dangling-element cleanup's — so a user's own plan may still use one, and deleting its command
+        would leave that plan an element of a deleted command. One plan that could not be checked
+        keeps every command (its element may sit there), as in deletable_source_command_ids.
+        """
+        wanted = set(webio_ids)
+        placed, failures = await self._placed_webio_ids(skip_managed=True)
+        return (wanted, failures) if failures else (wanted & placed, [])
+
+    async def _placed_webio_ids(self, *, skip_managed: bool = False) -> tuple[set[int], list[tuple[str, str]]]:
         """(webIoIds with an element in any plan, (name, detail) of each plan that could not be checked).
+
+        skip_managed leaves the managed plans out: only the user's own plans count.
 
         The plan list ($Fubs) is read fresh first: the one the last poll read lacks a plan the user
         created in Comexio since, which may hold the command. If it cannot be read, nothing counts as
@@ -8869,6 +8888,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         placed: set[int] = set()
         failures = [(key, PLAN_ENTRY_UNREADABLE) for key in unreadable_plan_keys(self.api.fub_data)]
         for fub_id in sorted(function_plan_ids(self.api.fub_data)):
+            if skip_managed and self._is_managed_function_plan(fub_id):
+                continue
             plan_data = fresh.get(fub_id) or await self.api.function_plan_load_elements(fub_id, strict=True)
             if not plan_data:
                 failures.append((self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED))
