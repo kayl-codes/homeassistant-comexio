@@ -22,6 +22,7 @@ from custom_components.comexio.const import (
     PLAN_FAILURE_OFF_CANVAS,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
+    WEBIO_COMMAND_DUPLICATES_KEY,
     WebioClass,
 )
 from custom_components.comexio.coordinator import (
@@ -804,6 +805,33 @@ def test_commands_no_plan_holds_are_picked_for_deletion() -> None:
     # 900 was unwired by the plan cleanup, 901 was never wired; 902 still sits in plan 6.
     coordinator = _command_coordinator({6: {"elements": {"1": _web_io_element(42)}, "connections": {}}, 9: EMPTY_PLAN})
     assert _deletable(coordinator, [7], [900]) == ([900, 901], [], ["HA M7 kaputt"], ["HA M7 Licht (2)"])
+
+
+def test_a_same_named_duplicate_command_is_picked_and_resolved_too() -> None:
+    """A copy of a source's command name goes with it, not as the next audit's orphan (#251).
+
+    Its webIoId resolves to its cmdId: an unwired duplicate's command is deleted, no failed step.
+    """
+    coordinator = _command_coordinator({6: {"elements": {"1": _web_io_element(42)}, "connections": {}}, 9: EMPTY_PLAN})
+    coordinator.data[WEBIO_COMMAND_DUPLICATES_KEY] = [
+        {"name": "HA M7 Licht", "cmdId": 906, "webIoId": 46, "webioClass": "marker"},
+    ]
+
+    assert _deletable(coordinator, [7], [900]) == ([900, 901, 906], [], ["HA M7 kaputt"], ["HA M7 Licht (2)"])
+    assert coordinator.webio_id_to_cmd_id()["46"] == 906
+
+
+def test_an_unwired_duplicate_is_listed_by_its_cmd_id() -> None:
+    """The plan cleanup resolves a duplicate's webIoId to its cmdId: the last poll lists that cmdId too.
+
+    Its name serves another source, so only the cmdId matches; it must not end up "not in the last poll".
+    """
+    coordinator = _command_coordinator({6: {"elements": {"1": _web_io_element(42)}, "connections": {}}, 9: EMPTY_PLAN})
+    coordinator.data[WEBIO_COMMAND_DUPLICATES_KEY] = [
+        {"name": "HA M8 Rollo", "cmdId": 907, "webIoId": 47, "webioClass": "marker"},
+    ]
+
+    assert _deletable(coordinator, [7], [900, 907]) == ([900, 901, 907], [], ["HA M7 kaputt"], ["HA M7 Licht (2)"])
 
 
 def test_a_plan_that_cannot_be_loaded_keeps_every_command() -> None:

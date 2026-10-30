@@ -6,6 +6,7 @@ import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import html
+from itertools import chain
 import logging
 import math
 import pathlib
@@ -170,6 +171,7 @@ from .const import (
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_FORMER_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_WARNED_MAX,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
     WEBIO_CLASS_IO,
@@ -178,6 +180,7 @@ from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_CLASS_QUICKBUS,
     WEBIO_CLASSES,
+    WEBIO_COMMAND_DUPLICATES_KEY,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     WEBIO_RANGE_CHECK_HOUR,
     WEBIO_RANGE_CHECK_MINUTE,
@@ -579,6 +582,7 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "knx": parsed_data.get("knx", []) if import_knx else [],
         QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
         "webio_commands": parsed_data.get("webio_commands", {}),
+        WEBIO_COMMAND_DUPLICATES_KEY: parsed_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []),
         "webio_names": parsed_data.get("webio_names", {}),
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
@@ -661,9 +665,15 @@ def _inexact_command_key(
 
 
 def _build_com_audit_map(
-    com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+    com_commands: dict[str, Any],
+    ha_map: dict[str, dict[str, Any]],
+    duplicates: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, list[dict[str, Any]]]:
     """The Comexio side of the audit: Web-IO commands grouped by the audit key they serve.
+
+    duplicates are the commands whose name an earlier one already has (webio_commands holds only
+    the first): they join the same key after it, so the audit keeps the first and reports them
+    as orphans instead of a sync deleting one layer of them per run (#251).
 
     Exact reverse lookup first: ha_map's "name" values are built from the same extension names
     that may contain spaces, so a positional full_name.split(" ") would misparse
@@ -681,7 +691,8 @@ def _build_com_audit_map(
     quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
     io_name_to_key = {info["name"]: key for key, info in ha_map.items() if classify_audit_key(key) is WebioClass.IO}
     com_map: dict[str, list[dict[str, Any]]] = {}
-    for full_name, info in com_commands.items():
+    named_commands = chain(com_commands.items(), ((dup["name"], dup) for dup in duplicates))
+    for full_name, info in named_commands:
         key = name_to_key.get(full_name) or _inexact_command_key(full_name, quickbus_ref_to_key, io_name_to_key)
         if key is None:
             _LOGGER.debug("Web-IO audit: command '%s' fits several IOs, left as it is", one_line(full_name))
@@ -712,15 +723,35 @@ def _split_disabled_commands(
     kept: dict[str, Any] = {}
     disabled: dict[WebioClass, int] = {}
     for name, info in com_commands.items():
-        try:
-            cls = WebioClass(info.get("webioClass"))
-        except ValueError:
-            cls = None
+        cls = _command_class(info)
         if cls is None or cls in active:
             kept[name] = info
         else:
             disabled[cls] = disabled.get(cls, 0) + 1
     return kept, disabled
+
+
+def _stored_commands(data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    """(name, info) of every stored Web-IO command: webio_commands, then the same-named duplicates."""
+    yield from data.get("webio_commands", {}).items()
+    for dup in data.get(WEBIO_COMMAND_DUPLICATES_KEY, []):
+        yield dup["name"], dup
+
+
+def _command_class(info: Mapping[str, Any]) -> WebioClass | None:
+    """The Web-IO class of a parsed command, None if it names no known class."""
+    try:
+        return WebioClass(info.get("webioClass"))
+    except ValueError:
+        return None
+
+
+def _audited_duplicates(
+    duplicates: Iterable[Mapping[str, Any]], active_classes: Iterable[WebioClass]
+) -> list[Mapping[str, Any]]:
+    """The name duplicates the audit sees: like _split_disabled_commands, a switched-off class stays out."""
+    active = set(active_classes)
+    return [dup for dup in duplicates if (cls := _command_class(dup)) is None or cls in active]
 
 
 def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
@@ -1108,6 +1139,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
         self._webhook_updated_knx_ids: set[str] = set()
+        # Unknown IOs a webhook push was already warned about: a stale command pushes on every value
+        # change, so only its first push warns (#251). Cleared with the coordinator on every reload.
+        self._warned_unknown_webhook_ios: set[tuple[str, ...]] = set()
         self.last_plan_preview: dict[str, Any] | None = None
         # In-memory copy of the last rendered preview SVG, served directly by the
         # image entity (image.py) without touching the config/www file.
@@ -1910,14 +1944,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
     ]:
         """ha_map, io_meta_by_key, com_map and the per-class count of switched-off commands of an audit."""
         ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
-        audited_commands, disabled_commands = _split_disabled_commands(
-            final_data["webio_commands"], active_webio_classes(conf)
-        )
-        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map)
+        active_classes = active_webio_classes(conf)
+        audited_commands, disabled_commands = _split_disabled_commands(final_data["webio_commands"], active_classes)
+        duplicates = _audited_duplicates(final_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []), active_classes)
+        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map, duplicates)
         return ha_map, io_meta_by_key, com_map, disabled_commands
 
     def _build_com_audit_map_without_held(
-        self, com_commands: dict[str, Any], final_data: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+        self,
+        com_commands: dict[str, Any],
+        final_data: dict[str, Any],
+        ha_map: dict[str, dict[str, Any]],
+        duplicates: Iterable[Mapping[str, Any]] = (),
     ) -> dict[str, list[dict[str, Any]]]:
         """_build_com_audit_map less the commands of held IOs: imported IOs without an entity.
 
@@ -1930,7 +1968,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         deleted, which it refuses while a command is wired, so only unwired ones go.
         """
         held_map = {key: {"name": name} for key, _io, name in self._io_audit_entries(final_data) if key not in ha_map}
-        com_map = _build_com_audit_map(com_commands, ha_map | held_map)
+        com_map = _build_com_audit_map(com_commands, ha_map | held_map, duplicates)
         held = [key for key in held_map if key in com_map]
         for key in held:
             del com_map[key]
@@ -4862,8 +4900,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
+            self._warned_unknown_webhook_ios.discard(("io", *key))  # unknown again later: warn again
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), one_line(identifier), value)
+            self._log_unknown_webhook_io(
+                ("io", *key), WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), one_line(identifier), value
+            )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
@@ -4877,10 +4918,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label = io.get("name") or io_id_str
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "quickbus", one_line(label), value, previous)
             self._fire_plan_event("io", io_id_str, label, value)
+            self._warned_unknown_webhook_ios.discard(("quickbus", io_id_str))  # unknown again later: warn again
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG, one_line(io_id_str), value)
+            self._log_unknown_webhook_io(
+                ("quickbus", io_id_str), WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG, one_line(io_id_str), value
+            )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
+
+    def _log_unknown_webhook_io(self, warn_key: tuple[str, ...], msg: str, *args: Any) -> None:
+        """Warn about the first push of an unknown IO, log every later push of it at DEBUG only."""
+        warned = self._warned_unknown_webhook_ios
+        if warn_key in warned:
+            _LOGGER.debug(msg, *args)
+            return
+        if len(warned) < WEBHOOK_UNKNOWN_IO_WARNED_MAX:
+            warned.add(warn_key)
+        _LOGGER.warning(msg, *args)
 
     async def async_load_extension_firmware(self) -> None:
         """Restore the last checked firmware snapshot from disk (called once at setup).
@@ -8694,10 +8748,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return await self.delete_plan_elements_for_commands(fub_id, elem_ids, found_webio_ids, webio_id_to_cmd_id)
 
     def webio_id_to_cmd_id(self) -> dict[str, Any]:
-        """webIoId (as str) -> real Web-IO command id, from the last poll's commands."""
+        """webIoId (as str) -> real Web-IO command id, from the last poll's commands (duplicates included)."""
         return {
             str(cmd["webIoId"]): cmd.get("cmdId")
-            for cmd in (self.data or {}).get("webio_commands", {}).values()
+            for _name, cmd in _stored_commands(self.data or {})
             if cmd.get("webIoId") is not None
         }
 
@@ -8861,7 +8915,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         found: list[tuple[str, Any, int]] = []
         unreadable: list[str] = []
         listed: set[Any] = set()
-        for name, info in data.get("webio_commands", {}).items():
+        for name, info in _stored_commands(data):
             cmd_id = info.get("cmdId")
             listed.add(cmd_id)
             if cmd_id not in unwired_cmd_ids and not _serves_sources(name, info, category, (names, taken, keys)):

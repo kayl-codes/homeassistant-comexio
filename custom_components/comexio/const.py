@@ -193,6 +193,11 @@ _QUICKBUS_AUDIT_KEY_PREFIX = "QB"
 # identifier, which a Quickbus IO's G1/TL1/R repeats on every device of the same kind.
 QUICKBUS_IO_DATA_KEY = "quickbus_io"
 
+# parse_config() output key of the stored Web-IO commands whose name an earlier command already
+# has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
+# as orphans, so one sync deletes them all.
+WEBIO_COMMAND_DUPLICATES_KEY = "webio_command_duplicates"
+
 
 @dataclass(frozen=True, kw_only=True)
 class SourceCategory:
@@ -1193,6 +1198,11 @@ WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — n
 
 # The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
 WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
+
+# How many unknown IOs the coordinator remembers as already warned about (later pushes of them log
+# at DEBUG only). The pushed ext/identifier come from the request, so the set must stay bounded:
+# past the limit, an unknown IO warns on every push again, as before #251.
+WEBHOOK_UNKNOWN_IO_WARNED_MAX = 512
 
 # DEBUG for a push matched to an IO whose id the latest scrape gave another IO (deleted and reused):
 # it is the former IO's value and is dropped. Args: server id, IO label, new value.

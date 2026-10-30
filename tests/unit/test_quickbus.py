@@ -1,6 +1,7 @@
 """Quickbus IOs (#86): own data key, own Web-IO class [QB], read-only entities, webhook by IO Id."""
 
 import json
+import logging
 import re
 from types import SimpleNamespace
 from typing import Any
@@ -9,7 +10,7 @@ from unittest.mock import MagicMock
 from aiocomexio.webio import WEBIO_PROTOCOL_HTTP
 import pytest
 
-from custom_components.comexio import _quickbus_entity_uids
+from custom_components.comexio import _quickbus_entity_uids, coordinator as coordinator_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.cleanup_scope import CLEANUP_SCOPE_QUICKBUS, CLEANUP_SCOPES, webio_classes_in_scope
 from custom_components.comexio.const import (
@@ -17,6 +18,7 @@ from custom_components.comexio.const import (
     CONF_IGNORED_KNX,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
+    WEBIO_COMMAND_DUPLICATES_KEY,
     WebioClass,
     known_extension_names,
     quickbus_io_platform,
@@ -134,6 +136,17 @@ def test_import_quickbus_defaults_to_on(quickbus_result: dict[str, Any]) -> None
     assert len(_imported_data(quickbus_result, {})[QUICKBUS_IO_DATA_KEY]) == 8
 
 
+def test_imported_data_forwards_the_web_io_command_duplicates(quickbus_result: dict[str, Any]) -> None:
+    """The audit reports every same-named command as an orphan only if the import passes them on (#251)."""
+    duplicates = [{"name": "HA IO EXT-1 I1", "webIoId": 11, "cmdId": 11, "typeId": 1, "webioClass": "io"}]
+
+    assert (
+        _imported_data({**quickbus_result, WEBIO_COMMAND_DUPLICATES_KEY: duplicates}, {})[WEBIO_COMMAND_DUPLICATES_KEY]
+        == duplicates
+    )
+    assert _imported_data(quickbus_result, {})[WEBIO_COMMAND_DUPLICATES_KEY] == []
+
+
 @pytest.mark.parametrize(("import_quickbus", "keeps_quickbus_labels"), [(True, True), (False, False)])
 def test_plan_labels_of_imported_quickbus_ios_survive_import_ios_off(
     quickbus_result: dict[str, Any], import_quickbus: bool, keeps_quickbus_labels: bool
@@ -161,6 +174,7 @@ def _webhook_coordinator(quickbus_ios: list[dict[str, Any]]) -> ComexioCoordinat
     coordinator.io_states = {}
     coordinator._io_real_value_ids = set()
     coordinator._webhook_updated_io_ids = set()
+    coordinator._warned_unknown_webhook_ios = set()
     coordinator._io_identities = {}
     coordinator._async_publish_pushed_value = MagicMock()
     coordinator._fire_plan_event = MagicMock()
@@ -196,6 +210,61 @@ def test_quickbus_webhook_for_an_unknown_id_is_dropped_with_a_warning(
     assert coordinator._webhook_updated_io_ids == set()
     coordinator._fire_plan_event.assert_not_called()
     assert "unknown Quickbus IO 999" in caplog.text
+
+
+def test_only_the_first_push_of_an_unknown_quickbus_io_warns(
+    quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A stale command pushes on every value change: one WARNING per IO, the rest at DEBUG (#251)."""
+    coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
+
+    with caplog.at_level(logging.DEBUG):
+        for io_id in ("999", "999", "998", "999"):
+            coordinator.update_quickbus_io(io_id, 1)
+
+    levels = [(record.levelno, record.args[0]) for record in caplog.records if "unknown Quickbus IO" in record.msg]
+    assert levels == [
+        (logging.WARNING, "999"),
+        (logging.DEBUG, "999"),
+        (logging.WARNING, "998"),
+        (logging.DEBUG, "999"),
+    ]
+
+
+def test_an_io_that_became_known_warns_again_once_unknown(
+    quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A matched push forgets the earlier warning: the IO going unknown again is news, not noise."""
+    quickbus_ios = quickbus_result[QUICKBUS_IO_DATA_KEY]
+    coordinator = _webhook_coordinator(quickbus_ios)
+    known = coordinator._quickbus_index.pop("211")
+
+    with caplog.at_level(logging.DEBUG):
+        coordinator.update_quickbus_io("211", 1)
+        coordinator._quickbus_index["211"] = known
+        coordinator.update_quickbus_io("211", 0)
+        del coordinator._quickbus_index["211"]
+        coordinator.update_quickbus_io("211", 1)
+
+    levels = [record.levelno for record in caplog.records if "unknown Quickbus IO" in record.msg]
+    assert levels == [logging.WARNING, logging.WARNING]
+    assert coordinator._warned_unknown_webhook_ios == {("quickbus", "211")}
+
+
+def test_the_warned_unknown_ios_stay_bounded(
+    quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pushed id comes from the request: past the limit nothing more is remembered, it warns again."""
+    monkeypatch.setattr(coordinator_module, "WEBHOOK_UNKNOWN_IO_WARNED_MAX", 2)
+    coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
+
+    with caplog.at_level(logging.DEBUG):
+        for io_id in ("997", "998", "999", "999", "997"):
+            coordinator.update_quickbus_io(io_id, 1)
+
+    assert coordinator._warned_unknown_webhook_ios == {("quickbus", "997"), ("quickbus", "998")}
+    levels = [record.levelno for record in caplog.records if "unknown Quickbus IO" in record.msg]
+    assert levels == [logging.WARNING, logging.WARNING, logging.WARNING, logging.WARNING, logging.DEBUG]
 
 
 def test_poll_keeps_a_quickbus_webhook_value_that_arrived_during_the_fetch(quickbus_result: dict[str, Any]) -> None:
