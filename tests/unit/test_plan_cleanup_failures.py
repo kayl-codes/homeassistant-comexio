@@ -1335,6 +1335,69 @@ def test_unwire_removes_the_wiring_and_a_bare_duplicate_element_of_the_command()
     assert delete.await_args.args[1] == [13, 11, 15]
 
 
+@pytest.mark.parametrize(
+    ("targets", "extra"),
+    [
+        (("13", "14"), {}),
+        (("14", "12"), {}),
+        (("14",), {"1": {"input": {"FubElementId": "11"}, "output": None}}),
+        # Read before the wire to 14: skipped, the cleanup goes on.
+        (("14",), {"8": None, "9": {"input": None, "output": [{"FubElementId": "14"}]}}),
+    ],
+    ids=["feeds the retained namesake too", "feeds plan logic too", "unreadable wiring", "unreadable connections"],
+)
+def test_unwire_keeps_a_source_element_that_feeds_anything_else(
+    targets: tuple[str, ...], extra: dict[str, Any]
+) -> None:
+    """Marker 7 feeds the duplicate 41 and the retained command 40 (or a logic block): deleting it would cut
+    that other wire, so only the duplicate's WebIO element goes."""
+    plan = {
+        "elements": {
+            "10": {"reference": None},  # an element without a reference, read first: no match, no crash
+            "11": _marker_element(7),
+            "12": LOGIC_BLOCK,
+            "13": _web_io_element(40),
+            "14": _web_io_element(41),
+        },
+        "connections": {**extra, "0": _conn("11", *targets)},
+    }
+
+    delete, _result = _unwire({5: plan}, [41])
+
+    assert delete.await_args.args[1] == [14]
+
+
+@pytest.mark.parametrize(
+    ("element", "unreadable"),
+    [
+        ({}, True),
+        ({"reference": "x"}, True),
+        ({"reference": {"type": "abc", "ref_id": 40}}, True),
+        ("junk", True),
+        ({"reference": None}, False),
+        (_marker_element(7), False),
+        ({"reference": {"type": "10", "ref_id": "x"}}, True),
+        ({"reference": {"type": " 010", "ref_id": 43}}, False),
+    ],
+    ids=[
+        "no reference",
+        "malformed reference",
+        "unreadable type",
+        "malformed element",
+        "explicit null",
+        "marker element",
+        "WebIO element without a readable webIoId",
+        "WebIO type spelled otherwise",
+    ],
+)
+def test_an_element_without_a_readable_reference_leaves_its_plan_unchecked(element: Any, unreadable: bool) -> None:
+    """It may be a WebIO element of a command about to be deleted; only an explicit null means none."""
+    plan = {"elements": {"1": element, "2": _web_io_element(42)}, "connections": {}}
+
+    webio_ids = {42, 43} if element == {"reference": {"type": " 010", "ref_id": 43}} else {42}
+    assert ComexioAPI.plan_webio_ids(plan) == (webio_ids, unreadable)
+
+
 _CLEAN_OUTCOME = {
     "touched_fub_ids": [],
     "deleted_elem_count": 0,
@@ -1352,6 +1415,7 @@ def test_the_delta_cleanup_unwires_the_webio_ids_of_its_delete_tasks_only() -> N
         {"type": "delete", "item": {"webIoId": 40}},
         {"type": "delete", "item": {"webIoId": "41"}},
         {"type": "delete", "item": {"name": "HA M9 ohne webIoId"}},
+        {"type": "delete", "item": {"webIoId": "abc"}},  # int("abc") aborted the sync before
         {"type": "rename", "item": {"webIoId": 42}},
     ]
 
@@ -1374,28 +1438,42 @@ def test_a_cancelled_delta_sync_checks_no_plan() -> None:
     api.delete_single_command.assert_not_awaited()
 
 
+NO_WEBIO_ID_KEPT = f"delete HA M9 ohne webIoId (no readable webIoId): {COMMAND_NOT_CHECKED}"
+NO_WEBIO_ID_UNREADABLE_KEPT = f"delete HA M10 (no readable webIoId): {COMMAND_NOT_CHECKED}"
+
+
 @pytest.mark.parametrize(
     ("in_use", "plan_failures", "deleted", "failed_writes"),
     [
-        ({40}, [], [(901, "7"), (903, "7")], [f"delete HA M7 Licht (webIoId 40): {COMMAND_IN_PLAN}"]),
+        (
+            {40},
+            [],
+            [(901, "7")],
+            [f"delete HA M7 Licht (webIoId 40): {COMMAND_IN_PLAN}", NO_WEBIO_ID_KEPT, NO_WEBIO_ID_UNREADABLE_KEPT],
+        ),
         (
             {40, 41},
             [("Plan 6", PLAN_LOAD_FAILED)],
-            [(903, "7")],
+            [],
             [
                 f"function plan 'Plan 6': {PLAN_LOAD_FAILED}",
                 f"delete HA M7 Licht (webIoId 40): {COMMAND_NOT_CHECKED}",
                 f"delete HA M8 Rollo (webIoId 41): {COMMAND_NOT_CHECKED}",
+                NO_WEBIO_ID_KEPT,
+                NO_WEBIO_ID_UNREADABLE_KEPT,
             ],
         ),
-        (set(), [], [(900, "7"), (901, "7"), (903, "7")], []),
+        (set(), [], [(900, "7"), (901, "7")], [NO_WEBIO_ID_KEPT, NO_WEBIO_ID_UNREADABLE_KEPT]),
     ],
     ids=["used in a plan", "plan not checked", "no plan uses them"],
 )
 def test_the_delta_sync_deletes_no_orphan_a_plan_may_use(
     in_use: set[int], plan_failures: list[tuple[str, str]], deleted: list[tuple[int, str]], failed_writes: list[str]
 ) -> None:
-    """A kept orphan is a failed step: the sync ends partial and says why the command is still there (#252)."""
+    """A kept orphan is a failed step: the sync ends partial and says why the command is still there (#252).
+
+    A command without a readable webIoId cannot be checked against the plans: it stays every time.
+    """
     check = AsyncMock(return_value=(in_use, plan_failures))
     button = _button(webio_ids_in_plans=check)
     button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
@@ -1404,7 +1482,8 @@ def test_the_delta_sync_deletes_no_orphan_a_plan_may_use(
     tasks = [
         {"type": "delete", "item": {"id": 900, "webIoId": 40, "name": "HA M7 Licht"}},
         {"type": "delete", "item": {"id": 901, "webIoId": "41", "name": "HA M8 Rollo"}},
-        {"type": "delete", "item": {"id": 903, "name": "HA M9 ohne webIoId"}},  # no webIoId: never checked, deleted
+        {"type": "delete", "item": {"id": 903, "name": "HA M9 ohne webIoId"}},
+        {"type": "delete", "item": {"id": 905, "webIoId": "abc", "name": "HA M10"}},
         {"type": "rename", "item": {"id": 902, "webIoId": 42, "name": "HA M9", "payload": {}}},
     ]
     api.save_single_command = AsyncMock(return_value=True)

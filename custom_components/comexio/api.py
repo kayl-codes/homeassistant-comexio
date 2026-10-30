@@ -5383,12 +5383,24 @@ class ComexioAPI:
 
     @staticmethod
     def plan_webio_ids(plan_data: dict) -> tuple[set[int], bool]:
-        """(webIoIds of the plan's WebIO elements, whether one of them has no readable webIoId)."""
+        """(webIoIds of the plan's WebIO elements, whether an element may hide one).
+
+        An element may hide one when its WebIO reference has no readable webIoId, or when its reference
+        is missing or has no readable type: loadelements sends a reference with every element, only an
+        explicit null means none (as in _plan_marker_refs_strict).
+        """
         webio_ids: set[int] = set()
         unreadable = False
-        for elem_data in plan_data.get("elements", {}).values():
-            ref = ComexioAPI._element_reference(elem_data)
-            if not ComexioAPI._is_webio_reference(ref):
+        for elem_id, elem_data in plan_data.get("elements", {}).items():
+            ref = elem_data.get("reference", "missing") if isinstance(elem_data, dict) else "malformed"
+            if ref is None:
+                continue
+            if (ref_type := _reference_type(ref)) is None:
+                _LOGGER.warning("Function plan element %s has no readable reference (%r)", elem_id, ref)
+                unreadable = True
+                continue
+            # _reference_type, not _is_webio_reference: " 10" and "010" are WebIO elements too.
+            if ref_type != FUNCTION_PLAN_REF_TYPE_WEBIO:
                 continue
             if (webio_id := ComexioAPI._reference_id(ref)) is None:
                 unreadable = True
@@ -5487,21 +5499,17 @@ class ComexioAPI:
         element id is no number a delete request can carry.
         """
         elements = plan_data.get("elements", {})
-        webio_elem_id = next(
-            (
-                eid
-                for eid, elem in elements.items()
-                if elem.get("reference", {}).get("type") == 10
-                and str(elem.get("reference", {}).get("ref_id")) == str(webio_id)
-            ),
-            None,
-        )
+        # An element with a null or malformed reference is no match. Stricter than plan_webio_ids on purpose:
+        # an element only that one reads as WebIO stays, and so does its command.
+        webio_elem_ids = ComexioAPI._find_source_element_ids(elements, webio_id, FUNCTION_PLAN_REF_TYPE_WEBIO)
+        webio_elem_id = webio_elem_ids[0] if webio_elem_ids else None
         if webio_elem_id is None:
             return None
         for conn_data in plan_data.get("connections", {}).values():
-            if webio_elem_id not in ComexioAPI._connection_output_ids(conn_data):
+            if not isinstance(conn_data, dict) or webio_elem_id not in ComexioAPI._connection_output_ids(conn_data):
                 continue
-            input_elem_id = conn_data.get("input", {}).get("FubElementId")
+            source = conn_data.get("input")
+            input_elem_id = source.get("FubElementId") if isinstance(source, dict) else None
             if input_elem_id is None:
                 continue
             # int() would abort the cleanup on "w3" and read "013" as another element's id: both stay.

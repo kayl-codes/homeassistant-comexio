@@ -739,6 +739,16 @@ def _stored_commands(data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, A
         yield dup["name"], dup
 
 
+def _source_shared(source_elem_id: str, webio_id: int, plan_data: dict) -> bool:
+    """Whether a source element wired to webio_id's WebIO element feeds anything else too.
+
+    Anything else: another command's WebIO element, plan logic, or wiring that cannot be read — see
+    ComexioAPI._source_element_wiring. Unwiring webio_id then removes its WebIO element only.
+    """
+    webio, other = ComexioAPI._source_element_wiring(source_elem_id, plan_data)
+    return other or any(fed_webio_id != webio_id for _elem_id, fed_webio_id in webio)
+
+
 def _command_class(info: Mapping[str, Any]) -> WebioClass | None:
     """The Web-IO class of a parsed command, None if it names no known class."""
     try:
@@ -854,7 +864,7 @@ PLAN_ENTRY_UNREADABLE = "plan list entry unreadable, cleanup skipped"
 PLAN_DELETE_FAILED = "element deletion failed"
 PLAN_CMD_NOT_FOUND = "Web-IO command not found, not deleted"
 # A plan's WebIO element without a readable webIoId may stand for any command: none is deleted.
-PLAN_WEBIO_ID_UNREADABLE = "holds a WebIO element without a readable webIoId, no Web-IO command deleted"
+PLAN_WEBIO_ID_UNREADABLE = "holds an element without a readable reference or webIoId, no Web-IO command deleted"
 # A Web-IO command of an ignored source without a readable webIoId, or an unwired one the last poll
 # does not list: it cannot be checked against the plans.
 COMMAND_NOT_CHECKED = "could not be checked against the plans, not deleted"
@@ -8767,6 +8777,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if ComexioAPI._deletable_element_id(elem_id)
         ]
         wired = self.api._find_webio_wiring(webio_id, plan_data) or []
+        if wired and _source_shared(str(wired[1]), webio_id, plan_data):
+            # Deleting the source would cut the other command's wire (e.g. the duplicate's retained namesake).
+            _LOGGER.info(
+                "[%s] Unwiring webIoId %s: source element %s feeds more than it, it stays",
+                self.server_id,
+                webio_id,
+                wired[1],
+            )
+            wired = wired[:1]
         return list(dict.fromkeys([*wired, *webio_elem_ids]))
 
     def webio_id_to_cmd_id(self) -> dict[str, Any]:

@@ -22,6 +22,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
 
+from .api import ComexioAPI
 from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_ENABLE_NOTIFICATIONS,
@@ -165,9 +166,20 @@ def _flanke_unusable(ctx: "_SyncContext") -> str:
 
 
 def _delete_task_webio_id(task: dict) -> int | None:
-    """The webIoId of a delta sync delete task, None for any other task or a command without one."""
-    webio_id = task["item"].get("webIoId") if task["type"] == "delete" else None
-    return None if webio_id is None else int(webio_id)
+    """The webIoId of a delta sync delete task, None for any other task or a command without a readable one."""
+    return ComexioAPI._reference_id({"ref_id": task["item"].get("webIoId")}) if task["type"] == "delete" else None
+
+
+def _skipped_delete_reason(task: dict, kept: dict[int, str]) -> str | None:
+    """Why a delta sync delete task is skipped, None to run it (and for any other task).
+
+    A command without a readable webIoId cannot be checked against the plans: it stays, as in
+    deletable_source_command_ids.
+    """
+    if task["type"] != "delete":
+        return None
+    webio_id = _delete_task_webio_id(task)
+    return COMMAND_NOT_CHECKED if webio_id is None else kept.get(webio_id)
 
 
 def _record_plan_cleanup_failures(
@@ -1984,9 +1996,11 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
             on_progress(idx, task["item"]["name"], task["type"])
-            if reason := kept.get(webio_id := _delete_task_webio_id(task)):
+            if reason := _skipped_delete_reason(task, kept):
                 # The webIoId keeps same-named duplicates apart: failed_writes drops repeated lines.
-                ctx.failed_writes.append(f"delete {one_line(task['item']['name'])} (webIoId {webio_id}): {reason}")
+                webio_id = _delete_task_webio_id(task)
+                ident = "no readable webIoId" if webio_id is None else f"webIoId {webio_id}"
+                ctx.failed_writes.append(f"delete {one_line(task['item']['name'])} ({ident}): {reason}")
                 continue
             await self._apply_delta_task(
                 api,
