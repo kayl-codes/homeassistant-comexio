@@ -26,7 +26,7 @@ from custom_components.comexio.const import (
     WebioClass,
 )
 from custom_components.comexio.coordinator import (
-    COMMAND_IN_USER_PLAN,
+    COMMAND_IN_PLAN,
     COMMAND_NOT_CHECKED,
     PLAN_CMD_NOT_FOUND,
     PLAN_DELETE_FAILED,
@@ -1234,47 +1234,120 @@ def test_a_command_a_plan_still_uses_is_named_in_the_result() -> None:
     assert ctx.failed_writes == []
 
 
-def _managed_9(_self: ComexioCoordinator, fub_id: int) -> bool:
-    return fub_id == 9
-
-
-def test_only_a_users_own_plan_keeps_an_orphan_of_the_delta_sync() -> None:
-    """Plan 6 is the user's: its element keeps 42. Plan 9 is managed: a leftover element there (43) is
-    the dangling-element cleanup's and must not block the delete, or the orphan would never go."""
+def test_every_plan_keeps_an_orphan_of_the_delta_sync() -> None:
+    """Plan 6 is the user's, plan 9 a managed one whose unwiring left an element of 43 behind: both keep
+    their command, or the plan would be left an element of a deleted command."""
     plan_6 = {"elements": {"1": _web_io_element(42)}, "connections": {}}
     plan_9 = {"elements": {"1": _web_io_element(43)}, "connections": {}}
     coordinator = _command_coordinator({}, bulk={6: plan_6, 9: plan_9})
 
-    with patch.object(ComexioCoordinator, "_is_managed_function_plan", _managed_9):
-        assert asyncio.run(coordinator.webio_ids_in_user_plans([42, 43, 44])) == ({42}, [])
+    with patch.object(ComexioCoordinator, "_is_managed_function_plan", return_value=True):
+        assert asyncio.run(coordinator.webio_ids_in_plans([42, 43, 44])) == ({42, 43}, [])
 
 
-def test_a_users_plan_that_cannot_be_loaded_keeps_every_orphan() -> None:
-    """Plan 6 may hold any of them; the managed plan 9 failing to load is no reason to keep one."""
-    coordinator = _command_coordinator({}, listed={6, 9})
+def test_a_plan_that_cannot_be_loaded_keeps_every_orphan() -> None:
+    coordinator = _command_coordinator({}, listed={6, 9}, bulk={6: EMPTY_PLAN})
 
-    with patch.object(ComexioCoordinator, "_is_managed_function_plan", _managed_9):
-        result = asyncio.run(coordinator.webio_ids_in_user_plans([42, 43]))
+    result = asyncio.run(coordinator.webio_ids_in_plans([42, 43]))
 
-    assert result == ({42, 43}, [("Plan 6", PLAN_LOAD_FAILED)])
+    assert result == ({42, 43}, [("Plan 9", PLAN_LOAD_FAILED)])
 
 
 def test_an_unread_plan_list_keeps_every_orphan_of_the_delta_sync() -> None:
-    # Leaving the managed plans out must not turn an unread list into "no user's plan uses them".
     coordinator = _command_coordinator({6: EMPTY_PLAN})
     coordinator.api.get_raw_config = AsyncMock(side_effect=TimeoutError)
 
-    with patch.object(ComexioCoordinator, "_is_managed_function_plan", _managed_9):
-        result = asyncio.run(coordinator.webio_ids_in_user_plans([42, 43]))
+    result = asyncio.run(coordinator.webio_ids_in_plans([42, 43]))
 
     assert result == ({42, 43}, [(PLAN_LIST_NAME, PLAN_LIST_NOT_READ)])
 
 
+async def _echo_delete(fub_id: int, elem_ids: list[int], webio_ids: list[int], plan_name: str) -> dict[str, Any]:
+    return _delete_result(deleted_elem_count=len(elem_ids), webio_cmd_ids=list(webio_ids), fub_id=fub_id)
+
+
+def _unwire(
+    plans: dict[int, dict[str, Any]], webio_ids: list[int], *, preferred_fub_id: int | None = 5
+) -> tuple[AsyncMock, dict[str, Any]]:
+    """Unwire webio_ids from the plans (managed: 5 only); returns the element delete mock and the result.
+
+    The poll knows webIoId 40 as cmdId 900.
+    """
+    delete = AsyncMock(side_effect=_echo_delete)
+    api = _api(
+        function_plan_load_elements=AsyncMock(side_effect=plans.get),
+        _find_webio_wiring=ComexioAPI._find_webio_wiring,
+        _delete_plan_elements_and_restart=delete,
+    )
+    coordinator = _coordinator(api)
+    coordinator.data = {"webio_commands": {"a": {"webIoId": 40, "cmdId": 900}}}
+    with (
+        patch.object(ComexioCoordinator, "_is_managed_function_plan", lambda _self, fub_id: fub_id == 5),
+        patch.object(ComexioCoordinator, "_load_function_plan_check_data", AsyncMock(return_value=plans)),
+    ):
+        result = asyncio.run(coordinator.unwire_webio_commands(webio_ids, preferred_fub_id=preferred_fub_id))
+    return delete, result
+
+
+@pytest.mark.parametrize("preferred_fub_id", [5, None], ids=["preferred plan", "scan of the managed plans"])
+def test_unwire_removes_a_web_io_element_nothing_is_wired_to(preferred_fub_id: int | None) -> None:
+    """The dangling-element cleanup removes source elements only: a bare WebIO element of a deleted
+    command would stay in the managed plan for good (#252). Plan 6 is the user's: never touched."""
+    plan = {"elements": {"13": _web_io_element(40), "14": _web_io_element(41)}, "connections": {}}
+
+    delete, result = _unwire({5: plan, 6: plan}, [40], preferred_fub_id=preferred_fub_id)
+
+    assert [call.args[:3] for call in delete.await_args_list] == [(5, [13], [40])]
+    assert (result["cmd_ids"], result["touched_fub_ids"], result["failures"]) == ([900], [5], [])
+
+
+@pytest.mark.parametrize(
+    ("elements", "connections", "deleted"),
+    [
+        ({"w3": _web_io_element(40), "13": _web_io_element(40)}, {}, [13]),
+        ({"11": _marker_element(7), "w3": _web_io_element(40)}, {"0": _conn("11", "w3")}, None),
+        (
+            {"012": _marker_element(7), "12": _marker_element(8), "13": _web_io_element(40)},
+            {"0": _conn("012", "13")},
+            [13],
+        ),
+    ],
+    ids=["bare", "wired WebIO element", "wired source"],
+)
+def test_unwire_leaves_an_element_whose_id_no_delete_request_can_carry(
+    elements: dict[str, Any], connections: dict[str, Any], deleted: list[int] | None
+) -> None:
+    """int("w3") would abort the whole cleanup, int("012") delete element 12 by mistake: the
+    element stays, and the plan check after the unwiring keeps its command."""
+    delete, _result = _unwire({5: {"elements": elements, "connections": connections}}, [40])
+
+    assert (delete.await_args.args[1] if delete.await_args else None) == deleted
+
+
+def test_unwire_removes_the_wiring_and_a_bare_duplicate_element_of_the_command() -> None:
+    plan = {
+        "elements": {"11": _marker_element(7), "13": _web_io_element(40), "15": _web_io_element("40")},
+        "connections": {"0": _conn("11", "13")},
+    }
+
+    delete, _result = _unwire({5: plan}, [40])
+
+    assert delete.await_args.args[1] == [13, 11, 15]
+
+
+_CLEAN_OUTCOME = {
+    "touched_fub_ids": [],
+    "deleted_elem_count": 0,
+    "cmd_ids": [],
+    "stopped_plans": [],
+    "stop_failures": [],
+    "failures": [],
+}
+
+
 def test_the_delta_cleanup_unwires_the_webio_ids_of_its_delete_tasks_only() -> None:
-    outcome = {"touched_fub_ids": [], "deleted_elem_count": 0, "cmd_ids": [], "stopped_plans": []}
-    outcome |= {"stop_failures": [], "failures": []}
-    unwire = AsyncMock(return_value=outcome)
-    button = _button(unwire_webio_commands=unwire, delete_dangling_plan_elements=AsyncMock(return_value=outcome))
+    unwire = AsyncMock(return_value=_CLEAN_OUTCOME)
+    button = _button(unwire_webio_commands=unwire, delete_dangling_plan_elements=AsyncMock(return_value=_CLEAN_OUTCOME))
     tasks = [
         {"type": "delete", "item": {"webIoId": 40}},
         {"type": "delete", "item": {"webIoId": "41"}},
@@ -1289,7 +1362,7 @@ def test_the_delta_cleanup_unwires_the_webio_ids_of_its_delete_tasks_only() -> N
 
 def test_a_cancelled_delta_sync_checks_no_plan() -> None:
     check = AsyncMock(return_value=(set(), []))
-    button = _button(webio_ids_in_user_plans=check, cancel_sync=True)
+    button = _button(webio_ids_in_plans=check, cancel_sync=True)
     button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
     api = SimpleNamespace(delete_single_command=AsyncMock(return_value=True))
     ctx = SimpleNamespace(failed_writes=[], api=api, update_status=MagicMock())
@@ -1304,27 +1377,27 @@ def test_a_cancelled_delta_sync_checks_no_plan() -> None:
 @pytest.mark.parametrize(
     ("in_use", "plan_failures", "deleted", "failed_writes"),
     [
-        ({40}, [], [(901, "7"), (903, "7")], [f"delete HA M7 Licht: {COMMAND_IN_USER_PLAN}"]),
+        ({40}, [], [(901, "7"), (903, "7")], [f"delete HA M7 Licht (webIoId 40): {COMMAND_IN_PLAN}"]),
         (
             {40, 41},
             [("Plan 6", PLAN_LOAD_FAILED)],
             [(903, "7")],
             [
                 f"function plan 'Plan 6': {PLAN_LOAD_FAILED}",
-                f"delete HA M7 Licht: {COMMAND_NOT_CHECKED}",
-                f"delete HA M8 Rollo: {COMMAND_NOT_CHECKED}",
+                f"delete HA M7 Licht (webIoId 40): {COMMAND_NOT_CHECKED}",
+                f"delete HA M8 Rollo (webIoId 41): {COMMAND_NOT_CHECKED}",
             ],
         ),
         (set(), [], [(900, "7"), (901, "7"), (903, "7")], []),
     ],
-    ids=["used in a user's plan", "plan not checked", "no user's plan uses them"],
+    ids=["used in a plan", "plan not checked", "no plan uses them"],
 )
-def test_the_delta_sync_deletes_no_orphan_a_users_plan_may_use(
+def test_the_delta_sync_deletes_no_orphan_a_plan_may_use(
     in_use: set[int], plan_failures: list[tuple[str, str]], deleted: list[tuple[int, str]], failed_writes: list[str]
 ) -> None:
     """A kept orphan is a failed step: the sync ends partial and says why the command is still there (#252)."""
     check = AsyncMock(return_value=(in_use, plan_failures))
-    button = _button(webio_ids_in_user_plans=check)
+    button = _button(webio_ids_in_plans=check)
     button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
     api = SimpleNamespace(delete_single_command=AsyncMock(return_value=True))
     ctx = SimpleNamespace(failed_writes=[], api=api, update_status=MagicMock())
@@ -1344,3 +1417,23 @@ def test_the_delta_sync_deletes_no_orphan_a_users_plan_may_use(
     assert [call.args for call in api.delete_single_command.await_args_list] == deleted
     assert (result["removed"], result["renamed"]) == (len(deleted), 1)
     assert ctx.failed_writes == failed_writes
+
+
+def test_kept_same_named_duplicates_each_get_their_own_line() -> None:
+    """failed_writes drops repeated lines: without the webIoId the second kept duplicate would vanish."""
+    button = _button(webio_ids_in_plans=AsyncMock(return_value=({40, 42}, [])))
+    button._cleanup_delta_debris = AsyncMock(return_value=({}, 0))  # type: ignore[method-assign]
+    api = SimpleNamespace(delete_single_command=AsyncMock(return_value=True))
+    ctx = SimpleNamespace(failed_writes=[], api=api, update_status=MagicMock())
+    tasks = [
+        {"type": "delete", "item": {"id": 900, "webIoId": 40, "name": "HA M7 Licht"}},
+        {"type": "delete", "item": {"id": 904, "webIoId": 42, "name": "HA M7 Licht"}},
+    ]
+
+    asyncio.run(button._execute_delta_tasks(ctx, WebioClass.MARKER, "7", "3", tasks, [], MagicMock(), "Marker", 10))
+
+    assert ctx.failed_writes == [
+        f"delete HA M7 Licht (webIoId 40): {COMMAND_IN_PLAN}",
+        f"delete HA M7 Licht (webIoId 42): {COMMAND_IN_PLAN}",
+    ]
+    api.delete_single_command.assert_not_awaited()

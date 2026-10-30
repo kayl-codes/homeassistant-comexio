@@ -119,6 +119,7 @@ from .const import (
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    FUNCTION_PLAN_REF_TYPE_WEBIO,
     FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS,
     FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
@@ -857,10 +858,11 @@ PLAN_WEBIO_ID_UNREADABLE = "holds a WebIO element without a readable webIoId, no
 # A Web-IO command of an ignored source without a readable webIoId, or an unwired one the last poll
 # does not list: it cannot be checked against the plans.
 COMMAND_NOT_CHECKED = "could not be checked against the plans, not deleted"
-# A Web-IO command the delta sync would delete as an orphan, but a plan outside the managed ones uses.
-COMMAND_IN_USER_PLAN = (
-    "a function plan outside the managed ones still uses it, not deleted"
-    " — remove its WebIO element there, then sync again"
+# A Web-IO command the delta sync would delete as an orphan, but a plan still holds a WebIO element of
+# after the unwiring: a user's own plan, or a managed plan the unwiring could not clean up.
+COMMAND_IN_PLAN = (
+    "a function plan still holds its WebIO element, not deleted"
+    " — if the next sync keeps it too, remove the element in that plan"
 )
 # Comexio's plan list could not be read: a plan holding a command may be missing from the cache.
 PLAN_LIST_NAME = "plan list"
@@ -8722,7 +8724,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for fub_id, plan_data in plans.items():
                 if not self._is_managed_function_plan(fub_id):
                     continue
-                if self.api._find_webio_wiring(webio_id, plan_data) is not None:
+                if self._unwire_element_ids(webio_id, plan_data):
                     # No break: a stray duplicate element (e.g. left behind by a delete+
                     # recreate cycle, see _wired_source_webio_pairs) can reuse the same
                     # webIoId in more than one managed plan. Collecting into every matching
@@ -8746,11 +8748,26 @@ class ComexioCoordinator(DataUpdateCoordinator):
         elem_ids: list[int] = []
         found_webio_ids: list[int] = []
         for webio_id in ids:
-            pair = self.api._find_webio_wiring(webio_id, plan_data)
-            if pair is not None:
-                elem_ids.extend(pair)
+            if plan_elem_ids := self._unwire_element_ids(webio_id, plan_data):
+                elem_ids.extend(plan_elem_ids)
                 found_webio_ids.append(webio_id)
         return await self.delete_plan_elements_for_commands(fub_id, elem_ids, found_webio_ids, webio_id_to_cmd_id)
+
+    def _unwire_element_ids(self, webio_id: int, plan_data: dict) -> list[int]:
+        """The plan elements unwiring webio_id removes: its WebIO element(s) and the source wired to one.
+
+        A WebIO element nothing is wired to goes too: the dangling-element cleanup removes source
+        elements only, so it would outlive the command. Empty if the plan holds no element of webio_id.
+        """
+        elements = plan_data.get("elements", {})
+        webio_elem_ids = [
+            int(elem_id)
+            for elem_id in ComexioAPI._find_source_element_ids(elements, webio_id, FUNCTION_PLAN_REF_TYPE_WEBIO)
+            # An element id no delete request can carry stays; the plan check after the unwiring keeps its command.
+            if ComexioAPI._deletable_element_id(elem_id)
+        ]
+        wired = self.api._find_webio_wiring(webio_id, plan_data) or []
+        return list(dict.fromkeys([*wired, *webio_elem_ids]))
 
     def webio_id_to_cmd_id(self) -> dict[str, Any]:
         """webIoId (as str) -> real Web-IO command id, from the last poll's commands (duplicates included)."""
@@ -8857,22 +8874,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
         deletable = [cmd_id for _name, cmd_id, webio_id in candidates if webio_id not in placed]
         return SourceCommandCheck(deletable, [], unchecked, in_use)
 
-    async def webio_ids_in_user_plans(self, webio_ids: Iterable[int]) -> tuple[set[int], list[tuple[str, str]]]:
-        """(the webio_ids a plan outside the managed ones holds a WebIO element of, plans not checked).
+    async def webio_ids_in_plans(self, webio_ids: Iterable[int]) -> tuple[set[int], list[tuple[str, str]]]:
+        """(the webio_ids a plan still holds a WebIO element of, plans not checked).
 
-        The delta sync unwires its orphans from the managed plans only — a leftover element there is the
-        dangling-element cleanup's — so a user's own plan may still use one, and deleting its command
-        would leave that plan an element of a deleted command. One plan that could not be checked
-        keeps every command (its element may sit there), as in deletable_source_command_ids.
+        The delta sync unwires its orphans from the managed plans only, so a user's own plan may still
+        use one, and so may a managed plan the unwiring failed in; deleting its command would leave that
+        plan an element of a deleted command. One plan that could not be checked keeps every command
+        (its element may sit there), as in deletable_source_command_ids.
         """
         wanted = set(webio_ids)
-        placed, failures = await self._placed_webio_ids(skip_managed=True)
+        placed, failures = await self._placed_webio_ids()
         return (wanted, failures) if failures else (wanted & placed, [])
 
-    async def _placed_webio_ids(self, *, skip_managed: bool = False) -> tuple[set[int], list[tuple[str, str]]]:
+    async def _placed_webio_ids(self) -> tuple[set[int], list[tuple[str, str]]]:
         """(webIoIds with an element in any plan, (name, detail) of each plan that could not be checked).
-
-        skip_managed leaves the managed plans out: only the user's own plans count.
 
         The plan list ($Fubs) is read fresh first: the one the last poll read lacks a plan the user
         created in Comexio since, which may hold the command. If it cannot be read, nothing counts as
@@ -8888,8 +8903,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         placed: set[int] = set()
         failures = [(key, PLAN_ENTRY_UNREADABLE) for key in unreadable_plan_keys(self.api.fub_data)]
         for fub_id in sorted(function_plan_ids(self.api.fub_data)):
-            if skip_managed and self._is_managed_function_plan(fub_id):
-                continue
             plan_data = fresh.get(fub_id) or await self.api.function_plan_load_elements(fub_id, strict=True)
             if not plan_data:
                 failures.append((self.api.function_plan_name(fub_id), PLAN_LOAD_FAILED))
@@ -8976,10 +8989,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Remove Function-Plan wiring for the given webIoIds and resolve their real cmdIds.
 
         For each webio_id: locates its WebIO element + connected source element (marker or
-        IO) across managed plans (or just preferred_fub_id if given), deletes both, restarts
-        the plan if it was running. The real Web-IO command id is resolved from self.data["webio_commands"]
-        (webIoId -> cmdId) — never guessed from a plan element's ref_id, which IS the
-        webIoId, not the WebCommandId (see project-logikplan-api memory).
+        IO) across managed plans (or just preferred_fub_id if given), deletes both — a WebIO
+        element nothing is wired to on its own — and restarts the plan if it was running. The real
+        Web-IO command id is resolved from self.data["webio_commands"] (webIoId -> cmdId) — never
+        guessed from a plan element's ref_id, which IS the webIoId, not the WebCommandId (see
+        project-logikplan-api memory).
 
         Returns {"deleted_elem_count": int, "cmd_ids": list[int], "stopped_plans": [...],
         "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int],
@@ -8987,7 +9001,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         failures lists plans that could not be loaded (wiring not checked) or whose element
         deletion failed — both leave Function-Plan debris behind — and unwired commands whose
         cmdId could not be resolved, which stay in Comexio. cmd_ids only includes commands
-        actually found wired and successfully unwired; the caller is responsible for deleting
+        actually found in a plan and successfully unwired; the caller is responsible for deleting
         each via api.delete_single_command afterwards. touched_fub_ids lists plans that had at
         least one element successfully removed — useful for a caller that wants to re-sort the
         plan afterwards (deletion opens a gap in the grid that a sort would close);

@@ -5483,7 +5483,8 @@ class ComexioAPI:
 
         The source element is whatever is wired to the WebIO element's input side (marker or
         raw IO — the type doesn't matter here, it's simply the other end of the same wire).
-        Returns None if this webIoId has no element in the plan, or the element isn't wired.
+        Returns None if this webIoId has no element in the plan, the element isn't wired, or either
+        element id is no number a delete request can carry.
         """
         elements = plan_data.get("elements", {})
         webio_elem_id = next(
@@ -5503,6 +5504,9 @@ class ComexioAPI:
             input_elem_id = conn_data.get("input", {}).get("FubElementId")
             if input_elem_id is None:
                 continue
+            # int() would abort the cleanup on "w3" and read "013" as another element's id: both stay.
+            if not all(ComexioAPI._deletable_element_id(str(elem_id)) for elem_id in (webio_elem_id, input_elem_id)):
+                return None
             return [int(webio_elem_id), int(input_elem_id)]
         return None
 

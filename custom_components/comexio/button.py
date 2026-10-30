@@ -86,7 +86,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import (
-    COMMAND_IN_USER_PLAN,
+    COMMAND_IN_PLAN,
     COMMAND_NOT_CHECKED,
     PLAN_LOAD_FAILED,
     ComexioCoordinator,
@@ -1979,13 +1979,14 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
             await self._sort_checked(ctx, fub_id, api.function_plan_name(fub_id), was_active=resort_fub_ids[fub_id])
 
-        kept = await self._orphans_kept_for_user_plans(ctx, tasks_to_do)
+        kept = await self._orphans_kept(ctx, tasks_to_do)
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
             on_progress(idx, task["item"]["name"], task["type"])
-            if reason := kept.get(_delete_task_webio_id(task)):
-                ctx.failed_writes.append(f"delete {one_line(task['item']['name'])}: {reason}")
+            if reason := kept.get(webio_id := _delete_task_webio_id(task)):
+                # The webIoId keeps same-named duplicates apart: failed_writes drops repeated lines.
+                ctx.failed_writes.append(f"delete {one_line(task['item']['name'])} (webIoId {webio_id}): {reason}")
                 continue
             await self._apply_delta_task(
                 api,
@@ -1997,18 +1998,20 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             )
         return result
 
-    async def _orphans_kept_for_user_plans(self, ctx: _SyncContext, tasks_to_do: list[dict]) -> dict[int, str]:
-        """webIoId -> why its delete task is skipped: a user's own plan uses it, or a plan could not be checked.
+    async def _orphans_kept(self, ctx: _SyncContext, tasks_to_do: list[dict]) -> dict[int, str]:
+        """webIoId -> why its delete task is skipped: a plan still holds its WebIO element, or a plan
+        could not be checked.
 
-        The cleanup above unwired the orphans from the managed plans only; deleting a command a user's
-        own plan still holds a WebIO element of would leave that plan an element of a deleted command.
+        The cleanup above unwired the orphans from the managed plans only. Every plan is read fresh
+        after it: a user's own plan may still use an orphan, and so may a managed plan the unwiring
+        failed in — deleting the command would leave that plan an element of a deleted command.
         """
         webio_ids = {webio_id for task in tasks_to_do if (webio_id := _delete_task_webio_id(task)) is not None}
         if not webio_ids or getattr(self.coordinator, "cancel_sync", False):
             return {}
-        in_use, plan_failures = await self.coordinator.webio_ids_in_user_plans(webio_ids)
+        in_use, plan_failures = await self.coordinator.webio_ids_in_plans(webio_ids)
         ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in plan_failures)
-        reason = COMMAND_NOT_CHECKED if plan_failures else COMMAND_IN_USER_PLAN
+        reason = COMMAND_NOT_CHECKED if plan_failures else COMMAND_IN_PLAN
         if in_use:
             _LOGGER.info(
                 "[%s] Delta sync: %d orphaned Web-IO command(s) kept — %s", self.server_id, len(in_use), reason
