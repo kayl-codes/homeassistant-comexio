@@ -7,18 +7,22 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
+from homeassistant.components.repairs import DOMAIN as REPAIRS_DOMAIN, RepairsFlowManager, repairs_flow_manager
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.setup import async_setup_component
 import pytest
-from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
+from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser, async_mock_service
 
 from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.certificate import (
+    CERTIFICATE_ACCEPT_LOCKS,
     CERTIFICATE_PUSHES,
+    accept_action_id,
     async_clear_certificate_changed,
     async_remove_certificate_pushes,
     async_report_certificate_changed,
@@ -994,6 +998,13 @@ async def test_another_certificate_is_pushed_urgently_once(hass: HomeAssistant, 
     assert push["data"]["ttl"] == 0
     assert push["data"]["push"]["interruption-level"] == "critical"
     assert push["data"]["push"]["sound"]["critical"] == 1
+    assert push["data"]["actions"] == [
+        {
+            "action": f"COMEXIO_ACCEPT_CERTIFICATE_{pinned_entry.entry_id}_{OTHER}",
+            "title": "Accept certificate",
+            "authenticationRequired": True,
+        }
+    ]
     assert family[0].data == push
 
     # Every retry and poll reports the same certificate again: no second push.
@@ -1054,16 +1065,19 @@ async def test_a_notify_service_not_there_yet_gets_the_push_at_the_next_report(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
     # Right after a restart the setup can report before the mobile app has registered its notify service.
+    caplog.set_level(logging.INFO, logger="custom_components.comexio.certificate")
     _with_push_targets(hass, pinned_entry)
     family = async_mock_service(hass, "notify", FAMILY)
     async_report_certificate_changed(hass, pinned_entry, OTHER)
     await hass.async_block_till_done()
     assert f"Comexio certificate push to notify.{PHONE} failed" in caplog.text
+    assert f"sent to ['notify.{FAMILY}']" in caplog.text  # the only trace of a push that went out
 
     phone = async_mock_service(hass, "notify", PHONE)
     async_report_certificate_changed(hass, pinned_entry, OTHER)
     await hass.async_block_till_done()
 
+    assert f"sent to ['notify.{PHONE}']" in caplog.text
     assert len(phone) == 1
     assert phone[0].data["title"] == "Comexio: certificate changed"
     assert len(family) == 1
@@ -1089,10 +1103,14 @@ async def test_a_hanging_notify_service_times_out_without_holding_up_the_others(
 
 
 @pytest.mark.parametrize(
-    ("language", "title"), [("de", "Comexio: Zertifikat geändert"), ("fr", "Comexio: certificate changed")]
+    ("language", "title", "button"),
+    [
+        ("de", "Comexio: Zertifikat geändert", "Zertifikat übernehmen"),
+        ("fr", "Comexio: certificate changed", "Accept certificate"),
+    ],
 )
 async def test_the_push_speaks_the_language_of_home_assistant(
-    hass: HomeAssistant, pinned_entry: MockConfigEntry, language: str, title: str
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, language: str, title: str, button: str
 ) -> None:
     # German has its own texts, any other language gets the English ones.
     hass.config.language = language
@@ -1104,6 +1122,7 @@ async def test_the_push_speaks_the_language_of_home_assistant(
     await hass.async_block_till_done()
 
     assert phone[0].data["title"] == title
+    assert phone[0].data["data"]["actions"][0]["title"] == button
     for part in (SERVER_ID, HOST, ":".join(["BB"] * 32)):
         assert part in phone[0].data["message"]
 
@@ -1689,8 +1708,9 @@ async def test_the_pinned_certificate_back_in_the_repair_removes_the_push_from_t
         (PINNED, "certificate_restored", None),
         (THIRD, "certificate_changed_again", THIRD),
         (ComexioConnectionError("down"), "cannot_connect", OTHER),
+        (ValueError("no fingerprint in the answer"), "cannot_connect", OTHER),
     ],
-    ids=["pinned one back", "yet another one", "unreachable"],
+    ids=["pinned one back", "yet another one", "unreachable", "unreadable"],
 )
 async def test_the_repair_pins_nothing_but_the_certificate_shown(
     hass: HomeAssistant,
@@ -1808,6 +1828,636 @@ async def test_the_pinned_certificate_back_sets_up_a_waiting_entry(
     assert result["reason"] == "certificate_restored"
     assert pinned_entry.state is ConfigEntryState.LOADED
     assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+
+
+# The push's "Accept certificate" button
+
+
+async def _waiting_for_the_button(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+) -> tuple[list[ServiceCall], list[ServiceCall]]:
+    """Set up an entry whose login meets OTHER: not loaded, repair and push up. Returns the phone's and group's calls.
+
+    Comexio then lets the login through again and serves `certificate_handshake.return_value` (OTHER until a
+    test sets another one), so whatever the button leads to can set the entry up.
+    """
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, options=PUSH_TARGETS)
+    phone = async_mock_service(hass, "notify", PHONE)
+    family = async_mock_service(hass, "notify", FAMILY)
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+    api_attributes["certificate_mismatch"] = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is ConfigEntryState.SETUP_RETRY
+    assert _messages(phone) == _messages(family) == ["push"]
+    api_returns["login"] = True
+    api_attributes.clear()
+    certificate_handshake.reset_mock()
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = OTHER
+    return phone, family
+
+
+def _fire_tap(hass: HomeAssistant, action: str, user: MockUser | None) -> None:
+    """A tap as the companion app reports it: in the context of the user its registration belongs to."""
+    hass.bus.async_fire(
+        "mobile_app_notification_action", {"action": action}, context=Context(user_id=user.id if user else None)
+    )
+
+
+async def _tap(hass: HomeAssistant, action: str, user: MockUser | None) -> None:
+    _fire_tap(hass, action, user)
+    await hass.async_block_till_done()
+
+
+def _button(call: ServiceCall) -> str:
+    return call.data["data"]["actions"][0]["action"]
+
+
+async def test_the_push_button_pins_the_certificate_it_shows(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    # The entry is not loaded: the button must work without a coordinator.
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert _issue(hass, pinned_entry) is None
+    assert _messages(phone) == ["push", CLEAR]
+    assert _messages(family) == ["push"]
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    assert mock_comexio_api[-1].fingerprint == OTHER
+
+    # A second tap (another phone, or the same push twice) finds no repair for it: no handshake, no reload.
+    certificate_handshake.reset_mock()
+    with patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
+        await _tap(hass, _button(phone[0]), hass_admin_user)
+    certificate_handshake.assert_not_awaited()
+    schedule_reload.assert_not_called()
+    assert _messages(phone) == ["push", CLEAR]
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_two_taps_at_once_read_the_certificate_once(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    handshake_running = asyncio.Event()
+    comexio_answers = asyncio.Event()
+
+    async def _slow_handshake(_host: str) -> str:
+        handshake_running.set()
+        await comexio_answers.wait()
+        return OTHER
+
+    certificate_handshake.side_effect = _slow_handshake
+
+    _fire_tap(hass, _button(phone[0]), hass_admin_user)
+    _fire_tap(hass, _button(phone[0]), hass_admin_user)
+    await handshake_running.wait()
+    for _ in range(5):  # let the second tap get past its checks and wait at the lock
+        await asyncio.sleep(0)
+    comexio_answers.set()
+    await hass.async_block_till_done()
+
+    certificate_handshake.assert_awaited_once()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert _issue(hass, pinned_entry) is None
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    # The second tap finds the first one's pin before it compares connections: not taken for a reconfigure.
+    assert "connection changed" not in caplog.text
+    assert caplog.text.count("pinned by the user, replacing") == 1
+
+
+@pytest.mark.parametrize(
+    ("served", "issue_actual", "messages", "loaded"),
+    [
+        (PINNED, None, ["push", CLEAR], True),
+        (THIRD, THIRD, ["push", "push"], False),
+        (ComexioConnectionError("down"), OTHER, ["push", "push"], False),
+        (ValueError("no fingerprint in the answer"), OTHER, ["push", "push"], False),
+    ],
+    ids=["pinned one back", "yet another one", "unreachable", "unreadable"],
+)
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_pins_nothing_but_the_certificate_shown(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    served: str | Exception,
+    issue_actual: str | None,
+    messages: list[str],
+    loaded: bool,
+) -> None:
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    if isinstance(served, Exception):
+        certificate_handshake.side_effect = served
+    else:
+        certificate_handshake.return_value = served
+
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    certificate_handshake.assert_awaited_once()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    issue = _issue(hass, pinned_entry)
+    assert (issue.data["actual"] if issue else None) == issue_actual
+    assert (pinned_entry.state is ConfigEntryState.LOADED) is loaded
+    # Yet another certificate is pushed for comparison; an unreachable Comexio gets the same push put up again,
+    # on every target, since the tap may have taken it off the phone.
+    assert _messages(phone) == messages
+    if issue_actual is not None:
+        assert _button(phone[-1]).endswith(issue_actual)
+        assert len(family) == 2
+        assert family[-1].data == phone[-1].data
+
+
+@pytest.mark.logged_exception  # the handler logs the unexpected error with its traceback
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_an_error_while_accepting_puts_the_push_up_again(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    certificate_handshake.side_effect = RuntimeError("boom")
+
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry) is not None
+    assert _messages(phone) == ["push", "push"]
+    assert "the certificate push button failed" in caplog.text
+
+
+@pytest.mark.parametrize("repair", [THIRD, None], ids=["yet another one up", "repair gone"])
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_push_older_than_the_repair_pins_nothing(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    repair: str | None,
+) -> None:
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    stale = _button(phone[0])
+    if repair is None:
+        async_clear_certificate_changed(hass, pinned_entry.entry_id)
+    else:
+        async_report_certificate_changed(hass, pinned_entry, repair)
+    await hass.async_block_till_done()
+    calls = len(phone)
+
+    await _tap(hass, stale, hass_admin_user)
+
+    certificate_handshake.assert_not_awaited()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    if repair is None:
+        assert len(phone) == calls  # nothing left to accept: no alarm through Do Not Disturb
+    else:
+        # The tap may have taken the newer push off the phone as well: it comes again.
+        assert len(phone) == calls + 1
+        assert _button(phone[-1]).endswith(repair)
+
+
+@pytest.mark.parametrize("read_only_user", [True, False], ids=["not an administrator", "no user"])
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_only_an_administrator_s_tap_pins(
+    hass: HomeAssistant,
+    hass_read_only_user: MockUser,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    read_only_user: bool,
+) -> None:
+    # Any companion app can fire the event: only who may confirm the repair may accept the certificate.
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+
+    await _tap(hass, _button(phone[0]), hass_read_only_user if read_only_user else None)
+
+    certificate_handshake.assert_not_awaited()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry) is not None
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        f"COMEXIO_ACCEPT_CERTIFICATE_unknown_entry_{OTHER}",
+        f"COMEXIO_ACCEPT_CERTIFICATE_{{entry_id}}_{OTHER.upper()}",
+        "COMEXIO_ACCEPT_CERTIFICATE_{entry_id}_" + "b" * 40,
+        f"COMEXIO_START_PLAN_{SERVER_ID}_7",
+    ],
+    ids=["entry gone", "not a fingerprint as pinned", "sha-1 length", "another button"],
+)
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_ignores_any_other_action(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    action: str,
+) -> None:
+    await _waiting_for_the_button(hass, pinned_entry, api_returns, api_attributes, certificate_handshake)
+
+    await _tap(hass, action.format(entry_id=pinned_entry.entry_id), hass_admin_user)
+
+    certificate_handshake.assert_not_awaited()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry) is not None
+
+
+@pytest.mark.parametrize(
+    ("domain", "data"),
+    [
+        (DOMAIN, {CONF_HOST: HOST, CONF_SERVER_ID: "other"}),
+        ("another_integration", {CONF_HOST: HOST, CONF_CERTIFICATE_FINGERPRINT: PINNED}),
+    ],
+    ids=["entry on http", "entry of another integration"],
+)
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_touches_no_entry_without_a_comexio_pin(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    domain: str,
+    data: dict[str, Any],
+) -> None:
+    # A stale or forged push must never switch an entry to HTTPS, nor write into another integration's entry.
+    await _waiting_for_the_button(hass, pinned_entry, api_returns, api_attributes, certificate_handshake)
+    other = MockConfigEntry(domain=domain, data=data)
+    other.add_to_hass(hass)
+
+    await _tap(hass, f"COMEXIO_ACCEPT_CERTIFICATE_{other.entry_id}_{OTHER}", hass_admin_user)
+
+    certificate_handshake.assert_not_awaited()
+    assert other.data == data
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_repair_confirmed_after_the_push_button_pinned_reads_nothing_again(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    issue = _issue(hass, pinned_entry)
+    assert issue is not None
+    flow = ComexioRepairFlow(issue.issue_id, issue.data)
+    flow.hass = hass
+    await flow.async_step_certificate_changed()  # the repair form open on another screen
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+    certificate_handshake.reset_mock()
+
+    result = await flow.async_step_certificate_changed({})
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    certificate_handshake.assert_not_awaited()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+
+
+async def test_the_push_button_pins_a_loaded_entry_through_its_update_listener(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    # A poll met another certificate; the entry stays loaded. The update listener reloads it, nothing else.
+    await _setup(hass, pinned_entry)
+    async_report_certificate_changed(hass, pinned_entry, OTHER)
+    await hass.async_block_till_done()
+    certificate_handshake.reset_mock()
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = OTHER
+
+    with patch.object(hass.config_entries, "async_schedule_reload") as schedule_reload:
+        await _tap(hass, accept_action_id(pinned_entry.entry_id, OTHER), hass_admin_user)
+
+    certificate_handshake.assert_awaited_once()
+    schedule_reload.assert_not_called()
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert _issue(hass, pinned_entry) is None
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    assert len(mock_comexio_api) == 2  # set up again by the update listener
+    assert mock_comexio_api[-1].fingerprint == OTHER
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_an_entry_removed_while_the_button_reads_the_certificate_pins_nothing(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+
+    async def _removed_meanwhile(_host: str) -> str:
+        await hass.config_entries.async_remove(pinned_entry.entry_id)
+        return OTHER
+
+    certificate_handshake.side_effect = _removed_meanwhile
+
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry) is None
+    assert _messages(phone) == ["push", CLEAR]  # the removal's clear, no push for an entry that is gone
+    assert len(family) == 1
+    assert "entry removed while its certificate was read" in caplog.text
+
+
+async def test_a_repair_whose_entry_is_removed_while_it_reads_the_certificate_pins_nothing(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, certificate_handshake: AsyncMock
+) -> None:
+    flow = await _repair_form(hass, pinned_entry)
+
+    async def _removed_meanwhile(_host: str) -> str:
+        await hass.config_entries.async_remove(pinned_entry.entry_id)
+        return OTHER
+
+    certificate_handshake.side_effect = _removed_meanwhile
+
+    result = await flow.async_step_certificate_changed({})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "entry_not_found"
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry) is None
+
+
+RECONFIGURED = pytest.mark.parametrize(
+    "change",
+    [{CONF_HOST: "192.168.1.11"}, {CONF_CERTIFICATE_FINGERPRINT: THIRD}, {CONF_CERTIFICATE_FINGERPRINT: None}],
+    ids=["host", "pin", "https_dropped"],
+)
+
+
+def _reconfigured(entry: MockConfigEntry, change: dict[str, str | None]) -> dict[str, Any]:
+    """The entry's data after a reconfigure applying `change`; a None value drops the key (HTTPS turned off)."""
+    return {key: value for key, value in {**entry.data, **change}.items() if value is not None}
+
+
+@RECONFIGURED
+async def test_a_repair_whose_entry_is_reconfigured_while_it_reads_the_certificate_pins_nothing(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    certificate_handshake: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+    change: dict[str, str | None],
+) -> None:
+    # The certificate read belongs to the old connection: pinning it would overwrite the reconfigured one's pin.
+    flow = await _repair_form(hass, pinned_entry)
+    reconfigured = _reconfigured(pinned_entry, change)
+
+    async def _reconfigured_meanwhile(_host: str) -> str:
+        hass.config_entries.async_update_entry(pinned_entry, data=reconfigured)
+        return OTHER
+
+    certificate_handshake.side_effect = _reconfigured_meanwhile
+
+    result = await flow.async_step_certificate_changed({})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "certificate_entry_changed"
+    assert dict(pinned_entry.data) == reconfigured
+    assert "connection changed while accepting certificate" in caplog.text
+
+
+@RECONFIGURED
+async def test_a_repair_whose_entry_is_reconfigured_while_it_waits_for_another_acceptance_pins_nothing(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    certificate_handshake: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+    change: dict[str, str | None],
+) -> None:
+    # Another acceptance holds the lock; the reconfigured values must not become this one's baseline.
+    flow = await _repair_form(hass, pinned_entry)
+    lock = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {}).setdefault(pinned_entry.entry_id, asyncio.Lock())
+    await lock.acquire()
+    confirm = hass.async_create_task(flow.async_step_certificate_changed({}))
+    await asyncio.sleep(0)
+    assert not confirm.done()  # waiting at the lock, its baseline taken
+    assert lock.locked()
+    reconfigured = _reconfigured(pinned_entry, change)
+    hass.config_entries.async_update_entry(pinned_entry, data=reconfigured)
+    lock.release()
+
+    result = await confirm
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "certificate_entry_changed"
+    certificate_handshake.assert_not_awaited()
+    assert dict(pinned_entry.data) == reconfigured
+    assert "connection changed while accepting certificate" in caplog.text
+    assert _issue(hass, pinned_entry).data["actual"] == OTHER  # left as it is: the reload decides on it
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_pins_nothing_for_a_connection_reconfigured_while_it_reads(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # No push again either: it would offer the old connection's certificate; the reload owns the next one.
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+
+    async def _reconfigured_meanwhile(_host: str) -> str:
+        hass.config_entries.async_update_entry(
+            pinned_entry, data={**pinned_entry.data, CONF_CERTIFICATE_FINGERPRINT: THIRD}
+        )
+        return OTHER
+
+    certificate_handshake.side_effect = _reconfigured_meanwhile
+
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == THIRD
+    assert _messages(phone) == ["push"]
+    assert len(family) == 1
+    assert "connection changed while accepting certificate" in caplog.text
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_pins_nothing_once_https_is_dropped_while_it_looks_the_user_up(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The pin is checked before the user lookup; a reconfigure in that await drops it. No traceback, no pin.
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    get_user = hass.auth.async_get_user
+
+    async def _https_dropped_meanwhile(user_id: str) -> MockUser | None:
+        data = {key: value for key, value in pinned_entry.data.items() if key != CONF_CERTIFICATE_FINGERPRINT}
+        hass.config_entries.async_update_entry(pinned_entry, data=data)
+        return await get_user(user_id)
+
+    with patch.object(hass.auth, "async_get_user", side_effect=_https_dropped_meanwhile):
+        await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert CONF_CERTIFICATE_FINGERPRINT not in pinned_entry.data
+    certificate_handshake.assert_not_awaited()
+    assert "connection changed while accepting certificate" in caplog.text
+    assert "the certificate push button failed" not in caplog.text
+    assert _messages(phone) == ["push"]
+    assert len(family) == 1
+    assert _issue(hass, pinned_entry).data["actual"] == OTHER  # left as it is: the reload decides on it
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_clears_a_repair_left_over_from_the_pin(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    # The certificate got pinned, but its repair stayed up (the clear after the pin failed).
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    hass.config_entries.async_update_entry(
+        pinned_entry, data={**pinned_entry.data, CONF_CERTIFICATE_FINGERPRINT: OTHER}
+    )
+    assert _issue(hass, pinned_entry) is not None
+
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    certificate_handshake.assert_not_awaited()
+    assert _issue(hass, pinned_entry) is None
+    assert _messages(phone) == ["push", CLEAR]
+
+
+async def _repairs_page_form(hass: HomeAssistant, entry: MockConfigEntry) -> tuple[RepairsFlowManager, Any]:
+    """Open the certificate repair through HA's repairs flow manager, as the repairs page does."""
+    assert await async_setup_component(hass, REPAIRS_DOMAIN, {})
+    manager = repairs_flow_manager(hass)
+    assert manager is not None
+    form = await manager.async_init(DOMAIN, data={"issue_id": certificate_issue_id(entry.entry_id)})
+    assert form["step_id"] == "certificate_changed"
+    return manager, form
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_repair_confirmed_on_the_repairs_page_pins_and_closes_it(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    # The counterpart of the late confirmation below: nothing newer came up, so the flow manager closes the repair.
+    await _waiting_for_the_button(hass, pinned_entry, api_returns, api_attributes, certificate_handshake)
+    manager, form = await _repairs_page_form(hass, pinned_entry)
+
+    result = await manager.async_configure(form["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert _issue(hass, pinned_entry) is None
+    assert pinned_entry.state is ConfigEntryState.LOADED
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_repair_confirmed_late_leaves_the_newer_repair_up(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    # The repair form for OTHER is open; meanwhile OTHER got pinned by the button and THIRD came up. Run through
+    # HA's repairs flow manager: it deletes the issue on any result but an abort.
+    phone, _family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    manager, form = await _repairs_page_form(hass, pinned_entry)
+    await _tap(hass, _button(phone[0]), hass_admin_user)
+    async_report_certificate_changed(hass, pinned_entry, THIRD)
+    await hass.async_block_till_done()
+
+    result = await manager.async_configure(form["flow_id"], {})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "certificate_changed_again"
+    assert result["description_placeholders"]["actual"] == ":".join(["CC"] * 32)
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    issue = _issue(hass, pinned_entry)
+    assert issue is not None
+    assert issue.data["actual"] == THIRD
 
 
 async def test_removing_the_entry_drops_its_repair(

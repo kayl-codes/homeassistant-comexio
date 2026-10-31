@@ -3,10 +3,9 @@ import asyncio
 import logging
 import time
 
-from aiocomexio import ComexioError, fetch_certificate_fingerprint
 from homeassistant.components import persistent_notification
 from homeassistant.components.repairs import RepairsFlow
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.selector import SelectSelector, SelectSelectorConfig, SelectSelectorMode
@@ -14,10 +13,15 @@ from homeassistant.util import slugify
 import voluptuous as vol
 
 from .certificate import (
+    ACCEPT_CHANGED_AGAIN,
+    ACCEPT_ENTRY_CHANGED,
+    ACCEPT_ENTRY_GONE,
+    ACCEPT_PINNED,
+    ACCEPT_RESTORED,
     ISSUE_CERTIFICATE_CHANGED,
-    async_clear_certificate_changed,
-    async_report_certificate_changed,
+    async_accept_certificate,
     certificate_placeholders,
+    presented_fingerprint,
 )
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
@@ -35,7 +39,6 @@ from .const import (
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_ENABLE_NOTIFICATIONS,
     CONF_ENTITY_ID_MIGRATION_IGNORED,
-    CONF_HOST,
     CONF_IMPORT_DISABLED_IGNORED,
     CONF_KNX_DPT_SUFFIX_IGNORED,
     CONF_SERVER_ID,
@@ -1439,8 +1442,8 @@ class ComexioRepairFlow(RepairsFlow):
     async def async_step_certificate_changed(self, user_input=None):
         """Show pinned and presented fingerprint; on confirmation pin the presented one if Comexio still shows it.
 
-        Never pins anything the user has not seen: the certificate is read again on confirmation, and
-        a different one than shown is put up for comparison instead.
+        Never pins anything the user has not seen: see certificate.async_accept_certificate, which the push's
+        button goes through as well.
         """
         entry = self.hass.config_entries.async_get_entry(str(self.issue_data.get("entry_id")))
         if entry is None or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
@@ -1450,36 +1453,28 @@ class ComexioRepairFlow(RepairsFlow):
         placeholders = certificate_placeholders(entry, shown)
         if user_input is None:
             return self.async_show_form(step_id="certificate_changed", description_placeholders=placeholders)
-        try:
-            current = await fetch_certificate_fingerprint(entry.data[CONF_HOST])
-        except (ComexioError, ValueError) as err:
-            _LOGGER.warning("Comexio certificate could not be read again for the repair: %s", err)
-            return self.async_abort(reason="cannot_connect", description_placeholders=placeholders)
-        if current == entry.data[CONF_CERTIFICATE_FINGERPRINT]:
-            # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
-            async_clear_certificate_changed(self.hass, entry.entry_id)
-            if entry.state is not ConfigEntryState.LOADED:
-                self.hass.config_entries.async_schedule_reload(entry.entry_id)
+        outcome, current = await async_accept_certificate(self.hass, entry, shown)
+        if outcome == ACCEPT_PINNED:
+            newer = presented_fingerprint(self.hass, entry.entry_id)
+            if newer is not None and newer != shown:
+                # Confirmed late: `shown` is pinned already and the repair now shows yet another certificate. An
+                # entry result would make the flow manager delete that newer repair; an abort leaves it up.
+                return self.async_abort(
+                    reason="certificate_changed_again", description_placeholders=certificate_placeholders(entry, newer)
+                )
+            return self.async_create_entry(data={})
+        if outcome == ACCEPT_RESTORED:
             return self.async_abort(reason="certificate_restored", description_placeholders=placeholders)
-        if current != shown:
-            # Yet another certificate than the one the user just compared: put that one up instead.
-            async_report_certificate_changed(self.hass, entry, current)
+        if outcome == ACCEPT_ENTRY_GONE:
+            ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
+            return self.async_abort(reason="entry_not_found")
+        if outcome == ACCEPT_ENTRY_CHANGED:
+            return self.async_abort(reason="certificate_entry_changed")
+        if outcome == ACCEPT_CHANGED_AGAIN and current is not None:
             return self.async_abort(
                 reason="certificate_changed_again", description_placeholders=certificate_placeholders(entry, current)
             )
-        _LOGGER.warning(
-            "Comexio at %s: certificate %s pinned by the user, replacing %s",
-            entry.data[CONF_HOST],
-            placeholders["actual"],
-            placeholders["pinned"],
-        )
-        # A loaded entry reloads through its update listener on the data change below.
-        reload = entry.state is not ConfigEntryState.LOADED
-        self.hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: current})
-        async_clear_certificate_changed(self.hass, entry.entry_id)  # also removes the push from the phones
-        if reload:
-            self.hass.config_entries.async_schedule_reload(entry.entry_id)
-        return self.async_create_entry(data={})
+        return self.async_abort(reason="cannot_connect", description_placeholders=placeholders)
 
     async def async_step_orphaned_backups(self, user_input=None):
         """Delete or keep the backups of a deleted plan whose retention has passed, or look at them first."""

@@ -229,7 +229,26 @@ Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities 
 
 When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's certificate: at setup, and for existing entries at their next start. Comexio signs its certificate itself, so instead of a certificate authority the integration remembers its SHA-256 fingerprint (trust on first use) and announces the switch in a notification. The fingerprint is the SHA-256 value Comexio's admin page lists under its certificate hashes. Without HTTPS the connection stays on plain HTTP — unencrypted, including the admin login — and every start tries the switch again. *Reconfigure* shows which of the two is in use, and the pinned fingerprint.
 
-A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. The integration then sends nothing more to Comexio and raises a repair that shows the pinned and the new fingerprint; only when you confirm it there is the new certificate pinned. The notify services set under **Function plan watchdog: push to** get an urgent push for it (iOS: critical alert, Android: alarm stream — both through Do Not Disturb) that opens the repairs; it is removed from the phone once the repair is done; a notify service not reachable yet (for example right after a restart) is retried at the next check. A certificate that changes is never accepted automatically, not even when the server's serial number matches: reading it would need a login, which would hand the admin credentials to whoever answers in Comexio's place.
+### When the certificate changes
+
+A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. What happens then:
+
+1. **The integration stops talking to Comexio.** It sends nothing more to Comexio until you decide; after a restart it does not load at all.
+2. **A repair shows both fingerprints**, the pinned and the new one.
+3. **An urgent push** goes to the notify services set under **Function plan watchdog: push to** (iOS: critical alert, Android: alarm stream — both through Do Not Disturb). A tap opens the repairs; its **Accept certificate** button accepts the new certificate right from the notification (iOS asks to unlock the phone first). A notify service not reachable yet, for example right after a restart, is retried at the next check.
+4. **Check the fingerprint:** compare the new one with the SHA-256 value on Comexio's admin page.
+5. **Confirm** — in the repair or with the button. The integration reads the certificate again, pins it only if it is the one you were shown and connects again, without a restart. The push disappears from the phone, as it does when the pinned certificate comes back on its own.
+
+Should Comexio present yet another certificate meanwhile, nothing is pinned and that one gets a repair and push of its own. Should Comexio not answer when you tap the button, the push comes back so you can try again.
+
+### Why it works this way
+
+- **A pin instead of a certificate authority:** Comexio signs its certificate itself, so no authority vouches for it. The pinned fingerprint is the only proof that Home Assistant talks to your Comexio and not to a device that took over its address.
+- **Never accepted automatically:** a device answering in Comexio's place presents another certificate too. Accepting it without asking would hand it the admin login the integration sends next. So the integration goes quiet and asks — an interruption, but no leaked credentials.
+- **No automatic check by serial number, hardware or firmware:** reading them needs a login, which would already hand the admin credentials to whoever answers.
+- **Only the certificate you were shown:** the button and the repair read the certificate again and pin it only if it matches the one you checked; an older push cannot pin a certificate that came up later.
+- **Only an administrator:** the button counts only when the companion app belongs to a Home Assistant administrator, as the repair needs an administrator too.
+- **Nothing secret in the push:** the fingerprints are hashes of a public certificate.
 
 *Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
 
@@ -497,7 +516,26 @@ Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs a
 
 Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt das Zertifikat des Comexio: bei der Einrichtung, bestehende Einträge beim nächsten Start. Comexio signiert sein Zertifikat selbst, darum merkt sich die Integration statt einer Zertifizierungsstelle dessen SHA-256-Fingerabdruck (Trust on First Use) und meldet die Umstellung in einer Benachrichtigung. Der Fingerabdruck ist der SHA-256-Wert, den die Admin-Seite des Comexio unter seinen Zertifikats-Hashes anzeigt. Ohne HTTPS bleibt die Verbindung auf HTTP — unverschlüsselt, auch der Admin-Login — und jeder Start versucht die Umstellung erneut. *Neu konfigurieren* zeigt, welche der beiden genutzt wird, und den gepinnten Fingerabdruck.
 
-Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Die Integration sendet dann nichts mehr an Comexio und legt eine Reparatur an, die den gepinnten und den neuen Fingerabdruck zeigt; erst wenn du dort bestätigst, wird das neue Zertifikat gepinnt. Die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste bekommen dazu einen dringenden Push (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“), der die Reparaturen öffnet; er verschwindet vom Handy, sobald die Reparatur erledigt ist; ein noch nicht erreichbarer Dienst (etwa direkt nach einem Neustart) wird bei der nächsten Prüfung erneut versucht. Ein geändertes Zertifikat wird auch dann nie automatisch übernommen, wenn die Seriennummer des Servers passt: Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten an den, der an Comexios Stelle antwortet.
+### Wenn sich das Zertifikat ändert
+
+Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Dann passiert Folgendes:
+
+1. **Die Integration spricht nicht mehr mit Comexio.** Sie sendet nichts mehr an Comexio, bis du entschieden hast; nach einem Neustart lädt sie gar nicht.
+2. **Eine Reparatur zeigt beide Fingerabdrücke**, den gepinnten und den neuen.
+3. **Ein dringender Push** geht an die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“). Ein Tipp öffnet die Reparaturen; der Knopf **Zertifikat übernehmen** übernimmt das neue Zertifikat direkt aus der Mitteilung (iOS verlangt vorher das Entsperren). Ein noch nicht erreichbarer Dienst, etwa direkt nach einem Neustart, wird bei der nächsten Prüfung erneut versucht.
+4. **Fingerabdruck prüfen:** Vergleiche den neuen mit dem SHA-256-Wert auf der Admin-Seite des Comexio.
+5. **Bestätigen** — in der Reparatur oder mit dem Knopf. Die Integration liest das Zertifikat neu, pinnt es nur, wenn es das dir gezeigte ist, und verbindet sich wieder, ohne Neustart. Der Push verschwindet vom Handy, so wie wenn das gepinnte Zertifikat von selbst zurückkommt.
+
+Legt Comexio inzwischen ein wieder anderes Zertifikat vor, wird nichts gepinnt, und dieses bekommt eine eigene Reparatur und einen eigenen Push. Antwortet Comexio beim Tipp auf den Knopf nicht, kommt der Push erneut, damit du es noch einmal versuchen kannst.
+
+### Warum es so läuft
+
+- **Ein Pin statt einer Zertifizierungsstelle:** Comexio signiert sein Zertifikat selbst, keine Zertifizierungsstelle bürgt dafür. Der gepinnte Fingerabdruck ist der einzige Beweis, dass Home Assistant mit deinem Comexio spricht und nicht mit einem Gerät, das dessen Adresse übernommen hat.
+- **Nie automatisch übernommen:** Ein Gerät, das an Comexios Stelle antwortet, legt ebenfalls ein anderes Zertifikat vor. Es ungefragt zu übernehmen, gäbe ihm den Admin-Login, den die Integration als Nächstes sendet. Darum verstummt die Integration und fragt — eine Unterbrechung, aber keine abgeflossenen Zugangsdaten.
+- **Keine automatische Prüfung über Seriennummer, Hardware oder Firmware:** Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten schon dem, der antwortet.
+- **Nur das gezeigte Zertifikat:** Knopf und Reparatur lesen das Zertifikat neu und pinnen es nur, wenn es dem geprüften entspricht; ein älterer Push kann kein später aufgetauchtes Zertifikat pinnen.
+- **Nur ein Administrator:** Der Knopf zählt nur, wenn die Companion-App einem Home-Assistant-Administrator gehört, so wie die Reparatur einen Administrator verlangt.
+- **Nichts Geheimes im Push:** Die Fingerabdrücke sind Hashes eines öffentlichen Zertifikats.
 
 *Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Bis auf den TLS-Handshake, der das Zertifikat ausliest, wird vor deiner Bestätigung nichts gesendet — auch nicht der Login-Test.
 

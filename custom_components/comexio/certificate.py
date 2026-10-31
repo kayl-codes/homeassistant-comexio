@@ -5,19 +5,21 @@ fingerprint, read from a bare TLS handshake at setup (trust on first use, see ai
 that serves no HTTPS keeps plain HTTP, and every setup of such an entry tries the switch again.
 
 A certificate other than the pinned one is never accepted on its own: the certificate_changed repair
-shows the pinned and the new fingerprint and pins the new one only when the user confirms it.
+and the urgent push show the pinned and the new fingerprint and pin the new one only when the user confirms
+it (the repair's button, or the push's).
 """
 
 import asyncio
 from dataclasses import dataclass, field
 import logging
+import re
 from typing import Any
 
 from aiocomexio import ComexioError, fetch_certificate_fingerprint, format_fingerprint
 from aiocomexio.tls import https_address
 from homeassistant.components import persistent_notification
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 import voluptuous as vol
@@ -46,6 +48,25 @@ ISSUE_CERTIFICATE_CHANGED = "certificate_changed"
 REPAIRS_PATH = "/config/repairs"
 # hass.data: entry_id -> _EntryPushes, the urgent push of each entry's changed certificate.
 CERTIFICATE_PUSHES = f"{DOMAIN}_certificate_pushes"
+# hass.data: entry_id -> lock running one acceptance of the entry's certificate at a time (repair and push button).
+CERTIFICATE_ACCEPT_LOCKS = f"{DOMAIN}_certificate_accept_locks"
+
+# The push's "Accept certificate" button: the action id names the entry and the certificate the push showed,
+# so a tap pins that very certificate and nothing else. It comes back as a mobile_app_notification_action event.
+ACCEPT_ACTION_PREFIX = "COMEXIO_ACCEPT_CERTIFICATE_"
+_ACCEPT_ACTION_RE = re.compile(re.escape(ACCEPT_ACTION_PREFIX) + r"(?P<entry_id>.+)_(?P<actual>[0-9a-f]{64})")
+
+# Outcomes of async_accept_certificate; all but ACCEPT_PINNED are the repair's abort reasons as well.
+ACCEPT_PINNED = "pinned"
+ACCEPT_RESTORED = "certificate_restored"
+ACCEPT_CHANGED_AGAIN = "certificate_changed_again"
+ACCEPT_UNREACHABLE = "cannot_connect"
+ACCEPT_ENTRY_GONE = "entry_not_found"
+ACCEPT_ENTRY_CHANGED = "certificate_entry_changed"
+# The push button's outcomes for a push older than the repair (another certificate is up, or the pin is back)
+# and for an unexpected error.
+_ACCEPT_OUTDATED = "outdated_push"
+_ACCEPT_FAILED = "failed"
 
 # Push texts by HA language (English fallback); the certificate_changed placeholders are filled in.
 CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
@@ -53,19 +74,23 @@ CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
         "title": "Comexio: certificate changed",
         "message": (
             "Comexio {server_id} ({host}) presents another TLS certificate than the pinned one. Home Assistant "
-            "sends nothing to it until you check the new certificate in the repair.\n"
+            "sends nothing to it until you accept the new certificate, here or in the repair. Compare it with "
+            "the SHA-256 value on Comexio's admin page first.\n"
             "Pinned (SHA-256): {pinned}\n"
             "New (SHA-256): {actual}"
         ),
+        "accept": "Accept certificate",
     },
     "de": {
         "title": "Comexio: Zertifikat geändert",
         "message": (
             "Comexio {server_id} ({host}) zeigt ein anderes TLS-Zertifikat als das gepinnte. Home Assistant "
-            "sendet nichts mehr dorthin, bis du das neue Zertifikat in der Reparatur prüfst.\n"
+            "sendet nichts mehr dorthin, bis du das neue Zertifikat übernimmst, hier oder in der Reparatur. "
+            "Vergleiche es vorher mit dem SHA-256-Wert auf der Admin-Seite der Comexio.\n"
             "Gepinnt (SHA-256): {pinned}\n"
             "Neu (SHA-256): {actual}"
         ),
+        "accept": "Zertifikat übernehmen",
     },
 }
 
@@ -201,6 +226,7 @@ def async_remove_certificate_pushes(hass: HomeAssistant, entry: ConfigEntry) -> 
         _entry_pushes(hass, entry)
     async_clear_certificate_changed(hass, entry.entry_id, final=True)
     hass.data.get(CERTIFICATE_PUSHES, {}).pop(entry.entry_id, None)
+    hass.data.get(CERTIFICATE_ACCEPT_LOCKS, {}).pop(entry.entry_id, None)
 
 
 @dataclass
@@ -259,10 +285,11 @@ def _phones(entry: ConfigEntry) -> set[str]:
 
 
 def _certificate_push_data(hass: HomeAssistant, entry: ConfigEntry, actual: str) -> dict[str, Any]:
-    """Urgent push: the repair needs the user, Comexio gets nothing until then.
+    """Urgent push: the new certificate needs the user, Comexio gets nothing until then.
 
     Through Do Not Disturb (iOS: a critical alert, Android: the alarm stream), delivered at once; a tap
-    opens the repairs. The fingerprints are the hashes of public certificates, no secret.
+    opens the repairs, the button accepts the certificate shown (see async_handle_certificate_action; iOS
+    asks to unlock the phone first). The fingerprints are the hashes of public certificates, no secret.
     """
     texts = CERTIFICATE_PUSH_TEXTS.get(hass.config.language, CERTIFICATE_PUSH_TEXTS["en"])
     data: dict[str, Any] = {
@@ -274,6 +301,13 @@ def _certificate_push_data(hass: HomeAssistant, entry: ConfigEntry, actual: str)
         "priority": "high",
         "channel": "alarm_stream",
         "push": {"interruption-level": "critical", "sound": {"name": "default", "critical": 1, "volume": 1.0}},
+        "actions": [
+            {
+                "action": accept_action_id(entry.entry_id, actual),
+                "title": texts["accept"],
+                "authenticationRequired": True,
+            }
+        ],
     }
     message = texts["message"].format(**certificate_placeholders(entry, actual))
     return {"title": texts["title"], "message": message, "data": data}
@@ -285,8 +319,15 @@ async def _async_send_certificate_push(
     try:
         async with pushes.lock:
             if pushes.current is not push:
-                return  # cleared, or another certificate reported, while it waited: its alarm is no news anymore
+                # Cleared, or another certificate reported, while it waited: its alarm is no news anymore.
+                _LOGGER.debug("Comexio certificate push %s dropped: no longer current", format_fingerprint(push.actual))
+                return
             delivered, failed = await _async_notify(hass, push.service_data, targets, push.failed)
+            if delivered:
+                # The only trace of a push that went out: the companion app reports nothing back.
+                _LOGGER.info(
+                    "Comexio certificate push %s sent to %s", format_fingerprint(push.actual), sorted(delivered)
+                )
             push.delivered |= delivered
             push.failed |= failed
             pushes.shown |= {target for target in delivered if _is_mobile_app(target)}
@@ -371,6 +412,144 @@ def _is_mobile_app(target: str) -> bool:
 def _certificate_push_tag(entry_id: str) -> str:
     """One push per entry: a newer one replaces it on the phone, the clear removes it."""
     return f"{DOMAIN}_certificate_{entry_id}"
+
+
+def accept_action_id(entry_id: str, actual: str) -> str:
+    """Action id of the push's "Accept certificate" button for the certificate `actual` the push shows."""
+    return f"{ACCEPT_ACTION_PREFIX}{entry_id}_{actual}"
+
+
+def parse_accept_action(action: Any) -> tuple[str, str] | None:
+    """(entry_id, certificate shown) of an "Accept certificate" button, None for any other action."""
+    if not isinstance(action, str) or (match := _ACCEPT_ACTION_RE.fullmatch(action)) is None:
+        return None
+    return match["entry_id"], match["actual"]
+
+
+async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, shown: str) -> tuple[str, str | None]:
+    """Pin `shown`, the certificate the user has seen, if Comexio still presents it.
+
+    Never pins anything the user has not seen: the certificate is read again, and a different one than shown
+    is put up for comparison instead (repair and push). One acceptance runs at a time, so a second tap, or the
+    repair confirmed alongside, finds the certificate pinned already and leaves it at that.
+
+    Returns the outcome (ACCEPT_*) and the certificate Comexio presents now, None if it could not be read.
+    """
+    # The connection the user decided on: a reconfigure while this waits for the lock or reads counts as a change,
+    # as does one that dropped the pin before (the push button looks the user up after checking it).
+    host, pinned = entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+    locks: dict[str, asyncio.Lock] = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {})
+    async with locks.setdefault(entry.entry_id, asyncio.Lock()):
+        if entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == shown:
+            # Accepted already (a second tap, or the repair alongside). A repair still showing it is left over.
+            if presented_fingerprint(hass, entry.entry_id) == shown:
+                async_clear_certificate_changed(hass, entry.entry_id)
+            return ACCEPT_PINNED, shown
+        if _connection_changed(entry, host, pinned, shown):
+            return ACCEPT_ENTRY_CHANGED, None
+        try:
+            current = await fetch_certificate_fingerprint(host)
+        except (ComexioError, ValueError) as err:
+            _LOGGER.warning("Comexio certificate could not be read again to accept it: %s", err)
+            return ACCEPT_UNREACHABLE, None
+        if hass.config_entries.async_get_entry(entry.entry_id) is not entry:
+            _LOGGER.warning("Comexio at %s: entry removed while its certificate was read, nothing pinned", host)
+            return ACCEPT_ENTRY_GONE, None
+        if _connection_changed(entry, host, pinned, shown):
+            return ACCEPT_ENTRY_CHANGED, None
+        if current == pinned:
+            # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
+            async_clear_certificate_changed(hass, entry.entry_id)
+            if entry.state is not ConfigEntryState.LOADED:
+                hass.config_entries.async_schedule_reload(entry.entry_id)
+            return ACCEPT_RESTORED, current
+        if current != shown:
+            # Yet another certificate than the one the user just compared: put that one up instead.
+            async_report_certificate_changed(hass, entry, current)
+            return ACCEPT_CHANGED_AGAIN, current
+        _LOGGER.warning(
+            "Comexio at %s: certificate %s pinned by the user, replacing %s",
+            entry.data[CONF_HOST],
+            format_fingerprint(current),
+            format_fingerprint(entry.data[CONF_CERTIFICATE_FINGERPRINT]),  # still the pin: unchanged, checked above
+        )
+        # A loaded entry reloads through its update listener on the data change below.
+        reload = entry.state is not ConfigEntryState.LOADED
+        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: current})
+        async_clear_certificate_changed(hass, entry.entry_id)  # also removes the push from the phones
+        if reload:
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        return ACCEPT_PINNED, current
+
+
+def _connection_changed(entry: ConfigEntry, host: str, pinned: str | None, shown: str) -> bool:
+    """Whether the entry was reconfigured since the user accepted `shown` (host or pin differ); logs it if so.
+
+    The user compared `shown` against that connection's pin: pinning it now would overwrite the new one's.
+    No pin to compare against (HTTPS dropped already) counts as a change too.
+    """
+    now_host, now_pin = entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+    if pinned is not None and (now_host, now_pin) == (host, pinned):
+        return False
+    _LOGGER.warning(
+        "Comexio at %s: connection changed while accepting certificate %s, nothing pinned (now %s, %s)",
+        host,
+        format_fingerprint(shown),
+        now_host,
+        "no pin" if now_pin is None else format_fingerprint(now_pin),
+    )
+    return True
+
+
+async def async_handle_certificate_action(hass: HomeAssistant, event: Event) -> None:
+    """The push's "Accept certificate" button: pin the certificate the push showed, as the repair does.
+
+    Listens for every entry, also one waiting for the repair (not loaded). Only an administrator's tap counts,
+    as only an administrator sees the repair (any companion app can fire this event), and only while the repair
+    shows the very certificate of the push. Comexio not answering, an error or a push older than the repair put
+    the repair's push up again: the tap may have taken the push off the phone. Yet another certificate gets its
+    own push from the repair it raises. Nothing is pushed once the repair is gone (the pinned certificate is back).
+    """
+    if (accept := await _accept_request(hass, event)) is None:
+        return
+    entry, shown = accept
+    if presented_fingerprint(hass, entry.entry_id) == shown:
+        try:
+            outcome, _current = await async_accept_certificate(hass, entry, shown)
+        except Exception:
+            _LOGGER.exception("Comexio at %s: the certificate push button failed", entry.data[CONF_HOST])
+            outcome = _ACCEPT_FAILED
+    else:
+        outcome = _ACCEPT_OUTDATED
+    _LOGGER.info("Comexio at %s: certificate push button: %s", entry.data[CONF_HOST], outcome)
+    if (
+        outcome in (ACCEPT_UNREACHABLE, _ACCEPT_FAILED, _ACCEPT_OUTDATED)
+        and (presented := presented_fingerprint(hass, entry.entry_id)) is not None
+    ):
+        if (pushes := hass.data.get(CERTIFICATE_PUSHES, {}).get(entry.entry_id)) is not None:
+            pushes.current = None  # sent afresh to every target, also the ones it reached before
+        async_report_certificate_changed(hass, entry, presented)
+
+
+async def _accept_request(hass: HomeAssistant, event: Event) -> tuple[ConfigEntry, str] | None:
+    """(entry, certificate shown) of an administrator's "Accept certificate" tap, None for any other event."""
+    if (parsed := parse_accept_action(event.data.get("action"))) is None:
+        return None
+    entry_id, shown = parsed
+    entry = hass.config_entries.async_get_entry(entry_id)
+    if entry is None or entry.domain != DOMAIN or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
+        _LOGGER.warning("Comexio certificate push answered for an entry that is gone or has no pin: %s", entry_id)
+        return None
+    user_id = event.context.user_id
+    user = await hass.auth.async_get_user(user_id) if user_id else None
+    if user is None or not user.is_admin:
+        _LOGGER.warning(
+            "Comexio at %s: certificate push button ignored, only an administrator may accept a certificate (user %s)",
+            entry.data[CONF_HOST],
+            user.name if user else user_id,
+        )
+        return None
+    return entry, shown
 
 
 def certificate_placeholders(entry: ConfigEntry, actual: str) -> dict[str, str]:
