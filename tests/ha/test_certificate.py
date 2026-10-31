@@ -7,11 +7,13 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
+from homeassistant.components.repairs import DOMAIN as REPAIRS_DOMAIN, RepairsFlowManager, repairs_flow_manager
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser, async_mock_service
 
@@ -2259,6 +2261,38 @@ async def test_the_push_button_clears_a_repair_left_over_from_the_pin(
     assert _messages(phone) == ["push", CLEAR]
 
 
+async def _repairs_page_form(hass: HomeAssistant, entry: MockConfigEntry) -> tuple[RepairsFlowManager, Any]:
+    """Open the certificate repair through HA's repairs flow manager, as the repairs page does."""
+    assert await async_setup_component(hass, REPAIRS_DOMAIN, {})
+    manager = repairs_flow_manager(hass)
+    assert manager is not None
+    form = await manager.async_init(DOMAIN, data={"issue_id": certificate_issue_id(entry.entry_id)})
+    assert form["step_id"] == "certificate_changed"
+    return manager, form
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_repair_confirmed_on_the_repairs_page_pins_and_closes_it(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+) -> None:
+    # The counterpart of the late confirmation below: nothing newer came up, so the flow manager closes the repair.
+    await _waiting_for_the_button(hass, pinned_entry, api_returns, api_attributes, certificate_handshake)
+    manager, form = await _repairs_page_form(hass, pinned_entry)
+
+    result = await manager.async_configure(form["flow_id"], {})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert _issue(hass, pinned_entry) is None
+    assert pinned_entry.state is ConfigEntryState.LOADED
+
+
 @pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_repair_confirmed_late_leaves_the_newer_repair_up(
     hass: HomeAssistant,
@@ -2268,21 +2302,22 @@ async def test_a_repair_confirmed_late_leaves_the_newer_repair_up(
     certificate_handshake: AsyncMock,
     hass_admin_user: MockUser,
 ) -> None:
-    # The repair form for OTHER is open; meanwhile OTHER got pinned by the button and THIRD came up.
+    # The repair form for OTHER is open; meanwhile OTHER got pinned by the button and THIRD came up. Run through
+    # HA's repairs flow manager: it deletes the issue on any result but an abort.
     phone, _family = await _waiting_for_the_button(
         hass, pinned_entry, api_returns, api_attributes, certificate_handshake
     )
-    issue = _issue(hass, pinned_entry)
-    assert issue is not None
-    flow = ComexioRepairFlow(issue.issue_id, issue.data)
-    flow.hass = hass
-    await flow.async_step_certificate_changed()
+    manager, form = await _repairs_page_form(hass, pinned_entry)
     await _tap(hass, _button(phone[0]), hass_admin_user)
     async_report_certificate_changed(hass, pinned_entry, THIRD)
     await hass.async_block_till_done()
 
-    await flow.async_step_certificate_changed({})
+    result = await manager.async_configure(form["flow_id"], {})
 
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "certificate_changed_again"
+    assert result["description_placeholders"]["actual"] == ":".join(["CC"] * 32)
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
     issue = _issue(hass, pinned_entry)
     assert issue is not None
     assert issue.data["actual"] == THIRD

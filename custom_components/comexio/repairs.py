@@ -20,6 +20,7 @@ from .certificate import (
     ISSUE_CERTIFICATE_CHANGED,
     async_accept_certificate,
     certificate_placeholders,
+    presented_fingerprint,
 )
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
@@ -1453,6 +1454,13 @@ class ComexioRepairFlow(RepairsFlow):
             return self.async_show_form(step_id="certificate_changed", description_placeholders=placeholders)
         outcome, current = await async_accept_certificate(self.hass, entry, shown)
         if outcome == ACCEPT_PINNED:
+            newer = presented_fingerprint(self.hass, entry.entry_id)
+            if newer is not None and newer != shown:
+                # Confirmed late: `shown` is pinned already and the repair now shows yet another certificate. An
+                # entry result would make the flow manager delete that newer repair; an abort leaves it up.
+                return self.async_abort(
+                    reason="certificate_changed_again", description_placeholders=certificate_placeholders(entry, newer)
+                )
             return self.async_create_entry(data={})
         if outcome == ACCEPT_RESTORED:
             return self.async_abort(reason="certificate_restored", description_placeholders=placeholders)
