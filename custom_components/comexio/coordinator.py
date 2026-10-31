@@ -742,8 +742,11 @@ def _stored_commands(data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, A
 
 
 def _webhook_warn_key(kind: str, *parts: str) -> tuple[str, ...]:
-    """An unknown IO's key in the warned set: the request-supplied parts cut to a bounded length."""
-    return (kind, *(part[:WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN] for part in parts))
+    """An unknown IO's key in the warned set: the request-supplied parts cut to a bounded length.
+
+    The hash of the full parts keeps two ids apart that share their cut prefix.
+    """
+    return (kind, *(part[:WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN] for part in parts), str(hash(parts)))
 
 
 def _source_shared(source_elem_id: str, webio_id: int, plan_data: dict) -> bool:
@@ -766,10 +769,10 @@ def _command_class(info: Mapping[str, Any]) -> WebioClass | None:
 
 def _audited_duplicates(
     duplicates: Iterable[Mapping[str, Any]], active_classes: Iterable[WebioClass]
-) -> list[Mapping[str, Any]]:
-    """The name duplicates the audit sees: like _split_disabled_commands, a switched-off class stays out."""
-    active = set(active_classes)
-    return [dup for dup in duplicates if (cls := _command_class(dup)) is None or cls in active]
+) -> tuple[list[Mapping[str, Any]], dict[WebioClass, int]]:
+    """(name duplicates the audit sees, count per switched-off class of the others): as _split_disabled_commands."""
+    kept, disabled = _split_disabled_commands({str(pos): dup for pos, dup in enumerate(duplicates)}, active_classes)
+    return list(kept.values()), disabled
 
 
 def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
@@ -1971,7 +1974,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
         active_classes = active_webio_classes(conf)
         audited_commands, disabled_commands = _split_disabled_commands(final_data["webio_commands"], active_classes)
-        duplicates = _audited_duplicates(final_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []), active_classes)
+        duplicates, disabled_duplicates = _audited_duplicates(
+            final_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []), active_classes
+        )
+        for cls, count in disabled_duplicates.items():  # still on the server, so in the import_disabled count
+            disabled_commands[cls] = disabled_commands.get(cls, 0) + count
         com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map, duplicates)
         return ha_map, io_meta_by_key, com_map, disabled_commands
 
@@ -4920,6 +4927,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(
                 WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, f"{one_line(ext_name)} {one_line(identifier)}", value
             )
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         elif io:
             previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or f"{ext_name} {identifier}"
@@ -4942,6 +4950,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         io_id_str = str(io_id)
         if (io := self._quickbus_index.get(io_id_str)) and self._names_another_io_now(io):
             _LOGGER.debug(WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, one_line(io_id_str), value)
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("quickbus", io_id_str))  # warn again later
         elif io:
             previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or io_id_str

@@ -5451,8 +5451,9 @@ class ComexioAPI:
 
         Only the canonical spelling counts: int() reads "013" or Arabic-Indic digits as another element's id.
         """
-        if elem_id.isascii() and elem_id.isdecimal() and str(int(elem_id)) == elem_id:
-            return True
+        with suppress(ValueError):  # more digits than int() converts (sys.get_int_max_str_digits): not deletable
+            if elem_id.isascii() and elem_id.isdecimal() and str(int(elem_id)) == elem_id:
+                return True
         _LOGGER.warning("Function plan element id %r is not a number — the element stays", elem_id)
         return False
 

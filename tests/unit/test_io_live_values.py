@@ -13,7 +13,13 @@ import pytest
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.binary_sensor import ComexioBinarySensor
 from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY
-from custom_components.comexio.coordinator import ComexioCoordinator, _io_identity, _io_label, _io_live_requests
+from custom_components.comexio.coordinator import (
+    ComexioCoordinator,
+    _io_identity,
+    _io_label,
+    _io_live_requests,
+    _webhook_warn_key,
+)
 from custom_components.comexio.switch import ComexioIOSwitch
 from tests.common import load_json_fixture
 
@@ -776,7 +782,22 @@ def test_an_io_that_became_known_warns_again_once_unknown(api: ComexioAPI, caplo
 
     levels = [record.levelno for record in caplog.records if "for unknown IO" in record.msg]
     assert levels == [logging.WARNING, logging.WARNING]
-    assert coordinator._warned_unknown_webhook_ios == {("io", "base", "ai1")}
+    assert coordinator._warned_unknown_webhook_ios == {_webhook_warn_key("io", "base", "ai1")}
+
+
+def test_a_push_for_a_former_io_forgets_the_earlier_warning(api: ComexioAPI) -> None:
+    """The address is known again, if for another IO now: it going unknown later warns again."""
+    coordinator = _coordinator(api)
+    _index_scraped_ios(coordinator, _config())
+    known = coordinator._io_index.pop(("base", "ai1"))
+
+    coordinator.update_io_by_name("BASE", "AI1", 1.0)
+    coordinator._io_index["base", "ai1"] = known
+    coordinator._io_identities[known["id"]] = ("another", "io")
+    coordinator.update_io_by_name("BASE", "AI1", 2.0)
+
+    assert known["id"] not in coordinator._webhook_updated_io_ids
+    assert coordinator._warned_unknown_webhook_ios == set()
 
 
 def test_webhook_value_during_a_failed_io_fetch_is_kept_as_real(api: ComexioAPI) -> None:

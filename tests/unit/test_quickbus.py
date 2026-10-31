@@ -34,6 +34,7 @@ from custom_components.comexio.coordinator import (
     _build_com_audit_map,
     _imported_data,
     _split_disabled_commands,
+    _webhook_warn_key,
 )
 from custom_components.comexio.repairs import _CLEANUP_SCOPE_LABELS
 
@@ -172,6 +173,7 @@ def test_import_ios_keeps_every_plan_label(quickbus_result: dict[str, Any], impo
 
 def _webhook_coordinator(quickbus_ios: list[dict[str, Any]]) -> ComexioCoordinator:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "iosrv1"
     coordinator._quickbus_index = {str(io["id"]): io for io in quickbus_ios}
     coordinator.io_states = {}
     coordinator._io_real_value_ids = set()
@@ -251,7 +253,21 @@ def test_an_io_that_became_known_warns_again_once_unknown(
 
     levels = [record.levelno for record in caplog.records if "unknown Quickbus IO" in record.msg]
     assert levels == [logging.WARNING, logging.WARNING]
-    assert coordinator._warned_unknown_webhook_ios == {("quickbus", "211")}
+    assert coordinator._warned_unknown_webhook_ios == {_webhook_warn_key("quickbus", "211")}
+
+
+def test_a_push_for_a_former_io_forgets_the_earlier_warning(quickbus_result: dict[str, Any]) -> None:
+    """The id is known again, if for another IO now: it going unknown later warns again."""
+    coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
+    known = coordinator._quickbus_index.pop("211")
+
+    coordinator.update_quickbus_io("211", 1)
+    coordinator._quickbus_index["211"] = known
+    coordinator._io_identities["211"] = ("another", "io")
+    coordinator.update_quickbus_io("211", 0)
+
+    assert coordinator.io_states == {}
+    assert coordinator._warned_unknown_webhook_ios == set()
 
 
 def test_the_warned_unknown_ios_stay_bounded(
@@ -266,20 +282,32 @@ def test_the_warned_unknown_ios_stay_bounded(
         for io_id in ("997", "998", "999", "999", "997"):
             coordinator.update_quickbus_io(io_id, 1)
 
-    assert coordinator._warned_unknown_webhook_ios == {("quickbus", "997"), ("quickbus", "998")}
+    assert coordinator._warned_unknown_webhook_ios == {
+        _webhook_warn_key("quickbus", "997"),
+        _webhook_warn_key("quickbus", "998"),
+    }
     levels = [record.levelno for record in caplog.records if "unknown Quickbus IO" in record.msg]
     assert levels == [logging.WARNING, logging.WARNING, logging.DEBUG, logging.DEBUG, logging.DEBUG]
     caps = [record.levelno for record in caplog.records if record.msg == WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG]
     assert caps == [logging.WARNING]
 
 
-def test_a_remembered_unknown_io_id_is_cut_to_a_bounded_length(quickbus_result: dict[str, Any]) -> None:
-    """The limit counts entries: a huge pushed id must not be held in full."""
+def test_a_remembered_unknown_io_id_is_cut_to_a_bounded_length(
+    quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    """The limit counts entries: a huge pushed id must not be held in full. Two ids that share
+    the cut prefix are still two IOs, each warned about once."""
     coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
 
-    coordinator.update_quickbus_io("9" * 10_000, 1)
+    with caplog.at_level(logging.DEBUG):
+        for io_id in ("9" * 10_000, "9" * 9_999 + "8", "9" * 10_000):
+            coordinator.update_quickbus_io(io_id, 1)
 
-    assert coordinator._warned_unknown_webhook_ios == {("quickbus", "9" * WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN)}
+    warned = coordinator._warned_unknown_webhook_ios
+    assert len(warned) == 2
+    assert max(len(part) for key in warned for part in key) <= WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN
+    levels = [record.levelno for record in caplog.records if "unknown Quickbus IO" in record.msg]
+    assert levels == [logging.WARNING, logging.WARNING, logging.DEBUG]
 
 
 def test_a_long_unknown_io_id_that_becomes_known_is_forgotten(quickbus_result: dict[str, Any]) -> None:

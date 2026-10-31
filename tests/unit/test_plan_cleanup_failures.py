@@ -1312,8 +1312,10 @@ def test_unwire_removes_a_web_io_element_nothing_is_wired_to(preferred_fub_id: i
             {"0": _conn("012", "13")},
             [13],
         ),
+        # More digits than int() converts: a ValueError would abort the delta sync.
+        ({"1" * 5000: _web_io_element(40), "13": _web_io_element(40)}, {}, [13]),
     ],
-    ids=["bare", "wired WebIO element", "wired source"],
+    ids=["bare", "wired WebIO element", "wired source", "beyond int()'s digit limit"],
 )
 def test_unwire_leaves_an_element_whose_id_no_delete_request_can_carry(
     elements: dict[str, Any], connections: dict[str, Any], deleted: list[int] | None

@@ -284,6 +284,23 @@ def test_a_name_duplicate_the_audit_leaves_alone_is_no_orphan(duplicate: dict[st
     assert found["orphan"] == []
 
 
+@pytest.mark.parametrize(
+    ("duplicate", "disabled_count"),
+    [(_duplicate("HA K7 Jalousie", 14, "knx"), 2), (_duplicate("HA IO EXT-1 I1", 11), 1)],
+    ids=["switched-off class", "imported class"],
+)
+def test_a_name_duplicate_of_a_switched_off_class_counts_as_disabled(
+    duplicate: dict[str, Any], disabled_count: int
+) -> None:
+    """The import_disabled repair names how many commands of the class stay on the server: copies too."""
+    commands = {**EVERY_COMMAND, "HA K7 Jalousie": {**_command(13), "webioClass": "knx"}}
+    data = {**_data(), "webio_commands": commands, WEBIO_COMMAND_DUPLICATES_KEY: [duplicate]}
+
+    *_maps, disabled = _coordinator()._build_audit_maps({}, data)
+
+    assert disabled == {WebioClass.KNX: disabled_count}
+
+
 def test_include_offline_extensions_from_the_entry_data_counts_too() -> None:
     """Same merge of entry data and options as the entity platforms."""
     source = _coordinator(entry_data={CONF_INCLUDE_OFFLINE_EXTENSIONS: True}).webio_source_data(_data())
