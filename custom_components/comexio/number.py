@@ -1,4 +1,5 @@
 # Version: 0.7.5
+from decimal import ROUND_HALF_UP, Decimal
 import logging
 from typing import Any
 
@@ -182,6 +183,19 @@ class ComexioKnxNumber(ComexioKnxEntity, ComexioMarkerNumber):
             self._attr_icon = "mdi:knx"
 
 
+def io_number_step(unit: str, min_value: float, max_value: float) -> float:
+    """Step of an analog IO output number.
+
+    A percentage output (dimmer) takes whole percent only: the Comexio API rounds a written value
+    (12.1 → 12, 25.6 → 26, measured 2026-10-31, #253), whatever resolution the IO type table states
+    (LED dimmers list 0.1 there). Step 1 needs whole bounds, as the frontend counts its steps from
+    the minimum. Every other output keeps 0.1.
+    """
+    if unit == PERCENTAGE and min_value.is_integer() and max_value.is_integer():
+        return 1.0
+    return 0.1
+
+
 class ComexioIONumber(ComexioIOEntity, NumberEntity):
     """Representation of an analog writable Comexio IO output (dimmer, analog out)."""
 
@@ -197,12 +211,12 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         self._attr_native_min_value = float(_raw_min if _raw_min is not None else WEBIO_MARKER_ANALOG_MIN)
         _raw_max = io.get("max")
         self._attr_native_max_value = float(_raw_max if _raw_max is not None else WEBIO_MARKER_ANALOG_MAX)
-        self._attr_native_step = 0.1
 
         unit = io.get("unit", "")
+        self._attr_native_step = io_number_step(unit, self._attr_native_min_value, self._attr_native_max_value)
         if unit:
             self._attr_native_unit_of_measurement = unit
-        if unit == "%":
+        if unit == PERCENTAGE:
             self._attr_icon = "mdi:brightness-percent"
         elif unit in ("W", "V", "A"):
             self._attr_icon = "mdi:gauge"
@@ -221,6 +235,10 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Write value to Comexio IO output via API."""
+        if self._attr_native_step == 1.0:
+            # A service call can still pass a fraction, which Comexio rounds (#253): send the whole
+            # number instead, so HA's own state matches the output at once instead of after the push.
+            value = float(Decimal(str(value)).to_integral_value(ROUND_HALF_UP))
         if not await self.coordinator.api.set_value("io", self._io_id, value, self._ext_name, self._identifier):
             raise HomeAssistantError(f"Failed to set value {value} for IO {self._ext_name} {self._identifier}")
         self.coordinator.update_io_by_name(self._ext_name, self._identifier, value)
