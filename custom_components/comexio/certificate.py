@@ -62,6 +62,7 @@ ACCEPT_RESTORED = "certificate_restored"
 ACCEPT_CHANGED_AGAIN = "certificate_changed_again"
 ACCEPT_UNREACHABLE = "cannot_connect"
 ACCEPT_ENTRY_GONE = "entry_not_found"
+ACCEPT_ENTRY_CHANGED = "certificate_entry_changed"
 # The push button's outcomes for a push older than the repair (another certificate is up, or the pin is back)
 # and for an unexpected error.
 _ACCEPT_OUTDATED = "outdated_push"
@@ -437,21 +438,30 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
     locks: dict[str, asyncio.Lock] = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {})
     async with locks.setdefault(entry.entry_id, asyncio.Lock()):
         pinned = entry.data[CONF_CERTIFICATE_FINGERPRINT]
+        host = entry.data[CONF_HOST]
         if shown == pinned:
             # Accepted already (a second tap, or the repair alongside). A repair still showing it is left over.
             if presented_fingerprint(hass, entry.entry_id) == shown:
                 async_clear_certificate_changed(hass, entry.entry_id)
             return ACCEPT_PINNED, shown
         try:
-            current = await fetch_certificate_fingerprint(entry.data[CONF_HOST])
+            current = await fetch_certificate_fingerprint(host)
         except (ComexioError, ValueError) as err:
             _LOGGER.warning("Comexio certificate could not be read again to accept it: %s", err)
             return ACCEPT_UNREACHABLE, None
         if hass.config_entries.async_get_entry(entry.entry_id) is not entry:
-            _LOGGER.warning(
-                "Comexio at %s: entry removed while its certificate was read, nothing pinned", entry.data[CONF_HOST]
-            )
+            _LOGGER.warning("Comexio at %s: entry removed while its certificate was read, nothing pinned", host)
             return ACCEPT_ENTRY_GONE, None
+        if (entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)) != (host, pinned):
+            # Reconfigured meanwhile: the certificate read belongs to the old connection, the entry has its own pin.
+            _LOGGER.warning(
+                "Comexio at %s: connection changed while its certificate %s was read, nothing pinned (now %s, %s)",
+                host,
+                format_fingerprint(current),
+                entry.data[CONF_HOST],
+                "no pin" if (now := entry.data.get(CONF_CERTIFICATE_FINGERPRINT)) is None else format_fingerprint(now),
+            )
+            return ACCEPT_ENTRY_CHANGED, None
         if current == pinned:
             # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
             async_clear_certificate_changed(hass, entry.entry_id)

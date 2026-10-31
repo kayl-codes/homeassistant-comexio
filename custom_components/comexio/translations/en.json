@@ -630,7 +630,8 @@
           "entry_not_found": "The associated config entry could not be found — it may have been removed.",
           "cannot_connect": "Comexio's certificate could not be read again ({host}). Nothing was changed — try again once Comexio is reachable.",
           "certificate_restored": "Comexio presents the pinned certificate again. Nothing was changed.",
-          "certificate_changed_again": "Comexio now presents yet another certificate:\n`{actual}`\n\nNothing was changed. Open the repair again to compare that one."
+          "certificate_changed_again": "Comexio now presents yet another certificate:\n`{actual}`\n\nNothing was changed. Open the repair again to compare that one.",
+          "certificate_entry_changed": "The connection to Comexio was changed while its certificate was read. No certificate was pinned — open the repair again if it is still shown."
         }
       }
     }

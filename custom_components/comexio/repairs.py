@@ -14,6 +14,7 @@ import voluptuous as vol
 
 from .certificate import (
     ACCEPT_CHANGED_AGAIN,
+    ACCEPT_ENTRY_CHANGED,
     ACCEPT_ENTRY_GONE,
     ACCEPT_PINNED,
     ACCEPT_RESTORED,
@@ -1467,6 +1468,8 @@ class ComexioRepairFlow(RepairsFlow):
         if outcome == ACCEPT_ENTRY_GONE:
             ir.async_delete_issue(self.hass, DOMAIN, self.issue_id)
             return self.async_abort(reason="entry_not_found")
+        if outcome == ACCEPT_ENTRY_CHANGED:
+            return self.async_abort(reason="certificate_entry_changed")
         if outcome == ACCEPT_CHANGED_AGAIN and current is not None:
             return self.async_abort(
                 reason="certificate_changed_again", description_placeholders=certificate_placeholders(entry, current)
