@@ -183,17 +183,15 @@ class ComexioKnxNumber(ComexioKnxEntity, ComexioMarkerNumber):
             self._attr_icon = "mdi:knx"
 
 
-def io_number_step(unit: str, min_value: float, max_value: float) -> float:
-    """Step of an analog IO output number.
+def io_number_takes_whole_percent(unit: str, min_value: float, max_value: float) -> bool:
+    """Whether an analog IO output number steps in whole percent (step 1) instead of 0.1.
 
     A percentage output (dimmer) takes whole percent only: the Comexio API rounds a written value
     (12.1 → 12, 25.6 → 26, measured 2026-10-31, #253), whatever resolution the IO type table states
     (LED dimmers list 0.1 there). Step 1 needs whole bounds, as the frontend counts its steps from
     the minimum. Every other output keeps 0.1.
     """
-    if unit == PERCENTAGE and min_value.is_integer() and max_value.is_integer():
-        return 1.0
-    return 0.1
+    return unit == PERCENTAGE and min_value.is_integer() and max_value.is_integer()
 
 
 class ComexioIONumber(ComexioIOEntity, NumberEntity):
@@ -213,7 +211,10 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         self._attr_native_max_value = float(_raw_max if _raw_max is not None else WEBIO_MARKER_ANALOG_MAX)
 
         unit = io.get("unit", "")
-        self._attr_native_step = io_number_step(unit, self._attr_native_min_value, self._attr_native_max_value)
+        self._whole_percent = io_number_takes_whole_percent(
+            unit, self._attr_native_min_value, self._attr_native_max_value
+        )
+        self._attr_native_step = 1.0 if self._whole_percent else 0.1
         if unit:
             self._attr_native_unit_of_measurement = unit
         if unit == PERCENTAGE:
@@ -235,7 +236,7 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         """Write value to Comexio IO output via API."""
-        if self._attr_native_step == 1.0:
+        if self._whole_percent:
             # A service call can still pass a fraction, which Comexio rounds (#253): send the whole
             # number instead, so HA's own state matches the output at once instead of after the push.
             value = float(Decimal(str(value)).to_integral_value(ROUND_HALF_UP))
