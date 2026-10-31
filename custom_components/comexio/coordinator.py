@@ -171,6 +171,8 @@ from .const import (
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_FORMER_IO_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_WARNED_MAX,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
@@ -739,6 +741,11 @@ def _stored_commands(data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, A
         yield dup["name"], dup
 
 
+def _webhook_warn_key(kind: str, *parts: str) -> tuple[str, ...]:
+    """An unknown IO's key in the warned set: the request-supplied parts cut to a bounded length."""
+    return (kind, *(part[:WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN] for part in parts))
+
+
 def _source_shared(source_elem_id: str, webio_id: int, plan_data: dict) -> bool:
     """Whether a source element wired to webio_id's WebIO element feeds anything else too.
 
@@ -1159,6 +1166,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Unknown IOs a webhook push was already warned about: a stale command pushes on every value
         # change, so only its first push warns (#251). Cleared with the coordinator on every reload.
         self._warned_unknown_webhook_ios: set[tuple[str, ...]] = set()
+        self._warned_unknown_webhook_cap = False
         self.last_plan_preview: dict[str, Any] | None = None
         # In-memory copy of the last rendered preview SVG, served directly by the
         # image entity (image.py) without touching the config/www file.
@@ -4917,10 +4925,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
-            self._warned_unknown_webhook_ios.discard(("io", *key))  # unknown again later: warn again
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         else:
             self._log_unknown_webhook_io(
-                ("io", *key), WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), one_line(identifier), value
+                _webhook_warn_key("io", *key),
+                WEBHOOK_UNKNOWN_IO_LOG_MSG,
+                one_line(ext_name),
+                one_line(identifier),
+                value,
             )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
@@ -4935,23 +4947,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
             label = io.get("name") or io_id_str
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "quickbus", one_line(label), value, previous)
             self._fire_plan_event("io", io_id_str, label, value)
-            self._warned_unknown_webhook_ios.discard(("quickbus", io_id_str))  # unknown again later: warn again
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("quickbus", io_id_str))  # warn again later
         else:
             self._log_unknown_webhook_io(
-                ("quickbus", io_id_str), WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG, one_line(io_id_str), value
+                _webhook_warn_key("quickbus", io_id_str),
+                WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
+                one_line(io_id_str),
+                value,
             )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
     def _log_unknown_webhook_io(self, warn_key: tuple[str, ...], msg: str, *args: Any) -> None:
-        """Warn about the first push of an unknown IO, log every later push of it at DEBUG only."""
+        """Warn about the first push of an unknown IO, log every later push of it at DEBUG only.
+
+        Past WEBHOOK_UNKNOWN_IO_WARNED_MAX remembered IOs, one warning says so and a further unknown IO
+        logs at DEBUG only: a warning on each of its pushes would bring back the log flood of #251.
+        """
         warned = self._warned_unknown_webhook_ios
         if warn_key in warned:
             _LOGGER.debug(msg, *args)
             return
         if len(warned) < WEBHOOK_UNKNOWN_IO_WARNED_MAX:
             warned.add(warn_key)
-        _LOGGER.warning(msg, *args)
+            _LOGGER.warning(msg, *args)
+            return
+        if not self._warned_unknown_webhook_cap:
+            self._warned_unknown_webhook_cap = True
+            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG, WEBHOOK_UNKNOWN_IO_WARNED_MAX)
+        _LOGGER.debug(msg, *args)
 
     async def async_load_extension_firmware(self) -> None:
         """Restore the last checked firmware snapshot from disk (called once at setup).
@@ -8764,29 +8788,68 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return await self.delete_plan_elements_for_commands(fub_id, elem_ids, found_webio_ids, webio_id_to_cmd_id)
 
     def _unwire_element_ids(self, webio_id: int, plan_data: dict) -> list[int]:
-        """The plan elements unwiring webio_id removes: its WebIO element(s) and the source wired to one.
+        """The plan elements unwiring webio_id removes: each of its WebIO elements and the source wired to it.
 
         A WebIO element nothing is wired to goes too: the dangling-element cleanup removes source
         elements only, so it would outlive the command. Empty if the plan holds no element of webio_id.
         """
+        # An element with a null or malformed reference is no match. Stricter than plan_webio_ids on purpose:
+        # an element only that one reads as WebIO stays, and so does its command.
         elements = plan_data.get("elements", {})
-        webio_elem_ids = [
-            int(elem_id)
-            for elem_id in ComexioAPI._find_source_element_ids(elements, webio_id, FUNCTION_PLAN_REF_TYPE_WEBIO)
-            # An element id no delete request can carry stays; the plan check after the unwiring keeps its command.
-            if ComexioAPI._deletable_element_id(elem_id)
+        found = ComexioAPI._find_source_element_ids(elements, webio_id, FUNCTION_PLAN_REF_TYPE_WEBIO)
+        elem_ids = [
+            elem_id for found_id in found for elem_id in self._webio_element_unwiring(found_id, webio_id, plan_data)
         ]
-        wired = self.api._find_webio_wiring(webio_id, plan_data) or []
-        if wired and _source_shared(str(wired[1]), webio_id, plan_data):
-            # Deleting the source would cut the other command's wire (e.g. the duplicate's retained namesake).
+        return list(dict.fromkeys(elem_ids))
+
+    def _webio_element_unwiring(self, elem_id: str, webio_id: int, plan_data: dict) -> list[int]:
+        """The elements unwiring one WebIO element of webio_id removes: none, the element, or it and its source.
+
+        The element stays when no delete request can carry its id, when it feeds anything, when more than one
+        wire feeds it or when a connection cannot be read: that is plan logic beyond the integration's one wire
+        (see ComexioAPI._wired_elsewhere), and the plan check after the unwiring keeps the command for it. The
+        source goes only when it feeds nothing else (_source_shared).
+        """
+        if not ComexioAPI._deletable_element_id(elem_id):
+            return []
+        sources: list[str] = []
+        feeds = unreadable = False
+        for conn_data in plan_data.get("connections", {}).values():
+            ends = ComexioAPI._connection_ends(conn_data)
+            if ends is None:
+                unreadable = True
+            elif ends[0] == elem_id:
+                feeds = True
+            elif elem_id in ends[1]:
+                sources.append(ends[0])
+        if unreadable:
+            _LOGGER.warning(
+                "[%s] Unwiring webIoId %s: a plan connection cannot be read, element %s stays",
+                self.server_id,
+                webio_id,
+                elem_id,
+            )
+            return []
+        if feeds or len(sources) > 1:
+            _LOGGER.info(
+                "[%s] Unwiring webIoId %s: element %s takes part in more plan logic, it stays",
+                self.server_id,
+                webio_id,
+                elem_id,
+            )
+            return []
+        if not sources:
+            return [int(elem_id)]
+        if _source_shared(sources[0], webio_id, plan_data):
+            # Deleting the source would cut the other wire (e.g. to the duplicate's retained namesake).
             _LOGGER.info(
                 "[%s] Unwiring webIoId %s: source element %s feeds more than it, it stays",
                 self.server_id,
                 webio_id,
-                wired[1],
+                sources[0],
             )
-            wired = wired[:1]
-        return list(dict.fromkeys([*wired, *webio_elem_ids]))
+            return [int(elem_id)]
+        return [int(elem_id), int(sources[0])]
 
     def webio_id_to_cmd_id(self) -> dict[str, Any]:
         """webIoId (as str) -> real Web-IO command id, from the last poll's commands (duplicates included)."""

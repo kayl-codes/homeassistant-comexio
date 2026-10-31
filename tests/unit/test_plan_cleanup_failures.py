@@ -91,10 +91,14 @@ def test_unwire_reports_a_plan_that_could_not_be_loaded() -> None:
     assert result["cmd_ids"] == []
 
 
+def _wired_plan() -> dict[str, Any]:
+    """Marker 7 wired to the WebIO element of webIoId 40."""
+    return {"elements": {"11": _web_io_element(40), "12": _marker_element(7)}, "connections": {"0": _conn("12", "11")}}
+
+
 def test_unwire_reports_a_failed_element_deletion() -> None:
     api = _api(
-        function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}),
-        _find_webio_wiring=MagicMock(return_value=[11, 12]),
+        function_plan_load_elements=AsyncMock(return_value=_wired_plan()),
         _delete_plan_elements_and_restart=AsyncMock(return_value=_delete_result(delete_failed=True)),
     )
     coordinator = _coordinator(api)
@@ -106,8 +110,7 @@ def test_unwire_reports_a_failed_element_deletion() -> None:
 def test_unwire_reports_a_web_io_command_it_cannot_resolve() -> None:
     # (an): the command stays in Comexio after its wiring was removed — only logged before.
     api = _api(
-        function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}),
-        _find_webio_wiring=MagicMock(return_value=[11, 12]),
+        function_plan_load_elements=AsyncMock(return_value=_wired_plan()),
         _delete_plan_elements_and_restart=AsyncMock(
             return_value=_delete_result(deleted_elem_count=4, webio_cmd_ids=[40, 41])
         ),
@@ -237,8 +240,7 @@ def test_plan_that_was_not_running_is_resorted_as_inactive() -> None:
 
 def test_unwire_marks_a_plan_that_was_not_running() -> None:
     api = _api(
-        function_plan_load_elements=AsyncMock(return_value={"elements": {}, "connections": {}}),
-        _find_webio_wiring=MagicMock(return_value=[11, 12]),
+        function_plan_load_elements=AsyncMock(return_value=_wired_plan()),
         _delete_plan_elements_and_restart=AsyncMock(
             return_value=_delete_result(deleted_elem_count=2, plan_stopped=False, was_running=False)
         ),
@@ -1276,7 +1278,6 @@ def _unwire(
     delete = AsyncMock(side_effect=_echo_delete)
     api = _api(
         function_plan_load_elements=AsyncMock(side_effect=plans.get),
-        _find_webio_wiring=ComexioAPI._find_webio_wiring,
         _delete_plan_elements_and_restart=delete,
     )
     coordinator = _coordinator(api)
@@ -1340,11 +1341,9 @@ def test_unwire_removes_the_wiring_and_a_bare_duplicate_element_of_the_command()
     [
         (("13", "14"), {}),
         (("14", "12"), {}),
-        (("14",), {"1": {"input": {"FubElementId": "11"}, "output": None}}),
-        # Read before the wire to 14: skipped, the cleanup goes on.
-        (("14",), {"8": None, "9": {"input": None, "output": [{"FubElementId": "14"}]}}),
+        (("14",), {"1": {"input": {"FubElementId": "11"}, "output": [{"FubElementId": "12"}]}}),
     ],
-    ids=["feeds the retained namesake too", "feeds plan logic too", "unreadable wiring", "unreadable connections"],
+    ids=["feeds the retained namesake too", "feeds plan logic too", "a second wire to plan logic"],
 )
 def test_unwire_keeps_a_source_element_that_feeds_anything_else(
     targets: tuple[str, ...], extra: dict[str, Any]
@@ -1365,6 +1364,75 @@ def test_unwire_keeps_a_source_element_that_feeds_anything_else(
     delete, _result = _unwire({5: plan}, [41])
 
     assert delete.await_args.args[1] == [14]
+
+
+@pytest.mark.parametrize(
+    ("connections", "log_line"),
+    [
+        ({"0": _conn("11", "14"), "1": _conn("14", "12")}, ("INFO", "takes part in more plan logic")),
+        ({"0": _conn("11", "14"), "1": _conn("12", "14")}, ("INFO", "takes part in more plan logic")),
+        ({"1": None, "0": _conn("11", "14")}, ("WARNING", "a plan connection cannot be read")),
+        (
+            {"1": {"input": None, "output": [{"FubElementId": "14"}]}, "0": _conn("11", "14")},
+            ("WARNING", "a plan connection cannot be read"),
+        ),
+    ],
+    ids=["it feeds plan logic", "a second wire feeds it", "null connection", "connection without a readable input"],
+)
+def test_unwire_keeps_a_web_io_element_that_takes_part_in_more_plan_logic(
+    connections: dict[str, Any], log_line: tuple[str, str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """Shared plan logic stays, and so does the command: the plan check after the unwiring still sees
+    the element. Unreadable wiring may be any of these, so it keeps the element too, with its own warning."""
+    plan = {
+        "elements": {"11": _marker_element(7), "12": LOGIC_BLOCK, "14": _web_io_element(41)},
+        "connections": connections,
+    }
+
+    with caplog.at_level(logging.INFO):
+        delete, result = _unwire({5: plan}, [41])
+
+    assert delete.await_args is None
+    assert result["cmd_ids"] == []
+    assert [
+        (rec.levelname, log_line[1] in rec.getMessage()) for rec in caplog.records if "element 14" in rec.getMessage()
+    ] == [(log_line[0], True)]
+
+
+@pytest.mark.parametrize(
+    ("first", "second", "deleted"),
+    [
+        (("11", "14"), ("13", "15"), [14, 11, 15, 13]),
+        (("11", "14"), ("13", "15", "16"), [14, 11, 15]),
+        (("11", "14"), ("11", "15"), [14, 11, 15]),
+        (("11", "w3"), ("13", "15"), [14, 15, 13]),
+    ],
+    ids=[
+        "each its own source",
+        "the second source feeds another command too",
+        "one source feeds both",
+        "one id no delete can carry",
+    ],
+)
+def test_unwire_handles_every_web_io_element_of_the_command(
+    first: tuple[str, ...], second: tuple[str, ...], deleted: list[int]
+) -> None:
+    """Two elements of webIoId 41 (a stray duplicate element): each one and its source are judged on their own."""
+    plan = {
+        "elements": {
+            "11": _marker_element(7),
+            "13": _marker_element(8),
+            "14": _web_io_element(41),
+            "w3": _web_io_element(41),
+            "15": _web_io_element(41),
+            "16": _web_io_element(42),
+        },
+        "connections": {"0": _conn(*first), "1": _conn(*second)},
+    }
+
+    delete, _result = _unwire({5: plan}, [41])
+
+    assert delete.await_args.args[1] == deleted
 
 
 @pytest.mark.parametrize(

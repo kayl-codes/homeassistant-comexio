@@ -5489,35 +5489,6 @@ class ComexioAPI:
             if other_id != conn_id
         )
 
-    @staticmethod
-    def _find_webio_wiring(webio_id: int, plan_data: dict) -> list[int] | None:
-        """Return [webio_elem_id, connected_source_elem_id] if webio_id is wired in this plan.
-
-        The source element is whatever is wired to the WebIO element's input side (marker or
-        raw IO — the type doesn't matter here, it's simply the other end of the same wire).
-        Returns None if this webIoId has no element in the plan, the element isn't wired, or either
-        element id is no number a delete request can carry.
-        """
-        elements = plan_data.get("elements", {})
-        # An element with a null or malformed reference is no match. Stricter than plan_webio_ids on purpose:
-        # an element only that one reads as WebIO stays, and so does its command.
-        webio_elem_ids = ComexioAPI._find_source_element_ids(elements, webio_id, FUNCTION_PLAN_REF_TYPE_WEBIO)
-        webio_elem_id = webio_elem_ids[0] if webio_elem_ids else None
-        if webio_elem_id is None:
-            return None
-        for conn_data in plan_data.get("connections", {}).values():
-            if not isinstance(conn_data, dict) or webio_elem_id not in ComexioAPI._connection_output_ids(conn_data):
-                continue
-            source = conn_data.get("input")
-            input_elem_id = source.get("FubElementId") if isinstance(source, dict) else None
-            if input_elem_id is None:
-                continue
-            # int() would abort the cleanup on "w3" and read "013" as another element's id: both stay.
-            if not all(ComexioAPI._deletable_element_id(str(elem_id)) for elem_id in (webio_elem_id, input_elem_id)):
-                return None
-            return [int(webio_elem_id), int(input_elem_id)]
-        return None
-
     async def _delete_plan_elements_and_restart(
         self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str
     ) -> dict:

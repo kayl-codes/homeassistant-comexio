@@ -1201,8 +1201,18 @@ WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (
 
 # How many unknown IOs the coordinator remembers as already warned about (later pushes of them log
 # at DEBUG only). The pushed ext/identifier come from the request, so the set must stay bounded:
-# past the limit, an unknown IO warns on every push again, as before #251.
+# past the limit, one warning says so and every further unknown IO logs at DEBUG only.
 WEBHOOK_UNKNOWN_IO_WARNED_MAX = 512
+
+# The request-supplied parts of a remembered unknown IO are cut to this length: the limit above counts
+# entries, so without it a request could make the coordinator hold strings of any size. Real extension
+# names and IO identifiers are far shorter.
+WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN = 64
+
+# Logged once when WEBHOOK_UNKNOWN_IO_WARNED_MAX is reached. Args: the limit.
+WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG = (
+    "Webhook pushes for more than %s unknown IOs — further unknown IOs are logged at DEBUG only"
+)
 
 # DEBUG for a push matched to an IO whose id the latest scrape gave another IO (deleted and reused):
 # it is the former IO's value and is dropped. Args: server id, IO label, new value.

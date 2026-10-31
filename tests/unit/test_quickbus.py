@@ -18,6 +18,8 @@ from custom_components.comexio.const import (
     CONF_IGNORED_KNX,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
+    WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBIO_COMMAND_DUPLICATES_KEY,
     WebioClass,
     known_extension_names,
@@ -175,6 +177,7 @@ def _webhook_coordinator(quickbus_ios: list[dict[str, Any]]) -> ComexioCoordinat
     coordinator._io_real_value_ids = set()
     coordinator._webhook_updated_io_ids = set()
     coordinator._warned_unknown_webhook_ios = set()
+    coordinator._warned_unknown_webhook_cap = False
     coordinator._io_identities = {}
     coordinator._async_publish_pushed_value = MagicMock()
     coordinator._fire_plan_event = MagicMock()
@@ -254,7 +257,8 @@ def test_an_io_that_became_known_warns_again_once_unknown(
 def test_the_warned_unknown_ios_stay_bounded(
     quickbus_result: dict[str, Any], caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The pushed id comes from the request: past the limit nothing more is remembered, it warns again."""
+    """The pushed id comes from the request: past the limit nothing more is remembered, and one warning
+    says so instead of a warning on every push of every further unknown IO (#251)."""
     monkeypatch.setattr(coordinator_module, "WEBHOOK_UNKNOWN_IO_WARNED_MAX", 2)
     coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
 
@@ -264,7 +268,30 @@ def test_the_warned_unknown_ios_stay_bounded(
 
     assert coordinator._warned_unknown_webhook_ios == {("quickbus", "997"), ("quickbus", "998")}
     levels = [record.levelno for record in caplog.records if "unknown Quickbus IO" in record.msg]
-    assert levels == [logging.WARNING, logging.WARNING, logging.WARNING, logging.WARNING, logging.DEBUG]
+    assert levels == [logging.WARNING, logging.WARNING, logging.DEBUG, logging.DEBUG, logging.DEBUG]
+    caps = [record.levelno for record in caplog.records if record.msg == WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG]
+    assert caps == [logging.WARNING]
+
+
+def test_a_remembered_unknown_io_id_is_cut_to_a_bounded_length(quickbus_result: dict[str, Any]) -> None:
+    """The limit counts entries: a huge pushed id must not be held in full."""
+    coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
+
+    coordinator.update_quickbus_io("9" * 10_000, 1)
+
+    assert coordinator._warned_unknown_webhook_ios == {("quickbus", "9" * WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN)}
+
+
+def test_a_long_unknown_io_id_that_becomes_known_is_forgotten(quickbus_result: dict[str, Any]) -> None:
+    """The matched push forgets the cut key it was remembered under, not the full id."""
+    coordinator = _webhook_coordinator(quickbus_result[QUICKBUS_IO_DATA_KEY])
+    long_id = "9" * 10_000
+
+    coordinator.update_quickbus_io(long_id, 1)
+    coordinator._quickbus_index[long_id] = coordinator._quickbus_index["211"]
+    coordinator.update_quickbus_io(long_id, 0)
+
+    assert coordinator._warned_unknown_webhook_ios == set()
 
 
 def test_poll_keeps_a_quickbus_webhook_value_that_arrived_during_the_fetch(quickbus_result: dict[str, Any]) -> None:

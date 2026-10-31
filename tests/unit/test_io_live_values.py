@@ -57,6 +57,7 @@ def _coordinator(
         "_webhook_updated_markers": set(),
         "_webhook_updated_io_ids": set(),
         "_warned_unknown_webhook_ios": set(),
+        "_warned_unknown_webhook_cap": False,
         "_last_poll_scraped": False,
         "_polled_plan_ids": None,
         "note_comexio_unreachable": MagicMock(),
