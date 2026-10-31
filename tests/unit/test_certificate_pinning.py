@@ -619,3 +619,26 @@ def test_the_orphan_cleanup_keeps_the_connection_sensor() -> None:
     unique_id = ComexioConnectionSensor(MagicMock(), "srv").unique_id
 
     assert unique_id.removeprefix("comexio_srv_") in SERVER_LEVEL_UNIQUE_ID_SUFFIXES
+
+
+@pytest.mark.parametrize("entry_id", ["01JBX5K8Q2ZP4W7N3M6R9T0V1Y", "test_entry_1"])
+def test_the_accept_button_names_its_entry_and_certificate(entry_id: str) -> None:
+    # An underscore in the entry id must not move the split: the fingerprint is always the last 64 hex digits.
+    action = certificate.accept_action_id(entry_id, PINNED)
+
+    assert certificate.parse_accept_action(action) == (entry_id, PINNED)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        None,
+        7,
+        "",
+        "COMEXIO_ACCEPT_CERTIFICATE_",
+        f"COMEXIO_ACCEPT_CERTIFICATE__{PINNED}",
+        f"COMEXIO_START_PLAN_srv_{PINNED}",
+    ],
+)
+def test_no_other_action_passes_for_the_accept_button(action: object) -> None:
+    assert certificate.parse_accept_action(action) is None
