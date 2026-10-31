@@ -5383,12 +5383,24 @@ class ComexioAPI:
 
     @staticmethod
     def plan_webio_ids(plan_data: dict) -> tuple[set[int], bool]:
-        """(webIoIds of the plan's WebIO elements, whether one of them has no readable webIoId)."""
+        """(webIoIds of the plan's WebIO elements, whether an element may hide one).
+
+        An element may hide one when its WebIO reference has no readable webIoId, or when its reference
+        is missing or has no readable type: loadelements sends a reference with every element, only an
+        explicit null means none (as in _plan_marker_refs_strict).
+        """
         webio_ids: set[int] = set()
         unreadable = False
-        for elem_data in plan_data.get("elements", {}).values():
-            ref = ComexioAPI._element_reference(elem_data)
-            if not ComexioAPI._is_webio_reference(ref):
+        for elem_id, elem_data in plan_data.get("elements", {}).items():
+            ref = elem_data.get("reference", "missing") if isinstance(elem_data, dict) else "malformed"
+            if ref is None:
+                continue
+            if (ref_type := _reference_type(ref)) is None:
+                _LOGGER.warning("Function plan element %s has no readable reference (%r)", elem_id, ref)
+                unreadable = True
+                continue
+            # _reference_type, not _is_webio_reference: " 10" and "010" are WebIO elements too.
+            if ref_type != FUNCTION_PLAN_REF_TYPE_WEBIO:
                 continue
             if (webio_id := ComexioAPI._reference_id(ref)) is None:
                 unreadable = True
@@ -5439,8 +5451,9 @@ class ComexioAPI:
 
         Only the canonical spelling counts: int() reads "013" or Arabic-Indic digits as another element's id.
         """
-        if elem_id.isascii() and elem_id.isdecimal() and str(int(elem_id)) == elem_id:
-            return True
+        with suppress(ValueError):  # more digits than int() converts (sys.get_int_max_str_digits): not deletable
+            if elem_id.isascii() and elem_id.isdecimal() and str(int(elem_id)) == elem_id:
+                return True
         _LOGGER.warning("Function plan element id %r is not a number — the element stays", elem_id)
         return False
 
@@ -5476,35 +5489,6 @@ class ComexioAPI:
             for other_id, other in connections.items()
             if other_id != conn_id
         )
-
-    @staticmethod
-    def _find_webio_wiring(webio_id: int, plan_data: dict) -> list[int] | None:
-        """Return [webio_elem_id, connected_source_elem_id] if webio_id is wired in this plan.
-
-        The source element is whatever is wired to the WebIO element's input side (marker or
-        raw IO — the type doesn't matter here, it's simply the other end of the same wire).
-        Returns None if this webIoId has no element in the plan, or the element isn't wired.
-        """
-        elements = plan_data.get("elements", {})
-        webio_elem_id = next(
-            (
-                eid
-                for eid, elem in elements.items()
-                if elem.get("reference", {}).get("type") == 10
-                and str(elem.get("reference", {}).get("ref_id")) == str(webio_id)
-            ),
-            None,
-        )
-        if webio_elem_id is None:
-            return None
-        for conn_data in plan_data.get("connections", {}).values():
-            if webio_elem_id not in ComexioAPI._connection_output_ids(conn_data):
-                continue
-            input_elem_id = conn_data.get("input", {}).get("FubElementId")
-            if input_elem_id is None:
-                continue
-            return [int(webio_elem_id), int(input_elem_id)]
-        return None
 
     async def _delete_plan_elements_and_restart(
         self, fub_id: int, elem_ids_to_delete: list[int], webio_cmd_ids: list[int], plan_name: str

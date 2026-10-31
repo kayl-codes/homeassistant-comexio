@@ -22,6 +22,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
 
+from .api import ComexioAPI
 from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_ENABLE_NOTIFICATIONS,
@@ -86,6 +87,7 @@ from .const import (
     webio_range_check_entity_id,
 )
 from .coordinator import (
+    COMMAND_IN_PLAN,
     COMMAND_NOT_CHECKED,
     PLAN_LOAD_FAILED,
     ComexioCoordinator,
@@ -161,6 +163,23 @@ def _flanke_unusable(ctx: "_SyncContext") -> str:
     # Add and remove can both hit the guard in one sync; _unique_failures drops the repeat.
     ctx.failed_writes.append(_plan_failure(FUNCTION_PLAN_TRIGGER_PLAN_NAME, _FLANKE_SKIPPED_DETAIL))
     return _FLANKE_UNUSABLE_LINE
+
+
+def _delete_task_webio_id(task: dict) -> int | None:
+    """The webIoId of a delta sync delete task, None for any other task or a command without a readable one."""
+    return ComexioAPI._reference_id({"ref_id": task["item"].get("webIoId")}) if task["type"] == "delete" else None
+
+
+def _skipped_delete_reason(task: dict, kept: dict[int, str]) -> str | None:
+    """Why a delta sync delete task is skipped, None to run it (and for any other task).
+
+    A command without a readable webIoId cannot be checked against the plans: it stays, as in
+    deletable_source_command_ids.
+    """
+    if task["type"] != "delete":
+        return None
+    webio_id = _delete_task_webio_id(task)
+    return COMMAND_NOT_CHECKED if webio_id is None else kept.get(webio_id)
 
 
 def _record_plan_cleanup_failures(
@@ -1869,11 +1888,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         # Web-IO command, unconditionally — not just when Comexio's delete call happens to
         # refuse it (it doesn't reliably refuse, which is how orphaned plan elements were
         # left dangling before). Batched once for the whole run, not per task.
-        delete_webio_ids = [
-            int(t["item"]["webIoId"])
-            for t in tasks_to_do
-            if t["type"] == "delete" and t["item"].get("webIoId") is not None
-        ]
+        delete_webio_ids = [webio_id for t in tasks_to_do if (webio_id := _delete_task_webio_id(t)) is not None]
         if delete_webio_ids and not getattr(self.coordinator, "cancel_sync", False):
             unwired = await self.coordinator.unwire_webio_commands(delete_webio_ids)
             _add_resort_plans(resort_fub_ids, unwired)
@@ -1976,10 +1991,17 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 )
             await self._sort_checked(ctx, fub_id, api.function_plan_name(fub_id), was_active=resort_fub_ids[fub_id])
 
+        kept = await self._orphans_kept(ctx, tasks_to_do)
         for idx, task in enumerate(tasks_to_do):
             if getattr(self.coordinator, "cancel_sync", False):
                 break
             on_progress(idx, task["item"]["name"], task["type"])
+            if reason := _skipped_delete_reason(task, kept):
+                # The webIoId keeps same-named duplicates apart: failed_writes drops repeated lines.
+                webio_id = _delete_task_webio_id(task)
+                ident = "no readable webIoId" if webio_id is None else f"webIoId {webio_id}"
+                ctx.failed_writes.append(f"delete {one_line(task['item']['name'])} ({ident}): {reason}")
+                continue
             await self._apply_delta_task(
                 api,
                 base_id,
@@ -1989,6 +2011,26 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
                 ctx.failed_writes,
             )
         return result
+
+    async def _orphans_kept(self, ctx: _SyncContext, tasks_to_do: list[dict]) -> dict[int, str]:
+        """webIoId -> why its delete task is skipped: a plan still holds its WebIO element, or a plan
+        could not be checked.
+
+        The cleanup above unwired the orphans from the managed plans only. Every plan is read fresh
+        after it: a user's own plan may still use an orphan, and so may a managed plan the unwiring
+        failed in — deleting the command would leave that plan an element of a deleted command.
+        """
+        webio_ids = {webio_id for task in tasks_to_do if (webio_id := _delete_task_webio_id(task)) is not None}
+        if not webio_ids or getattr(self.coordinator, "cancel_sync", False):
+            return {}
+        in_use, plan_failures = await self.coordinator.webio_ids_in_plans(webio_ids)
+        ctx.failed_writes.extend(_plan_failure(name, detail) for name, detail in plan_failures)
+        reason = COMMAND_NOT_CHECKED if plan_failures else COMMAND_IN_PLAN
+        if in_use:
+            _LOGGER.info(
+                "[%s] Delta sync: %d orphaned Web-IO command(s) kept — %s", self.server_id, len(in_use), reason
+            )
+        return dict.fromkeys(in_use, reason)
 
     async def _sync_class(
         self,

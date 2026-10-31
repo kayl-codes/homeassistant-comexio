@@ -6,6 +6,7 @@ import contextlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import html
+from itertools import chain
 import logging
 import math
 import pathlib
@@ -118,6 +119,7 @@ from .const import (
     FUNCTION_PLAN_MANAGED_PLAN_COMMENT,
     FUNCTION_PLAN_OMITTED_NOTIFY_THRESHOLD,
     FUNCTION_PLAN_ORPHANED_VIEW_OPTION,
+    FUNCTION_PLAN_REF_TYPE_WEBIO,
     FUNCTION_PLAN_RENAME_CHECK_ATTEMPTS,
     FUNCTION_PLAN_RESTORE_ERROR_DETAIL_MAX,
     FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD,
@@ -169,7 +171,10 @@ from .const import (
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_FORMER_IO_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
+    WEBHOOK_UNKNOWN_IO_WARNED_MAX,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
     WEBIO_CLASS_IO,
@@ -178,6 +183,7 @@ from .const import (
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_CLASS_QUICKBUS,
     WEBIO_CLASSES,
+    WEBIO_COMMAND_DUPLICATES_KEY,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
     WEBIO_RANGE_CHECK_HOUR,
     WEBIO_RANGE_CHECK_MINUTE,
@@ -579,6 +585,7 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "knx": parsed_data.get("knx", []) if import_knx else [],
         QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
         "webio_commands": parsed_data.get("webio_commands", {}),
+        WEBIO_COMMAND_DUPLICATES_KEY: parsed_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []),
         "webio_names": parsed_data.get("webio_names", {}),
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
@@ -661,9 +668,15 @@ def _inexact_command_key(
 
 
 def _build_com_audit_map(
-    com_commands: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+    com_commands: dict[str, Any],
+    ha_map: dict[str, dict[str, Any]],
+    duplicates: Iterable[Mapping[str, Any]] = (),
 ) -> dict[str, list[dict[str, Any]]]:
     """The Comexio side of the audit: Web-IO commands grouped by the audit key they serve.
+
+    duplicates are the commands whose name an earlier one already has (webio_commands holds only
+    the first): they join the same key after it, so the audit keeps the first and reports them
+    as orphans instead of a sync deleting one layer of them per run (#251).
 
     Exact reverse lookup first: ha_map's "name" values are built from the same extension names
     that may contain spaces, so a positional full_name.split(" ") would misparse
@@ -681,7 +694,8 @@ def _build_com_audit_map(
     quickbus_ref_to_key = {ref: key for key, info in ha_map.items() if (ref := _quickbus_command_ref(info["name"]))}
     io_name_to_key = {info["name"]: key for key, info in ha_map.items() if classify_audit_key(key) is WebioClass.IO}
     com_map: dict[str, list[dict[str, Any]]] = {}
-    for full_name, info in com_commands.items():
+    named_commands = chain(com_commands.items(), ((dup["name"], dup) for dup in duplicates))
+    for full_name, info in named_commands:
         key = name_to_key.get(full_name) or _inexact_command_key(full_name, quickbus_ref_to_key, io_name_to_key)
         if key is None:
             _LOGGER.debug("Web-IO audit: command '%s' fits several IOs, left as it is", one_line(full_name))
@@ -712,15 +726,53 @@ def _split_disabled_commands(
     kept: dict[str, Any] = {}
     disabled: dict[WebioClass, int] = {}
     for name, info in com_commands.items():
-        try:
-            cls = WebioClass(info.get("webioClass"))
-        except ValueError:
-            cls = None
+        cls = _command_class(info)
         if cls is None or cls in active:
             kept[name] = info
         else:
             disabled[cls] = disabled.get(cls, 0) + 1
     return kept, disabled
+
+
+def _stored_commands(data: Mapping[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    """(name, info) of every stored Web-IO command: webio_commands, then the same-named duplicates."""
+    yield from data.get("webio_commands", {}).items()
+    for dup in data.get(WEBIO_COMMAND_DUPLICATES_KEY, []):
+        yield dup["name"], dup
+
+
+def _webhook_warn_key(kind: str, *parts: str) -> tuple[str, ...]:
+    """An unknown IO's key in the warned set: the request-supplied parts cut to a bounded length.
+
+    The hash of the full parts keeps two ids apart that share their cut prefix.
+    """
+    return (kind, *(part[:WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN] for part in parts), str(hash(parts)))
+
+
+def _source_shared(source_elem_id: str, webio_id: int, plan_data: dict) -> bool:
+    """Whether a source element wired to webio_id's WebIO element feeds anything else too.
+
+    Anything else: another command's WebIO element, plan logic, or wiring that cannot be read — see
+    ComexioAPI._source_element_wiring. Unwiring webio_id then removes its WebIO element only.
+    """
+    webio, other = ComexioAPI._source_element_wiring(source_elem_id, plan_data)
+    return other or any(fed_webio_id != webio_id for _elem_id, fed_webio_id in webio)
+
+
+def _command_class(info: Mapping[str, Any]) -> WebioClass | None:
+    """The Web-IO class of a parsed command, None if it names no known class."""
+    try:
+        return WebioClass(info.get("webioClass"))
+    except ValueError:
+        return None
+
+
+def _audited_duplicates(
+    duplicates: Iterable[Mapping[str, Any]], active_classes: Iterable[WebioClass]
+) -> tuple[list[Mapping[str, Any]], dict[WebioClass, int]]:
+    """(name duplicates the audit sees, count per switched-off class of the others): as _split_disabled_commands."""
+    kept, disabled = _split_disabled_commands({str(pos): dup for pos, dup in enumerate(duplicates)}, active_classes)
+    return list(kept.values()), disabled
 
 
 def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
@@ -822,10 +874,16 @@ PLAN_ENTRY_UNREADABLE = "plan list entry unreadable, cleanup skipped"
 PLAN_DELETE_FAILED = "element deletion failed"
 PLAN_CMD_NOT_FOUND = "Web-IO command not found, not deleted"
 # A plan's WebIO element without a readable webIoId may stand for any command: none is deleted.
-PLAN_WEBIO_ID_UNREADABLE = "holds a WebIO element without a readable webIoId, no Web-IO command deleted"
+PLAN_WEBIO_ID_UNREADABLE = "holds an element without a readable reference or webIoId, no Web-IO command deleted"
 # A Web-IO command of an ignored source without a readable webIoId, or an unwired one the last poll
 # does not list: it cannot be checked against the plans.
 COMMAND_NOT_CHECKED = "could not be checked against the plans, not deleted"
+# A Web-IO command the delta sync would delete as an orphan, but a plan still holds a WebIO element of
+# after the unwiring: a user's own plan, or a managed plan the unwiring could not clean up.
+COMMAND_IN_PLAN = (
+    "a function plan still holds its WebIO element, not deleted"
+    " — if the next sync keeps it too, remove the element in that plan"
+)
 # Comexio's plan list could not be read: a plan holding a command may be missing from the cache.
 PLAN_LIST_NAME = "plan list"
 PLAN_LIST_NOT_READ = "could not be read, no Web-IO command deleted"
@@ -1108,6 +1166,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
         self._webhook_updated_knx_ids: set[str] = set()
+        # Unknown IOs a webhook push was already warned about: a stale command pushes on every value
+        # change, so only its first push warns (#251). Cleared with the coordinator on every reload.
+        self._warned_unknown_webhook_ios: set[tuple[str, ...]] = set()
+        self._warned_unknown_webhook_cap = False
         self.last_plan_preview: dict[str, Any] | None = None
         # In-memory copy of the last rendered preview SVG, served directly by the
         # image entity (image.py) without touching the config/www file.
@@ -1910,14 +1972,22 @@ class ComexioCoordinator(DataUpdateCoordinator):
     ]:
         """ha_map, io_meta_by_key, com_map and the per-class count of switched-off commands of an audit."""
         ha_map, io_meta_by_key = self._build_ha_audit_map(final_data)
-        audited_commands, disabled_commands = _split_disabled_commands(
-            final_data["webio_commands"], active_webio_classes(conf)
+        active_classes = active_webio_classes(conf)
+        audited_commands, disabled_commands = _split_disabled_commands(final_data["webio_commands"], active_classes)
+        duplicates, disabled_duplicates = _audited_duplicates(
+            final_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []), active_classes
         )
-        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map)
+        for cls, count in disabled_duplicates.items():  # still on the server, so in the import_disabled count
+            disabled_commands[cls] = disabled_commands.get(cls, 0) + count
+        com_map = self._build_com_audit_map_without_held(audited_commands, final_data, ha_map, duplicates)
         return ha_map, io_meta_by_key, com_map, disabled_commands
 
     def _build_com_audit_map_without_held(
-        self, com_commands: dict[str, Any], final_data: dict[str, Any], ha_map: dict[str, dict[str, Any]]
+        self,
+        com_commands: dict[str, Any],
+        final_data: dict[str, Any],
+        ha_map: dict[str, dict[str, Any]],
+        duplicates: Iterable[Mapping[str, Any]] = (),
     ) -> dict[str, list[dict[str, Any]]]:
         """_build_com_audit_map less the commands of held IOs: imported IOs without an entity.
 
@@ -1930,7 +2000,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         deleted, which it refuses while a command is wired, so only unwired ones go.
         """
         held_map = {key: {"name": name} for key, _io, name in self._io_audit_entries(final_data) if key not in ha_map}
-        com_map = _build_com_audit_map(com_commands, ha_map | held_map)
+        com_map = _build_com_audit_map(com_commands, ha_map | held_map, duplicates)
         held = [key for key in held_map if key in com_map]
         for key in held:
             del com_map[key]
@@ -4857,13 +4927,21 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(
                 WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, f"{one_line(ext_name)} {one_line(identifier)}", value
             )
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         elif io:
             previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_LOG_MSG, one_line(ext_name), one_line(identifier), value)
+            self._log_unknown_webhook_io(
+                _webhook_warn_key("io", *key),
+                WEBHOOK_UNKNOWN_IO_LOG_MSG,
+                one_line(ext_name),
+                one_line(identifier),
+                value,
+            )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
@@ -4872,15 +4950,41 @@ class ComexioCoordinator(DataUpdateCoordinator):
         io_id_str = str(io_id)
         if (io := self._quickbus_index.get(io_id_str)) and self._names_another_io_now(io):
             _LOGGER.debug(WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, one_line(io_id_str), value)
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("quickbus", io_id_str))  # warn again later
         elif io:
             previous = self._store_pushed_io_value(io, value)
             label = io.get("name") or io_id_str
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "quickbus", one_line(label), value, previous)
             self._fire_plan_event("io", io_id_str, label, value)
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("quickbus", io_id_str))  # warn again later
         else:
-            _LOGGER.warning(WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG, one_line(io_id_str), value)
+            self._log_unknown_webhook_io(
+                _webhook_warn_key("quickbus", io_id_str),
+                WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
+                one_line(io_id_str),
+                value,
+            )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
+
+    def _log_unknown_webhook_io(self, warn_key: tuple[str, ...], msg: str, *args: Any) -> None:
+        """Warn about the first push of an unknown IO, log every later push of it at DEBUG only.
+
+        Past WEBHOOK_UNKNOWN_IO_WARNED_MAX remembered IOs, one warning says so and a further unknown IO
+        logs at DEBUG only: a warning on each of its pushes would bring back the log flood of #251.
+        """
+        warned = self._warned_unknown_webhook_ios
+        if warn_key in warned:
+            _LOGGER.debug(msg, *args)
+            return
+        if len(warned) < WEBHOOK_UNKNOWN_IO_WARNED_MAX:
+            warned.add(warn_key)
+            _LOGGER.warning(msg, *args)
+            return
+        if not self._warned_unknown_webhook_cap:
+            self._warned_unknown_webhook_cap = True
+            _LOGGER.warning(WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG, WEBHOOK_UNKNOWN_IO_WARNED_MAX)
+        _LOGGER.debug(msg, *args)
 
     async def async_load_extension_firmware(self) -> None:
         """Restore the last checked firmware snapshot from disk (called once at setup).
@@ -8663,7 +8767,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             for fub_id, plan_data in plans.items():
                 if not self._is_managed_function_plan(fub_id):
                     continue
-                if self.api._find_webio_wiring(webio_id, plan_data) is not None:
+                if self._unwire_element_ids(webio_id, plan_data):
                     # No break: a stray duplicate element (e.g. left behind by a delete+
                     # recreate cycle, see _wired_source_webio_pairs) can reuse the same
                     # webIoId in more than one managed plan. Collecting into every matching
@@ -8687,17 +8791,80 @@ class ComexioCoordinator(DataUpdateCoordinator):
         elem_ids: list[int] = []
         found_webio_ids: list[int] = []
         for webio_id in ids:
-            pair = self.api._find_webio_wiring(webio_id, plan_data)
-            if pair is not None:
-                elem_ids.extend(pair)
+            if plan_elem_ids := self._unwire_element_ids(webio_id, plan_data):
+                elem_ids.extend(plan_elem_ids)
                 found_webio_ids.append(webio_id)
         return await self.delete_plan_elements_for_commands(fub_id, elem_ids, found_webio_ids, webio_id_to_cmd_id)
 
+    def _unwire_element_ids(self, webio_id: int, plan_data: dict) -> list[int]:
+        """The plan elements unwiring webio_id removes: each of its WebIO elements and the source wired to it.
+
+        A WebIO element nothing is wired to goes too: the dangling-element cleanup removes source
+        elements only, so it would outlive the command. Empty if the plan holds no element of webio_id.
+        """
+        # An element with a null or malformed reference is no match. Stricter than plan_webio_ids on purpose:
+        # an element only that one reads as WebIO stays, and so does its command.
+        elements = plan_data.get("elements", {})
+        found = ComexioAPI._find_source_element_ids(elements, webio_id, FUNCTION_PLAN_REF_TYPE_WEBIO)
+        elem_ids = [
+            elem_id for found_id in found for elem_id in self._webio_element_unwiring(found_id, webio_id, plan_data)
+        ]
+        return list(dict.fromkeys(elem_ids))
+
+    def _webio_element_unwiring(self, elem_id: str, webio_id: int, plan_data: dict) -> list[int]:
+        """The elements unwiring one WebIO element of webio_id removes: none, the element, or it and its source.
+
+        The element stays when no delete request can carry its id, when it feeds anything, when more than one
+        wire feeds it or when a connection cannot be read: that is plan logic beyond the integration's one wire
+        (see ComexioAPI._wired_elsewhere), and the plan check after the unwiring keeps the command for it. The
+        source goes only when it feeds nothing else (_source_shared).
+        """
+        if not ComexioAPI._deletable_element_id(elem_id):
+            return []
+        sources: list[str] = []
+        feeds = unreadable = False
+        for conn_data in plan_data.get("connections", {}).values():
+            ends = ComexioAPI._connection_ends(conn_data)
+            if ends is None:
+                unreadable = True
+            elif ends[0] == elem_id:
+                feeds = True
+            elif elem_id in ends[1]:
+                sources.append(ends[0])
+        if unreadable:
+            _LOGGER.warning(
+                "[%s] Unwiring webIoId %s: a plan connection cannot be read, element %s stays",
+                self.server_id,
+                webio_id,
+                elem_id,
+            )
+            return []
+        if feeds or len(sources) > 1:
+            _LOGGER.info(
+                "[%s] Unwiring webIoId %s: element %s takes part in more plan logic, it stays",
+                self.server_id,
+                webio_id,
+                elem_id,
+            )
+            return []
+        if not sources:
+            return [int(elem_id)]
+        if _source_shared(sources[0], webio_id, plan_data):
+            # Deleting the source would cut the other wire (e.g. to the duplicate's retained namesake).
+            _LOGGER.info(
+                "[%s] Unwiring webIoId %s: source element %s feeds more than it, it stays",
+                self.server_id,
+                webio_id,
+                sources[0],
+            )
+            return [int(elem_id)]
+        return [int(elem_id), int(sources[0])]
+
     def webio_id_to_cmd_id(self) -> dict[str, Any]:
-        """webIoId (as str) -> real Web-IO command id, from the last poll's commands."""
+        """webIoId (as str) -> real Web-IO command id, from the last poll's commands (duplicates included)."""
         return {
             str(cmd["webIoId"]): cmd.get("cmdId")
-            for cmd in (self.data or {}).get("webio_commands", {}).values()
+            for _name, cmd in _stored_commands(self.data or {})
             if cmd.get("webIoId") is not None
         }
 
@@ -8798,6 +8965,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         deletable = [cmd_id for _name, cmd_id, webio_id in candidates if webio_id not in placed]
         return SourceCommandCheck(deletable, [], unchecked, in_use)
 
+    async def webio_ids_in_plans(self, webio_ids: Iterable[int]) -> tuple[set[int], list[tuple[str, str]]]:
+        """(the webio_ids a plan still holds a WebIO element of, plans not checked).
+
+        The delta sync unwires its orphans from the managed plans only, so a user's own plan may still
+        use one, and so may a managed plan the unwiring failed in; deleting its command would leave that
+        plan an element of a deleted command. One plan that could not be checked keeps every command
+        (its element may sit there), as in deletable_source_command_ids.
+        """
+        wanted = set(webio_ids)
+        placed, failures = await self._placed_webio_ids()
+        return (wanted, failures) if failures else (wanted & placed, [])
+
     async def _placed_webio_ids(self) -> tuple[set[int], list[tuple[str, str]]]:
         """(webIoIds with an element in any plan, (name, detail) of each plan that could not be checked).
 
@@ -8861,7 +9040,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         found: list[tuple[str, Any, int]] = []
         unreadable: list[str] = []
         listed: set[Any] = set()
-        for name, info in data.get("webio_commands", {}).items():
+        for name, info in _stored_commands(data):
             cmd_id = info.get("cmdId")
             listed.add(cmd_id)
             if cmd_id not in unwired_cmd_ids and not _serves_sources(name, info, category, (names, taken, keys)):
@@ -8901,10 +9080,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Remove Function-Plan wiring for the given webIoIds and resolve their real cmdIds.
 
         For each webio_id: locates its WebIO element + connected source element (marker or
-        IO) across managed plans (or just preferred_fub_id if given), deletes both, restarts
-        the plan if it was running. The real Web-IO command id is resolved from self.data["webio_commands"]
-        (webIoId -> cmdId) — never guessed from a plan element's ref_id, which IS the
-        webIoId, not the WebCommandId (see project-logikplan-api memory).
+        IO) across managed plans (or just preferred_fub_id if given), deletes both — a WebIO
+        element nothing is wired to on its own — and restarts the plan if it was running. The real
+        Web-IO command id is resolved from self.data["webio_commands"] (webIoId -> cmdId) — never
+        guessed from a plan element's ref_id, which IS the webIoId, not the WebCommandId (see
+        project-logikplan-api memory).
 
         Returns {"deleted_elem_count": int, "cmd_ids": list[int], "stopped_plans": [...],
         "stop_failures": [...], "failures": [(name, detail), ...], "touched_fub_ids": list[int],
@@ -8912,7 +9092,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         failures lists plans that could not be loaded (wiring not checked) or whose element
         deletion failed — both leave Function-Plan debris behind — and unwired commands whose
         cmdId could not be resolved, which stay in Comexio. cmd_ids only includes commands
-        actually found wired and successfully unwired; the caller is responsible for deleting
+        actually found in a plan and successfully unwired; the caller is responsible for deleting
         each via api.delete_single_command afterwards. touched_fub_ids lists plans that had at
         least one element successfully removed — useful for a caller that wants to re-sort the
         plan afterwards (deletion opens a gap in the grid that a sort would close);

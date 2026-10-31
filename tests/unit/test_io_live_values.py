@@ -13,7 +13,13 @@ import pytest
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.binary_sensor import ComexioBinarySensor
 from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY
-from custom_components.comexio.coordinator import ComexioCoordinator, _io_identity, _io_label, _io_live_requests
+from custom_components.comexio.coordinator import (
+    ComexioCoordinator,
+    _io_identity,
+    _io_label,
+    _io_live_requests,
+    _webhook_warn_key,
+)
 from custom_components.comexio.switch import ComexioIOSwitch
 from tests.common import load_json_fixture
 
@@ -56,6 +62,8 @@ def _coordinator(
         "schedule_plan_preview_refresh": MagicMock(),
         "_webhook_updated_markers": set(),
         "_webhook_updated_io_ids": set(),
+        "_warned_unknown_webhook_ios": set(),
+        "_warned_unknown_webhook_cap": False,
         "_last_poll_scraped": False,
         "_polled_plan_ids": None,
         "note_comexio_unreachable": MagicMock(),
@@ -742,6 +750,54 @@ def test_a_pushed_io_identifier_with_line_breaks_stays_on_one_log_line(
     assert ("is for the IO that had its id before" if former else "for unknown IO") in caplog.text
     assert "\nforged" not in caplog.text
     assert "\r" not in caplog.text
+
+
+def test_only_the_first_push_of_an_unknown_io_warns(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """A stale command pushes on every value change: one WARNING per IO, the rest at DEBUG (#251).
+
+    The IO is matched case-insensitively like the IO index, so "multibridge a6/tl1" is the same IO.
+    """
+    coordinator = _coordinator(api)
+
+    with caplog.at_level(logging.DEBUG):
+        for ext, identifier in (("Multibridge A6", "TL1"), ("multibridge a6", "tl1"), ("Multibridge A6", "HUM")):
+            coordinator.update_io_by_name(ext, identifier, 1)
+
+    levels = [(record.levelno, record.args[1]) for record in caplog.records if "for unknown IO" in record.msg]
+    assert levels == [(logging.WARNING, "TL1"), (logging.DEBUG, "tl1"), (logging.WARNING, "HUM")]
+
+
+def test_an_io_that_became_known_warns_again_once_unknown(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    """A matched push forgets the earlier warning: the IO going unknown again is news, not noise."""
+    coordinator = _coordinator(api)
+    _index_scraped_ios(coordinator, _config())
+    known = coordinator._io_index.pop(("base", "ai1"))
+
+    with caplog.at_level(logging.DEBUG):
+        coordinator.update_io_by_name("BASE", "AI1", 1.0)
+        coordinator._io_index["base", "ai1"] = known
+        coordinator.update_io_by_name("BASE", "AI1", 2.0)
+        del coordinator._io_index["base", "ai1"]
+        coordinator.update_io_by_name("BASE", "AI1", 3.0)
+
+    levels = [record.levelno for record in caplog.records if "for unknown IO" in record.msg]
+    assert levels == [logging.WARNING, logging.WARNING]
+    assert coordinator._warned_unknown_webhook_ios == {_webhook_warn_key("io", "base", "ai1")}
+
+
+def test_a_push_for_a_former_io_forgets_the_earlier_warning(api: ComexioAPI) -> None:
+    """The address is known again, if for another IO now: it going unknown later warns again."""
+    coordinator = _coordinator(api)
+    _index_scraped_ios(coordinator, _config())
+    known = coordinator._io_index.pop(("base", "ai1"))
+
+    coordinator.update_io_by_name("BASE", "AI1", 1.0)
+    coordinator._io_index["base", "ai1"] = known
+    coordinator._io_identities[known["id"]] = ("another", "io")
+    coordinator.update_io_by_name("BASE", "AI1", 2.0)
+
+    assert known["id"] not in coordinator._webhook_updated_io_ids
+    assert coordinator._warned_unknown_webhook_ios == set()
 
 
 def test_webhook_value_during_a_failed_io_fetch_is_kept_as_real(api: ComexioAPI) -> None:

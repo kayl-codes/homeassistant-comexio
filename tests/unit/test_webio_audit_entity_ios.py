@@ -14,6 +14,7 @@ from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     QUICKBUS_IO_DATA_KEY,
+    WEBIO_COMMAND_DUPLICATES_KEY,
     WebioClass,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
@@ -174,10 +175,13 @@ def test_io_has_entity(io: dict[str, Any], include_offline: bool, expected: bool
 
 
 def _audit(
-    coordinator: ComexioCoordinator, commands: dict[str, Any], data: dict[str, Any] | None = None
+    coordinator: ComexioCoordinator,
+    commands: dict[str, Any],
+    data: dict[str, Any] | None = None,
+    duplicates: list[dict[str, Any]] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """missing / orphan / ... of the audit, as the repair and the sync see them (_async_audit_webio's maps)."""
-    data = {**(data or _data()), "webio_commands": commands}
+    data = {**(data or _data()), "webio_commands": commands, WEBIO_COMMAND_DUPLICATES_KEY: duplicates or []}
     ha_map, io_meta_by_key, com_map, _disabled = coordinator._build_audit_maps({}, data)
     return coordinator._compare_audit_maps(ha_map, com_map, {}, (None, None, None), io_meta_by_key, set(), set())
 
@@ -228,6 +232,73 @@ def test_a_stale_name_of_two_ios_is_neither_renamed_nor_an_orphan(offline: bool,
 
     assert (found["rename"], found["orphan"]) == ([], [])
     assert [item["name"] for item in found["missing"]] == missing
+
+
+def _duplicate(name: str, cmd_id: int, webio_class: str = "io") -> dict[str, Any]:
+    """An entry of aiocomexio's webio_command_duplicates: a command whose name an earlier one has."""
+    return {"name": name, "webIoId": cmd_id, "cmdId": cmd_id, "typeId": 1, "webioClass": webio_class}
+
+
+def test_every_name_duplicate_is_an_orphan_in_one_audit() -> None:
+    """A sync deletes them all at once, not one layer per run while the next duplicate moves up (#251).
+
+    Both cases: a copy of an expected command (the first one stays) and copies of a command
+    no IO needs any more, e.g. the IO commands of Quickbus devices from before Quickbus support.
+    """
+    commands = {**EVERY_COMMAND, "HA IO Multibridge A6 TL1": _command(20)}
+    duplicates = [
+        _duplicate("HA IO EXT-1 I1", 11),
+        _duplicate("HA IO Multibridge A6 TL1", 21),
+        _duplicate("HA IO Multibridge A6 TL1", 22),
+    ]
+
+    found = _audit(_coordinator(), commands, duplicates=duplicates)
+
+    assert sorted(item["id"] for item in found["orphan"]) == [11, 20, 21, 22]
+    assert (found["missing"], found["rename"], found["type"]) == ([], [], [])
+
+
+def test_a_name_duplicate_of_another_type_is_an_orphan_not_a_type_fix() -> None:
+    """The first command of the name keeps the key; a copy of the wrong type goes, the first stays as it is."""
+    duplicate = {**_duplicate("HA IO EXT-1 I1", 11), "typeId": 2}
+
+    found = _audit(_coordinator(), EVERY_COMMAND, duplicates=[duplicate])
+
+    assert [item["id"] for item in found["orphan"]] == [11]
+    assert (found["missing"], found["rename"], found["type"]) == ([], [], [])
+
+
+@pytest.mark.parametrize(
+    "duplicate",
+    [
+        # Held like the first command of its name: the offline extension's IO keeps its commands.
+        _duplicate("HA IO vDS1 I1", 12),
+        # A switched-off category (KNX import is off by default) is left to the import_disabled repair.
+        _duplicate("HA K7 Jalousie", 13, "knx"),
+    ],
+    ids=["held IO", "switched-off class"],
+)
+def test_a_name_duplicate_the_audit_leaves_alone_is_no_orphan(duplicate: dict[str, Any]) -> None:
+    found = _audit(_coordinator(), EVERY_COMMAND, duplicates=[duplicate])
+
+    assert found["orphan"] == []
+
+
+@pytest.mark.parametrize(
+    ("duplicate", "disabled_count"),
+    [(_duplicate("HA K7 Jalousie", 14, "knx"), 2), (_duplicate("HA IO EXT-1 I1", 11), 1)],
+    ids=["switched-off class", "imported class"],
+)
+def test_a_name_duplicate_of_a_switched_off_class_counts_as_disabled(
+    duplicate: dict[str, Any], disabled_count: int
+) -> None:
+    """The import_disabled repair names how many commands of the class stay on the server: copies too."""
+    commands = {**EVERY_COMMAND, "HA K7 Jalousie": {**_command(13), "webioClass": "knx"}}
+    data = {**_data(), "webio_commands": commands, WEBIO_COMMAND_DUPLICATES_KEY: [duplicate]}
+
+    *_maps, disabled = _coordinator()._build_audit_maps({}, data)
+
+    assert disabled == {WebioClass.KNX: disabled_count}
 
 
 def test_include_offline_extensions_from_the_entry_data_counts_too() -> None:
