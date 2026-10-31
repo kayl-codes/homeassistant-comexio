@@ -435,15 +435,18 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
 
     Returns the outcome (ACCEPT_*) and the certificate Comexio presents now, None if it could not be read.
     """
+    # The connection the user decided on: a reconfigure while this waits for the lock or reads counts as a change,
+    # as does one that dropped the pin before (the push button looks the user up after checking it).
+    host, pinned = entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
     locks: dict[str, asyncio.Lock] = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {})
     async with locks.setdefault(entry.entry_id, asyncio.Lock()):
-        pinned = entry.data[CONF_CERTIFICATE_FINGERPRINT]
-        host = entry.data[CONF_HOST]
-        if shown == pinned:
+        if entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == shown:
             # Accepted already (a second tap, or the repair alongside). A repair still showing it is left over.
             if presented_fingerprint(hass, entry.entry_id) == shown:
                 async_clear_certificate_changed(hass, entry.entry_id)
             return ACCEPT_PINNED, shown
+        if _connection_changed(entry, host, pinned, shown):
+            return ACCEPT_ENTRY_CHANGED, None
         try:
             current = await fetch_certificate_fingerprint(host)
         except (ComexioError, ValueError) as err:
@@ -452,15 +455,7 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
         if hass.config_entries.async_get_entry(entry.entry_id) is not entry:
             _LOGGER.warning("Comexio at %s: entry removed while its certificate was read, nothing pinned", host)
             return ACCEPT_ENTRY_GONE, None
-        if (entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)) != (host, pinned):
-            # Reconfigured meanwhile: the certificate read belongs to the old connection, the entry has its own pin.
-            _LOGGER.warning(
-                "Comexio at %s: connection changed while its certificate %s was read, nothing pinned (now %s, %s)",
-                host,
-                format_fingerprint(current),
-                entry.data[CONF_HOST],
-                "no pin" if (now := entry.data.get(CONF_CERTIFICATE_FINGERPRINT)) is None else format_fingerprint(now),
-            )
+        if _connection_changed(entry, host, pinned, shown):
             return ACCEPT_ENTRY_CHANGED, None
         if current == pinned:
             # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
@@ -476,7 +471,7 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
             "Comexio at %s: certificate %s pinned by the user, replacing %s",
             entry.data[CONF_HOST],
             format_fingerprint(current),
-            format_fingerprint(pinned),
+            format_fingerprint(entry.data[CONF_CERTIFICATE_FINGERPRINT]),  # still the pin: unchanged, checked above
         )
         # A loaded entry reloads through its update listener on the data change below.
         reload = entry.state is not ConfigEntryState.LOADED
@@ -485,6 +480,25 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
         if reload:
             hass.config_entries.async_schedule_reload(entry.entry_id)
         return ACCEPT_PINNED, current
+
+
+def _connection_changed(entry: ConfigEntry, host: str, pinned: str | None, shown: str) -> bool:
+    """Whether the entry was reconfigured since the user accepted `shown` (host or pin differ); logs it if so.
+
+    The user compared `shown` against that connection's pin: pinning it now would overwrite the new one's.
+    No pin to compare against (HTTPS dropped already) counts as a change too.
+    """
+    now_host, now_pin = entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+    if pinned is not None and (now_host, now_pin) == (host, pinned):
+        return False
+    _LOGGER.warning(
+        "Comexio at %s: connection changed while accepting certificate %s, nothing pinned (now %s, %s)",
+        host,
+        format_fingerprint(shown),
+        now_host,
+        "no pin" if now_pin is None else format_fingerprint(now_pin),
+    )
+    return True
 
 
 async def async_handle_certificate_action(hass: HomeAssistant, event: Event) -> None:

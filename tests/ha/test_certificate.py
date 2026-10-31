@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUs
 from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.certificate import (
+    CERTIFICATE_ACCEPT_LOCKS,
     CERTIFICATE_PUSHES,
     accept_action_id,
     async_clear_certificate_changed,
@@ -1919,6 +1920,7 @@ async def test_two_taps_at_once_read_the_certificate_once(
     api_attributes: dict,
     certificate_handshake: AsyncMock,
     hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     phone, _family = await _waiting_for_the_button(
         hass, pinned_entry, api_returns, api_attributes, certificate_handshake
@@ -1945,6 +1947,9 @@ async def test_two_taps_at_once_read_the_certificate_once(
     assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
     assert _issue(hass, pinned_entry) is None
     assert pinned_entry.state is ConfigEntryState.LOADED
+    # The second tap finds the first one's pin before it compares connections: not taken for a reconfigure.
+    assert "connection changed" not in caplog.text
+    assert caplog.text.count("pinned by the user, replacing") == 1
 
 
 @pytest.mark.parametrize(
@@ -2236,21 +2241,29 @@ async def test_a_repair_whose_entry_is_removed_while_it_reads_the_certificate_pi
     assert _issue(hass, pinned_entry) is None
 
 
-@pytest.mark.parametrize(
+RECONFIGURED = pytest.mark.parametrize(
     "change",
     [{CONF_HOST: "192.168.1.11"}, {CONF_CERTIFICATE_FINGERPRINT: THIRD}, {CONF_CERTIFICATE_FINGERPRINT: None}],
     ids=["host", "pin", "https_dropped"],
 )
+
+
+def _reconfigured(entry: MockConfigEntry, change: dict[str, str | None]) -> dict[str, Any]:
+    """The entry's data after a reconfigure applying `change`; a None value drops the key (HTTPS turned off)."""
+    return {key: value for key, value in {**entry.data, **change}.items() if value is not None}
+
+
+@RECONFIGURED
 async def test_a_repair_whose_entry_is_reconfigured_while_it_reads_the_certificate_pins_nothing(
     hass: HomeAssistant,
     pinned_entry: MockConfigEntry,
     certificate_handshake: AsyncMock,
     caplog: pytest.LogCaptureFixture,
-    change: dict[str, str],
+    change: dict[str, str | None],
 ) -> None:
     # The certificate read belongs to the old connection: pinning it would overwrite the reconfigured one's pin.
     flow = await _repair_form(hass, pinned_entry)
-    reconfigured = {key: value for key, value in {**pinned_entry.data, **change}.items() if value is not None}
+    reconfigured = _reconfigured(pinned_entry, change)
 
     async def _reconfigured_meanwhile(_host: str) -> str:
         hass.config_entries.async_update_entry(pinned_entry, data=reconfigured)
@@ -2263,7 +2276,37 @@ async def test_a_repair_whose_entry_is_reconfigured_while_it_reads_the_certifica
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "certificate_entry_changed"
     assert dict(pinned_entry.data) == reconfigured
-    assert "connection changed while its certificate" in caplog.text
+    assert "connection changed while accepting certificate" in caplog.text
+
+
+@RECONFIGURED
+async def test_a_repair_whose_entry_is_reconfigured_while_it_waits_for_another_acceptance_pins_nothing(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    certificate_handshake: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+    change: dict[str, str | None],
+) -> None:
+    # Another acceptance holds the lock; the reconfigured values must not become this one's baseline.
+    flow = await _repair_form(hass, pinned_entry)
+    lock = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {}).setdefault(pinned_entry.entry_id, asyncio.Lock())
+    await lock.acquire()
+    confirm = hass.async_create_task(flow.async_step_certificate_changed({}))
+    await asyncio.sleep(0)
+    assert not confirm.done()  # waiting at the lock, its baseline taken
+    assert lock.locked()
+    reconfigured = _reconfigured(pinned_entry, change)
+    hass.config_entries.async_update_entry(pinned_entry, data=reconfigured)
+    lock.release()
+
+    result = await confirm
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "certificate_entry_changed"
+    certificate_handshake.assert_not_awaited()
+    assert dict(pinned_entry.data) == reconfigured
+    assert "connection changed while accepting certificate" in caplog.text
+    assert _issue(hass, pinned_entry).data["actual"] == OTHER  # left as it is: the reload decides on it
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -2294,7 +2337,40 @@ async def test_the_push_button_pins_nothing_for_a_connection_reconfigured_while_
     assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == THIRD
     assert _messages(phone) == ["push"]
     assert len(family) == 1
-    assert "connection changed while its certificate" in caplog.text
+    assert "connection changed while accepting certificate" in caplog.text
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_pins_nothing_once_https_is_dropped_while_it_looks_the_user_up(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The pin is checked before the user lookup; a reconfigure in that await drops it. No traceback, no pin.
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    get_user = hass.auth.async_get_user
+
+    async def _https_dropped_meanwhile(user_id: str) -> MockUser | None:
+        data = {key: value for key, value in pinned_entry.data.items() if key != CONF_CERTIFICATE_FINGERPRINT}
+        hass.config_entries.async_update_entry(pinned_entry, data=data)
+        return await get_user(user_id)
+
+    with patch.object(hass.auth, "async_get_user", side_effect=_https_dropped_meanwhile):
+        await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert CONF_CERTIFICATE_FINGERPRINT not in pinned_entry.data
+    certificate_handshake.assert_not_awaited()
+    assert "connection changed while accepting certificate" in caplog.text
+    assert "the certificate push button failed" not in caplog.text
+    assert _messages(phone) == ["push"]
+    assert len(family) == 1
+    assert _issue(hass, pinned_entry).data["actual"] == OTHER  # left as it is: the reload decides on it
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
