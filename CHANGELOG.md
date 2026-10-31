@@ -7,6 +7,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes & Refactoring
+- **Same-named Web-IO commands are cleaned up in one sync:** several Web-IO commands can share one name on the Comexio server, e.g. leftover `HA IO <ext> TL1` commands from before Quickbus support. The audit saw only the first command of each name, so every sync deleted just one of them and the "Web-IO mismatch" repair came back after the next poll. Every duplicate now counts as an orphan and one sync removes them all; a command still placed in a function plan is kept, and if a plan cannot be read, every command is kept. Reported by **@mexpert71** (#251, #252).
+- **Pushes for an unknown IO warn once:** a stale command that keeps pushing values for an IO Home Assistant does not track logs one WARNING per IO instead of one per push; repeats go to DEBUG (#252).
+
 ---
 
 ## [0.30.0] — 2026-10-29
