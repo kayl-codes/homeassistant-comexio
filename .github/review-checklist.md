@@ -222,6 +222,17 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   (to start, to push, to clear) is re-checked for each plan right before its own await and its answer — a plan
   started or restored while an earlier plan's await ran keeps its confirmation (`_started_in_check`,
   `unless_restored`).
+- **Capture the decision's target before the first await:** an action that carries out a user's decision (a push
+  button, a repair confirmation, a dialog step) takes everything that names what was decided on — host, pin, the
+  value shown to the user, the version the push or dialog was issued for — when the decision arrives, before its
+  first `await` (a lock, a user lookup, a network read). Right before the write it compares that capture with the
+  current state and writes nothing if anything changed. A value read only after an await is already the new state
+  and compares equal to itself, so a reconfigure during the await goes unnoticed and the old decision lands on the
+  new connection. What the user saw travels with the decision: a push's action id names the pin it was issued
+  against, so an older push is recognised as outdated instead of replacing a newer pin. Flag a read of
+  `entry.data`, issue data or the pin that a decision depends on placed after that decision's first `await`, and a
+  write that follows the last await without comparing against the capture (#250: `_accept_tap`,
+  `async_accept_certificate`).
 - **Skip guards before the first write:** a list chosen up front (the classes a sync runs, the plans a repair
   fixes) can be stale by the time an item's turn comes — an options save mid-sync can empty a class. The guard
   against writing for nothing (an empty template, no wanted command) runs right before that item's first write and
