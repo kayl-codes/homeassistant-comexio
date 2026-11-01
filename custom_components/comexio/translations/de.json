@@ -630,7 +630,8 @@
           "entry_not_found": "Der zugehörige Konfigurationseintrag wurde nicht gefunden — er wurde eventuell entfernt.",
           "cannot_connect": "Das Comexio-Zertifikat konnte nicht erneut gelesen werden ({host}). Nichts wurde geändert — bitte erneut versuchen, sobald Comexio erreichbar ist.",
           "certificate_restored": "Comexio zeigt wieder das gespeicherte Zertifikat. Nichts wurde geändert.",
-          "certificate_changed_again": "Comexio zeigt jetzt noch ein anderes Zertifikat:\n`{actual}`\n\nNichts wurde geändert. Öffne die Reparatur erneut, um dieses zu vergleichen."
+          "certificate_changed_again": "Comexio zeigt jetzt noch ein anderes Zertifikat:\n`{actual}`\n\nNichts wurde geändert. Öffne die Reparatur erneut, um dieses zu vergleichen.",
+          "certificate_entry_changed": "Die Verbindung zu Comexio wurde geändert, während das Zertifikat gelesen wurde. Es wurde kein Zertifikat gespeichert — öffne die Reparatur erneut, falls sie noch angezeigt wird."
         }
       }
     }

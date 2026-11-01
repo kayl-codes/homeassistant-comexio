@@ -630,7 +630,8 @@
           "entry_not_found": "No se encontró la entrada de configuración asociada; puede que se haya eliminado.",
           "cannot_connect": "No se pudo volver a leer el certificado de Comexio ({host}). No se cambió nada; inténtalo de nuevo cuando Comexio esté accesible.",
           "certificate_restored": "Comexio vuelve a presentar el certificado guardado. No se cambió nada.",
-          "certificate_changed_again": "Comexio presenta ahora otro certificado más:\n`{actual}`\n\nNo se cambió nada. Vuelve a abrir la reparación para comparar ese."
+          "certificate_changed_again": "Comexio presenta ahora otro certificado más:\n`{actual}`\n\nNo se cambió nada. Vuelve a abrir la reparación para comparar ese.",
+          "certificate_entry_changed": "La conexión con Comexio se cambió mientras se leía su certificado. No se guardó ningún certificado; vuelve a abrir la reparación si sigue apareciendo."
         }
       }
     }

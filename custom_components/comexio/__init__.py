@@ -9,14 +9,21 @@ from aiocomexio import __version__ as AIOCOMEXIO_VERSION
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as HA_VERSION
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
-from homeassistant.helpers import device_registry as dr, entity_registry as er, issue_registry as ir
+from homeassistant.helpers import (
+    config_validation as cv,
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import slugify
 
 from .certificate import (
     async_clear_certificate_changed,
     async_create_api,
+    async_handle_certificate_action,
     async_remove_certificate_pushes,
     async_replaced_fingerprint,
     async_report_certificate_changed,
@@ -107,6 +114,22 @@ SERVER_LEVEL_UNIQUE_ID_SUFFIXES = (
     "function_plan_auto_start",
     "function_plan_auto_start_user",
 )
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSONAR
+    """Listen for the certificate push's "Accept certificate" button once, for every entry.
+
+    Not per entry: an entry that met another certificate at setup waits for the repair without being loaded,
+    and its push button must work all the same.
+    """
+
+    async def _certificate_action(event: Event) -> None:
+        await async_handle_certificate_action(hass, event)
+
+    hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, _certificate_action)
+    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):

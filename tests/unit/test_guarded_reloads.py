@@ -41,7 +41,7 @@ ALLOWED = {
         1,
         "runs under _sync_lock, which the guard would wait for forever",
     ),
-    ("repairs.py", "ComexioRepairFlow.async_step_certificate_changed"): (2, "only an entry that is not loaded"),
+    ("certificate.py", "async_accept_certificate"): (2, "only an entry that is not loaded"),
     ("switch.py", "ComexioPlanAutoStartSwitch.is_on"): (1, "no reload: getattr reads the plan watchdog flag"),
 }
 

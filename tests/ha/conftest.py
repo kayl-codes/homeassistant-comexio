@@ -133,7 +133,6 @@ def certificate_handshake() -> Generator[AsyncMock]:
     handshake = AsyncMock(name="fetch_certificate_fingerprint", side_effect=ComexioConnectionError("no HTTPS"))
     with (
         patch("custom_components.comexio.certificate.fetch_certificate_fingerprint", handshake),
-        patch("custom_components.comexio.repairs.fetch_certificate_fingerprint", handshake),
         patch("custom_components.comexio.api.fetch_certificate_fingerprint", handshake),
     ):
         yield handshake
