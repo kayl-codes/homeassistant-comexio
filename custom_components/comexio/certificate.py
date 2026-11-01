@@ -511,21 +511,21 @@ async def async_handle_certificate_action(hass: HomeAssistant, event: Event) -> 
     Listens for every entry, also one waiting for the repair (not loaded). Only an administrator's tap counts,
     as only an administrator sees the repair (any companion app can fire this event), and only while the repair
     shows the very certificate of the push and the entry still has the pin the push compared it against.
-    Comexio not answering, an error (the user lookup's too) or a push older than the repair or the pin put the
+    Comexio not answering, an error (the user lookup's too) or a push older than the repair, the pin or the host put the
     repair's push up again: the tap may have taken the push off the phone. Yet another certificate gets its
     own push from the repair it raises. Nothing is pushed once the repair is gone (the pinned certificate is back).
     """
     if (tap := _accept_tap(hass, event)) is None:
         return
-    entry, issued_pin, shown = tap
+    entry, host, issued_pin, shown = tap
     try:
-        if not await _tapped_by_admin(hass, event, entry):
+        if not await _tapped_by_admin(hass, event, host):
             return
-        outcome = await _accept_tapped(hass, entry, issued_pin, shown)
+        outcome = await _accept_tapped(hass, entry, host, issued_pin, shown)
     except Exception:
-        _LOGGER.exception("Comexio at %s: the certificate push button failed", entry.data[CONF_HOST])
+        _LOGGER.exception("Comexio at %s: the certificate push button failed", host)
         outcome = _ACCEPT_FAILED
-    _LOGGER.info("Comexio at %s: certificate push button: %s", entry.data[CONF_HOST], outcome)
+    _LOGGER.info("Comexio at %s: certificate push button: %s", host, outcome)
     if (
         outcome in (ACCEPT_UNREACHABLE, _ACCEPT_FAILED, _ACCEPT_OUTDATED)
         and (presented := presented_fingerprint(hass, entry.entry_id)) is not None
@@ -535,8 +535,11 @@ async def async_handle_certificate_action(hass: HomeAssistant, event: Event) -> 
         async_report_certificate_changed(hass, entry, presented)
 
 
-def _accept_tap(hass: HomeAssistant, event: Event) -> tuple[ConfigEntry, str, str] | None:
-    """(entry, pin the push compared against, certificate shown) of an "Accept certificate" tap, else None."""
+def _accept_tap(hass: HomeAssistant, event: Event) -> tuple[ConfigEntry, str, str, str] | None:
+    """(entry, its host, pin the push compared against, certificate shown) of an "Accept certificate" tap, else None.
+
+    The host is taken at the tap, before the user lookup awaits: a reconfigure meanwhile outdates the push.
+    """
     if (parsed := parse_accept_action(event.data.get("action"))) is None:
         return None
     entry_id, issued_pin, shown = parsed
@@ -544,28 +547,31 @@ def _accept_tap(hass: HomeAssistant, event: Event) -> tuple[ConfigEntry, str, st
     if entry is None or entry.domain != DOMAIN or CONF_CERTIFICATE_FINGERPRINT not in entry.data:
         _LOGGER.warning("Comexio certificate push answered for an entry that is gone or has no pin: %s", entry_id)
         return None
-    return entry, issued_pin, shown
+    return entry, entry.data[CONF_HOST], issued_pin, shown
 
 
-async def _tapped_by_admin(hass: HomeAssistant, event: Event, entry: ConfigEntry) -> bool:
+async def _tapped_by_admin(hass: HomeAssistant, event: Event, host: str) -> bool:
     """Whether an administrator tapped; anyone else's tap is logged and ignored."""
     user_id = event.context.user_id
     user = await hass.auth.async_get_user(user_id) if user_id else None
     if user is None or not user.is_admin:
         _LOGGER.warning(
             "Comexio at %s: certificate push button ignored, only an administrator may accept a certificate (user %s)",
-            entry.data[CONF_HOST],
+            host,
             user.name if user else user_id,
         )
         return False
     return True
 
 
-async def _accept_tapped(hass: HomeAssistant, entry: ConfigEntry, issued_pin: str, shown: str) -> str:
-    """Outcome of an administrator's tap; a push older than the repair or than the pin is outdated.
+async def _accept_tapped(hass: HomeAssistant, entry: ConfigEntry, host: str, issued_pin: str, shown: str) -> str:
+    """Outcome of an administrator's tap; a push older than the repair, the pin or the host is outdated.
 
     One whose certificate is pinned already goes on: the acceptance clears a repair left over from that pin.
     """
+    if (now_host := entry.data[CONF_HOST]) != host:
+        _LOGGER.info("Comexio at %s: certificate push outdated, the entry moved to %s meanwhile", host, now_host)
+        return _ACCEPT_OUTDATED
     pin = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
     if presented_fingerprint(hass, entry.entry_id) != shown or pin not in (issued_pin, shown):
         return _ACCEPT_OUTDATED

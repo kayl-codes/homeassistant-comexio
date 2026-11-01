@@ -2135,16 +2135,20 @@ async def test_the_push_button_touches_no_entry_without_a_comexio_pin(
     hass_admin_user: MockUser,
     domain: str,
     data: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # A stale or forged push must never switch an entry to HTTPS, nor write into another integration's entry.
     await _waiting_for_the_button(hass, pinned_entry, api_returns, api_attributes, certificate_handshake)
     other = MockConfigEntry(domain=domain, data=data)
     other.add_to_hass(hass)
 
-    await _tap(hass, f"COMEXIO_ACCEPT_CERTIFICATE_{other.entry_id}_{OTHER}", hass_admin_user)
+    # Well-formed, so the entry guard decides, not the parser.
+    await _tap(hass, accept_action_id(other.entry_id, PINNED, OTHER), hass_admin_user)
 
     certificate_handshake.assert_not_awaited()
     assert other.data == data
+    assert f"answered for an entry that is gone or has no pin: {other.entry_id}" in caplog.text
+    assert "certificate push button:" not in caplog.text  # stopped at the guard, no later check decided
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -2379,6 +2383,40 @@ async def test_the_push_button_pins_nothing_once_https_is_dropped_while_it_looks
     assert _messages(phone) == ["push"]
     assert len(family) == 1
     assert _issue(hass, pinned_entry).data["actual"] == OTHER  # left as it is: the reload decides on it
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_push_button_pins_nothing_on_a_host_reconfigured_while_it_looks_the_user_up(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    hass_admin_user: MockUser,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Another host, same pin, while the button looks the user up: the push was about the host before, so it
+    # pins nothing there, even if the new host presents the certificate shown, and goes out afresh.
+    phone, family = await _waiting_for_the_button(
+        hass, pinned_entry, api_returns, api_attributes, certificate_handshake
+    )
+    get_user = hass.auth.async_get_user
+
+    async def _host_changed_meanwhile(user_id: str) -> MockUser | None:
+        hass.config_entries.async_update_entry(pinned_entry, data={**pinned_entry.data, CONF_HOST: "192.0.2.99"})
+        return await get_user(user_id)
+
+    with patch.object(hass.auth, "async_get_user", side_effect=_host_changed_meanwhile):
+        await _tap(hass, _button(phone[0]), hass_admin_user)
+
+    assert pinned_entry.data[CONF_HOST] == "192.0.2.99"
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, pinned_entry).data["actual"] == OTHER  # the repair still shows it: the host decided
+    certificate_handshake.assert_not_awaited()
+    assert f"Comexio at {HOST}: certificate push outdated, the entry moved to 192.0.2.99 meanwhile" in caplog.text
+    assert f"Comexio at {HOST}: certificate push button: outdated_push" in caplog.text
+    assert _messages(phone) == ["push", "push"]
+    assert len(family) == 2
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
