@@ -417,6 +417,7 @@ def test_a_poll_fetch_asks_no_handshake_where_no_certificate_can_hide(
     setattr(client, method, AsyncMock(side_effect=error))
 
     assert asyncio.run(fetch(comexio_api)) == failed
+    getattr(client, method).assert_awaited_once()
     handshake.assert_not_called()
     hook.assert_not_called()
 
@@ -890,5 +891,6 @@ def test_the_set_value_service_names_another_certificate_as_its_cause(
     response = asyncio.run(misc._handle_set_value(MagicMock(), MagicMock(data={"target": "M1", "value": "1"})))
 
     assert response["success"] is False
+    client.set_marker_value.assert_awaited_once()
     notify.assert_called_once()
     assert (CERTIFICATE_CHANGED_MSG in notify.call_args.args[1]) is hinted
