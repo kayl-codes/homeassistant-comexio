@@ -331,6 +331,96 @@ def test_every_mismatch_reaches_the_hook_right_away(
     assert comexio_api.certificate_mismatch is not None
 
 
+@pytest.mark.parametrize(("presented", "noted"), [(OTHER, True), (PINNED, False)], ids=["another", "pinned"])
+@pytest.mark.parametrize(
+    ("method", "fetch", "failed"),
+    [
+        ("get_live_states", lambda api: api.get_live_states(4), (None, None)),
+        ("get_io_live_states", lambda api: api.get_io_live_states([(1, "11")]), None),
+        ("get_knx_dpt_catalog", lambda api: api.get_knx_dpt_catalog(), {}),
+    ],
+    ids=["live states poll", "IO live states poll", "KNX catalog"],
+)
+def test_a_poll_fetch_finds_another_certificate_behind_a_connection_error(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    handshake: AsyncMock,
+    method: str,
+    fetch,
+    failed: object,
+    presented: str,
+    noted: bool,
+) -> None:
+    # Comexio's IPv4 and IPv6 address: another certificate on one and an unreachable other arrive as one connection
+    # error. Kept as a mismatch, it raises the repair and the poll keeps its last data (_fail_poll_on_certificate_...).
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    handshake.return_value = presented
+    comexio_api.on_certificate_mismatch = hook = MagicMock()
+    setattr(client, method, AsyncMock(side_effect=ComexioConnectionError("unreachable")))
+
+    assert asyncio.run(fetch(comexio_api)) == failed
+    assert hook.call_args_list == ([call(OTHER)] if noted else [])
+    assert comexio_api.certificate_mismatch_count == int(noted)
+
+
+@pytest.mark.parametrize(
+    ("presented", "cause"),
+    [
+        (OTHER, "ComexioCertificateMismatchError"),
+        (PINNED, "ComexioConnectionError"),
+        (ComexioConnectionError("still unreachable"), "ComexioConnectionError"),
+    ],
+    ids=["another", "pinned", "handshake fails"],
+)
+def test_an_io_live_fetch_keeps_the_certificate_as_its_cause(
+    comexio_api: ComexioAPI, client: MagicMock, handshake: AsyncMock, presented: object, cause: str
+) -> None:
+    # The coordinator reports io_live_fetch_error; behind a connection error it names the certificate when one answers.
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    handshake.side_effect = [presented]
+    client.get_io_live_states = AsyncMock(side_effect=ComexioConnectionError("unreachable"))
+
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
+    assert comexio_api.io_live_fetch_error == f"{cause}: unreachable"
+
+
+@pytest.mark.parametrize(
+    ("pinned", "error"),
+    [(PINNED, ComexioResponseError("bad answer", status=500)), (None, ComexioConnectionError("unreachable"))],
+    ids=["no connection error", "nothing pinned"],
+)
+@pytest.mark.parametrize(
+    ("method", "fetch", "failed"),
+    [
+        ("get_live_states", lambda api: api.get_live_states(4), (None, None)),
+        ("get_io_live_states", lambda api: api.get_io_live_states([(1, "11")]), None),
+        ("get_knx_dpt_catalog", lambda api: api.get_knx_dpt_catalog(), {}),
+    ],
+    ids=["live states poll", "IO live states poll", "KNX catalog"],
+)
+def test_a_poll_fetch_asks_no_handshake_where_no_certificate_can_hide(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    handshake: AsyncMock,
+    method: str,
+    fetch,
+    failed: object,
+    pinned: str | None,
+    error: Exception,
+) -> None:
+    # Only a connection error with a pin can hide another certificate; every other failure stays a plain one.
+    comexio_api.fingerprint = pinned
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    comexio_api.on_certificate_mismatch = hook = MagicMock()
+    setattr(client, method, AsyncMock(side_effect=error))
+
+    assert asyncio.run(fetch(comexio_api)) == failed
+    handshake.assert_not_called()
+    hook.assert_not_called()
+
+
 def test_a_system_info_poll_meeting_another_certificate_raises_the_repair(
     comexio_api: ComexioAPI, client: MagicMock
 ) -> None:

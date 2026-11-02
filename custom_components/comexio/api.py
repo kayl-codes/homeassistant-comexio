@@ -1292,6 +1292,16 @@ class ComexioAPI:
         self._handshake_failure_logged = False
         return None if current == self.fingerprint else current
 
+    async def _replaced_certificate_behind(self, err: ComexioError) -> ComexioCertificateMismatchError | None:
+        """The mismatch a connection error hides, else None.
+
+        Comexio takes one IPv4 and one IPv6 address: with both in DNS, aiohttp reports another certificate on one
+        and an unreachable other as a connection error, which fetch_replaced_fingerprint tells apart.
+        """
+        if not isinstance(err, ComexioConnectionError) or (actual := await self.fetch_replaced_fingerprint()) is None:
+            return None
+        return ComexioCertificateMismatchError(str(err), expected=self.fingerprint or "", actual=actual)
+
     async def get_raw_config(self) -> dict[str, Any]:
         """The function module page's config objects ($FubModules, $Fubs, ...), keyed without "$".
 
@@ -1436,6 +1446,9 @@ class ComexioAPI:
             self._note_certificate_mismatch(err, "KNX DPT catalog not fetched")
             return self._knx_dpt_catalog or {}
         except ComexioError as err:
+            if (mismatch := await self._replaced_certificate_behind(err)) is not None:
+                self._note_certificate_mismatch(mismatch, "KNX DPT catalog not fetched")
+                return self._knx_dpt_catalog or {}
             _LOGGER.warning("Failed to fetch KNX DPT catalog, keeping the last known-good one: %s", err)
             return self._knx_dpt_catalog or {}
         self._knx_dpt_catalog = result
@@ -1483,6 +1496,9 @@ class ComexioAPI:
             self._note_certificate_mismatch(err, "Live states not fetched")
             return None, None
         except ComexioError as err:
+            if (mismatch := await self._replaced_certificate_behind(err)) is not None:
+                self._note_certificate_mismatch(mismatch, "Live states not fetched")
+                return None, None
             _LOGGER.error("Live states fetch failed: %s", err)
             return None, None
         return states.markers, states.knx
@@ -1513,7 +1529,12 @@ class ComexioAPI:
             _LOGGER.log(level, "IO live states request refused: %s", err, exc_info=True)
             return None
         except ComexioError as err:
-            self.io_live_fetch_error = f"{type(err).__name__}: {err}"
+            mismatch = await self._replaced_certificate_behind(err)
+            cause = mismatch or err
+            self.io_live_fetch_error = f"{type(cause).__name__}: {cause}"
+            if mismatch is not None:
+                self._note_certificate_mismatch(mismatch, "IO live states not fetched")
+                return None
             _LOGGER.debug("IO live states fetch failed: %s", self.io_live_fetch_error, exc_info=True)
             return None
         self.io_live_fetch_error = None
@@ -5582,9 +5603,7 @@ class ComexioAPI:
             self._note_write_met_another_certificate(err, target_type, target_id)
             return False
         except ComexioConnectionError as err:
-            # A foreign certificate on a host name with several addresses arrives as a connection error.
-            if (actual := await self.fetch_replaced_fingerprint()) is not None:
-                mismatch = ComexioCertificateMismatchError(str(err), expected=self.fingerprint or "", actual=actual)
+            if (mismatch := await self._replaced_certificate_behind(err)) is not None:
                 self._note_write_met_another_certificate(mismatch, target_type, target_id)
                 return False
             failure: Exception = err
