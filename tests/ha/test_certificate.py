@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import Generator
+from functools import partial
 import logging
 import re
 from typing import Any
@@ -2641,15 +2642,14 @@ async def test_a_poll_meeting_another_certificate_keeps_reading_until_one_gets_t
         assert response.status == 200
         assert hass.states.get(MARKER_SWITCH).state == state
 
-    async def write_meets_foreign_certificate(*_args: object) -> bool:
-        # What ComexioAPI.set_value answers once the write met the mismatch.
-        api.last_write_met_another_certificate = True
-        return False
-
-    api.set_value = AsyncMock(side_effect=write_meets_foreign_certificate)
+    # The real write, on a client whose request meets the mismatch.
+    api.set_value = partial(ComexioAPI.set_value, api)
+    api.client.set_marker_value = AsyncMock(
+        side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+    )
     with pytest.raises(HomeAssistantError, match=re.escape(CERTIFICATE_CHANGED_MSG)):
         await hass.services.async_call("switch", "turn_on", {"entity_id": MARKER_SWITCH}, blocking=True)
-    api.set_value.assert_awaited_once()
+    api.client.set_marker_value.assert_awaited_once()
 
     async def pinned_certificate() -> dict:
         api.certificate_mismatch = None

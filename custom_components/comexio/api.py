@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import timedelta
 import hashlib
 import logging
@@ -103,6 +104,12 @@ _PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio 
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 
 _LOGGER = logging.getLogger(__name__)
+
+# The API whose set_value last met another certificate, kept per asyncio task: two writes in flight at once (two
+# entities, a service call) run in tasks of their own, so neither reads the other's cause.
+_write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
+    "comexio_write_met_another_certificate", default=None
+)
 
 
 def _webhook_path(server_id: str) -> str:
@@ -698,9 +705,6 @@ class ComexioAPI:
         # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
         self.certificate_mismatch_count = 0
         self.last_certificate_mismatch: ComexioCertificateMismatchError | None = None
-        # Whether the last set_value was refused because another certificate answered; read right after the
-        # write, so it names that write's cause, not a mismatch some other request met before.
-        self.last_write_met_another_certificate = False
         # The presented fingerprint last logged at ERROR: a mismatch that persists is logged once, then
         # at debug (the repair is up). Cleared by a login or config fetch that gets through.
         self._mismatch_logged: str | None = None
@@ -5563,7 +5567,7 @@ class ComexioAPI:
         identifier: str | None = None,
     ) -> bool:
         """API write via Basic Auth; False if Comexio refused it or could not be reached."""
-        self.last_write_met_another_certificate = False
+        _write_met_another_certificate.set(None)
         try:
             if target_type == "marker":
                 await self.client.set_marker_value(int(target_id), value)
@@ -5576,13 +5580,21 @@ class ComexioAPI:
                 await self.client.set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
-            self.last_write_met_another_certificate = True
+            _write_met_another_certificate.set(self)
             return False
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
             return False
         return True
+
+    @property
+    def last_write_met_another_certificate(self) -> bool:
+        """Whether this task's last set_value here was refused because another certificate answered.
+
+        Read right after the write, so it names that write's cause, not a mismatch some other request met before.
+        """
+        return _write_met_another_certificate.get() is self
 
     async def get_bus_workload(self) -> dict[str, Any]:
         """Fetch the internal bus workload (%) and SD-card presence from the admin interface.

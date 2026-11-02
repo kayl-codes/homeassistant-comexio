@@ -5,7 +5,6 @@ from typing import Any
 from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -152,7 +151,8 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
             self._attr_is_on = target > 0
             self.async_write_ha_state()
             if not stop_ok:
-                raise HomeAssistantError(
+                raise write_failed(
+                    self.coordinator,
                     f"Stop telegram failed after dimming K{self._direction_id}/K{self._stepcode_id} "
-                    "— the actuator may still be moving"
+                    "— the actuator may still be moving",
                 )

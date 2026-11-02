@@ -27,6 +27,7 @@ from custom_components.comexio.const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
 )
+from custom_components.comexio.light import ComexioKnxLight
 from custom_components.comexio.sensor import ComexioConnectionSensor
 from custom_components.comexio.services import misc
 from custom_components.comexio.services._context import login_failed_message
@@ -676,6 +677,73 @@ def test_a_refused_write_names_another_certificate_as_its_cause(
     assert str(raised.value).startswith("Failed to turn on IO EXT1 DO1")
     assert (CERTIFICATE_CHANGED_MSG in str(raised.value)) is hinted
     switch.coordinator.update_io_by_name.assert_not_called()
+
+
+@_WRITE_CAUSES
+def test_a_refused_stop_telegram_names_another_certificate_as_its_cause(
+    comexio_api: ComexioAPI, client: MagicMock, write_error: Exception, hinted: bool
+) -> None:
+    # The certificate can change while a dimmer moves: the move telegrams get through, the stop does not.
+    client.set_marker_value = AsyncMock(side_effect=[None, None, write_error])
+    light = ComexioKnxLight.__new__(ComexioKnxLight)
+    light.coordinator = MagicMock()
+    light.coordinator.api = comexio_api
+    light.coordinator._knx_bridge_marker_by_k_id.return_value = {"1": 101, "2": 102}
+    light._direction_id, light._stepcode_id = "1", "2"
+    light._attr_brightness, light._move_lock = 254, asyncio.Lock()
+    light.async_write_ha_state = MagicMock()
+
+    turn_on = light.async_turn_on(brightness=255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(turn_on)
+
+    assert str(raised.value).startswith("Stop telegram failed after dimming K1/K2")
+    assert (CERTIFICATE_CHANGED_MSG in str(raised.value)) is hinted
+    assert client.set_marker_value.await_count == 3
+
+
+def test_overlapping_writes_each_name_their_own_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Two writes in flight at once (two entities, a service call) run in tasks of their own: the write Comexio
+    # refuses with 403 must not take on the mismatch the other one met while both awaited Comexio.
+    async def scenario() -> tuple[tuple[bool, bool], tuple[bool, bool]]:
+        foreign_met = asyncio.Event()
+
+        async def set_marker_value(marker_id: int, _value: float) -> None:
+            if marker_id == 1:
+                foreign_met.set()
+                raise _mismatch()
+            await foreign_met.wait()
+            raise ComexioResponseError("Forbidden", status=403)
+
+        client.set_marker_value = AsyncMock(side_effect=set_marker_value)
+
+        async def write(marker_id: int) -> tuple[bool, bool]:
+            written = await comexio_api.set_value("marker", marker_id, 1)
+            return written, comexio_api.last_write_met_another_certificate
+
+        forbidden = asyncio.create_task(write(2))
+        await asyncio.sleep(0)  # the 403 write is in flight before the other one starts
+        foreign = await asyncio.create_task(write(1))
+        return foreign, await forbidden
+
+    foreign, forbidden = asyncio.run(scenario())
+
+    assert foreign == (False, True)
+    assert forbidden == (False, False)
+
+
+def test_the_next_write_in_the_same_task_names_its_own_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # A dimmer writes three times in one task: a mismatch one write met must not stick to the next one.
+    client.set_marker_value = AsyncMock(side_effect=[_mismatch(), ComexioResponseError("Forbidden", status=403)])
+
+    async def two_writes() -> list[bool]:
+        causes = []
+        for _ in range(2):
+            await comexio_api.set_value("marker", 7, 1)
+            causes.append(comexio_api.last_write_met_another_certificate)
+        return causes
+
+    assert asyncio.run(two_writes()) == [True, False]
 
 
 @_WRITE_CAUSES
