@@ -698,6 +698,9 @@ class ComexioAPI:
         # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
         self.certificate_mismatch_count = 0
         self.last_certificate_mismatch: ComexioCertificateMismatchError | None = None
+        # Whether the last set_value was refused because another certificate answered; read right after the
+        # write, so it names that write's cause, not a mismatch some other request met before.
+        self.last_write_met_another_certificate = False
         # The presented fingerprint last logged at ERROR: a mismatch that persists is logged once, then
         # at debug (the repair is up). Cleared by a login or config fetch that gets through.
         self._mismatch_logged: str | None = None
@@ -5560,6 +5563,7 @@ class ComexioAPI:
         identifier: str | None = None,
     ) -> bool:
         """API write via Basic Auth; False if Comexio refused it or could not be reached."""
+        self.last_write_met_another_certificate = False
         try:
             if target_type == "marker":
                 await self.client.set_marker_value(int(target_id), value)
@@ -5572,6 +5576,7 @@ class ComexioAPI:
                 await self.client.set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
+            self.last_write_met_another_certificate = True
             return False
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.

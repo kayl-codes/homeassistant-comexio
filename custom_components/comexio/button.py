@@ -94,7 +94,7 @@ from .coordinator import (
     _device_ip_mismatch,
     webio_still_present,
 )
-from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity
+from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMarkerEntity, write_failed
 from .ha_address import is_loopback_address
 from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
@@ -3386,7 +3386,7 @@ class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):
                 f"{self._source_label} — reload the integration to refresh entities."
             )
         if not await self._async_source_write(1):
-            raise HomeAssistantError(f"Failed to trigger {self._source_label} {self._marker_id}")
+            raise write_failed(self.coordinator, f"Failed to trigger {self._source_label} {self._marker_id}")
 
 
 class ComexioKnxTriggerButton(ComexioKnxEntity, ComexioMarkerTriggerButton):

@@ -15,6 +15,7 @@ from aiocomexio import (
     RawConfig,
 )
 import aiohttp
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, certificate
@@ -27,7 +28,9 @@ from custom_components.comexio.const import (
     LOGIN_ERROR_REJECTED,
 )
 from custom_components.comexio.sensor import ComexioConnectionSensor
+from custom_components.comexio.services import misc
 from custom_components.comexio.services._context import login_failed_message
+from custom_components.comexio.switch import ComexioIOSwitch
 
 PINNED = "a" * 64
 OTHER = "b" * 64
@@ -644,3 +647,54 @@ def test_the_accept_button_names_its_entry_pin_and_certificate(entry_id: str) ->
 )
 def test_no_other_action_passes_for_the_accept_button(action: object) -> None:
     assert certificate.parse_accept_action(action) is None
+
+
+_WRITE_CAUSES = pytest.mark.parametrize(
+    ("write_error", "hinted"),
+    [(_mismatch(), True), (ComexioResponseError("Forbidden", status=403), False)],
+    ids=["another-certificate", "other-cause"],
+)
+
+
+@_WRITE_CAUSES
+def test_a_refused_write_names_another_certificate_as_its_cause(
+    comexio_api: ComexioAPI, client: MagicMock, write_error: Exception, hinted: bool
+) -> None:
+    # #250: the entities stay available while another certificate answers, so a write is refused by the API.
+    # A mismatch some earlier request met is still kept: only the write's own cause may name the certificate.
+    comexio_api.certificate_mismatch = _mismatch()
+    client.set_io_value = AsyncMock(side_effect=write_error)
+    switch = ComexioIOSwitch.__new__(ComexioIOSwitch)
+    switch.coordinator = MagicMock()
+    switch.coordinator.api = comexio_api
+    switch._io_id, switch._ext_name, switch._identifier = "11", "EXT1", "DO1"
+
+    turn_on = switch.async_turn_on()
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(turn_on)
+
+    assert str(raised.value).startswith("Failed to turn on IO EXT1 DO1")
+    assert (CERTIFICATE_CHANGED_MSG in str(raised.value)) is hinted
+    switch.coordinator.update_io_by_name.assert_not_called()
+
+
+@_WRITE_CAUSES
+def test_the_set_value_service_names_another_certificate_as_its_cause(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    write_error: Exception,
+    hinted: bool,
+) -> None:
+    comexio_api.certificate_mismatch = _mismatch()
+    client.set_marker_value = AsyncMock(side_effect=write_error)
+    monkeypatch.setattr(misc, "_async_get_service_context", AsyncMock(return_value=(MagicMock(), comexio_api, None)))
+    monkeypatch.setattr(misc, "_resolve_set_value_target", lambda *_: ({"target_type": "marker", "target_id": 1}, ""))
+    notify = MagicMock()
+    monkeypatch.setattr(misc.persistent_notification, "async_create", notify)
+
+    response = asyncio.run(misc._handle_set_value(MagicMock(), MagicMock(data={"target": "M1", "value": "1"})))
+
+    assert response["success"] is False
+    notify.assert_called_once()
+    assert (CERTIFICATE_CHANGED_MSG in notify.call_args.args[1]) is hinted

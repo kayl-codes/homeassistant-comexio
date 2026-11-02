@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
-from homeassistant.helpers.update_coordinator import UpdateFailed
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
@@ -18,6 +17,7 @@ from custom_components.comexio.coordinator import (
     _io_identity,
     _io_label,
     _io_live_requests,
+    _PollMetAnotherCertificate,
     _webhook_warn_key,
 )
 from custom_components.comexio.switch import ComexioIOSwitch
@@ -866,13 +866,14 @@ def test_io_entities_read_unknown_for_a_missing_or_non_numeric_value(
 
 
 def test_another_certificate_on_the_io_fetch_fails_the_poll(api: ComexioAPI) -> None:
-    """Kept IO values must not pass as current ones while another certificate answers (like the marker fetch)."""
+    """Kept IO values must not pass as fetched ones: the poll ends and keeps its last data (like the marker fetch)."""
     coordinator = _coordinator(api, io_states={"13": 18.25})
     coordinator._report_certificate_changed = MagicMock()
     err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
     conf = _config()
 
-    with pytest.raises(UpdateFailed, match="another certificate"):
+    # The failure _async_update_data turns into keeping the last data (#250), not a plain failed poll.
+    with pytest.raises(_PollMetAnotherCertificate, match="another certificate"):
         _poll(coordinator, conf, err)
 
     coordinator._report_certificate_changed.assert_called_once_with("b" * 64)

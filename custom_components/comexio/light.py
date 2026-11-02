@@ -18,7 +18,7 @@ from .const import (
     KNX_DPT3_STEPCODE_MOVE,
 )
 from .coordinator import ComexioCoordinator
-from .entity import ComexioKnxDpt3Entity
+from .entity import ComexioKnxDpt3Entity, write_failed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,7 +142,7 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
                 if not await self._async_write_direction(direction) or not await self._async_write_stepcode(
                     KNX_DPT3_STEPCODE_MOVE
                 ):
-                    raise HomeAssistantError(f"Failed to dim K{self._direction_id}/K{self._stepcode_id}")
+                    raise write_failed(self.coordinator, f"Failed to dim K{self._direction_id}/K{self._stepcode_id}")
                 try:
                     await asyncio.sleep(duration)
                 finally:

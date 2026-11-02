@@ -278,6 +278,7 @@ class _FakeCoordinator(SimpleNamespace):
     _report_certificate_changed = ComexioCoordinator._report_certificate_changed
     _fail_poll_on_certificate_mismatch = ComexioCoordinator._fail_poll_on_certificate_mismatch
     _clear_certificate_changed = ComexioCoordinator._clear_certificate_changed
+    _keep_data_through_certificate_change = ComexioCoordinator._keep_data_through_certificate_change
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -332,6 +333,9 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _unresolved_watch_picks=frozenset(),
         _comexio_unreachable=False,
         _plan_watch_grace_until=None,
+        # No poll has delivered data yet (the first refresh after setup); a test sets it for a later poll.
+        data=None,
+        _reading_through_certificate_change=False,
         config_entry=SimpleNamespace(options={}, entry_id="entry1"),
         plan_watchdog=SimpleNamespace(
             async_check=AsyncMock(return_value=False),
@@ -3608,6 +3612,115 @@ def test_an_unreachable_poll_checks_for_a_replaced_certificate(
         certificate_repair.report.assert_not_called()
     certificate_repair.clear.assert_not_called()
     assert coordinator.comexio_unreachable is True  # still counted as an outage
+
+
+_READ_THROUGH_WARNING = "polls bring nothing new and nothing is written until the certificate is accepted"
+
+
+def _poll_meeting_another_certificate(coordinator: _FakeCoordinator) -> AsyncMock:
+    """Live states that met another certificate after the config page was read, failed as the poll fails them."""
+    coordinator.api.certificate_mismatch = ComexioCertificateMismatchError(
+        "foreign", expected=PINNED_CERT, actual=OTHER_CERT
+    )
+
+    async def fetch_and_audit() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = {1}
+        coordinator._fail_poll_on_certificate_mismatch(coordinator.api.certificate_mismatch_count)
+        return {}
+
+    return AsyncMock(side_effect=fetch_and_audit)
+
+
+def test_a_poll_meeting_another_certificate_keeps_the_last_data(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    # #250: reading goes on through the webhook pushes instead of every entity turning unavailable at each poll.
+    last_data = {"markers": [{"id": 1}]}
+    coordinator = _certificate_coordinator(api)
+    coordinator.data = last_data
+    coordinator._async_fetch_and_audit = _poll_meeting_another_certificate(coordinator)
+
+    assert asyncio.run(ComexioCoordinator._async_update_data(coordinator)) is last_data
+    assert asyncio.run(ComexioCoordinator._async_update_data(coordinator)) is last_data
+
+    assert certificate_repair.report.call_count == 2  # the repair stays up at every poll
+    certificate_repair.clear.assert_not_called()
+    assert caplog.text.count(_READ_THROUGH_WARNING) == 1
+    # The config page this poll read is not the data it keeps: no scraped poll for the cleanups.
+    assert coordinator._last_poll_scraped is False
+    assert coordinator._polled_plan_ids is None
+
+
+def test_the_first_poll_meeting_another_certificate_still_fails(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # Right after setup there is no data to keep: the first refresh fails, and the entry retries its setup.
+    coordinator = _certificate_coordinator(api)
+    coordinator._async_fetch_and_audit = _poll_meeting_another_certificate(coordinator)
+
+    update = ComexioCoordinator._async_update_data(coordinator)
+    with pytest.raises(UpdateFailed, match="another certificate than the pinned one"):
+        asyncio.run(update)
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+
+
+def test_an_unreachable_poll_with_a_replaced_certificate_keeps_the_last_data(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    last_data = {"markers": [{"id": 1}]}
+    coordinator = _certificate_coordinator(api)
+    coordinator.data = last_data
+    coordinator._async_fetch_and_audit = AsyncMock(side_effect=ComexioConnectionError("down"))
+    api.fetch_replaced_fingerprint = AsyncMock(return_value=OTHER_CERT)
+
+    assert asyncio.run(ComexioCoordinator._async_update_data(coordinator)) is last_data
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    assert coordinator.comexio_unreachable is True
+
+
+def test_an_unreachable_poll_without_a_replaced_certificate_still_fails(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # A plain outage is no certificate change: the entities turn unavailable as before.
+    coordinator = _certificate_coordinator(api)
+    coordinator.data = {"markers": []}
+    coordinator._async_fetch_and_audit = AsyncMock(side_effect=ComexioConnectionError("down"))
+    api.fetch_replaced_fingerprint = AsyncMock(return_value=None)
+
+    update = ComexioCoordinator._async_update_data(coordinator)
+    with pytest.raises(ComexioConnectionError):
+        asyncio.run(update)
+    assert coordinator._reading_through_certificate_change is False
+
+
+def test_a_poll_with_the_pinned_certificate_again_ends_the_read_through(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _certificate_coordinator(api)
+    coordinator.data = {"markers": []}
+    coordinator._async_fetch_and_audit = _poll_meeting_another_certificate(coordinator)
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    async def answering() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = None
+        return {"markers": []}
+
+    api.certificate_mismatch = None
+    coordinator._async_fetch_and_audit = answering
+    caplog.clear()
+    caplog.set_level("INFO")
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    certificate_repair.clear.assert_called_once_with(coordinator.hass, "entry1")
+    assert coordinator._reading_through_certificate_change is False
+    assert "presents the pinned certificate again; polls and writes resume" in caplog.text
+
+    # Another certificate later on is a new change: it is warned about again.
+    coordinator._async_fetch_and_audit = _poll_meeting_another_certificate(coordinator)
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    assert caplog.text.count(_READ_THROUGH_WARNING) == 1
 
 
 def test_a_scraped_poll_drops_the_repair_whoever_raised_it(

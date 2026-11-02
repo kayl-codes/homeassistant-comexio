@@ -4,7 +4,6 @@ from typing import Any
 from homeassistant.components.cover import CoverDeviceClass, CoverEntity, CoverEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -14,7 +13,7 @@ from .const import (
     KNX_DPT3_STEPCODE_BREAK,
     KNX_DPT3_STEPCODE_MOVE,
 )
-from .entity import ComexioKnxDpt3Entity
+from .entity import ComexioKnxDpt3Entity, write_failed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -72,16 +71,16 @@ class ComexioKnxCover(ComexioKnxDpt3Entity, CoverEntity):
         if not await self._async_write_direction(KNX_DPT3_COVER_DIRECTION_UP) or not await self._async_write_stepcode(
             KNX_DPT3_STEPCODE_MOVE
         ):
-            raise HomeAssistantError(f"Failed to open cover K{self._direction_id}/K{self._stepcode_id}")
+            raise write_failed(self.coordinator, f"Failed to open cover K{self._direction_id}/K{self._stepcode_id}")
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Move down: write direction=Down, then a non-zero step code to start moving."""
         if not await self._async_write_direction(KNX_DPT3_COVER_DIRECTION_DOWN) or not await self._async_write_stepcode(
             KNX_DPT3_STEPCODE_MOVE
         ):
-            raise HomeAssistantError(f"Failed to close cover K{self._direction_id}/K{self._stepcode_id}")
+            raise write_failed(self.coordinator, f"Failed to close cover K{self._direction_id}/K{self._stepcode_id}")
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
         """Break: a step code of 0 stops movement regardless of the direction bit's value."""
         if not await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK):
-            raise HomeAssistantError(f"Failed to stop cover K{self._direction_id}/K{self._stepcode_id}")
+            raise write_failed(self.coordinator, f"Failed to stop cover K{self._direction_id}/K{self._stepcode_id}")

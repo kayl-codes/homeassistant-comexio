@@ -12,6 +12,7 @@ from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
+    CERTIFICATE_CHANGED_MSG,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     QUICKBUS_IO_DATA_KEY,
@@ -30,6 +31,17 @@ from .const import (
 from .coordinator import ComexioCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def write_failed(coordinator: ComexioCoordinator, message: str) -> HomeAssistantError:
+    """The error for a write Comexio did not take; names another certificate than the pinned one as its cause (#250).
+
+    The entities stay available while another certificate answers, so a write reaches the API and is refused there.
+    Called right after the refused set_value, with no await in between, so the flag is that write's own.
+    """
+    if coordinator.api.last_write_met_another_certificate:
+        return HomeAssistantError(f"{message}: {CERTIFICATE_CHANGED_MSG}")
+    return HomeAssistantError(message)
 
 
 def hub_device_id(coordinator: ComexioCoordinator) -> str | None:
