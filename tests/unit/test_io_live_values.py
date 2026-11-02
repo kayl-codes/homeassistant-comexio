@@ -878,3 +878,23 @@ def test_another_certificate_on_the_io_fetch_fails_the_poll(api: ComexioAPI) -> 
 
     coordinator._report_certificate_changed.assert_called_once_with("b" * 64)
     assert coordinator._io_live_fetch_failing is False  # a later plain failure still gets its warning
+
+
+def test_a_poll_meeting_another_certificate_keeps_the_io_identities_of_its_data(api: ComexioAPI) -> None:
+    """IO 11 handed to another IO, and the IO fetch meets another certificate: the poll keeps its last data, so
+    I1's entity keeps its value and the webhook index (still that data's) keeps taking I1's pushes (#250)."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
+    _index_scraped_ios(coordinator, _config())
+    coordinator._report_certificate_changed = MagicMock()
+    conf = _config()
+    conf["FubModules"]["1"]["1"]["inoutput"]["11"]["Identifier"] = "I5"
+    err = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+
+    with pytest.raises(_PollMetAnotherCertificate):
+        _poll(coordinator, conf, err)
+    kept = (coordinator.io_states.get("11"), "11" in coordinator._io_real_value_ids, coordinator._io_identities["11"])
+    coordinator.update_io_by_name("BASE", "I1", 0)
+
+    assert kept == (1.0, True, ("1", "I1", None, 1))
+    assert coordinator.io_states["11"] == 0.0

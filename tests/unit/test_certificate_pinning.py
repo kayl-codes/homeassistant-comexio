@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 import string
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -744,6 +744,42 @@ def test_the_next_write_in_the_same_task_names_its_own_cause(comexio_api: Comexi
         return causes
 
     assert asyncio.run(two_writes()) == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("presented", "hinted"),
+    [(OTHER, True), (PINNED, False), (ComexioConnectionError("down"), False)],
+    ids=["another certificate", "pinned certificate", "unreachable"],
+)
+def test_a_write_names_another_certificate_behind_a_connection_error(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    handshake: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+    presented: str | Exception,
+    hinted: bool,
+) -> None:
+    # A host name with several addresses: a foreign certificate on one and an unreachable other arrive as one
+    # connection error, so a fresh handshake tells the write's cause.
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    if isinstance(presented, Exception):
+        handshake.side_effect = presented
+    else:
+        handshake.return_value = presented
+    comexio_api.on_certificate_mismatch = on_mismatch = MagicMock()
+    client.set_marker_value = AsyncMock(side_effect=ComexioConnectionError("unreachable"))
+
+    async def write() -> tuple[bool, bool]:
+        written = await comexio_api.set_value("marker", 7, 1)
+        return written, comexio_api.last_write_met_another_certificate
+
+    assert asyncio.run(write()) == (False, hinted)
+    assert on_mismatch.call_args_list == ([call(OTHER)] if hinted else [])
+    kept = (comexio_api.certificate_mismatch_count, getattr(comexio_api.certificate_mismatch, "actual", None))
+    assert kept == ((1, OTHER) if hinted else (0, None))
+    # The certificate has its own ERROR line (once per certificate); the plain failure keeps its own.
+    assert ("Comexio API write failed" in caplog.text) is not hinted
 
 
 @_WRITE_CAUSES

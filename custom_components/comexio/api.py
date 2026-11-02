@@ -5579,14 +5579,29 @@ class ComexioAPI:
             else:
                 await self.client.set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
-            self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
-            _write_met_another_certificate.set(self)
+            self._note_write_met_another_certificate(err, target_type, target_id)
             return False
+        except ComexioConnectionError as err:
+            # A foreign certificate on a host name with several addresses arrives as a connection error.
+            if (actual := await self.fetch_replaced_fingerprint()) is not None:
+                mismatch = ComexioCertificateMismatchError(str(err), expected=self.fingerprint or "", actual=actual)
+                self._note_write_met_another_certificate(mismatch, target_type, target_id)
+                return False
+            failure: Exception = err
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
-            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
-            return False
-        return True
+            failure = err
+        else:
+            return True
+        _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, failure)
+        return False
+
+    def _note_write_met_another_certificate(
+        self, err: ComexioCertificateMismatchError, target_type: str, target_id: str | int
+    ) -> None:
+        """Keep a write's mismatch for the repair, and as this task's write cause (last_write_met_another_cert...)."""
+        self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
+        _write_met_another_certificate.set(self)
 
     @property
     def last_write_met_another_certificate(self) -> bool:

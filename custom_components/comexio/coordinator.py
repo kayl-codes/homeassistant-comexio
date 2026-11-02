@@ -1640,14 +1640,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # after the blip.
             self._polled_io_real_ids = set()
             return
-        self._forget_reassigned_io_values(ios)
         requests = _io_live_requests(ios)
         io_live_states = await self.api.get_io_live_states(requests)
+        if io_live_states is None:
+            # Kept values must not pass as fetched ones: the poll ends here and keeps its last data — and with it
+            # the IO identities that data's entities and webhook index stand for.
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
+        # After the await: a push during it for an IO whose id names another one now is dropped as well.
+        self._forget_reassigned_io_values(ios)
         # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
         known = {io_id: value for io_id, value in self.io_states.items() if io_id in self._io_real_value_ids}
         if io_live_states is None:
-            # Kept values must not pass as fetched ones: the poll ends here and keeps its last data.
-            self._fail_poll_on_certificate_mismatch(mismatches_before)
             self._log_io_live_fetch_failed(ios, known)
         else:
             if self._io_live_fetch_failing:
