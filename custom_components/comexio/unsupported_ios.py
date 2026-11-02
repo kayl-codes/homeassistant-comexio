@@ -2,9 +2,11 @@
 
 Comexio's IO type table marks some meter readings as outputs ($IOInputTypes input false), e.g. the
 Smart Meter's energy counters E1-E3 (Wh). As a writable number such an IO would offer a set point
-for a reading, so an output with a unit of IO_MEASUREMENT_ONLY_UNITS gets no entity at all. A
-Repair names those IOs; its link opens a GitHub issue pre-filled with the extension and IO types
-(no names, host or credentials) and asks for the diagnostics file, so the type can be supported.
+for a reading, so an output with a unit of IO_MEASUREMENT_ONLY_UNITS gets no entity at all. Since
+aiocomexio reads Comexio's IntIsOutput 0 as read-only (#249), such readings are inputs (sensors);
+the rule only still catches IO rows without that flag. A Repair names those IOs; its link opens a
+GitHub issue pre-filled with the extension and IO types (no names, host or credentials) and asks for
+the diagnostics file, so the type can be supported.
 """
 
 from __future__ import annotations

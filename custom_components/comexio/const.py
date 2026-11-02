@@ -124,7 +124,9 @@ ISSUE_IMPORT_DISABLED = "import_disabled"
 ISSUE_UNSUPPORTED_IO_TYPES = "unsupported_io_types"
 # Units of meter readings no output can be set to. Comexio's type table marks some of them as
 # outputs ($IOInputTypes input false: the Smart Meter's E1-E3 in Wh, S in VA, Q and DQ in var);
-# as a writable number such an IO would offer a set point, so it gets no entity yet (#196).
+# as a writable number such an IO would offer a set point, so it gets no entity (#196). Since
+# aiocomexio reads IntIsOutput 0 as read-only (#249) the Smart Meter's readings are sensors; this
+# only still applies to a firmware whose IO rows carry no IntIsOutput flag.
 IO_MEASUREMENT_ONLY_UNITS = frozenset({"Wh", "kWh", "VA", "var"})
 # Web-IO classes (values) the user chose "Ignore" for in that repair; a class leaves this
 # list again once its import is switched back on (see prune_import_disabled_ignored).
