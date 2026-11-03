@@ -5,22 +5,24 @@ from collections.abc import Generator
 from functools import partial
 import logging
 import re
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
 from homeassistant.components.repairs import DOMAIN as REPAIRS_DOMAIN, RepairsFlowManager, repairs_flow_manager
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
-from homeassistant.const import STATE_UNAVAILABLE
+from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser, async_mock_service
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
+import custom_components.comexio as comexio_module
 from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.certificate import (
@@ -46,6 +48,7 @@ from custom_components.comexio.const import (
     LOGIN_ERROR_REJECTED,
     SETUP_UNREACHABLE_ENTRIES,
 )
+from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.repairs import ComexioRepairFlow
 
 from .conftest import HOST, SERVER_ID
@@ -911,6 +914,148 @@ async def test_a_connection_failure_names_the_way_back_to_http_only_for_a_pinned
 
     assert entry.state is ConfigEntryState.SETUP_RETRY
     assert ("reconfigure the entry to go back to HTTP" in str(entry.reason)) is hinted
+
+
+ORPHANED_MARKER = f"switch.{SERVER_ID}_m999"
+
+
+@pytest.fixture
+def comexio_checks() -> Generator[SimpleNamespace]:
+    """The checks beside the poll and the extension rename migration, counted but run as usual."""
+    renames = ComexioCoordinator.async_detect_and_migrate_extension_renames
+    with (
+        patch.object(comexio_module, "_start_comexio_checks", wraps=comexio_module._start_comexio_checks) as checks,
+        patch.object(
+            ComexioCoordinator, "async_detect_and_migrate_extension_renames", autospec=True, side_effect=renames
+        ) as rename_migration,
+    ):
+        yield SimpleNamespace(checks=checks, rename_migration=rename_migration)
+
+
+async def _restart_meeting_another_certificate(
+    hass: HomeAssistant, entry: MockConfigEntry, api_returns: dict, api_attributes: dict
+) -> set[str]:
+    """A full setup (whose poll saves the config), then a setup that meets OTHER. Returns the entity_ids before.
+
+    In between, an entity of a marker Comexio no longer has is left in the registry for the cleanup.
+    """
+    await _setup(hass, entry)
+    assert entry.state is ConfigEntryState.LOADED
+    entity_registry = er.async_get(hass)
+    entity_ids = {e.entity_id for e in er.async_entries_for_config_entry(entity_registry, entry.entry_id)}
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    orphan = entity_registry.async_get_or_create(
+        "switch", DOMAIN, f"comexio_{SERVER_ID}_m999", config_entry=entry, suggested_object_id=f"{SERVER_ID}_m999"
+    )
+    assert orphan.entity_id == ORPHANED_MARKER
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+    api_attributes["certificate_mismatch"] = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    return entity_ids
+
+
+def _comexio_answers_again(api_returns: dict, api_attributes: dict, api: ComexioAPI) -> None:
+    api_returns["login"] = True
+    api_attributes.clear()
+    api.certificate_mismatch = None
+    api.last_login_error = None
+
+
+async def test_a_restart_meeting_another_certificate_sets_up_read_only_from_the_saved_config(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    comexio_checks: SimpleNamespace,
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    # #250: a restart (an update of another integration) while another certificate answers keeps the entities and
+    # the webhook; before, the entry waited in SETUP_RETRY and the pushes went nowhere.
+    entity_ids = await _restart_meeting_another_certificate(hass, pinned_entry, api_returns, api_attributes)
+
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    assert _issue(hass, pinned_entry) is not None
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    entries = er.async_entries_for_config_entry(er.async_get(hass), pinned_entry.entry_id)
+    assert {e.entity_id for e in entries} == {*entity_ids, ORPHANED_MARKER}  # the cleanup waits for a full setup
+    assert hass.states.get(MARKER_SWITCH).state == STATE_UNKNOWN  # no saved value: unknown until a push
+    api = mock_comexio_api[-1]
+    api.get_raw_config.assert_not_awaited()  # nothing goes to the server with the other certificate
+    api.get_live_states.assert_not_awaited()
+    # Only the full setup before started the checks and looked for renamed extensions.
+    comexio_checks.checks.assert_called_once()
+    comexio_checks.rename_migration.assert_called_once()
+
+    client = await hass_client_no_auth()
+    response = await client.post(f"/api/webhook/comexio_{SERVER_ID}", json={"type": "marker", "id": "1", "value": 1})
+    await hass.async_block_till_done()
+    assert response.status == 200
+    assert hass.states.get(MARKER_SWITCH).state == "on"
+
+    # The real write, on a client whose request meets the other certificate: refused, the state stays.
+    api.set_value = partial(ComexioAPI.set_value, api)
+    api.client.set_marker_value = AsyncMock(
+        side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+    )
+    with pytest.raises(HomeAssistantError, match=re.escape(CERTIFICATE_CHANGED_MSG)):
+        await hass.services.async_call("switch", "turn_off", {"entity_id": MARKER_SWITCH}, blocking=True)
+    assert hass.states.get(MARKER_SWITCH).state == "on"
+
+
+async def test_the_pinned_certificate_back_sets_a_read_only_entry_up_in_full(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    comexio_checks: SimpleNamespace,
+) -> None:
+    await _restart_meeting_another_certificate(hass, pinned_entry, api_returns, api_attributes)
+    read_only = hass.data[DOMAIN][pinned_entry.entry_id]
+    assert read_only.started_from_saved_config is True
+    _comexio_answers_again(api_returns, api_attributes, read_only.api)
+
+    await read_only.async_refresh()
+    await hass.async_block_till_done()
+
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    assert _issue(hass, pinned_entry) is None
+    full = hass.data[DOMAIN][pinned_entry.entry_id]
+    assert full is not read_only
+    assert full.started_from_saved_config is False
+    assert comexio_checks.checks.call_count == comexio_checks.rename_migration.call_count == 2
+    assert er.async_get(hass).async_get(ORPHANED_MARKER) is None  # the full setup caught the cleanup up
+
+
+async def test_accepting_the_certificate_sets_a_read_only_entry_up_in_full(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+) -> None:
+    await _restart_meeting_another_certificate(hass, pinned_entry, api_returns, api_attributes)
+    read_only = hass.data[DOMAIN][pinned_entry.entry_id]
+    flow = await _repair_form(hass, pinned_entry)
+    _comexio_answers_again(api_returns, api_attributes, read_only.api)
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = OTHER
+
+    result = await flow.async_step_certificate_changed({})
+    await hass.async_block_till_done()
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    full = hass.data[DOMAIN][pinned_entry.entry_id]
+    assert full is not read_only
+    assert full.started_from_saved_config is False
+    assert mock_comexio_api[-1].fingerprint == OTHER
 
 
 async def test_a_setup_with_the_pinned_certificate_drops_the_repair(

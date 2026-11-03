@@ -233,7 +233,7 @@ When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's
 
 A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. What happens then:
 
-1. **Nothing more goes to Comexio** — no login, no write — until you decide. While Home Assistant runs, the entities keep their last values and Comexio's webhook pushes keep updating them; switching or setting a value fails with a note about the certificate. After a restart the integration does not load at all.
+1. **Nothing more goes to Comexio** — no login, no write — until you decide. While Home Assistant runs, the entities keep their last values and Comexio's webhook pushes keep updating them; switching or setting a value fails with a note about the certificate. After a restart the integration sets up from the config Comexio last sent: the entities stay but show unknown until Comexio pushes a value, and the plan, bus load, system and firmware checks wait until the certificate is accepted. Only without such a saved config (it is written at every successful poll) does the integration not load.
 2. **A repair shows both fingerprints**, the pinned and the new one.
 3. **An urgent push** goes to the notify services set under **Function plan watchdog: push to** (iOS: critical alert, Android: alarm stream — both through Do Not Disturb). A tap opens the repairs; its **Accept certificate** button accepts the new certificate right from the notification (iOS asks to unlock the phone first). A notify service not reachable yet, for example right after a restart, is retried at the next check.
 4. **Check the fingerprint:** compare the new one with the SHA-256 value on Comexio's admin page.
@@ -252,7 +252,7 @@ Should Comexio present yet another certificate meanwhile, nothing is pinned and 
 
 *Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
 
-The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded; after a restart that met a changed certificate the integration does not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
+The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded, also after a restart that met a changed certificate; only when such a restart finds no saved config does the integration not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
 
 ```yaml
 triggers:
@@ -520,7 +520,7 @@ Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt
 
 Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Dann passiert Folgendes:
 
-1. **An Comexio geht nichts mehr** — kein Login, kein Schreiben —, bis du entschieden hast. Solange Home Assistant läuft, behalten die Entitäten ihre letzten Werte, und Comexios Webhook-Pushes aktualisieren sie weiter; Schalten oder Setzen scheitert mit einem Hinweis auf das Zertifikat. Nach einem Neustart lädt die Integration gar nicht.
+1. **An Comexio geht nichts mehr** — kein Login, kein Schreiben —, bis du entschieden hast. Solange Home Assistant läuft, behalten die Entitäten ihre letzten Werte, und Comexios Webhook-Pushes aktualisieren sie weiter; Schalten oder Setzen scheitert mit einem Hinweis auf das Zertifikat. Nach einem Neustart richtet sich die Integration aus der Konfiguration ein, die Comexio zuletzt geliefert hat: Die Entitäten bleiben, zeigen aber „unbekannt“, bis Comexio einen Wert pusht, und die Plan-, Busauslastungs-, System- und Firmware-Prüfungen warten, bis das Zertifikat übernommen ist. Nur ohne eine solche gespeicherte Konfiguration (sie wird bei jedem erfolgreichen Abruf geschrieben) lädt die Integration nicht.
 2. **Eine Reparatur zeigt beide Fingerabdrücke**, den gepinnten und den neuen.
 3. **Ein dringender Push** geht an die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“). Ein Tipp öffnet die Reparaturen; der Knopf **Zertifikat übernehmen** übernimmt das neue Zertifikat direkt aus der Mitteilung (iOS verlangt vorher das Entsperren). Ein noch nicht erreichbarer Dienst, etwa direkt nach einem Neustart, wird bei der nächsten Prüfung erneut versucht.
 4. **Fingerabdruck prüfen:** Vergleiche den neuen mit dem SHA-256-Wert auf der Admin-Seite des Comexio.
@@ -539,7 +539,7 @@ Legt Comexio inzwischen ein wieder anderes Zertifikat vor, wird nichts gepinnt, 
 
 *Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Bis auf den TLS-Handshake, der das Zertifikat ausliest, wird vor deiner Bestätigung nichts gesendet — auch nicht der Login-Test.
 
-Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist; nach einem Neustart, der auf ein geändertes Zertifikat traf, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
+Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist, auch nach einem Neustart, der auf ein geändertes Zertifikat traf; nur wenn ein solcher Neustart keine gespeicherte Konfiguration findet, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
 
 ```yaml
 triggers:

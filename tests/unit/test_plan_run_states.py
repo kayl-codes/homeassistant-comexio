@@ -16,6 +16,7 @@ from aiocomexio import (
     ComexioResponseError,
 )
 from aiocomexio.function_plan import plan_hash
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 import pytest
 
@@ -278,7 +279,13 @@ class _FakeCoordinator(SimpleNamespace):
     _report_certificate_changed = ComexioCoordinator._report_certificate_changed
     _fail_poll_on_certificate_mismatch = ComexioCoordinator._fail_poll_on_certificate_mismatch
     _clear_certificate_changed = ComexioCoordinator._clear_certificate_changed
+    _schedule_full_setup = ComexioCoordinator._schedule_full_setup
+    _async_full_setup = ComexioCoordinator._async_full_setup
     _keep_data_through_certificate_change = ComexioCoordinator._keep_data_through_certificate_change
+    _async_save_config = ComexioCoordinator._async_save_config
+    async_start_from_saved_config = ComexioCoordinator.async_start_from_saved_config
+    _index_ios = ComexioCoordinator._index_ios
+    _track_offline_extensions = ComexioCoordinator._track_offline_extensions
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
@@ -336,7 +343,14 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         # No poll has delivered data yet (the first refresh after setup); a test sets it for a later poll.
         data=None,
         _reading_through_certificate_change=False,
-        config_entry=SimpleNamespace(options={}, entry_id="entry1"),
+        # No poll scraped a config yet, none was saved, and the setup did not start from one (#250).
+        _scraped_config=None,
+        _saved_config=None,
+        _saved_config_store=SimpleNamespace(async_load=AsyncMock(return_value=None), async_save=AsyncMock()),
+        started_from_saved_config=False,
+        _full_setup_due=False,
+        offline_extensions=None,
+        config_entry=SimpleNamespace(options={}, data={}, entry_id="entry1"),
         plan_watchdog=SimpleNamespace(
             async_check=AsyncMock(return_value=False),
             async_sync_vanished=AsyncMock(),
@@ -3751,3 +3765,376 @@ def test_a_poll_that_scraped_nothing_keeps_the_repair(api: ComexioAPI, certifica
     coordinator._async_fetch_and_audit = not_scraped
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     certificate_repair.clear.assert_not_called()
+
+
+# #250: a setup that meets another certificate starts read only from the config the last scraped poll saved.
+
+
+def _parsed_config(marker_title: str = "Licht") -> dict[str, Any]:
+    """parse_config's result as the poll reads it, live values and keys the saved config leaves out included."""
+    io = {"ext_name": "A", "identifier": "IN1", "title": "Taster", "value": 1, "offline": False}
+    return {
+        "markers": [{"id": 7, "title": marker_title, "value": 42.5}],
+        "io": [io],
+        "io_all": [dict(io)],
+        "knx": [{"id": 3, "title": "KNX", "value": 1}],
+        coordinator_module.QUICKBUS_IO_DATA_KEY: [{"id": 501, "ext_name": "A", "title": "QB", "value": 0}],
+        coordinator_module.WEBIO_COMMAND_DUPLICATES_KEY: [],
+        "webio_commands": {"M7": {"name": "M7"}},
+        "webio_names": {"[M]": "Markers"},
+        "webio_devices": {"HA": {"ip": "192.0.2.1"}},
+        "extensions": {"A": {"serial": "1"}},
+        "live_only": {"not": "saved"},
+    }
+
+
+def test_the_saved_config_keeps_the_layout_without_the_values() -> None:
+    parsed = _parsed_config()
+
+    saved = coordinator_module.saved_config(parsed)
+
+    assert "live_only" not in saved
+    assert saved["markers"] == [{"id": 7, "title": "Licht", "value": None}]
+    assert saved["io"][0] == {"ext_name": "A", "identifier": "IN1", "title": "Taster", "value": None, "offline": False}
+    for key in ("io_all", "knx", coordinator_module.QUICKBUS_IO_DATA_KEY):
+        assert [item["value"] for item in saved[key]] == [None], key
+    assert saved["webio_devices"] == {"HA": {"ip": "192.0.2.1"}}
+    assert coordinator_module.is_saved_config(saved)
+    # A copy: what the poll and the pushes change afterwards does not reach the saved config.
+    parsed["markers"][0]["title"] = "renamed"
+    parsed["webio_devices"]["HA"]["ip"] = "192.0.2.9"
+    assert saved["markers"][0]["title"] == "Licht"
+    assert saved["webio_devices"]["HA"]["ip"] == "192.0.2.1"
+    assert parsed["io"][0]["value"] == 1  # the live data keeps its values
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        [],
+        "markers",
+        {},
+        {**coordinator_module.saved_config(_parsed_config()), "markers": None},
+        {**coordinator_module.saved_config(_parsed_config()), "io": ["IN1"]},
+        {**coordinator_module.saved_config(_parsed_config()), "extensions": []},
+    ],
+    ids=["list", "string", "empty", "markers missing", "io item no dict", "extensions no dict"],
+)
+def test_a_damaged_saved_config_is_not_taken(stored: Any) -> None:
+    assert coordinator_module.is_saved_config(stored) is False
+
+
+def _scraping_poll(coordinator: _FakeCoordinator, parsed: dict[str, Any]) -> AsyncMock:
+    """A poll that read the config page with the pinned certificate (as _async_poll_and_audit records it)."""
+
+    async def fetch_and_audit() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = None
+        coordinator._scraped_config = parsed
+        return {"markers": []}
+
+    return AsyncMock(side_effect=fetch_and_audit)
+
+
+def test_a_scraped_poll_saves_its_config_only_when_it_changed(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+    save = coordinator._saved_config_store.async_save
+
+    for parsed in (_parsed_config(), _parsed_config(), _parsed_config("Licht Flur")):
+        coordinator._async_fetch_and_audit = _scraping_poll(coordinator, parsed)
+        asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    assert [saved.args[0]["markers"][0]["title"] for saved in save.await_args_list] == ["Licht", "Licht Flur"]
+    assert save.await_args_list[0].args[0] == coordinator_module.saved_config(_parsed_config())
+    assert coordinator._scraped_config is None
+
+
+def test_a_poll_met_by_another_certificate_saves_nothing(api: ComexioAPI) -> None:
+    # It may have read the config page first: what it read is not taken for the config Comexio has.
+    coordinator = _certificate_coordinator(api)
+    coordinator.data = {"markers": []}
+    meeting = _poll_meeting_another_certificate(coordinator)
+
+    async def scraped_then_met() -> dict:
+        coordinator._scraped_config = _parsed_config()
+        return await meeting()
+
+    coordinator._async_fetch_and_audit = scraped_then_met
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    coordinator._saved_config_store.async_save.assert_not_awaited()
+
+
+def test_a_poll_that_scraped_nothing_saves_nothing(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+
+    async def not_scraped() -> dict:
+        coordinator._last_poll_scraped = False
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = not_scraped
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    coordinator._saved_config_store.async_save.assert_not_awaited()
+
+
+def test_a_config_a_failed_poll_left_behind_is_not_saved(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+    coordinator._scraped_config = _parsed_config()  # read by a poll that failed after its config fetch
+
+    async def scraped_without_config() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = None
+        return {"markers": []}
+
+    coordinator._async_fetch_and_audit = scraped_without_config
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    coordinator._saved_config_store.async_save.assert_not_awaited()
+
+
+def _saved_config_coordinator(api: ComexioAPI, stored: Any, options: dict | None = None) -> _FakeCoordinator:
+    coordinator = _coordinator(api)
+    coordinator.config_entry = SimpleNamespace(options=options or {}, data={}, entry_id="entry1")
+    coordinator._saved_config_store.async_load = AsyncMock(return_value=stored)
+    coordinator.async_reload_entry = _replacing_reload(coordinator)
+    # The tasks are kept, not run: a test runs them where it wants (_run_tasks).
+    coordinator.tasks = []
+    coordinator.hass = SimpleNamespace(
+        async_create_task=MagicMock(side_effect=lambda coro, _name: coordinator.tasks.append(coro)),
+        data={coordinator_module.DOMAIN: {"entry1": coordinator}},
+    )
+    return coordinator
+
+
+def _replacing_reload(coordinator: _FakeCoordinator) -> AsyncMock:
+    """A reload that went through: the entry holds a new coordinator."""
+
+    async def reload(_reason: str) -> bool:
+        coordinator.hass.data[coordinator_module.DOMAIN]["entry1"] = object()
+        return True
+
+    return AsyncMock(side_effect=reload)
+
+
+def _run_tasks(coordinator: _FakeCoordinator) -> None:
+    tasks, coordinator.tasks = coordinator.tasks, []
+    for task in tasks:
+        asyncio.run(task)
+
+
+def test_a_setup_without_a_saved_config_starts_no_read_only_entry(api: ComexioAPI) -> None:
+    coordinator = _saved_config_coordinator(api, None)
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is False
+    assert coordinator.data is None
+    assert coordinator.started_from_saved_config is False
+
+
+def test_a_damaged_saved_config_starts_no_read_only_entry(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    coordinator = _saved_config_coordinator(api, {"markers": "damaged"})
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is False
+    assert coordinator.data is None
+    assert coordinator.started_from_saved_config is False
+    assert "Saved Comexio config is unreadable" in caplog.text
+
+
+@pytest.mark.parametrize("io", [[{"id": 1}], [None]], ids=["io without its address", "io not a mapping"])
+def test_a_saved_config_with_damaged_items_starts_no_read_only_entry(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, io: list[Any]
+) -> None:
+    # False keeps the setup retrying (ConfigEntryNotReady); an exception would fail it for good.
+    coordinator = _saved_config_coordinator(api, {**coordinator_module.saved_config(_parsed_config()), "io": io})
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is False
+    assert coordinator.data is None
+    assert coordinator.started_from_saved_config is False
+    assert "Saved Comexio config is unreadable" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [NotImplementedError, HomeAssistantError("unreadable"), OSError("I/O error")],
+    ids=["newer store version after a downgrade", "file HA cannot read", "disk error"],
+)
+def test_a_saved_config_that_cannot_be_loaded_starts_no_read_only_entry(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, error: BaseException | type[BaseException]
+) -> None:
+    coordinator = _saved_config_coordinator(api, None)
+    coordinator._saved_config_store.async_load = AsyncMock(side_effect=error)
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is False
+    assert coordinator.started_from_saved_config is False
+    assert "Saved Comexio config is unreadable" in caplog.text
+
+
+def test_a_saved_config_starts_the_entry_read_only(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    # Saved unfiltered: the import options in force at this start decide what becomes an entity.
+    stored = coordinator_module.saved_config(_parsed_config())
+    coordinator = _saved_config_coordinator(api, stored, options={"import_markers": False, "import_knx": True})
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is True
+
+    assert coordinator.data["markers"] == []
+    assert coordinator.data["knx"] == [{"id": 3, "title": "KNX", "value": None}]
+    assert coordinator.data["io"] == stored["io"]
+    assert coordinator.data["webio_devices"] == {"HA": {"ip": "192.0.2.1"}}
+    # The webhook finds its IOs, and the offline tracking has its start.
+    assert list(coordinator._io_index) == [("a", "in1")]
+    assert list(coordinator._quickbus_index) == ["501"]
+    assert coordinator.offline_extensions == set()
+    assert coordinator.started_from_saved_config is True
+    assert coordinator._reading_through_certificate_change is True
+    assert coordinator._saved_config is stored  # an unchanged config is not written again
+    assert "set up read only from the config Comexio last sent" in caplog.text
+
+
+def test_a_read_only_start_keeps_its_data_through_the_next_poll(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _saved_config_coordinator(api, coordinator_module.saved_config(_parsed_config()))
+    asyncio.run(coordinator.async_start_from_saved_config())
+    seeded = coordinator.data
+    coordinator._async_fetch_and_audit = _poll_meeting_another_certificate(coordinator)
+
+    assert asyncio.run(ComexioCoordinator._async_update_data(coordinator)) is seeded
+
+    assert _READ_THROUGH_WARNING not in caplog.text  # the setup already said so
+    coordinator.async_reload_entry.assert_not_called()
+    coordinator._saved_config_store.async_save.assert_not_awaited()
+
+
+def test_the_pinned_certificate_back_reloads_a_read_only_entry_once(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # The read-only setup left out the checks and the entity cleanup: one full setup catches them up.
+    coordinator = _saved_config_coordinator(api, coordinator_module.saved_config(_parsed_config()))
+    asyncio.run(coordinator.async_start_from_saved_config())
+    api.certificate_mismatch = None
+
+    # The reload waits for the end of the poll: started under it, it would tear the coordinator down mid-poll.
+    coordinator._saved_config_store.async_save.side_effect = lambda _saved: (
+        coordinator.hass.async_create_task.assert_not_called()
+    )
+
+    for _poll in range(2):
+        coordinator._async_fetch_and_audit = _scraping_poll(coordinator, _parsed_config("Licht Flur"))
+        asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+        _run_tasks(coordinator)
+
+    coordinator._saved_config_store.async_save.assert_awaited_once()
+    coordinator.async_reload_entry.assert_awaited_once_with("pinned certificate answers again")
+    coordinator.hass.async_create_task.assert_called_once()
+    assert coordinator.started_from_saved_config is False
+    certificate_repair.clear.assert_called_with(coordinator.hass, "entry1")
+
+
+def _pinned_poll(coordinator: _FakeCoordinator) -> None:
+    """A scraped poll with the pinned certificate, then the tasks it scheduled."""
+    coordinator._async_fetch_and_audit = _scraping_poll(coordinator, _parsed_config())
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    _run_tasks(coordinator)
+
+
+@pytest.mark.parametrize(
+    ("reload", "log"),
+    [
+        (AsyncMock(return_value=False), "Still set up read only"),
+        (AsyncMock(side_effect=RuntimeError("reload broke")), "Reload after the read-only start failed"),
+        # A running sync skips the reload (its closing reload is due), which async_reload_entry reports as done.
+        (AsyncMock(return_value=True), "Still set up read only"),
+    ],
+    ids=["reload reported failed", "reload raised", "reload skipped for a sync"],
+)
+def test_a_read_only_entry_the_reload_did_not_replace_is_reloaded_after_the_next_poll(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, caplog: pytest.LogCaptureFixture, reload: AsyncMock, log: str
+) -> None:
+    coordinator = _saved_config_coordinator(api, coordinator_module.saved_config(_parsed_config()))
+    asyncio.run(coordinator.async_start_from_saved_config())
+    api.certificate_mismatch = None
+    coordinator.async_reload_entry = reload
+
+    _pinned_poll(coordinator)
+
+    assert coordinator.started_from_saved_config is True
+    assert log in caplog.text
+
+    coordinator.async_reload_entry = _replacing_reload(coordinator)
+    _pinned_poll(coordinator)
+
+    coordinator.async_reload_entry.assert_awaited_once_with("pinned certificate answers again")
+    assert coordinator.started_from_saved_config is False
+
+
+@pytest.mark.parametrize(
+    ("last_entry", "raises"),
+    [(False, False), (True, False), (False, True)],
+    ids=["entry gone", "last entry of the integration gone", "entry gone, reload raised"],
+)
+def test_a_failed_reload_that_tore_the_read_only_entry_down_leaves_the_retry_to_home_assistant(
+    api: ComexioAPI,
+    certificate_repair: SimpleNamespace,
+    caplog: pytest.LogCaptureFixture,
+    last_entry: bool,
+    raises: bool,
+) -> None:
+    # The entry is gone or in setup retry: its new setup builds a coordinator of its own, this one polls no more.
+    coordinator = _saved_config_coordinator(api, coordinator_module.saved_config(_parsed_config()))
+    asyncio.run(coordinator.async_start_from_saved_config())
+    api.certificate_mismatch = None
+
+    async def failed_reload(_reason: str) -> bool:
+        (coordinator.hass.data if last_entry else coordinator.hass.data[coordinator_module.DOMAIN]).clear()
+        if raises:
+            raise RuntimeError("reload broke")
+        return False
+
+    coordinator.async_reload_entry = AsyncMock(side_effect=failed_reload)
+    _pinned_poll(coordinator)
+
+    assert coordinator.started_from_saved_config is False
+    assert "Home Assistant retries the setup" in caplog.text
+    assert "Still set up read only" not in caplog.text
+    assert ("Reload after the read-only start failed" in caplog.text) is raises
+
+
+def test_a_read_only_entry_is_not_reloaded_by_a_poll_that_scraped_nothing(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    coordinator = _saved_config_coordinator(api, coordinator_module.saved_config(_parsed_config()))
+    asyncio.run(coordinator.async_start_from_saved_config())
+    api.certificate_mismatch = None
+
+    async def not_scraped() -> dict:
+        coordinator._last_poll_scraped = False
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = not_scraped
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    coordinator.hass.async_create_task.assert_not_called()
+    assert coordinator.started_from_saved_config is True
+
+
+@pytest.mark.parametrize(("read_only", "expected"), [(True, None), (False, 2)], ids=["read-only start", "full setup"])
+def test_the_plan_count_is_unknown_while_no_plan_list_was_read(read_only: bool, expected: int | None) -> None:
+    # A setup from the saved config reads no plan list: its empty fub_data does not mean 0 plans.
+    coordinator = SimpleNamespace(started_from_saved_config=read_only, api=SimpleNamespace(fub_data={1: {}, 2: {}}))
+
+    assert sensor_module.ComexioFunctionPlanCountSensor.native_value.fget(SimpleNamespace(coordinator=coordinator)) == (
+        expected
+    )
+
+
+def test_a_full_start_does_not_reload_when_the_pinned_certificate_answers(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    coordinator = _saved_config_coordinator(api, None)
+    coordinator._async_fetch_and_audit = _scraping_poll(coordinator, _parsed_config())
+
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    coordinator.async_reload_entry.assert_not_called()

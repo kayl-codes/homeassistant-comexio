@@ -20,6 +20,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import slugify
 
+from .api import ComexioAPI
 from .certificate import (
     async_clear_certificate_changed,
     async_create_api,
@@ -172,25 +173,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         coordinator.note_comexio_unreachable()
 
     try:
-        if not await api.login():
-            if (actual := await async_replaced_fingerprint(api)) is not None:
-                # Never accepted on its own: the repair shows both fingerprints and asks.
-                async_report_certificate_changed(hass, entry, actual)
-                raise ConfigEntryNotReady(
-                    f"Comexio at {entry.data[CONF_HOST]} presents another certificate than the pinned one — see Repairs"
-                )
-            if api.last_login_error == LOGIN_ERROR_CONNECTION:
-                hint = _HTTPS_RETRY_HINT if CONF_CERTIFICATE_FINGERPRINT in entry.data else ""
-                _LOGGER.warning(
-                    "Comexio login failed due to a connection problem for %s — will retry%s",
-                    entry.data[CONF_HOST],
-                    hint,
-                )
-                raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}{hint}")
-            _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
-            raise ConfigEntryAuthFailed
-        async_clear_certificate_changed(hass, entry.entry_id)
-        await coordinator.async_config_entry_first_refresh()
+        from_saved_config = await _async_connect(hass, entry, api, coordinator)
     except Exception:
         # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
         api.close()
@@ -214,8 +197,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # whose extension was renamed in Comexio since the last setup. Must run before the entity
     # cleanup below, which would otherwise treat the old (pre-rename) unique_ids as orphaned
     # and delete them instead of letting them be renamed in place.
+    # Not from the saved config: it tells nothing new about the extensions, the next full setup checks.
     await coordinator.async_load_extension_registry()
-    renamed_extensions = await coordinator.async_detect_and_migrate_extension_renames()
+    renamed_extensions = [] if from_saved_config else await coordinator.async_detect_and_migrate_extension_renames()
     for renamed in renamed_extensions:
         _LOGGER.info(
             "[%s] Comexio extension renamed: '%s' -> '%s' — migrated HA entities/device in place",
@@ -253,30 +237,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(track_quickbus_devices(coordinator))
-
-    # Extension firmware check: nightly window, version-gated (see
-    # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.
-    entry.async_on_unload(coordinator.async_start_firmware_update_check())
-
-    # Web-IO analog Min/Max range check: nightly window (see
-    # coordinator.async_start_webio_range_check). Cancelled automatically on unload/reload.
-    entry.async_on_unload(coordinator.async_start_webio_range_check())
-
-    # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
-    # cancelled automatically on unload/reload.
-    entry.async_on_unload(coordinator.async_start_bus_load_poll())
-    # Free storage, time server settings, uptime: own slow poll (see const.SYSTEM_INFO_POLL_INTERVAL_SEC).
-    entry.async_on_unload(coordinator.async_start_system_info_poll())
-    # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
-    entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
-    # After the platforms: the auto-start switches have restored the user's choice by now.
-    entry.async_create_background_task(
-        hass, coordinator.async_initial_plan_watch(), f"comexio_{server_id}_initial_plan_watch"
-    )
-    # "Start plan" button of the managed-plan watchdog's phone push (see plan_watchdog).
-    entry.async_on_unload(
-        hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, coordinator.async_handle_notification_action)
-    )
+    if not from_saved_config:
+        _start_comexio_checks(hass, entry, coordinator)
 
     # Set up services
     await async_setup_services(hass)
@@ -346,6 +308,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     coordinator.take_pending_reload_skip_options()
     entry.async_on_unload(entry.add_update_listener(update_listener))
     hass.data[DOMAIN][f"{entry.entry_id}_webhook"] = webhook_id
+
+    if from_saved_config:
+        # Nothing new is known about Comexio: no entity counts as gone. The full setup after the pinned
+        # certificate answers again (accepted, or back) catches the cleanup up.
+        return True
 
     # ---------------------------
     # Entity Cleanup
@@ -544,6 +511,66 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_check_orphaned_statistics(conf)
 
     return True
+
+
+async def _async_connect(
+    hass: HomeAssistant, entry: ConfigEntry, api: ComexioAPI, coordinator: ComexioCoordinator
+) -> bool:
+    """Log in and run the first refresh; True when the entry starts read only from its saved config instead (#250).
+
+    Another certificate than the pinned one gets no login: the setup goes on from the config the last scraped
+    poll saved, so the entities stay and webhook pushes keep arriving. Without one it waits for the repair.
+    """
+    if not await api.login():
+        if (actual := await async_replaced_fingerprint(api)) is not None:
+            # Never accepted on its own: the repair shows both fingerprints and asks.
+            async_report_certificate_changed(hass, entry, actual)
+            if await coordinator.async_start_from_saved_config():
+                return True
+            raise ConfigEntryNotReady(
+                f"Comexio at {entry.data[CONF_HOST]} presents another certificate than the pinned one — see Repairs"
+            )
+        if api.last_login_error == LOGIN_ERROR_CONNECTION:
+            hint = _HTTPS_RETRY_HINT if CONF_CERTIFICATE_FINGERPRINT in entry.data else ""
+            _LOGGER.warning(
+                "Comexio login failed due to a connection problem for %s — will retry%s",
+                entry.data[CONF_HOST],
+                hint,
+            )
+            raise ConfigEntryNotReady(f"Cannot connect to Comexio at {entry.data[CONF_HOST]}{hint}")
+        _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
+        raise ConfigEntryAuthFailed
+    async_clear_certificate_changed(hass, entry.entry_id)
+    await coordinator.async_config_entry_first_refresh()
+    return False
+
+
+def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: ComexioCoordinator) -> None:
+    """Start the timers and tasks that read from or write to Comexio beside the full poll."""
+    server_id = coordinator.server_id
+    # Extension firmware check: nightly window, version-gated (see
+    # coordinator.async_start_firmware_update_check). Cancelled automatically on unload/reload.
+    entry.async_on_unload(coordinator.async_start_firmware_update_check())
+
+    # Web-IO analog Min/Max range check: nightly window (see
+    # coordinator.async_start_webio_range_check). Cancelled automatically on unload/reload.
+    entry.async_on_unload(coordinator.async_start_webio_range_check())
+
+    # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
+    # cancelled automatically on unload/reload.
+    entry.async_on_unload(coordinator.async_start_bus_load_poll())
+    # Free storage, time server settings, uptime: own slow poll (see const.SYSTEM_INFO_POLL_INTERVAL_SEC).
+    entry.async_on_unload(coordinator.async_start_system_info_poll())
+    # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
+    entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
+    # After the platforms: the auto-start switches have restored the user's choice by now.
+    entry.async_create_background_task(
+        hass, coordinator.async_initial_plan_watch(), f"comexio_{server_id}_initial_plan_watch"
+    )
+    # "Start plan" button of the managed-plan watchdog's phone push (see plan_watchdog).
+    entry.async_on_unload(
+        hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, coordinator.async_handle_notification_action)
+    )
 
 
 def _quickbus_entity_uids(
