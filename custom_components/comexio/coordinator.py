@@ -598,9 +598,21 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
     }
 
 
-# The parse_config keys _imported_data reads, as saved for a start while another certificate answers (#250).
-_SAVED_CONFIG_LIST_KEYS = ("markers", "io", "io_all", "knx", QUICKBUS_IO_DATA_KEY, WEBIO_COMMAND_DUPLICATES_KEY)
+# The parse_config keys _imported_data reads, as saved for a start while another certificate answers (#250): each
+# list with the item keys the setup reads without a default — an item without them would fail its whole platform.
+_SAVED_SOURCE_ITEM_KEYS = frozenset({"id", "type", "name", "ha_name"})
+_SAVED_IO_ITEM_KEYS = frozenset({"id", "ext_name", "identifier", "name", "ha_name"})
+_SAVED_CONFIG_ITEM_KEYS: dict[str, frozenset[str]] = {
+    "markers": _SAVED_SOURCE_ITEM_KEYS,
+    "io": _SAVED_IO_ITEM_KEYS,
+    "io_all": _SAVED_IO_ITEM_KEYS,
+    "knx": _SAVED_SOURCE_ITEM_KEYS,
+    QUICKBUS_IO_DATA_KEY: _SAVED_IO_ITEM_KEYS | {"quickbus"},
+    WEBIO_COMMAND_DUPLICATES_KEY: frozenset({"name"}),
+}
+_SAVED_CONFIG_LIST_KEYS = tuple(_SAVED_CONFIG_ITEM_KEYS)
 _SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "extensions")
+_SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
 
 
 def saved_config(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
@@ -617,12 +629,22 @@ def saved_config(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
     return copy.deepcopy(saved)
 
 
+def _is_saved_item(key: str, item: Any) -> bool:
+    """Whether `item` of the saved list `key` carries what the setup reads from it."""
+    if not isinstance(item, dict) or _SAVED_CONFIG_ITEM_KEYS[key] - item.keys():
+        return False
+    # A Quickbus IO (in io and io_all as well) is read for its device's id and name; only other IOs have none.
+    if (quickbus := item.get("quickbus")) is None:
+        return key != QUICKBUS_IO_DATA_KEY
+    return isinstance(quickbus, dict) and quickbus.keys() >= _SAVED_QUICKBUS_DEVICE_KEYS
+
+
 def is_saved_config(stored: Any) -> bool:
     """Whether `stored` has the layout saved_config writes (a damaged or foreign store file has not)."""
     return (
         isinstance(stored, dict)
         and all(
-            isinstance(stored.get(key), list) and all(isinstance(item, dict) for item in stored[key])
+            isinstance(stored.get(key), list) and all(_is_saved_item(key, item) for item in stored[key])
             for key in _SAVED_CONFIG_LIST_KEYS
         )
         and all(isinstance(stored.get(key), dict) for key in _SAVED_CONFIG_DICT_KEYS)

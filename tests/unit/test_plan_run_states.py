@@ -49,6 +49,7 @@ from custom_components.comexio.plan_watchdog import (
     vanished_plan_token,
 )
 from custom_components.comexio.services import _context
+from tests.common import load_json_fixture
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
 
@@ -3772,14 +3773,25 @@ def test_a_poll_that_scraped_nothing_keeps_the_repair(api: ComexioAPI, certifica
 
 def _parsed_config(marker_title: str = "Licht") -> dict[str, Any]:
     """parse_config's result as the poll reads it, live values and keys the saved config leaves out included."""
-    io = {"ext_name": "A", "identifier": "IN1", "title": "Taster", "value": 1, "offline": False}
+    io = {
+        "id": 1,
+        "ext_name": "A",
+        "identifier": "IN1",
+        "name": "A IN1",
+        "ha_name": "IN1",
+        "value": 1,
+        "offline": False,
+    }
+    marker = {"id": 7, "type": "analog", "name": f"M7 {marker_title}", "ha_name": f"M7 {marker_title}", "value": 42.5}
     return {
-        "markers": [{"id": 7, "title": marker_title, "value": 42.5}],
+        "markers": [marker],
         "io": [io],
         "io_all": [dict(io)],
-        "knx": [{"id": 3, "title": "KNX", "value": 1}],
-        coordinator_module.QUICKBUS_IO_DATA_KEY: [{"id": 501, "ext_name": "A", "title": "QB", "value": 0}],
-        coordinator_module.WEBIO_COMMAND_DUPLICATES_KEY: [],
+        "knx": [{"id": 3, "type": "digital", "name": "K3 KNX", "ha_name": "K3 KNX", "value": 1}],
+        coordinator_module.QUICKBUS_IO_DATA_KEY: [
+            {**io, "id": 501, "identifier": "G1", "quickbus": {"device_id": 3, "name": "QB3"}, "value": 0}
+        ],
+        coordinator_module.WEBIO_COMMAND_DUPLICATES_KEY: [{"name": "M7", "webIoId": 9}],
         "webio_commands": {"M7": {"name": "M7"}},
         "webio_names": {"[M]": "Markers"},
         "webio_devices": {"HA": {"ip": "192.0.2.1"}},
@@ -3794,16 +3806,16 @@ def test_the_saved_config_keeps_the_layout_without_the_values() -> None:
     saved = coordinator_module.saved_config(parsed)
 
     assert "live_only" not in saved
-    assert saved["markers"] == [{"id": 7, "title": "Licht", "value": None}]
-    assert saved["io"][0] == {"ext_name": "A", "identifier": "IN1", "title": "Taster", "value": None, "offline": False}
+    assert saved["markers"] == [{**parsed["markers"][0], "value": None}]
+    assert saved["io"][0] == {**parsed["io"][0], "value": None}
     for key in ("io_all", "knx", coordinator_module.QUICKBUS_IO_DATA_KEY):
         assert [item["value"] for item in saved[key]] == [None], key
     assert saved["webio_devices"] == {"HA": {"ip": "192.0.2.1"}}
     assert coordinator_module.is_saved_config(saved)
     # A copy: what the poll and the pushes change afterwards does not reach the saved config.
-    parsed["markers"][0]["title"] = "renamed"
+    parsed["markers"][0]["ha_name"] = "renamed"
     parsed["webio_devices"]["HA"]["ip"] = "192.0.2.9"
-    assert saved["markers"][0]["title"] == "Licht"
+    assert saved["markers"][0]["ha_name"] == "M7 Licht"
     assert saved["webio_devices"]["HA"]["ip"] == "192.0.2.1"
     assert parsed["io"][0]["value"] == 1  # the live data keeps its values
 
@@ -3822,6 +3834,54 @@ def test_the_saved_config_keeps_the_layout_without_the_values() -> None:
 )
 def test_a_damaged_saved_config_is_not_taken(stored: Any) -> None:
     assert coordinator_module.is_saved_config(stored) is False
+
+
+_SAVED_ITEM_KEYS = [
+    (list_key, item_key)
+    for list_key, item_keys in coordinator_module._SAVED_CONFIG_ITEM_KEYS.items()
+    for item_key in sorted(item_keys)
+]
+
+
+@pytest.mark.parametrize(("list_key", "item_key"), _SAVED_ITEM_KEYS, ids=[f"{k} {i}" for k, i in _SAVED_ITEM_KEYS])
+def test_a_saved_item_without_a_key_the_setup_reads_is_not_taken(list_key: str, item_key: str) -> None:
+    # The entity platforms read these keys without a default: one missing would fail the platform, not the setup.
+    saved = coordinator_module.saved_config(_parsed_config())
+    assert coordinator_module.is_saved_config(saved)
+
+    del saved[list_key][0][item_key]
+
+    assert coordinator_module.is_saved_config(saved) is False
+
+
+@pytest.mark.parametrize("list_key", ["io", "io_all", coordinator_module.QUICKBUS_IO_DATA_KEY])
+@pytest.mark.parametrize("device", ["QB3", {"device_id": 3}, {"name": "QB3"}])
+def test_a_saved_quickbus_io_without_its_device_is_not_taken(list_key: str, device: Any) -> None:
+    # io and io_all hold the Quickbus IOs too; the plan labels read their device from there.
+    saved = coordinator_module.saved_config(_parsed_config())
+    saved[list_key][0]["quickbus"] = device
+
+    assert coordinator_module.is_saved_config(saved) is False
+
+
+def test_a_saved_quickbus_io_needs_its_device() -> None:
+    saved = coordinator_module.saved_config(_parsed_config())
+    saved[coordinator_module.QUICKBUS_IO_DATA_KEY][0]["quickbus"] = None
+
+    assert coordinator_module.is_saved_config(saved) is False
+
+
+def test_the_saved_config_of_a_real_parse_is_taken(parsing_api: ComexioAPI, quickbus_result: dict[str, Any]) -> None:
+    # Pins the required item keys to what aiocomexio's parse_config writes: a renamed key would reject every start.
+    basic = parsing_api.parse_config(
+        load_json_fixture("config_basic.json"), knx_dpt_catalog=load_json_fixture("knx_dpt_catalog.json")
+    )
+    assert basic["markers"]
+    assert basic["knx"]
+    assert quickbus_result[coordinator_module.QUICKBUS_IO_DATA_KEY]
+
+    assert coordinator_module.is_saved_config(coordinator_module.saved_config(basic))
+    assert coordinator_module.is_saved_config(coordinator_module.saved_config(quickbus_result))
 
 
 def _scraping_poll(coordinator: _FakeCoordinator, parsed: dict[str, Any]) -> AsyncMock:
@@ -3844,7 +3904,7 @@ def test_a_scraped_poll_saves_its_config_only_when_it_changed(api: ComexioAPI) -
         coordinator._async_fetch_and_audit = _scraping_poll(coordinator, parsed)
         asyncio.run(ComexioCoordinator._async_update_data(coordinator))
 
-    assert [saved.args[0]["markers"][0]["title"] for saved in save.await_args_list] == ["Licht", "Licht Flur"]
+    assert [saved.args[0]["markers"][0]["ha_name"] for saved in save.await_args_list] == ["M7 Licht", "M7 Licht Flur"]
     assert save.await_args_list[0].args[0] == coordinator_module.saved_config(_parsed_config())
     assert coordinator._scraped_config is None
 
@@ -3941,12 +4001,17 @@ def test_a_damaged_saved_config_starts_no_read_only_entry(api: ComexioAPI, caplo
     assert "Saved Comexio config is unreadable" in caplog.text
 
 
-@pytest.mark.parametrize("io", [[{"id": 1}], [None]], ids=["io without its address", "io not a mapping"])
+@pytest.mark.parametrize(
+    ("key", "items"),
+    [("io", [{"id": 1}]), ("io", [None]), ("markers", [{"type": "digital", "name": "M", "ha_name": "M"}])],
+    ids=["io without its address", "io not a mapping", "marker without its id"],
+)
 def test_a_saved_config_with_damaged_items_starts_no_read_only_entry(
-    api: ComexioAPI, caplog: pytest.LogCaptureFixture, io: list[Any]
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, key: str, items: list[Any]
 ) -> None:
-    # False keeps the setup retrying (ConfigEntryNotReady); an exception would fail it for good.
-    coordinator = _saved_config_coordinator(api, {**coordinator_module.saved_config(_parsed_config()), "io": io})
+    # False keeps the setup retrying (ConfigEntryNotReady); an item a platform cannot read would fail that platform
+    # while the entry counts as set up.
+    coordinator = _saved_config_coordinator(api, {**coordinator_module.saved_config(_parsed_config()), key: items})
 
     assert asyncio.run(coordinator.async_start_from_saved_config()) is False
     assert coordinator.data is None
@@ -3978,7 +4043,8 @@ def test_a_saved_config_starts_the_entry_read_only(api: ComexioAPI, caplog: pyte
     assert asyncio.run(coordinator.async_start_from_saved_config()) is True
 
     assert coordinator.data["markers"] == []
-    assert coordinator.data["knx"] == [{"id": 3, "title": "KNX", "value": None}]
+    assert coordinator.data["knx"] == stored["knx"]
+    assert [item["value"] for item in coordinator.data["knx"]] == [None]
     assert coordinator.data["io"] == stored["io"]
     assert coordinator.data["webio_devices"] == {"HA": {"ip": "192.0.2.1"}}
     # The webhook finds its IOs, and the offline tracking has its start.
