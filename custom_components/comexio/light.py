@@ -5,7 +5,6 @@ from typing import Any
 from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -18,7 +17,7 @@ from .const import (
     KNX_DPT3_STEPCODE_MOVE,
 )
 from .coordinator import ComexioCoordinator
-from .entity import ComexioKnxDpt3Entity
+from .entity import ComexioKnxDpt3Entity, write_failed
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -142,7 +141,7 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
                 if not await self._async_write_direction(direction) or not await self._async_write_stepcode(
                     KNX_DPT3_STEPCODE_MOVE
                 ):
-                    raise HomeAssistantError(f"Failed to dim K{self._direction_id}/K{self._stepcode_id}")
+                    raise write_failed(self.coordinator, f"Failed to dim K{self._direction_id}/K{self._stepcode_id}")
                 try:
                     await asyncio.sleep(duration)
                 finally:
@@ -152,7 +151,8 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
             self._attr_is_on = target > 0
             self.async_write_ha_state()
             if not stop_ok:
-                raise HomeAssistantError(
+                raise write_failed(
+                    self.coordinator,
                     f"Stop telegram failed after dimming K{self._direction_id}/K{self._stepcode_id} "
-                    "— the actuator may still be moving"
+                    "— the actuator may still be moving",
                 )

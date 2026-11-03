@@ -233,7 +233,7 @@ When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's
 
 A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. What happens then:
 
-1. **The integration stops talking to Comexio.** It sends nothing more to Comexio until you decide; after a restart it does not load at all.
+1. **Nothing more goes to Comexio** — no login, no write — until you decide. While Home Assistant runs, the entities keep their last values and Comexio's webhook pushes keep updating them; switching or setting a value fails with a note about the certificate. After a restart the integration does not load at all.
 2. **A repair shows both fingerprints**, the pinned and the new one.
 3. **An urgent push** goes to the notify services set under **Function plan watchdog: push to** (iOS: critical alert, Android: alarm stream — both through Do Not Disturb). A tap opens the repairs; its **Accept certificate** button accepts the new certificate right from the notification (iOS asks to unlock the phone first). A notify service not reachable yet, for example right after a restart, is retried at the next check.
 4. **Check the fingerprint:** compare the new one with the SHA-256 value on Comexio's admin page.
@@ -520,7 +520,7 @@ Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt
 
 Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Dann passiert Folgendes:
 
-1. **Die Integration spricht nicht mehr mit Comexio.** Sie sendet nichts mehr an Comexio, bis du entschieden hast; nach einem Neustart lädt sie gar nicht.
+1. **An Comexio geht nichts mehr** — kein Login, kein Schreiben —, bis du entschieden hast. Solange Home Assistant läuft, behalten die Entitäten ihre letzten Werte, und Comexios Webhook-Pushes aktualisieren sie weiter; Schalten oder Setzen scheitert mit einem Hinweis auf das Zertifikat. Nach einem Neustart lädt die Integration gar nicht.
 2. **Eine Reparatur zeigt beide Fingerabdrücke**, den gepinnten und den neuen.
 3. **Ein dringender Push** geht an die unter **Logikplan-Watchdog: Push an** eingetragenen Benachrichtigungsdienste (iOS: kritische Mitteilung, Android: Alarm-Kanal — beide auch bei „Nicht stören“). Ein Tipp öffnet die Reparaturen; der Knopf **Zertifikat übernehmen** übernimmt das neue Zertifikat direkt aus der Mitteilung (iOS verlangt vorher das Entsperren). Ein noch nicht erreichbarer Dienst, etwa direkt nach einem Neustart, wird bei der nächsten Prüfung erneut versucht.
 4. **Fingerabdruck prüfen:** Vergleiche den neuen mit dem SHA-256-Wert auf der Admin-Seite des Comexio.

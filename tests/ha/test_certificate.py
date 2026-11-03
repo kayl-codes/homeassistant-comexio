@@ -2,13 +2,16 @@
 
 import asyncio
 from collections.abc import Generator
+from functools import partial
 import logging
+import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
 from homeassistant.components.repairs import DOMAIN as REPAIRS_DOMAIN, RepairsFlowManager, repairs_flow_manager
 from homeassistant.config_entries import SOURCE_USER, ConfigEntryState
+from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import Context, HomeAssistant, ServiceCall
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.exceptions import HomeAssistantError
@@ -16,6 +19,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, MockUser, async_mock_service
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
@@ -29,6 +33,7 @@ from custom_components.comexio.certificate import (
     certificate_issue_id,
 )
 from custom_components.comexio.const import (
+    CERTIFICATE_CHANGED_MSG,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
     CONF_PASSWORD,
@@ -49,6 +54,7 @@ PINNED = "a" * 64
 OTHER = "b" * 64
 THIRD = "c" * 64
 NEW_HOST = "192.168.1.20"
+MARKER_SWITCH = f"switch.{SERVER_ID}_m1"
 
 USER_INPUT = {
     CONF_SERVER_ID: SERVER_ID,
@@ -2597,13 +2603,18 @@ async def test_removing_the_entry_drops_its_repair(
     assert _issue(hass, pinned_entry) is None
 
 
-@pytest.mark.logged_exception  # HA's coordinator logs the UpdateFailed with its traceback at debug level
-async def test_a_poll_meeting_another_certificate_raises_the_repair_until_one_gets_through(
-    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+async def test_a_poll_meeting_another_certificate_keeps_reading_until_one_gets_through(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    hass_client_no_auth: ClientSessionGenerator,
 ) -> None:
+    # #250: the entities stay available and pushes keep landing; writes are refused, the repair asks the user.
     await _setup(hass, pinned_entry)
     api = mock_comexio_api[0]
     coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
+    data_before = coordinator.data
 
     async def foreign_certificate() -> dict:
         # What ComexioAPI.get_raw_config does on a mismatch: keep it for the caller and hand it to the hook.
@@ -2613,11 +2624,32 @@ async def test_a_poll_meeting_another_certificate_raises_the_repair_until_one_ge
 
     api.get_raw_config = AsyncMock(side_effect=foreign_certificate)
     await coordinator.async_refresh()
+    await hass.async_block_till_done()
 
-    assert coordinator.last_update_success is False
+    assert coordinator.last_update_success is True
+    assert coordinator.data is data_before
+    assert hass.states.get(MARKER_SWITCH).state != STATE_UNAVAILABLE
     issue = _issue(hass, pinned_entry)
     assert issue is not None
     assert issue.data["actual"] == OTHER
+
+    client = await hass_client_no_auth()
+    for value, state in ((1, "on"), (0, "off")):  # a change of state, whatever the switch started with
+        response = await client.post(
+            f"/api/webhook/comexio_{SERVER_ID}", json={"type": "marker", "id": "1", "value": value}
+        )
+        await hass.async_block_till_done()
+        assert response.status == 200
+        assert hass.states.get(MARKER_SWITCH).state == state
+
+    # The real write, on a client whose request meets the mismatch.
+    api.set_value = partial(ComexioAPI.set_value, api)
+    api.client.set_marker_value = AsyncMock(
+        side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+    )
+    with pytest.raises(HomeAssistantError, match=re.escape(CERTIFICATE_CHANGED_MSG)):
+        await hass.services.async_call("switch", "turn_on", {"entity_id": MARKER_SWITCH}, blocking=True)
+    api.client.set_marker_value.assert_awaited_once()
 
     async def pinned_certificate() -> dict:
         api.certificate_mismatch = None
@@ -2686,20 +2718,25 @@ async def test_live_states_failing_for_another_reason_keep_the_last_values(
     assert "Live states fetch failed; keeping last known values" in caplog.text
 
 
-@pytest.mark.logged_exception  # HA's coordinator traces the UpdateFailed at debug
-async def test_live_states_meeting_another_certificate_fail_the_poll(
+async def test_live_states_meeting_another_certificate_end_the_poll(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
 ) -> None:
-    # The kept values of a failed live-states read must not pass as current ones.
+    # The kept values of a failed live-states read must not pass as fetched ones: the poll keeps its last data.
     await _setup(hass, pinned_entry)
     api = mock_comexio_api[0]
     coordinator = hass.data[DOMAIN][pinned_entry.entry_id]
+    data_before = coordinator.data
+    parse_config = MagicMock(wraps=api.parse_config)
+    api.parse_config = parse_config
 
     async def pinned_certificate() -> dict:
         api.certificate_mismatch = None
         return api_returns["get_raw_config"]
 
+    scraped_when_met: list[bool] = []
+
     async def foreign_certificate(*_args: object) -> tuple[None, None]:
+        scraped_when_met.append(coordinator._last_poll_scraped)  # the config page was read before
         api._keep_certificate_mismatch(ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER))
         api.certificate_mismatch = None  # a login alongside got through meanwhile
         return None, None
@@ -2708,7 +2745,13 @@ async def test_live_states_meeting_another_certificate_fail_the_poll(
     api.get_live_states = AsyncMock(side_effect=foreign_certificate)
     await coordinator.async_refresh()
 
-    assert not coordinator.last_update_success
+    assert coordinator.last_update_success
+    assert coordinator.data is data_before
+    parse_config.assert_not_called()
+    # The config page it read is not the data it keeps: no scraped poll for the cleanups.
+    assert scraped_when_met == [True]
+    assert coordinator._last_poll_scraped is False
+    assert coordinator._polled_plan_ids is None
     issue = _issue(hass, pinned_entry)
     assert issue is not None
     assert issue.data["actual"] == OTHER
@@ -2741,8 +2784,7 @@ async def test_a_login_alongside_the_poll_does_not_hide_its_mismatch(
     assert issue.data["actual"] == OTHER
 
 
-@pytest.mark.logged_exception  # HA's coordinator traces the UpdateFailed at debug
-async def test_a_knx_catalog_meeting_another_certificate_fails_the_poll(
+async def test_a_knx_catalog_meeting_another_certificate_ends_the_poll(
     hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
 ) -> None:
     # The catalog keeps its last known-good value; the poll must not go on to later requests.
@@ -2770,9 +2812,11 @@ async def test_a_knx_catalog_meeting_another_certificate_fails_the_poll(
 
     api.get_raw_config = AsyncMock(side_effect=pinned_certificate)
     api.get_knx_dpt_catalog = AsyncMock(side_effect=foreign_certificate)
+    data_before = coordinator.data
     await coordinator.async_refresh()
 
-    assert not coordinator.last_update_success
+    assert coordinator.last_update_success
+    assert coordinator.data is data_before
     parse_config.assert_not_called()
     issue = _issue(hass, entry)
     assert issue is not None

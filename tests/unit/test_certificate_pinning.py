@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 import string
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -15,6 +15,7 @@ from aiocomexio import (
     RawConfig,
 )
 import aiohttp
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, certificate
@@ -26,8 +27,11 @@ from custom_components.comexio.const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
 )
+from custom_components.comexio.light import ComexioKnxLight
 from custom_components.comexio.sensor import ComexioConnectionSensor
+from custom_components.comexio.services import misc
 from custom_components.comexio.services._context import login_failed_message
+from custom_components.comexio.switch import ComexioIOSwitch
 
 PINNED = "a" * 64
 OTHER = "b" * 64
@@ -325,6 +329,97 @@ def test_every_mismatch_reaches_the_hook_right_away(
     assert type(result) is type(failed)
     hook.assert_called_once_with(OTHER)
     assert comexio_api.certificate_mismatch is not None
+
+
+@pytest.mark.parametrize(("presented", "noted"), [(OTHER, True), (PINNED, False)], ids=["another", "pinned"])
+@pytest.mark.parametrize(
+    ("method", "fetch", "failed"),
+    [
+        ("get_live_states", lambda api: api.get_live_states(4), (None, None)),
+        ("get_io_live_states", lambda api: api.get_io_live_states([(1, "11")]), None),
+        ("get_knx_dpt_catalog", lambda api: api.get_knx_dpt_catalog(), {}),
+    ],
+    ids=["live states poll", "IO live states poll", "KNX catalog"],
+)
+def test_a_poll_fetch_finds_another_certificate_behind_a_connection_error(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    handshake: AsyncMock,
+    method: str,
+    fetch,
+    failed: object,
+    presented: str,
+    noted: bool,
+) -> None:
+    # Comexio's IPv4 and IPv6 address: another certificate on one and an unreachable other arrive as one connection
+    # error. Kept as a mismatch, it raises the repair and the poll keeps its last data (_fail_poll_on_certificate_...).
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    handshake.return_value = presented
+    comexio_api.on_certificate_mismatch = hook = MagicMock()
+    setattr(client, method, AsyncMock(side_effect=ComexioConnectionError("unreachable")))
+
+    assert asyncio.run(fetch(comexio_api)) == failed
+    assert hook.call_args_list == ([call(OTHER)] if noted else [])
+    assert comexio_api.certificate_mismatch_count == int(noted)
+
+
+@pytest.mark.parametrize(
+    ("presented", "cause"),
+    [
+        (OTHER, "ComexioCertificateMismatchError"),
+        (PINNED, "ComexioConnectionError"),
+        (ComexioConnectionError("still unreachable"), "ComexioConnectionError"),
+    ],
+    ids=["another", "pinned", "handshake fails"],
+)
+def test_an_io_live_fetch_keeps_the_certificate_as_its_cause(
+    comexio_api: ComexioAPI, client: MagicMock, handshake: AsyncMock, presented: object, cause: str
+) -> None:
+    # The coordinator reports io_live_fetch_error; behind a connection error it names the certificate when one answers.
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    handshake.side_effect = [presented]
+    client.get_io_live_states = AsyncMock(side_effect=ComexioConnectionError("unreachable"))
+
+    assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) is None
+    assert comexio_api.io_live_fetch_error == f"{cause}: unreachable"
+
+
+@pytest.mark.parametrize(
+    ("pinned", "error"),
+    [(PINNED, ComexioResponseError("bad answer", status=500)), (None, ComexioConnectionError("unreachable"))],
+    ids=["no connection error", "nothing pinned"],
+)
+@pytest.mark.parametrize(
+    ("method", "fetch", "failed"),
+    [
+        ("get_live_states", lambda api: api.get_live_states(4), (None, None)),
+        ("get_io_live_states", lambda api: api.get_io_live_states([(1, "11")]), None),
+        ("get_knx_dpt_catalog", lambda api: api.get_knx_dpt_catalog(), {}),
+    ],
+    ids=["live states poll", "IO live states poll", "KNX catalog"],
+)
+def test_a_poll_fetch_asks_no_handshake_where_no_certificate_can_hide(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    handshake: AsyncMock,
+    method: str,
+    fetch,
+    failed: object,
+    pinned: str | None,
+    error: Exception,
+) -> None:
+    # Only a connection error with a pin can hide another certificate; every other failure stays a plain one.
+    comexio_api.fingerprint = pinned
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    comexio_api.on_certificate_mismatch = hook = MagicMock()
+    setattr(client, method, AsyncMock(side_effect=error))
+
+    assert asyncio.run(fetch(comexio_api)) == failed
+    getattr(client, method).assert_awaited_once()
+    handshake.assert_not_called()
+    hook.assert_not_called()
 
 
 def test_a_system_info_poll_meeting_another_certificate_raises_the_repair(
@@ -644,3 +739,158 @@ def test_the_accept_button_names_its_entry_pin_and_certificate(entry_id: str) ->
 )
 def test_no_other_action_passes_for_the_accept_button(action: object) -> None:
     assert certificate.parse_accept_action(action) is None
+
+
+_WRITE_CAUSES = pytest.mark.parametrize(
+    ("write_error", "hinted"),
+    [(_mismatch(), True), (ComexioResponseError("Forbidden", status=403), False)],
+    ids=["another-certificate", "other-cause"],
+)
+
+
+@_WRITE_CAUSES
+def test_a_refused_write_names_another_certificate_as_its_cause(
+    comexio_api: ComexioAPI, client: MagicMock, write_error: Exception, hinted: bool
+) -> None:
+    # #250: the entities stay available while another certificate answers, so a write is refused by the API.
+    # A mismatch some earlier request met is still kept: only the write's own cause may name the certificate.
+    comexio_api.certificate_mismatch = _mismatch()
+    client.set_io_value = AsyncMock(side_effect=write_error)
+    switch = ComexioIOSwitch.__new__(ComexioIOSwitch)
+    switch.coordinator = MagicMock()
+    switch.coordinator.api = comexio_api
+    switch._io_id, switch._ext_name, switch._identifier = "11", "EXT1", "DO1"
+
+    turn_on = switch.async_turn_on()
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(turn_on)
+
+    assert str(raised.value).startswith("Failed to turn on IO EXT1 DO1")
+    assert (CERTIFICATE_CHANGED_MSG in str(raised.value)) is hinted
+    switch.coordinator.update_io_by_name.assert_not_called()
+
+
+@_WRITE_CAUSES
+def test_a_refused_stop_telegram_names_another_certificate_as_its_cause(
+    comexio_api: ComexioAPI, client: MagicMock, write_error: Exception, hinted: bool
+) -> None:
+    # The certificate can change while a dimmer moves: the move telegrams get through, the stop does not.
+    client.set_marker_value = AsyncMock(side_effect=[None, None, write_error])
+    light = ComexioKnxLight.__new__(ComexioKnxLight)
+    light.coordinator = MagicMock()
+    light.coordinator.api = comexio_api
+    light.coordinator._knx_bridge_marker_by_k_id.return_value = {"1": 101, "2": 102}
+    light._direction_id, light._stepcode_id = "1", "2"
+    light._attr_brightness, light._move_lock = 254, asyncio.Lock()
+    light.async_write_ha_state = MagicMock()
+
+    turn_on = light.async_turn_on(brightness=255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(turn_on)
+
+    assert str(raised.value).startswith("Stop telegram failed after dimming K1/K2")
+    assert (CERTIFICATE_CHANGED_MSG in str(raised.value)) is hinted
+    assert client.set_marker_value.await_count == 3
+
+
+def test_overlapping_writes_each_name_their_own_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # Two writes in flight at once (two entities, a service call) run in tasks of their own: the write Comexio
+    # refuses with 403 must not take on the mismatch the other one met while both awaited Comexio.
+    async def scenario() -> tuple[tuple[bool, bool], tuple[bool, bool]]:
+        foreign_met = asyncio.Event()
+
+        async def set_marker_value(marker_id: int, _value: float) -> None:
+            if marker_id == 1:
+                foreign_met.set()
+                raise _mismatch()
+            await foreign_met.wait()
+            raise ComexioResponseError("Forbidden", status=403)
+
+        client.set_marker_value = AsyncMock(side_effect=set_marker_value)
+
+        async def write(marker_id: int) -> tuple[bool, bool]:
+            written = await comexio_api.set_value("marker", marker_id, 1)
+            return written, comexio_api.last_write_met_another_certificate
+
+        forbidden = asyncio.create_task(write(2))
+        await asyncio.sleep(0)  # the 403 write is in flight before the other one starts
+        foreign = await asyncio.create_task(write(1))
+        return foreign, await forbidden
+
+    foreign, forbidden = asyncio.run(scenario())
+
+    assert foreign == (False, True)
+    assert forbidden == (False, False)
+
+
+def test_the_next_write_in_the_same_task_names_its_own_cause(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # A dimmer writes three times in one task: a mismatch one write met must not stick to the next one.
+    client.set_marker_value = AsyncMock(side_effect=[_mismatch(), ComexioResponseError("Forbidden", status=403)])
+
+    async def two_writes() -> list[bool]:
+        causes = []
+        for _ in range(2):
+            await comexio_api.set_value("marker", 7, 1)
+            causes.append(comexio_api.last_write_met_another_certificate)
+        return causes
+
+    assert asyncio.run(two_writes()) == [True, False]
+
+
+@pytest.mark.parametrize(
+    ("presented", "hinted"),
+    [(OTHER, True), (PINNED, False), (ComexioConnectionError("down"), False)],
+    ids=["another certificate", "pinned certificate", "unreachable"],
+)
+def test_a_write_names_another_certificate_behind_a_connection_error(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    handshake: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+    presented: str | Exception,
+    hinted: bool,
+) -> None:
+    # A host name with several addresses: a foreign certificate on one and an unreachable other arrive as one
+    # connection error, so a fresh handshake tells the write's cause.
+    comexio_api.fingerprint = PINNED
+    comexio_api._client_credentials = comexio_api._credentials()  # keeps the mock client
+    if isinstance(presented, Exception):
+        handshake.side_effect = presented
+    else:
+        handshake.return_value = presented
+    comexio_api.on_certificate_mismatch = on_mismatch = MagicMock()
+    client.set_marker_value = AsyncMock(side_effect=ComexioConnectionError("unreachable"))
+
+    async def write() -> tuple[bool, bool]:
+        written = await comexio_api.set_value("marker", 7, 1)
+        return written, comexio_api.last_write_met_another_certificate
+
+    assert asyncio.run(write()) == (False, hinted)
+    assert on_mismatch.call_args_list == ([call(OTHER)] if hinted else [])
+    kept = (comexio_api.certificate_mismatch_count, getattr(comexio_api.certificate_mismatch, "actual", None))
+    assert kept == ((1, OTHER) if hinted else (0, None))
+    # The certificate has its own ERROR line (once per certificate); the plain failure keeps its own.
+    assert ("Comexio API write failed" in caplog.text) is not hinted
+
+
+@_WRITE_CAUSES
+def test_the_set_value_service_names_another_certificate_as_its_cause(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    write_error: Exception,
+    hinted: bool,
+) -> None:
+    comexio_api.certificate_mismatch = _mismatch()
+    client.set_marker_value = AsyncMock(side_effect=write_error)
+    monkeypatch.setattr(misc, "_async_get_service_context", AsyncMock(return_value=(MagicMock(), comexio_api, None)))
+    monkeypatch.setattr(misc, "_resolve_set_value_target", lambda *_: ({"target_type": "marker", "target_id": 1}, ""))
+    notify = MagicMock()
+    monkeypatch.setattr(misc.persistent_notification, "async_create", notify)
+
+    response = asyncio.run(misc._handle_set_value(MagicMock(), MagicMock(data={"target": "M1", "value": "1"})))
+
+    assert response["success"] is False
+    client.set_marker_value.assert_awaited_once()
+    notify.assert_called_once()
+    assert (CERTIFICATE_CHANGED_MSG in notify.call_args.args[1]) is hinted

@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
+from contextvars import ContextVar
 from datetime import timedelta
 import hashlib
 import logging
@@ -103,6 +104,12 @@ _PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio 
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 
 _LOGGER = logging.getLogger(__name__)
+
+# The API whose set_value last met another certificate, kept per asyncio task: two writes in flight at once (two
+# entities, a service call) run in tasks of their own, so neither reads the other's cause.
+_write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
+    "comexio_write_met_another_certificate", default=None
+)
 
 
 def _webhook_path(server_id: str) -> str:
@@ -1285,6 +1292,16 @@ class ComexioAPI:
         self._handshake_failure_logged = False
         return None if current == self.fingerprint else current
 
+    async def _replaced_certificate_behind(self, err: ComexioError) -> ComexioCertificateMismatchError | None:
+        """The mismatch a connection error hides, else None.
+
+        Comexio takes one IPv4 and one IPv6 address: with both in DNS, aiohttp reports another certificate on one
+        and an unreachable other as a connection error, which fetch_replaced_fingerprint tells apart.
+        """
+        if not isinstance(err, ComexioConnectionError) or (actual := await self.fetch_replaced_fingerprint()) is None:
+            return None
+        return ComexioCertificateMismatchError(str(err), expected=self.fingerprint or "", actual=actual)
+
     async def get_raw_config(self) -> dict[str, Any]:
         """The function module page's config objects ($FubModules, $Fubs, ...), keyed without "$".
 
@@ -1429,6 +1446,9 @@ class ComexioAPI:
             self._note_certificate_mismatch(err, "KNX DPT catalog not fetched")
             return self._knx_dpt_catalog or {}
         except ComexioError as err:
+            if (mismatch := await self._replaced_certificate_behind(err)) is not None:
+                self._note_certificate_mismatch(mismatch, "KNX DPT catalog not fetched")
+                return self._knx_dpt_catalog or {}
             _LOGGER.warning("Failed to fetch KNX DPT catalog, keeping the last known-good one: %s", err)
             return self._knx_dpt_catalog or {}
         self._knx_dpt_catalog = result
@@ -1476,6 +1496,9 @@ class ComexioAPI:
             self._note_certificate_mismatch(err, "Live states not fetched")
             return None, None
         except ComexioError as err:
+            if (mismatch := await self._replaced_certificate_behind(err)) is not None:
+                self._note_certificate_mismatch(mismatch, "Live states not fetched")
+                return None, None
             _LOGGER.error("Live states fetch failed: %s", err)
             return None, None
         return states.markers, states.knx
@@ -1506,7 +1529,12 @@ class ComexioAPI:
             _LOGGER.log(level, "IO live states request refused: %s", err, exc_info=True)
             return None
         except ComexioError as err:
-            self.io_live_fetch_error = f"{type(err).__name__}: {err}"
+            mismatch = await self._replaced_certificate_behind(err)
+            cause = mismatch or err
+            self.io_live_fetch_error = f"{type(cause).__name__}: {cause}"
+            if mismatch is not None:
+                self._note_certificate_mismatch(mismatch, "IO live states not fetched")
+                return None
             _LOGGER.debug("IO live states fetch failed: %s", self.io_live_fetch_error, exc_info=True)
             return None
         self.io_live_fetch_error = None
@@ -5560,6 +5588,7 @@ class ComexioAPI:
         identifier: str | None = None,
     ) -> bool:
         """API write via Basic Auth; False if Comexio refused it or could not be reached."""
+        _write_met_another_certificate.set(None)
         try:
             if target_type == "marker":
                 await self.client.set_marker_value(int(target_id), value)
@@ -5571,13 +5600,35 @@ class ComexioAPI:
             else:
                 await self.client.set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
-            self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
+            self._note_write_met_another_certificate(err, target_type, target_id)
             return False
+        except ComexioConnectionError as err:
+            if (mismatch := await self._replaced_certificate_behind(err)) is not None:
+                self._note_write_met_another_certificate(mismatch, target_type, target_id)
+                return False
+            failure: Exception = err
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
-            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, err)
-            return False
-        return True
+            failure = err
+        else:
+            return True
+        _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, failure)
+        return False
+
+    def _note_write_met_another_certificate(
+        self, err: ComexioCertificateMismatchError, target_type: str, target_id: str | int
+    ) -> None:
+        """Keep a write's mismatch for the repair, and as this task's write cause (last_write_met_another_cert...)."""
+        self._note_certificate_mismatch(err, f"Comexio API write refused ({target_type} {target_id})")
+        _write_met_another_certificate.set(self)
+
+    @property
+    def last_write_met_another_certificate(self) -> bool:
+        """Whether this task's last set_value here was refused because another certificate answered.
+
+        Read right after the write, so it names that write's cause, not a mismatch some other request met before.
+        """
+        return _write_met_another_certificate.get() is self
 
     async def get_bus_workload(self) -> dict[str, Any]:
         """Fetch the internal bus workload (%) and SD-card presence from the admin interface.

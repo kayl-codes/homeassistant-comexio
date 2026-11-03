@@ -19,7 +19,15 @@ from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 
-from ..const import DOMAIN, MarkerKind, function_plans, one_line, unreadable_plan_keys, webio_class_name
+from ..const import (
+    CERTIFICATE_CHANGED_MSG,
+    DOMAIN,
+    MarkerKind,
+    function_plans,
+    one_line,
+    unreadable_plan_keys,
+    webio_class_name,
+)
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator, service_flag
@@ -633,9 +641,10 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
     success = await api.set_value(**kwargs, value=value)
     duration = time.monotonic() - t_start
     if not success:
+        cause = f" {CERTIFICATE_CHANGED_MSG}" if api.last_write_met_another_certificate else ""
         persistent_notification.async_create(
             hass,
-            f"Write failed: {target} = {value}.\nDuration: {duration:.1f}s",
+            f"Write failed: {target} = {value}.{cause}\nDuration: {duration:.1f}s",
             title=_TITLE_SET_VALUE_ERR,
         )
     return {"success": success, "target": target, "value": value, "duration": round(duration, 2)}

@@ -6,7 +6,6 @@ from homeassistant.components.switch import SwitchDeviceClass, SwitchEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import STATE_ON, EntityCategory
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -19,6 +18,7 @@ from .entity import (
     ComexioMarkerEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
+    write_failed,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class ComexioMarkerSwitch(ComexioMarkerEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the source on."""
         if not await self._async_source_write(1):
-            raise HomeAssistantError(f"Failed to turn on {self._source_label} {self._marker_id}")
+            raise write_failed(self.coordinator, f"Failed to turn on {self._source_label} {self._marker_id}")
 
         self._source_cache_update(1)
         self.async_write_ha_state()
@@ -155,7 +155,7 @@ class ComexioMarkerSwitch(ComexioMarkerEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the source off."""
         if not await self._async_source_write(0):
-            raise HomeAssistantError(f"Failed to turn off {self._source_label} {self._marker_id}")
+            raise write_failed(self.coordinator, f"Failed to turn off {self._source_label} {self._marker_id}")
 
         self._source_cache_update(0)
         self.async_write_ha_state()
@@ -196,7 +196,7 @@ class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the relay on via API."""
         if not await self.coordinator.api.set_value("io", self._io_id, 1, self._ext_name, self._identifier):
-            raise HomeAssistantError(f"Failed to turn on IO {self._ext_name} {self._identifier}")
+            raise write_failed(self.coordinator, f"Failed to turn on IO {self._ext_name} {self._identifier}")
 
         self.coordinator.update_io_by_name(self._ext_name, self._identifier, 1)
         self.async_write_ha_state()
@@ -204,7 +204,7 @@ class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the relay off via API."""
         if not await self.coordinator.api.set_value("io", self._io_id, 0, self._ext_name, self._identifier):
-            raise HomeAssistantError(f"Failed to turn off IO {self._ext_name} {self._identifier}")
+            raise write_failed(self.coordinator, f"Failed to turn off IO {self._ext_name} {self._identifier}")
 
         self.coordinator.update_io_by_name(self._ext_name, self._identifier, 0)
         self.async_write_ha_state()

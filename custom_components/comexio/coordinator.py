@@ -281,6 +281,11 @@ _IMPORT_QUICKBUS_KEY = "import_quickbus"
 # Errors that mean Comexio could not be reached at all (not: answered with an error or odd data).
 UNREACHABLE_ERRORS = (ComexioConnectionError, aiohttp.ClientError, TimeoutError)
 
+
+class _PollMetAnotherCertificate(UpdateFailed):
+    """A request of the poll met another certificate than the pinned one; nothing more went out to that server."""
+
+
 # Matches the "(ID <n>)" suffix format.format_plan_label() appends to a plan select-option
 # label, letting get_active_function_plan_fub_id() resolve the fub_id directly instead of
 # matching by (non-unique) plan name.
@@ -1310,6 +1315,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Set while _async_update_data runs: its $Fubs read brings the run states anyway, and
         # Comexio serializes requests, so the run-state poll stays out of its way.
         self._full_poll_running = False
+        # Set while polls keep the last data because another certificate answers; the warning goes out once.
+        self._reading_through_certificate_change = False
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -1335,12 +1342,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         mismatches_before = self.api.certificate_mismatch_count
         try:
             data = await self._async_fetch_and_audit()
-        except UNREACHABLE_ERRORS:
+        except _PollMetAnotherCertificate as err:
+            return self._keep_data_through_certificate_change(err)
+        except UNREACHABLE_ERRORS as err:
             self.note_comexio_unreachable()
             # A foreign certificate on a host name with several addresses arrives as a connection error.
-            if (actual := await self.api.fetch_replaced_fingerprint()) is not None:
-                self._report_certificate_changed(actual)
-            raise
+            if (actual := await self.api.fetch_replaced_fingerprint()) is None:
+                raise
+            self._report_certificate_changed(actual)
+            return self._keep_data_through_certificate_change(err)
         finally:
             self._full_poll_running = False
         if self._last_poll_scraped:
@@ -1506,7 +1516,33 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if mismatch is not None:
             # Nothing more goes out to a server that is not the pinned one; the repair asks the user.
             self._report_certificate_changed(mismatch.actual)
-            raise UpdateFailed(f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}")
+            raise _PollMetAnotherCertificate(
+                f"Comexio presents another certificate than the pinned one — see Repairs: {mismatch}"
+            )
+
+    def _keep_data_through_certificate_change(self, err: Exception) -> dict[str, Any]:
+        """The last data for a poll that met another certificate than the pinned one (#250).
+
+        Reading goes on: webhook pushes keep updating the entities, which stay available instead of turning
+        unavailable at every poll. Writes stay refused until the user accepts the certificate (repair or push).
+        Raises err when there is no data yet — the first refresh after setup has nothing to keep.
+        """
+        if self.data is None:
+            raise err
+        _LOGGER.debug("[%s] Poll keeps its last data, it met another certificate: %s", self.server_id, err)
+        # The poll may have read the config page before it met the certificate: what it read is not the data it
+        # keeps, so it must not pass as a scraped poll (uninstall/ignore-list cleanups, plan bookkeeping).
+        self._last_poll_scraped = False
+        self._polled_plan_ids = None
+        if not self._reading_through_certificate_change:
+            self._reading_through_certificate_change = True
+            _LOGGER.warning(
+                "[%s] Comexio presents another certificate than the pinned one (see Repairs): the entities keep "
+                "their last values and take webhook pushes, polls bring nothing new and nothing is written until "
+                "the certificate is accepted",
+                self.server_id,
+            )
+        return self.data
 
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
@@ -1539,7 +1575,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         live_states, knx_live_states = await self.api.get_live_states(*_source_max_ids(raw_config))
         if live_states is None:
-            # Kept values must not pass as current ones while another certificate answers.
+            # Kept values must not pass as fetched ones: the poll ends here and keeps its last data.
             self._fail_poll_on_certificate_mismatch(mismatches_before)
             # Fetch/parse failure this cycle (see get_live_states' docstring) — keep last
             # known values instead of letting parse_config default every item to 0/off.
@@ -1604,14 +1640,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # after the blip.
             self._polled_io_real_ids = set()
             return
-        self._forget_reassigned_io_values(ios)
         requests = _io_live_requests(ios)
         io_live_states = await self.api.get_io_live_states(requests)
+        if io_live_states is None:
+            # Kept values must not pass as fetched ones: the poll ends here and keeps its last data — and with it
+            # the IO identities that data's entities and webhook index stand for.
+            self._fail_poll_on_certificate_mismatch(mismatches_before)
+        # After the await: a push during it for an IO whose id names another one now is dropped as well.
+        self._forget_reassigned_io_values(ios)
         # Read after the await: a webhook push during it is a real value as well (R1 keeps it anyway).
         known = {io_id: value for io_id, value in self.io_states.items() if io_id in self._io_real_value_ids}
         if io_live_states is None:
-            # Kept values must not pass as current ones while another certificate answers.
-            self._fail_poll_on_certificate_mismatch(mismatches_before)
             self._log_io_live_fetch_failed(ios, known)
         else:
             if self._io_live_fetch_failing:
@@ -5847,6 +5886,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _clear_certificate_changed(self) -> None:
         """A poll got through with the pinned certificate: drop the repair, whoever raised it."""
+        if self._reading_through_certificate_change:
+            self._reading_through_certificate_change = False
+            _LOGGER.info("[%s] Comexio presents the pinned certificate again; polls and writes resume", self.server_id)
         async_clear_certificate_changed(self.hass, self.config_entry.entry_id)
 
     def note_comexio_unreachable(self) -> None:

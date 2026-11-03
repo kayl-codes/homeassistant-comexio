@@ -7,7 +7,6 @@ from homeassistant.components.number import NumberDeviceClass, NumberEntity, Num
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -23,7 +22,7 @@ from .const import (
     is_temperature_marker_name,
 )
 from .coordinator import ComexioCoordinator
-from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity
+from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, write_failed
 from .unsupported_ios import io_platform
 
 _LOGGER = logging.getLogger(__name__)
@@ -126,7 +125,9 @@ class ComexioMarkerNumber(ComexioMarkerEntity, NumberEntity):
     async def async_set_native_value(self, value: float) -> None:
         """Update the value via API and update local cache."""
         if not await self._async_source_write(value):
-            raise HomeAssistantError(f"Failed to set value {value} for {self._source_label} {self._marker_id}")
+            raise write_failed(
+                self.coordinator, f"Failed to set value {value} for {self._source_label} {self._marker_id}"
+            )
         self._source_cache_update(value)
         self.async_write_ha_state()
 
@@ -241,6 +242,8 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
             # number instead, so HA's own state matches the output at once instead of after the push.
             value = float(Decimal(str(value)).to_integral_value(ROUND_HALF_UP))
         if not await self.coordinator.api.set_value("io", self._io_id, value, self._ext_name, self._identifier):
-            raise HomeAssistantError(f"Failed to set value {value} for IO {self._ext_name} {self._identifier}")
+            raise write_failed(
+                self.coordinator, f"Failed to set value {value} for IO {self._ext_name} {self._identifier}"
+            )
         self.coordinator.update_io_by_name(self._ext_name, self._identifier, value)
         self.async_write_ha_state()
