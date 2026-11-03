@@ -615,6 +615,11 @@ _SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "ex
 _SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
 
 
+def saved_config_store(hass: HomeAssistant, server_id: str) -> Store:
+    """The store of the config the last scraped poll saved for this server (#250)."""
+    return Store(hass, 1, f"{DOMAIN}_saved_config_{server_id}")
+
+
 def saved_config(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
     """parse_config's result as saved for a start while another certificate answers (#250), without live values.
 
@@ -1374,7 +1379,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # The config of the last scraped poll, saved for a setup that meets another certificate (#250), and whether
         # this setup started from it (read only: no checks beside the poll, no entity cleanup, until the pin answers
         # again; then _full_setup_due asks for the reload that sets the entry up in full).
-        self._saved_config_store: Store = Store(hass, 1, f"{DOMAIN}_saved_config_{self.server_id}")
+        self._saved_config_store = saved_config_store(hass, self.server_id)
         self._saved_config: dict[str, Any] | None = None
         self._scraped_config: Mapping[str, Any] | None = None
         self.started_from_saved_config = False
@@ -1587,15 +1592,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Reading goes on: webhook pushes keep updating the entities, which stay available instead of turning
         unavailable at every poll. Writes stay refused until the user accepts the certificate (repair or push).
-        Raises err when there is no data yet — the first refresh after setup has nothing to keep.
+        Raises _PollMetAnotherCertificate when there is no data yet: the first refresh after setup has nothing to
+        keep, the setup starts from the saved config instead (see last_poll_met_another_certificate).
         """
-        if self.data is None:
-            raise err
-        _LOGGER.debug("[%s] Poll keeps its last data, it met another certificate: %s", self.server_id, err)
         # The poll may have read the config page before it met the certificate: what it read is not the data it
         # keeps, so it must not pass as a scraped poll (uninstall/ignore-list cleanups, plan bookkeeping).
         self._last_poll_scraped = False
         self._polled_plan_ids = None
+        if self.data is None:
+            if isinstance(err, _PollMetAnotherCertificate):
+                raise err
+            raise _PollMetAnotherCertificate(
+                f"Comexio presents another certificate than the pinned one: {err}"
+            ) from err
+        _LOGGER.debug("[%s] Poll keeps its last data, it met another certificate: %s", self.server_id, err)
         if not self._reading_through_certificate_change:
             self._reading_through_certificate_change = True
             _LOGGER.warning(
@@ -1605,6 +1615,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
             )
         return self.data
+
+    @property
+    def last_poll_met_another_certificate(self) -> bool:
+        """The last poll failed on a request that met another certificate than the pinned one (#250)."""
+        return isinstance(self.last_exception, _PollMetAnotherCertificate)
 
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
@@ -5203,6 +5218,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
         self.data = data
+        # Stands in for the first refresh, also one that failed on the certificate: the entities are available.
+        self.last_update_success = True
+        self.last_exception = None
         self._saved_config = stored
         self.started_from_saved_config = True
         self._reading_through_certificate_change = True

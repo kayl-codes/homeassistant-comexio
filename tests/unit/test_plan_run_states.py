@@ -3610,16 +3610,19 @@ def test_a_run_state_fetch_meeting_another_certificate_raises_the_repair(
     certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
 
 
-@pytest.mark.parametrize(("replaced", "reported"), [(OTHER_CERT, True), (None, False)])
+@pytest.mark.parametrize(
+    ("replaced", "reported", "error"), [(OTHER_CERT, True, UpdateFailed), (None, False, ComexioConnectionError)]
+)
 def test_an_unreachable_poll_checks_for_a_replaced_certificate(
-    api: ComexioAPI, certificate_repair: SimpleNamespace, replaced: str | None, reported: bool
+    api: ComexioAPI, certificate_repair: SimpleNamespace, replaced: str | None, reported: bool, error: type[Exception]
 ) -> None:
-    # A foreign certificate on a host name with several addresses arrives as a connection error.
+    # A foreign certificate on a host name with several addresses arrives as a connection error. The first poll
+    # has no data to keep: it fails on the certificate (for the setup), a plain outage on the connection error.
     coordinator = _certificate_coordinator(api)
     coordinator._async_fetch_and_audit = AsyncMock(side_effect=ComexioConnectionError("down"))
     api.fetch_replaced_fingerprint = AsyncMock(return_value=replaced)
     update = ComexioCoordinator._async_update_data(coordinator)
-    with pytest.raises(ComexioConnectionError):
+    with pytest.raises(error):
         asyncio.run(update)
     if reported:
         certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
@@ -3675,9 +3678,38 @@ def test_the_first_poll_meeting_another_certificate_still_fails(
     coordinator._async_fetch_and_audit = _poll_meeting_another_certificate(coordinator)
 
     update = ComexioCoordinator._async_update_data(coordinator)
-    with pytest.raises(UpdateFailed, match="another certificate than the pinned one"):
+    with pytest.raises(UpdateFailed, match="another certificate than the pinned one") as raised:
         asyncio.run(update)
     certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    # Its setup starts from the saved config instead (__init__._async_connect).
+    coordinator.last_exception = raised.value
+    assert ComexioCoordinator.last_poll_met_another_certificate.fget(coordinator) is True
+
+
+def test_an_unreachable_first_poll_with_a_replaced_certificate_fails_on_the_certificate(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # A foreign certificate reported as a connection error: the setup must see the certificate as the cause too.
+    coordinator = _certificate_coordinator(api)
+    coordinator._async_fetch_and_audit = AsyncMock(side_effect=ComexioConnectionError("down"))
+    api.fetch_replaced_fingerprint = AsyncMock(return_value=OTHER_CERT)
+    coordinator._last_poll_scraped = True  # left by a scraped poll: this one must not pass as one
+
+    update = ComexioCoordinator._async_update_data(coordinator)
+    with pytest.raises(UpdateFailed, match="another certificate than the pinned one") as raised:
+        asyncio.run(update)
+    coordinator.last_exception = raised.value
+
+    assert isinstance(raised.value.__cause__, ComexioConnectionError)
+    assert ComexioCoordinator.last_poll_met_another_certificate.fget(coordinator) is True
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    assert coordinator._last_poll_scraped is False
+
+
+def test_a_plain_outage_is_no_poll_that_met_another_certificate() -> None:
+    coordinator = SimpleNamespace(last_exception=UpdateFailed("down"))
+
+    assert ComexioCoordinator.last_poll_met_another_certificate.fget(coordinator) is False
 
 
 def test_an_unreachable_poll_with_a_replaced_certificate_keeps_the_last_data(
@@ -4191,6 +4223,16 @@ def test_the_plan_count_is_unknown_while_no_plan_list_was_read(read_only: bool, 
     coordinator = SimpleNamespace(started_from_saved_config=read_only, api=SimpleNamespace(fub_data={1: {}, 2: {}}))
 
     assert sensor_module.ComexioFunctionPlanCountSensor.native_value.fget(SimpleNamespace(coordinator=coordinator)) == (
+        expected
+    )
+
+
+@pytest.mark.parametrize(("read_only", "expected"), [(True, None), (False, 1)], ids=["read-only start", "full setup"])
+def test_the_changed_plans_are_unknown_while_no_backup_was_checked(read_only: bool, expected: int | None) -> None:
+    # A setup from the saved config runs no backup cycle: its empty change list does not mean no plan changed.
+    coordinator = SimpleNamespace(started_from_saved_config=read_only, last_changed_plans=[{"fub_id": 1}])
+
+    assert sensor_module.ComexioPlanChangedSensor.native_value.fget(SimpleNamespace(coordinator=coordinator)) == (
         expected
     )
 

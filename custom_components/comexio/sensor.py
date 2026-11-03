@@ -542,7 +542,10 @@ class ComexioPlanChangedSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity
         self._attr_translation_key = "plan_changed"
 
     @property
-    def native_value(self) -> int:
+    def native_value(self) -> int | None:
+        # A setup from the saved config (#250) checks no plan backups: unknown, not 0.
+        if self.coordinator.started_from_saved_config:
+            return None
         return len(self.coordinator.last_changed_plans)
 
     @property

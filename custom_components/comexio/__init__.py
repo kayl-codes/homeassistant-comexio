@@ -58,7 +58,7 @@ from .const import (
     stable_object_id,
     webio_range_check_entity_id,
 )
-from .coordinator import ComexioCoordinator
+from .coordinator import ComexioCoordinator, saved_config_store
 from .entity import track_quickbus_devices
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
@@ -518,8 +518,9 @@ async def _async_connect(
 ) -> bool:
     """Log in and run the first refresh; True when the entry starts read only from its saved config instead (#250).
 
-    Another certificate than the pinned one gets no login: the setup goes on from the config the last scraped
-    poll saved, so the entities stay and webhook pushes keep arriving. Without one it waits for the repair.
+    Another certificate than the pinned one gets no login, or fails the first poll after one: the setup goes on
+    from the config the last scraped poll saved, so the entities stay and webhook pushes keep arriving. Without
+    one it waits for the repair.
     """
     if not await api.login():
         if (actual := await async_replaced_fingerprint(api)) is not None:
@@ -541,7 +542,21 @@ async def _async_connect(
         _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
         raise ConfigEntryAuthFailed
     async_clear_certificate_changed(hass, entry.entry_id)
-    await coordinator.async_config_entry_first_refresh()
+    return await _async_first_refresh(entry, coordinator)
+
+
+async def _async_first_refresh(entry: ConfigEntry, coordinator: ComexioCoordinator) -> bool:
+    """Run the first refresh after a login; True when it met another certificate and the saved config stands in."""
+    try:
+        await coordinator.async_config_entry_first_refresh()
+    except ConfigEntryNotReady:
+        # The login got through with the pinned certificate, a request of the first poll met another one.
+        if not coordinator.last_poll_met_another_certificate:
+            raise
+        _LOGGER.debug("Comexio first poll for %s failed: %s", entry.data[CONF_HOST], coordinator.last_exception)
+        if await coordinator.async_start_from_saved_config():
+            return True
+        raise
     return False
 
 
@@ -791,12 +806,13 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_reload_entry("options changed")
 
 
-# HA awaits async_remove_entry, so it stays a coroutine without an await of its own (S7503 false positive).
-async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:  # NOSONAR
-    """Drop the entry's repairs that have nothing left to fix, and the certificate push on the phones."""
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the entry's repairs with nothing left to fix, the certificate push on the phones and its saved config."""
     async_remove_certificate_pushes(hass, entry)
     if server_id := entry.data.get(CONF_SERVER_ID):
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
+        # A new entry for this server must not set up from what this one saved (#250).
+        await saved_config_store(hass, server_id).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
