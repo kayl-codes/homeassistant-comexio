@@ -19,6 +19,7 @@ from .const import (
     DOMAIN,
     MarkerKind,
     bus_load_signal,
+    offline_io_skipped,
     plan_watch_signal,
     system_info_signal,
 )
@@ -49,7 +50,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioBinarySensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
+            if io.get("is_binary") and io.get("is_input", True) and not offline_io_skipped(io, include_offline)
         )
 
     # Quickbus IOs (multitouch gestures, motion detectors, ...) are read-only, outputs included

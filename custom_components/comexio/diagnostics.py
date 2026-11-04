@@ -29,6 +29,7 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     QUICKBUS_IO_DATA_KEY,
+    offline_io_skipped,
     quickbus_device_id,
     quickbus_io_platform,
 )
@@ -62,7 +63,7 @@ SKIPPED_OFFLINE_EXTENSION = "offline extension, include_offline_extensions off: 
 
 def _io_diagnostics(io: Mapping[str, Any], include_offline: bool) -> dict[str, Any]:
     """An IO as a setup reads it: the platform of its entity, or why it gets none (the type reason first)."""
-    offline_skipped = bool(io.get("offline")) and not include_offline
+    offline_skipped = offline_io_skipped(io, include_offline)
     return {
         **{key: io.get(key) for key in DIAGNOSTICS_IO_KEYS},
         "platform": None if offline_skipped else io_platform(io),

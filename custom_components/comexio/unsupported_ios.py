@@ -2,9 +2,11 @@
 
 Comexio's IO type table marks some meter readings as outputs ($IOInputTypes input false), e.g. the
 Smart Meter's energy counters E1-E3 (Wh). As a writable number such an IO would offer a set point
-for a reading, so an output with a unit of IO_MEASUREMENT_ONLY_UNITS gets no entity at all. A
-Repair names those IOs; its link opens a GitHub issue pre-filled with the extension and IO types
-(no names, host or credentials) and asks for the diagnostics file, so the type can be supported.
+for a reading, so an output with a unit of IO_MEASUREMENT_ONLY_UNITS gets no entity at all. Since
+aiocomexio reads Comexio's IntIsOutput 0 as read-only (#249), such readings are inputs (sensors);
+the rule only still catches IO rows without that flag. A Repair names those IOs; its link opens a
+GitHub issue pre-filled with the extension and IO types (no names, host or credentials) and asks for
+the diagnostics file, so the type can be supported.
 """
 
 from __future__ import annotations
@@ -22,7 +24,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, IO_MEASUREMENT_ONLY_UNITS, ISSUE_TRACKER_URL, ISSUE_UNSUPPORTED_IO_TYPES, one_line
+from .const import (
+    DOMAIN,
+    IO_MEASUREMENT_ONLY_UNITS,
+    ISSUE_TRACKER_URL,
+    ISSUE_UNSUPPORTED_IO_TYPES,
+    offline_io_skipped,
+    one_line,
+)
 from .reference_monitor import async_integration_version, github_issue_url
 
 if TYPE_CHECKING:
@@ -95,8 +104,9 @@ def io_platform(io: Mapping[str, Any]) -> str | None:
 
 def io_has_entity(io: Mapping[str, Any], include_offline: bool) -> bool:
     """Whether HA makes an entity of an imported IO: a supported type, on an online extension
-    unless include_offline_extensions is on. Only these IOs get a Web-IO command."""
-    return (include_offline or not io.get("offline")) and io_platform(io) is not None
+    unless include_offline_extensions is on or the extension is always taken in (offline_io_skipped).
+    Only these IOs get a Web-IO command."""
+    return not offline_io_skipped(io, include_offline) and io_platform(io) is not None
 
 
 def _raw_extensions(raw_config: Mapping[str, Any]) -> Mapping[str, Any]:

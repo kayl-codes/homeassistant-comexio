@@ -85,6 +85,12 @@ WEBHOOK_ADDRESS_MODES = [WEBHOOK_ADDRESS_AUTO, WEBHOOK_ADDRESS_EXTERNAL, WEBHOOK
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
+# Debug flag: extension name prefixes whose IOs get entities even while Comexio reports the extension
+# offline and include_offline_extensions is off (see offline_io_skipped). A virtual extension without a
+# device behind it reports no serial number and counts as offline, so include_offline_extensions would
+# add all of them. Set ("vSM",) to check the entities of the Smart Meters (vSM1, vSM2, ...; #249) on a
+# server without a meter; they stay unavailable and each IO expects a Web-IO command. Empty in a release.
+OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED: tuple[str, ...] = ()
 CONF_IGNORED_MARKERS = "ignored_markers"
 CONF_IGNORED_KNX = "ignored_knx"
 
@@ -124,7 +130,9 @@ ISSUE_IMPORT_DISABLED = "import_disabled"
 ISSUE_UNSUPPORTED_IO_TYPES = "unsupported_io_types"
 # Units of meter readings no output can be set to. Comexio's type table marks some of them as
 # outputs ($IOInputTypes input false: the Smart Meter's E1-E3 in Wh, S in VA, Q and DQ in var);
-# as a writable number such an IO would offer a set point, so it gets no entity yet (#196).
+# as a writable number such an IO would offer a set point, so it gets no entity (#196). Since
+# aiocomexio reads IntIsOutput 0 as read-only (#249) the Smart Meter's readings are sensors; this
+# only still applies to a firmware whose IO rows carry no IntIsOutput flag.
 IO_MEASUREMENT_ONLY_UNITS = frozenset({"Wh", "kWh", "VA", "var"})
 # Web-IO classes (values) the user chose "Ignore" for in that repair; a class leaves this
 # list again once its import is switched back on (see prune_import_disabled_ignored).
@@ -986,6 +994,16 @@ def extension_device_name(server_id: str, ext_name: str) -> str:
 def is_base_extension(ext_name: str) -> bool:
     """True for the IO-Server's onboard IOs — case-insensitive, like their lower-cased device identifier."""
     return ext_name.upper() == BASE_EXTENSION_NAME
+
+
+def offline_io_skipped(io: Mapping[str, Any], include_offline: bool) -> bool:
+    """True for an IO of an offline extension that gets no entity: include_offline_extensions is off
+    and its extension is not one of OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED."""
+    return (
+        bool(io.get("offline"))
+        and not include_offline
+        and not str(io.get("ext_name", "")).startswith(OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED)
+    )
 
 
 def known_extension_names(data: Mapping[str, Any], include_offline: bool) -> set[str]:

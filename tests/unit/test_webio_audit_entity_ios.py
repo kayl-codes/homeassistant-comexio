@@ -168,6 +168,9 @@ def test_an_expected_io_without_a_command_is_missing(include_offline: bool) -> N
         (UNSUPPORTED_IO, False, False),
         (UNSUPPORTED_IO, True, False),
         (_io("vDS1", "Q1", is_binary=False, is_input=False, unit="kWh", offline=True), True, False),
+        # A virtual extension without a device behind it reports offline (#249).
+        (_io("vTP1", "PIR1", is_binary=True, is_input=True, offline=True), False, False),
+        (_io("vTP1", "PIR1", is_binary=True, is_input=True, offline=True), True, True),
     ],
 )
 def test_io_has_entity(io: dict[str, Any], include_offline: bool, expected: bool) -> None:

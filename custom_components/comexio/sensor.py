@@ -58,6 +58,7 @@ from .const import (
     function_plan_info,
     function_plan_run_state_unique_id,
     is_temperature_marker_name,
+    offline_io_skipped,
     system_info_signal,
 )
 from .coordinator import ComexioCoordinator
@@ -92,7 +93,15 @@ UNIT_TO_DEVICE_CLASS = {
     "m/s": SensorDeviceClass.WIND_SPEED,
     "km/h": SensorDeviceClass.WIND_SPEED,
     "%": SensorDeviceClass.HUMIDITY,  # Often used for humidity in Comexio
+    # Smart Meter readings (#249)
+    "Wh": SensorDeviceClass.ENERGY,
+    "kWh": SensorDeviceClass.ENERGY,
+    "VA": SensorDeviceClass.APPARENT_POWER,
+    "var": SensorDeviceClass.REACTIVE_POWER,
 }
+# A meter counter can run backwards (Smart Meter E1-E3 net energy), so "total", not
+# "total_increasing", which would read every decrease as a meter reset.
+DEVICE_CLASS_TO_STATE_CLASS = {SensorDeviceClass.ENERGY: SensorStateClass.TOTAL}
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -106,7 +115,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioIOSensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
+            if not io.get("is_binary") and io.get("is_input", True) and not offline_io_skipped(io, include_offline)
         )
 
     # Quickbus IOs (multitouch, motion detectors, ...) are read-only, outputs included
@@ -210,11 +219,11 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         super().__init__(coordinator, server_id, io)
-        self._attr_state_class = SensorStateClass.MEASUREMENT
         unit = io.get("unit", "")
         self._attr_native_unit_of_measurement = unit
-        if unit in UNIT_TO_DEVICE_CLASS:
-            self._attr_device_class = UNIT_TO_DEVICE_CLASS[unit]
+        device_class = UNIT_TO_DEVICE_CLASS.get(unit)
+        self._attr_device_class = device_class
+        self._attr_state_class = DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
 
     @property
     def state_class(self) -> SensorStateClass | None:

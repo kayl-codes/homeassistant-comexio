@@ -53,6 +53,7 @@ from .const import (
     io_unique_id,
     known_extension_names,
     migrate_entry_options,
+    offline_io_skipped,
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
@@ -442,9 +443,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # entries count too: after the first restart with the extension offline, its entities are
     # already gone from the live registry, but their statistics must stay protected.
     offline_unique_ids = {
-        io_unique_id(server_id, io)
-        for io in coordinator.data.get("io", [])
-        if io.get("offline") and not include_offline
+        io_unique_id(server_id, io) for io in coordinator.data.get("io", []) if offline_io_skipped(io, include_offline)
     } | quickbus_offline_uids
     coordinator.offline_entity_statistic_ids = (
         {
