@@ -38,6 +38,7 @@ from custom_components.comexio.const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
+    CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_USERNAME,
@@ -46,10 +47,12 @@ from custom_components.comexio.const import (
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
+    QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.repairs import ComexioRepairFlow
+from tests.common import load_json_fixture
 
 from .conftest import HOST, SERVER_ID
 
@@ -58,6 +61,7 @@ OTHER = "b" * 64
 THIRD = "c" * 64
 NEW_HOST = "192.168.1.20"
 MARKER_SWITCH = f"switch.{SERVER_ID}_m1"
+IO_SENSOR = f"sensor.{SERVER_ID}_base_ai1"
 
 USER_INPUT = {
     CONF_SERVER_ID: SERVER_ID,
@@ -1127,6 +1131,163 @@ async def test_a_first_poll_meeting_another_certificate_without_a_saved_config_w
 
     assert pinned_entry.state is ConfigEntryState.SETUP_RETRY
     assert _issue(hass, pinned_entry) is not None
+
+
+def _including_offline_extensions(entry: MockConfigEntry) -> MockConfigEntry:
+    """The entry with the entities of offline extensions on: only those can be seen going available again."""
+    return MockConfigEntry(
+        domain=DOMAIN,
+        title=entry.title,
+        minor_version=entry.minor_version,
+        data=entry.data,
+        options={CONF_INCLUDE_OFFLINE_EXTENSIONS: True},
+    )
+
+
+async def _read_only_with_everything_saved_as_offline(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    hass_storage: dict[str, Any],
+) -> ComexioCoordinator:
+    """The entry set up from a saved config that has every extension offline, while another certificate answers."""
+    await _setup(hass, entry)
+    await hass.config_entries.async_unload(entry.entry_id)
+    await hass.async_block_till_done()
+    saved = hass_storage[f"{DOMAIN}_saved_config_{SERVER_ID}"]["data"]
+    for io in [*saved["io"], *saved[QUICKBUS_IO_DATA_KEY]]:
+        io["offline"] = True
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_CERTIFICATE
+    api_attributes["certificate_mismatch"] = ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
+    await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    assert coordinator.started_from_saved_config is True
+    return coordinator
+
+
+@pytest.mark.parametrize(
+    ("config_fixture", "io_types", "payload", "entity_id", "expected", "sibling", "other_ext", "other_entity"),
+    [
+        (
+            "config_basic.json",
+            {},
+            {"type": "io", "ext": "BASE", "io": "AI1", "value": 22.75},
+            IO_SENSOR,
+            "22.75",
+            f"binary_sensor.{SERVER_ID}_base_i1",
+            "UD 1",
+            f"sensor.{SERVER_ID}_ud_1_qi1",
+        ),
+        (
+            "config_quickbus.json",
+            {
+                "io_types": {
+                    "126": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+                    "134": {"binary": True, "min": 0, "max": 1, "unit": "0/1"},
+                }
+            },
+            {"type": "quickbus", "id": "201", "value": 1},
+            f"binary_sensor.{SERVER_ID}_qb201",
+            "on",
+            f"binary_sensor.{SERVER_ID}_qb202",
+            "Multibridge A6",
+            f"binary_sensor.{SERVER_ID}_qb301",
+        ),
+    ],
+    ids=["io", "quickbus"],
+)
+async def test_a_push_shows_an_extension_saved_as_offline_is_back(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    mock_comexio_api: list[ComexioAPI],
+    hass_storage: dict[str, Any],
+    hass_client_no_auth: ClientSessionGenerator,
+    config_fixture: str,
+    io_types: dict[str, Any],
+    payload: dict[str, Any],
+    entity_id: str,
+    expected: str,
+    sibling: str,
+    other_ext: str,
+    other_entity: str,
+) -> None:
+    # #250: no poll corrects the saved flag before the full setup, so the entities of an extension that came back
+    # would stay unavailable while it pushes.
+    entry = _including_offline_extensions(pinned_entry)
+    api_returns["get_raw_config"] = load_json_fixture(config_fixture)
+    api_attributes |= io_types
+    coordinator = await _read_only_with_everything_saved_as_offline(
+        hass, entry, api_returns, api_attributes, hass_storage
+    )
+    assert coordinator.offline_extensions == {"BASE", other_ext}
+    assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
+    assert hass.states.get(sibling).state == STATE_UNAVAILABLE
+
+    client = await hass_client_no_auth()
+    response = await client.post(f"/api/webhook/comexio_{SERVER_ID}", json=payload)
+    await hass.async_block_till_done()
+
+    assert response.status == 200
+    assert hass.states.get(entity_id).state == expected
+    assert hass.states.get(sibling).state == STATE_UNKNOWN  # the whole extension is back, without a value yet
+    assert coordinator.offline_extensions == {other_ext}
+    assert hass.states.get(other_entity).state == STATE_UNAVAILABLE
+
+
+async def test_a_push_without_a_reading_leaves_an_extension_saved_as_offline_offline(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    api_attributes: dict,
+    mock_comexio_api: list[ComexioAPI],
+    hass_storage: dict[str, Any],
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    # Only a finite number counts as a reading (#175), so only that shows the extension is back.
+    entry = _including_offline_extensions(pinned_entry)
+    coordinator = await _read_only_with_everything_saved_as_offline(
+        hass, entry, api_returns, api_attributes, hass_storage
+    )
+    offline_before = set(coordinator.offline_extensions)
+
+    client = await hass_client_no_auth()
+    response = await client.post(
+        f"/api/webhook/comexio_{SERVER_ID}", json={"type": "io", "ext": "BASE", "io": "AI1", "value": "nan"}
+    )
+    await hass.async_block_till_done()
+
+    assert response.status == 200
+    assert coordinator.offline_extensions == offline_before
+    assert hass.states.get(IO_SENSOR).state == STATE_UNAVAILABLE
+
+
+async def test_a_push_leaves_the_offline_extensions_to_the_poll_of_a_full_setup(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    api_returns: dict,
+    mock_comexio_api: list[ComexioAPI],
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    # Only a read-only setup has no poll to tell: here the next one decides, as before #250.
+    entry = _including_offline_extensions(pinned_entry)
+    for module in api_returns["get_raw_config"]["FubModules"]["1"].values():
+        module["extension"]["Identifier"] = ""  # no serial number: the extension is offline
+    await _setup(hass, entry)
+    assert hass.states.get(IO_SENSOR).state == STATE_UNAVAILABLE
+
+    client = await hass_client_no_auth()
+    response = await client.post(
+        f"/api/webhook/comexio_{SERVER_ID}", json={"type": "io", "ext": "BASE", "io": "AI1", "value": 22.75}
+    )
+    await hass.async_block_till_done()
+
+    assert response.status == 200
+    assert hass.states.get(IO_SENSOR).state == STATE_UNAVAILABLE
 
 
 async def test_removing_the_entry_removes_its_saved_config(

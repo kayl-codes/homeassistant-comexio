@@ -318,6 +318,18 @@ async def test_user_flow_rejects_taken_server_id(
     assert mock_comexio_api == []
 
 
+@pytest.mark.parametrize("chosen_id", ["../../configuration", "..\\..\\configuration", "a/b"])
+async def test_user_flow_rejects_a_path_separator_in_the_server_id(
+    hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], chosen_id: str
+) -> None:
+    """The storage keys carry the server id: a path separator would write outside .storage, so it is refused."""
+    result = await _submit(hass, {**USER_INPUT, CONF_SERVER_ID: chosen_id})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_SERVER_ID: "server_id_invalid"}
+    assert mock_comexio_api == []
+
+
 def _dns(table: dict[str, str]):
     """gethostbyname answering from the table; an IP resolves to itself, every other name fails."""
 

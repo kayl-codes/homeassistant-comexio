@@ -62,6 +62,10 @@ class ServerIdExists(HomeAssistantError):
     """Error to indicate the Server ID is already in use."""
 
 
+class ServerIdInvalid(HomeAssistantError):
+    """Error to indicate the Server ID contains a path separator."""
+
+
 class HostAlreadyConfigured(HomeAssistantError):
     """Error to indicate an existing entry already talks to this Comexio server."""
 
@@ -138,6 +142,13 @@ def _configured_addresses(hosts: list[str]) -> set[tuple[str, int]]:
 def _host_configured(host: str, configured_hosts: list[str]) -> bool:
     """Whether the host, as written or resolved, is one an existing entry uses (blocking)."""
     return bool(_host_addresses(host) & _configured_addresses(configured_hosts))
+
+
+def _reject_path_separator(server_id: str, errors: dict[str, str]) -> None:
+    """Raise ServerIdInvalid for a server ID with a path separator: the storage keys carry it as it is (#250)."""
+    if "/" in server_id or "\\" in server_id:
+        errors[CONF_SERVER_ID] = "server_id_invalid"
+        raise ServerIdInvalid
 
 
 def _taken_server_id(server_id: str, entries) -> str | None:
@@ -227,6 +238,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # (see webio_range_check_entity_id()) and two distinct raw IDs (e.g. "my-server"
                 # vs. "my_server") would otherwise collide there despite passing this check.
                 chosen_id = user_input[CONF_SERVER_ID].strip().lower()
+                _reject_path_separator(chosen_id, errors)
                 if (existing_id := _taken_server_id(chosen_id, current_entries)) is not None:
                     _LOGGER.warning(
                         "Setup failed: Server ID '%s' collides with existing entry '%s'",
@@ -255,7 +267,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     user_input[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
                 self._pending_entry = user_input
                 self._checked_hosts = set(configured_hosts)
-            except (ServerIdExists, HostAlreadyConfigured):
+            except (ServerIdExists, ServerIdInvalid, HostAlreadyConfigured):
                 # Error already added to the errors dict
                 pass
             except CannotConnect:

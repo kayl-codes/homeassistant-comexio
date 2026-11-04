@@ -2,6 +2,7 @@
   "config": {
     "error": {
       "server_id_exists": "Este nombre de instancia ya está en uso.",
+      "server_id_invalid": "El nombre de instancia no puede contener barras ni barras invertidas.",
       "already_configured": "Este servidor Comexio ya está configurado (mismo host o misma dirección).",
       "cannot_connect": "Error de conexión con Comexio.",
       "invalid_auth": "Credenciales no válidas (Usuario/Contraseña UI).",

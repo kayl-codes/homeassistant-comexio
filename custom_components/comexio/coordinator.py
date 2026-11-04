@@ -5043,6 +5043,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         else:
             self._io_real_value_ids.add(io["id"])
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+            if self.started_from_saved_config and io["ext_name"] in (offline := self.offline_extensions or set()):
+                # Saved as offline but reading, so it is back; no poll corrects the saved flag before the full setup.
+                self._handle_offline_extension_transitions(offline - {io["ext_name"]})
         return previous
 
     def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
