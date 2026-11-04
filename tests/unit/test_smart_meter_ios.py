@@ -12,8 +12,10 @@ from typing import Any
 from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 import pytest
 
+from custom_components.comexio import const
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import offline_io_skipped
+from custom_components.comexio.diagnostics import _io_diagnostics
 from custom_components.comexio.sensor import ComexioIOSensor
 from custom_components.comexio.unsupported_ios import (
     REASON_MEASUREMENT_OUTPUT,
@@ -107,11 +109,17 @@ def test_a_smart_meter_reading_becomes_a_sensor_of_its_kind(
     assert sensor.native_unit_of_measurement == unit
 
 
+def test_a_release_takes_in_no_offline_extension() -> None:
+    """The debug flag is empty: an offline Smart Meter gets no entity unless include_offline is on."""
+    assert const.OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED == ()
+    assert offline_io_skipped({"ext_name": "vSM1", "offline": True}, include_offline=False)
+
+
 @pytest.mark.parametrize(
     ("io", "include_offline", "skipped"),
     [
         ({"ext_name": "vSM1", "offline": False}, False, False),
-        # Comexio reports every virtual extension offline: only the Smart Meters are taken in.
+        # Comexio reports every virtual extension without a device offline: only the listed ones are taken in.
         ({"ext_name": "vSM1", "offline": True}, False, False),
         ({"ext_name": "vSM2", "offline": True}, False, False),
         ({"ext_name": "vTP1", "offline": True}, False, True),
@@ -121,7 +129,12 @@ def test_a_smart_meter_reading_becomes_a_sensor_of_its_kind(
         ({"offline": True}, False, True),
     ],
 )
-def test_only_a_smart_meter_of_the_offline_extensions_gets_entities(
-    io: dict[str, Any], include_offline: bool, skipped: bool
+def test_the_debug_flag_takes_in_only_the_listed_offline_extensions(
+    monkeypatch: pytest.MonkeyPatch, io: dict[str, Any], include_offline: bool, skipped: bool
 ) -> None:
+    monkeypatch.setattr(const, "OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED", ("vSM",))
+
     assert offline_io_skipped(io, include_offline) is skipped
+    # The same rule decides on the Web-IO command and on the diagnostics' platform.
+    assert io_has_entity({**io, "is_binary": False, "is_input": True}, include_offline) is not skipped
+    assert (_io_diagnostics({**io, "is_binary": True}, include_offline)["platform"] is None) is skipped

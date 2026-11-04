@@ -85,12 +85,12 @@ WEBHOOK_ADDRESS_MODES = [WEBHOOK_ADDRESS_AUTO, WEBHOOK_ADDRESS_EXTERNAL, WEBHOOK
 CONF_ENTITY_ID_MIGRATION_IGNORED = "entity_id_migration_ignored"
 CONF_STATISTICS_CLEANUP_IGNORED = "statistics_cleanup_ignored"
 CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
-# Extension name prefixes whose IOs get entities even while Comexio reports the extension offline
-# and include_offline_extensions is off (see offline_io_skipped). Comexio's virtual extensions carry
-# no serial number, so they always count as offline; turning on include_offline_extensions would add
-# every one of them. Only the Smart Meters (vSM1, vSM2, ...) are taken in (#249); add a prefix here to
-# take in another kind.
-OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED: tuple[str, ...] = ("vSM",)
+# Debug flag: extension name prefixes whose IOs get entities even while Comexio reports the extension
+# offline and include_offline_extensions is off (see offline_io_skipped). A virtual extension without a
+# device behind it reports no serial number and counts as offline, so include_offline_extensions would
+# add all of them. Set ("vSM",) to check the entities of the Smart Meters (vSM1, vSM2, ...; #249) on a
+# server without a meter; they stay unavailable and each IO expects a Web-IO command. Empty in a release.
+OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED: tuple[str, ...] = ()
 CONF_IGNORED_MARKERS = "ignored_markers"
 CONF_IGNORED_KNX = "ignored_knx"
 
