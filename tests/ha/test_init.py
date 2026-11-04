@@ -83,7 +83,7 @@ async def test_unload_without_a_coordinator_still_unloads(
 
         assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
         assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
-        assert f"{mock_config_entry.entry_id}_webhook" not in hass.data[DOMAIN]  # the cleanup after the pop still ran
+        assert f"{mock_config_entry.entry_id}_webhooks" not in hass.data[DOMAIN]  # the cleanup after the pop still ran
     finally:
         # Nothing in hass.data pointed at it any more, so the unload could not stop it: the test does.
         coordinator.plan_watchdog.close()
