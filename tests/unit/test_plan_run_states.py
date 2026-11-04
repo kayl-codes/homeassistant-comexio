@@ -1,6 +1,7 @@
 """Function plan run states: cache update, HA's own start/stop, the poll and its guards."""
 
 import asyncio
+from collections.abc import Callable
 import contextlib
 import logging
 import time
@@ -4164,6 +4165,34 @@ def test_a_read_only_entry_the_reload_did_not_replace_is_reloaded_after_the_next
 
     coordinator.async_reload_entry.assert_awaited_once_with("pinned certificate answers again")
     assert coordinator.started_from_saved_config is False
+
+
+@pytest.mark.parametrize(
+    "leave",
+    [
+        lambda entries: entries.update(entry1=object()),
+        lambda entries: entries.pop("entry1"),
+    ],
+    ids=["replaced by another reload", "unloaded"],
+)
+def test_a_read_only_entry_another_reload_replaced_is_not_reloaded_again(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, caplog: pytest.LogCaptureFixture, leave: Callable
+) -> None:
+    # An options change or a user reloaded or unloaded the entry between the poll and its full-setup task: the new
+    # setup stands, an unloaded entry stays unloaded.
+    coordinator = _saved_config_coordinator(api, coordinator_module.saved_config(_parsed_config()))
+    asyncio.run(coordinator.async_start_from_saved_config())
+    api.certificate_mismatch = None
+    coordinator._async_fetch_and_audit = _scraping_poll(coordinator, _parsed_config())
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    assert len(coordinator.tasks) == 1  # the full-setup task is queued
+
+    leave(coordinator.hass.data[coordinator_module.DOMAIN])
+    _run_tasks(coordinator)
+
+    coordinator.async_reload_entry.assert_not_called()
+    assert "Still set up read only" not in caplog.text
+    assert "Home Assistant retries the setup" not in caplog.text
 
 
 @pytest.mark.parametrize(

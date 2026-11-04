@@ -2,7 +2,7 @@
   "config": {
     "error": {
       "server_id_exists": "Ce nom d'instance est déjà utilisé.",
-      "server_id_invalid": "Le nom d'instance ne doit contenir ni barre oblique ni barre oblique inverse.",
+      "server_id_invalid": "Le nom de l'instance ne doit pas être vide ni contenir de barre oblique ou de barre oblique inverse.",
       "already_configured": "Ce serveur Comexio est déjà configuré (même hôte ou même adresse).",
       "cannot_connect": "La connexion à Comexio a échoué.",
       "invalid_auth": "Identifiants invalides (Interface Utilisateur/Mot de passe).",

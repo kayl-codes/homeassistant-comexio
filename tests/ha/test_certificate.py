@@ -50,7 +50,7 @@ from custom_components.comexio.const import (
     QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
 )
-from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.coordinator import ComexioCoordinator, saved_config_store
 from custom_components.comexio.repairs import ComexioRepairFlow
 from tests.common import load_json_fixture
 
@@ -1302,6 +1302,30 @@ async def test_removing_the_entry_removes_its_saved_config(
     assert key in hass_storage
 
     await hass.config_entries.async_remove(pinned_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert key not in hass_storage
+
+
+async def test_the_saved_config_is_kept_under_the_slug_of_the_server_id(hass: HomeAssistant) -> None:
+    # Saving, loading and removing all go through this store, so its key decides where the file lands.
+    assert saved_config_store(hass, "My-Server").key == f"{DOMAIN}_saved_config_my_server"
+
+
+@pytest.mark.parametrize(
+    ("server_id", "key"),
+    [("", f"{DOMAIN}_saved_config_"), ("../../configuration", f"{DOMAIN}_saved_config_configuration")],
+    ids=["empty server id", "path separators"],
+)
+async def test_removing_an_older_entry_removes_its_saved_config_inside_the_storage(
+    hass: HomeAssistant, hass_storage: dict[str, Any], server_id: str, key: str
+) -> None:
+    # Entries set up before the flow refused these ids: their saved config sits under the slug, inside .storage.
+    entry = MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: server_id})
+    entry.add_to_hass(hass)
+    hass_storage[key] = {"version": 1, "minor_version": 1, "key": key, "data": {}}
+
+    await hass.config_entries.async_remove(entry.entry_id)
     await hass.async_block_till_done()
 
     assert key not in hass_storage

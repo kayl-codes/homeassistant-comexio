@@ -318,11 +318,14 @@ async def test_user_flow_rejects_taken_server_id(
     assert mock_comexio_api == []
 
 
-@pytest.mark.parametrize("chosen_id", ["../../configuration", "..\\..\\configuration", "a/b"])
-async def test_user_flow_rejects_a_path_separator_in_the_server_id(
+@pytest.mark.parametrize("chosen_id", ["../../configuration", "..\\..\\configuration", "a/b", "", "   "])
+async def test_user_flow_rejects_an_empty_server_id_or_one_with_a_path_separator(
     hass: HomeAssistant, mock_comexio_api: list[ComexioAPI], chosen_id: str
 ) -> None:
-    """The storage keys carry the server id: a path separator would write outside .storage, so it is refused."""
+    """The storage keys carry the server id: a path separator would write outside .storage, so it is refused.
+
+    An empty one is refused too: the entity_ids, store keys and webhook all carry it.
+    """
     result = await _submit(hass, {**USER_INPUT, CONF_SERVER_ID: chosen_id})
 
     assert result["type"] is FlowResultType.FORM

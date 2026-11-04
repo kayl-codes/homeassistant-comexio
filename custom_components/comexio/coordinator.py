@@ -616,8 +616,12 @@ _SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
 
 
 def saved_config_store(hass: HomeAssistant, server_id: str) -> Store:
-    """The store of the config the last scraped poll saved for this server (#250)."""
-    return Store(hass, 1, f"{DOMAIN}_saved_config_{server_id}")
+    """The store of the config the last scraped poll saved for this server (#250).
+
+    Keyed by the slug: an entry set up before the setup flow refused path separators may carry one in its ID, and the
+    key becomes a path under .storage. The flow refuses two IDs with one slug, so no two entries share the store.
+    """
+    return Store(hass, 1, f"{DOMAIN}_saved_config_{slugify(server_id)}")
 
 
 def saved_config(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
@@ -6057,6 +6061,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_full_setup(self) -> None:
         """Run the reload of _schedule_full_setup and report how it ended."""
+        if self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) is not self:
+            # Another reload replaced this coordinator before the task ran; the new setup decides on its own whether
+            # it starts read only, so a reload here would only tear it down again.
+            _LOGGER.debug(
+                "[%s] Reload after the read-only start skipped: the entry was reloaded or unloaded meanwhile",
+                self.server_id,
+            )
+            return
         try:
             reloaded = await self.async_reload_entry("pinned certificate answers again")
         except Exception:
