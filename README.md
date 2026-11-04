@@ -41,7 +41,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 
 | Platform | Comexio Source | Features |
 | :--- | :--- | :--- |
-| `sensor` | Analog IOs (QI, TL, AI), Smart Meter readings | Automatic detection of temperature (°C), power (W), current (A), etc. via `$ioTypes`. Smart Meter (Gen1/Gen2) readings become energy (Wh, kWh; state class `total`, ready for the Energy dashboard), apparent power (VA) and reactive power (var) sensors. |
+| `sensor` | Analog IOs (QI, TL, AI), Smart Meter readings | Automatic detection of temperature (°C), power (W), current (A), etc. via `$ioTypes`. Smart Meter (Gen1/Gen2) readings become energy (Wh, kWh; state class `total`, ready for the Energy dashboard), apparent power (VA) and reactive power (var) sensors when Comexio marks them as never written (`IntIsOutput` 0); on firmware whose IO rows lack `IntIsOutput` they stay in the **IOs without an entity** repair (#196). |
 | `binary_sensor` | Digital Inputs | Auto-detection of motion detectors, window and door contacts based on the name. |
 | `switch` | Digital Outputs (Q) & Markers | Switches physical relays (classified as outlets) and digital markers. An IO that Comexio marks as never written (`IntIsOutput` 0: Smart Meter readings, PIR, Panic) is always read-only, whatever its identifier — the Smart Meter's Q1–Q3 are reactive power, not relays. |
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
@@ -328,7 +328,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 
 | Plattform | Comexio Quelle | Features |
 | :--- | :--- | :--- |
-| `sensor` | Analoge IOs (QI, TL, AI), Smart-Meter-Messwerte | Automatische Erkennung von Temperatur (°C), Leistung (W), Strom (A), etc. via `$ioTypes`. Messwerte der Smart Meter (Gen1/Gen2) werden Sensoren für Energie (Wh, kWh; State-Class `total`, direkt im Energie-Dashboard nutzbar), Scheinleistung (VA) und Blindleistung (var). |
+| `sensor` | Analoge IOs (QI, TL, AI), Smart-Meter-Messwerte | Automatische Erkennung von Temperatur (°C), Leistung (W), Strom (A), etc. via `$ioTypes`. Messwerte der Smart Meter (Gen1/Gen2) werden Sensoren für Energie (Wh, kWh; State-Class `total`, direkt im Energie-Dashboard nutzbar), Scheinleistung (VA) und Blindleistung (var), sofern Comexio sie als nie beschrieben markiert (`IntIsOutput` 0); bei Firmware, deren IO-Zeilen kein `IntIsOutput` liefern, bleiben sie in der Reparatur **IOs ohne Entität** (#196). |
 | `binary_sensor` | Digitale Eingänge | Auto-Erkennung von Bewegungsmeldern, Fenster- und Türkontakten anhand des Namens. |
 | `switch` | Digitale Ausgänge (Q) & Merker | Schaltet physische Relais (als Steckdose/Outlet klassifiziert) und digitale Merker. Ein IO, den Comexio als nie beschrieben markiert (`IntIsOutput` 0: Smart-Meter-Messwerte, PIR, Panik), ist immer nur lesbar, egal was sein Kennzeichen sagt — Q1–Q3 des Smart Meters sind Blindleistung, keine Relais. |
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
