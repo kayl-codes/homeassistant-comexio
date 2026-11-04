@@ -14,7 +14,12 @@ import pytest
 
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.sensor import ComexioIOSensor
-from custom_components.comexio.unsupported_ios import REASON_MEASUREMENT_OUTPUT, io_platform, unsupported_io_reason
+from custom_components.comexio.unsupported_ios import (
+    REASON_MEASUREMENT_OUTPUT,
+    io_has_entity,
+    io_platform,
+    unsupported_io_reason,
+)
 from tests.common import load_json_fixture
 
 # Type tables as Comexio sends them: every reading and the panel inputs are marked "not an input",
@@ -59,8 +64,13 @@ def test_an_io_comexio_never_writes_gets_a_read_only_entity(
 ) -> None:
     io = ios[key]
 
+    # The sensor, binary_sensor and switch setups filter on these two flags themselves.
+    assert io["is_input"] is (platform != "switch")
+    assert io["is_binary"] is (platform != "sensor")
     assert unsupported_io_reason(io) is None
     assert io_platform(io) == platform
+    # Only an IO with an entity gets a Web-IO command, so its value is pushed.
+    assert io_has_entity(io, include_offline=False)
 
 
 def test_a_reading_without_the_flag_still_gets_the_repair(ios: dict[tuple[str, str], dict[str, Any]]) -> None:
@@ -69,6 +79,7 @@ def test_a_reading_without_the_flag_still_gets_the_repair(ios: dict[tuple[str, s
 
     assert unsupported_io_reason(io) == REASON_MEASUREMENT_OUTPUT
     assert io_platform(io) is None
+    assert not io_has_entity(io, include_offline=False)
 
 
 @pytest.mark.parametrize(
