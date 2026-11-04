@@ -7,18 +7,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.31.0] — 2026-11-04
+
+Covers everything since v0.30.0, including the pre-release v0.30.1-rc1.
+
 ### ✨ New Features
-- **Accept a changed certificate from the push:** the urgent push for a changed Comexio certificate carries an **Accept certificate** button. Like confirming the repair, it reads the certificate again and pins it only if it is the one the push showed, and only for an administrator's companion app; the integration then connects again without a restart. The README explains the steps and why a changed certificate is never accepted on its own (#250).
-- **Smart Meter readings as sensors:** the IOs of the Smart Meter extension (Gen1 and Gen2) become sensors instead of a "Comexio IOs without an entity" repair. Energy counters (Wh/kWh) are `energy` sensors with state class `total`, so they work in the Energy dashboard and may also count down for net energy. Apparent power (VA) is an `apparent_power` sensor and reactive power (var) a `reactive_power` sensor. The direction comes from Comexio's own flag: an IO that Comexio marks as not writable is now always read-only. This also turns the RC1 `Panic` and the vDS/vTP `PIR` IOs from switches into binary sensors, so their old switch entity goes away. The repair stays only for firmware without that flag (#249).
+- **Accept a changed certificate from the push:** the urgent push for a changed Comexio certificate carries an **Accept certificate** button. Like confirming the repair, it reads the certificate again and pins it only if it is the one the push showed, and only for an administrator's companion app; the integration then connects again without a restart. The README explains the steps and why a changed certificate is never accepted on its own. Reported by **@mexpert71** (#250, #256).
+- **Smart Meter readings as sensors:** the IOs of the Smart Meter extension (Gen1 and Gen2) become sensors instead of a "Comexio IOs without an entity" repair. Energy counters (Wh/kWh) are `energy` sensors with state class `total`, so they work in the Energy dashboard and may also count down for net energy. Apparent power (VA) is an `apparent_power` sensor and reactive power (var) a `reactive_power` sensor. The direction comes from Comexio's own flag: an IO that Comexio marks as not writable is now always read-only. This also turns the RC1 `Panic` and the vDS/vTP `PIR` IOs from switches into binary sensors, so their old switch entity goes away. The repair stays only for firmware without that flag (#249, #262).
 
 ### 🛠️ Core & Stability Improvements
-- **Reading goes on while another certificate answers:** when Comexio presents another certificate than the pinned one while Home Assistant runs, the entities no longer turn unavailable at every poll. They keep their last values, Comexio's webhook pushes keep updating them, and the repair and push stay up. Nothing is written until you accept the certificate; a refused switch or value names the certificate as the cause (#250).
-- **A restart while another certificate answers keeps the entities:** a Home Assistant restart or an entry reload that meets another certificate no longer leaves the integration unloaded until you decide. It sets up from the config Comexio last sent (saved at every successful poll, without values): the entities stay, show unknown until Comexio's webhook pushes a value, and nothing is written or removed. The plan, bus load, system and firmware checks wait; once you accept the certificate, or the pinned one answers again, the integration sets itself up in full. Without a saved config, e.g. right after an update to this version, it still waits for your decision (#250).
-- **Digital markers without a value show unknown:** a marker switch or read-only binary sensor without a known value now shows unknown instead of off, as KNX objects already did (#250).
+- **Reading goes on while another certificate answers:** when Comexio presents another certificate than the pinned one while Home Assistant runs, the entities no longer turn unavailable at every poll. They keep their last values, Comexio's webhook pushes keep updating them, and the repair and push stay up. Nothing is written until you accept the certificate; a refused switch or value names the certificate as the cause (#250, #258).
+- **A restart while another certificate answers keeps the entities:** a Home Assistant restart or an entry reload that meets another certificate no longer leaves the integration unloaded until you decide. It sets up from the config Comexio last sent (saved at every successful poll, without values): the entities stay, show unknown until Comexio's webhook pushes a value, and nothing is written or removed. The plan, bus load, system and firmware checks wait; once you accept the certificate, or the pinned one answers again, the integration sets itself up in full. Without a saved config, e.g. right after an update to this version, it still waits for your decision. The saved config is kept per config entry and removed with it (#250, #260, #263).
+- **Digital markers without a value show unknown:** a marker switch or read-only binary sensor without a known value now shows unknown instead of off, as KNX objects already did (#250, #260).
 
 ### 🐛 Bug Fixes & Refactoring
 - **Same-named Web-IO commands are cleaned up in one sync:** several Web-IO commands can share one name on the Comexio server, e.g. leftover `HA IO <ext> TL1` commands from before Quickbus support. The audit saw only the first command of each name, so every sync deleted just one of them and the "Web-IO mismatch" repair came back after the next poll. Every duplicate now counts as an orphan and one sync removes them all; a command still placed in a function plan is kept, and if a plan cannot be read, every command is kept. Reported by **@mexpert71** (#251, #252).
 - **Pushes for an unknown IO warn once:** a stale command that keeps pushing values for an IO Home Assistant does not track logs one WARNING per IO instead of one per push; repeats go to DEBUG (#252).
+- **Dimmer outputs step in whole percent:** Comexio rounds a value written to a percentage output to a whole number, yet the number entity offered a 0.1 step, so the slider sent fractions the dimmer never held and every value showed a decimal (`2.0 %`). A percentage output with whole bounds now steps in 1, and a fraction from a service call is rounded half up before the write. Other outputs (0–10 V, A, W) keep 0.1. Reported by **@mexpert71** (#253, #255).
+
+### ⚠️ Requirements & Notes
+- **Restart required** after updating.
+- **Dependency:** `aiocomexio==0.8.2` (installed automatically by Home Assistant).
+- **Panic and PIR become binary sensors:** the RC1 `Panic` and the vDS/vTP `PIR` IOs lose their switch entity. Automations or dashboards using it must switch to the new `binary_sensor` (#249).
+- **Saved config after updating:** the read-only setup during a certificate change needs one successful poll on this version first; until then a restart that meets another certificate still waits for your decision (#250).
 
 ---
 
@@ -397,7 +410,9 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.31.0...HEAD
+[0.31.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.30.0...v0.31.0
+[0.30.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.10.0...v0.30.0
 [0.10.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.5...v0.10.0
 [0.9.5]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.4...v0.9.5
 [0.9.4]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.3...v0.9.4
