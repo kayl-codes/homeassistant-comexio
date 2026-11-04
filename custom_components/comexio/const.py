@@ -705,6 +705,19 @@ WEBIO_RANGE_CHECK_HOUR = 4
 WEBIO_RANGE_CHECK_MINUTE = 20
 
 
+# Nightly migration of the Web-IO commands to webhook ids of their own (dg): a command takes ~35 s to rewrite, so a
+# run stops after its budget and the next night carries on. It ends before WEBIO_RANGE_CHECK_HOUR.
+WEBHOOK_MIGRATION_HOUR = 1
+WEBHOOK_MIGRATION_MINUTE = 30
+WEBHOOK_MIGRATION_BUDGET_SEC = 2.5 * 3600
+WEBHOOK_MIGRATION_SAVE_EVERY = 20  # commands between two saves of the ledger
+WEBHOOK_MIGRATION_PENDING = "pending"
+WEBHOOK_MIGRATION_DONE = "done"
+WEBHOOK_MIGRATION_FAILED = "failed"
+WEBHOOK_MIGRATION_SKIPPED = "skipped"
+WEBHOOK_MIGRATION_NEEDS_RESTART = "needs_restart"
+
+
 def webio_range_check_entity_id(server_id: str) -> str:
     """Entity ID of the Web-IO range-check button — slugified so hyphens etc. in server_id stay valid.
 

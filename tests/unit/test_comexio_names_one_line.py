@@ -76,6 +76,7 @@ IDENTITY_FUNCTIONS = {
         "io_unique_id",  # an entity's unique_id
         "io_command_name",  # the Web-IO command name Comexio must report back
     },
+    "webhook_security.py": {"command_key", "payload_key"},  # the HMAC input that tells a command's webhook id
     "entity.py": {"extension_device_identifier"},  # a device registry identifier
     "function_plan_block_keys.py": {"_unresolved_element"},  # the element name written into the plan
     "coordinator.py": {

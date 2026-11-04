@@ -172,6 +172,15 @@ from .const import (
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_FORMER_IO_LOG_MSG,
+    WEBHOOK_MIGRATION_BUDGET_SEC,
+    WEBHOOK_MIGRATION_DONE,
+    WEBHOOK_MIGRATION_FAILED,
+    WEBHOOK_MIGRATION_HOUR,
+    WEBHOOK_MIGRATION_MINUTE,
+    WEBHOOK_MIGRATION_NEEDS_RESTART,
+    WEBHOOK_MIGRATION_PENDING,
+    WEBHOOK_MIGRATION_SAVE_EVERY,
+    WEBHOOK_MIGRATION_SKIPPED,
     WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
@@ -273,6 +282,7 @@ from .plan_watchdog import (
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
 from .unsupported_ios import IoTypeTableSnapshot, UnsupportedIoMonitor, io_has_entity
+from .webhook_security import WebhookSecurity, command_key, derive_webhook_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1329,6 +1339,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._bus_load_fail_streak = 0
         # Free storage, time server settings, boot time (see async_start_system_info_poll).
         self.system_info = SystemInfoState()
+        # Set by the entry setup once the webhooks are registered; the migration calls it after the old id is off.
+        self.sync_webhooks: Callable[[], None] = lambda: None
         self._system_info_task: asyncio.Task[None] | None = None
         # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
         # into api.fub_data's Active flags; the api reports the changes HA itself causes
@@ -5499,6 +5511,98 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
         return result
 
+    def async_start_webhook_migration(self):
+        """Start the nightly migration of the Web-IO commands to their own webhook ids; returns the cancel callback."""
+        return async_track_time_change(
+            self.hass,
+            self._async_webhook_migration_tick,
+            hour=WEBHOOK_MIGRATION_HOUR,
+            minute=WEBHOOK_MIGRATION_MINUTE,
+            second=0,
+        )
+
+    def _pending_webhook_migrations(self) -> list[tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]]:
+        """(name, stored command, its device, target) of every command that does not carry its own path yet."""
+        security = self.api.webhook_security
+        targets = self._webio_range_targets()
+        devices = self.data.get("webio_devices", {})
+        pending = []
+        for name, cmd in self.data.get("webio_commands", {}).items():
+            target = targets.get(name)
+            device = devices.get(cmd.get("webioClass"), {})
+            if target is None or security is None or name in security.migrated:
+                continue
+            if not cmd.get("cmdId") or not device.get("device_id"):
+                continue
+            pending.append((name, cmd, device, target))
+        return pending
+
+    async def _async_webhook_migration_tick(self, _now: datetime | None = None) -> str:
+        """Rewrite the Web-IO commands that still POST to the old webhook id, within the nightly budget.
+
+        Only the path and the payload change, the commands' protocol and address stay as they are. The old id stays
+        registered until every command has been rewritten and Comexio restarted after the last write (Comexio only
+        sends a changed command after a restart); then it is switched off. Returns one of the WEBHOOK_MIGRATION_*
+        states.
+        """
+        security = self.api.webhook_security
+        if security is None or not self.data or self.unloading or not security.legacy_enabled:
+            return WEBHOOK_MIGRATION_SKIPPED
+        written, failed = await self._async_rewrite_pending_webhooks(security)
+        await security.async_save()
+        remaining = len(self._pending_webhook_migrations())
+        _LOGGER.info(
+            "[%s] Webhook id migration: %d rewritten, %d failed, %d left", self.server_id, written, failed, remaining
+        )
+        if remaining:
+            return WEBHOOK_MIGRATION_FAILED if failed and not written else WEBHOOK_MIGRATION_PENDING
+        return await self._async_finish_webhook_migration()
+
+    async def _async_rewrite_pending_webhooks(self, security: WebhookSecurity) -> tuple[int, int]:
+        """(rewritten, failed) of one nightly run: stops at its budget, an unload or a function plan restore."""
+        deadline = time.monotonic() + WEBHOOK_MIGRATION_BUDGET_SEC
+        written = failed = 0
+        for name, cmd, device, target in self._pending_webhook_migrations():
+            if time.monotonic() > deadline or self.unloading or self._restore_lock.locked():
+                break
+            async with self._sync_lock:
+                ok = await self.api.save_single_command(
+                    device.get("base_id"), device.get("device_id"), target, existing_cmd_id=cmd.get("cmdId")
+                )
+            if not ok:
+                failed += 1
+                _LOGGER.warning(
+                    "[%s] Web-IO command '%s' could not be moved to its own webhook id", self.server_id, one_line(name)
+                )
+                continue
+            written += 1
+            if written % WEBHOOK_MIGRATION_SAVE_EVERY == 0:
+                await security.async_save()
+        return written, failed
+
+    async def _async_finish_webhook_migration(self) -> str:
+        """Switch the old webhook id off once Comexio has restarted after the last command was rewritten."""
+        security = self.api.webhook_security
+        boot_time = self.system_info.boot_time
+        if security is None:
+            return WEBHOOK_MIGRATION_SKIPPED
+        if security.last_write is not None and (boot_time is None or boot_time <= security.last_write):
+            persistent_notification.async_create(
+                self.hass,
+                f"All Web-IO commands of {self.server_id} now use a webhook id of their own, but Comexio only sends "
+                "a changed command after a restart. Restart the Comexio server; the old webhook id is switched off "
+                "at the next nightly run after that.",
+                title="Comexio: restart needed",
+                notification_id=f"{DOMAIN}_{self.server_id}_webhook_restart",
+            )
+            return WEBHOOK_MIGRATION_NEEDS_RESTART
+        security.legacy_enabled = False
+        await security.async_save()
+        persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.server_id}_webhook_restart")
+        self.sync_webhooks()
+        _LOGGER.info("[%s] Old webhook id switched off: every Web-IO command uses its own", self.server_id)
+        return WEBHOOK_MIGRATION_DONE
+
     async def async_force_webio_range_check(self) -> dict[str, int]:
         """Force-run the Web-IO analog range check outside its nightly window (manual trigger)."""
         return await self._async_webio_range_check_tick()
@@ -8275,6 +8379,28 @@ class ComexioCoordinator(DataUpdateCoordinator):
             **data,
             "io": [io for io in data.get("io", []) if io_has_entity(io, include_offline)],
             QUICKBUS_IO_DATA_KEY: [io for io in quickbus_ios if include_offline or not io.get("offline")],
+        }
+
+    def webhook_command_ids(self) -> set[str]:
+        """The webhook ids the Web-IO commands of this server can POST to (dg): one per source item.
+
+        include_held and the ignored items are not told apart: an id registered for a command that does not exist
+        is never called, so the set errs on the wide side and never misses a command that does.
+        """
+        security = self.api.webhook_security
+        if not security or not self.data:
+            return set()
+        source = self.webio_source_data(include_held=True)
+        items = (
+            (WebioClass.MARKER, source.get("markers", [])),
+            (WebioClass.IO, source.get("io", [])),
+            (WebioClass.QUICKBUS, source.get(QUICKBUS_IO_DATA_KEY, [])),
+            (WebioClass.KNX, source.get("knx", [])),
+        )
+        return {
+            derive_webhook_id(security.secret, command_key(webio_class, item))
+            for webio_class, group in items
+            for item in group
         }
 
     def managed_column_plan(self, fub_id: int) -> tuple[IoPlanKind, list[str]] | None:
