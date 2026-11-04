@@ -133,9 +133,14 @@ class ComexioMarkerBinarySensor(ComexioMarkerEntity, BinarySensorEntity):
     """
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the digital source is active."""
-        return float(self._source_value or 0) >= 1.0
+    def is_on(self) -> bool | None:
+        """True if the digital source is active, None ("unknown") while no value is known.
+
+        A KNX object has no value until its first webhook, a marker none after a setup from the saved config
+        (#250): an 'off' then would be made up rather than known.
+        """
+        val = self._source_value
+        return None if val is None else float(val or 0) >= 1.0
 
 
 class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
@@ -159,14 +164,6 @@ class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
                     self._marker_id,
                     dpt_device_class,
                 )
-
-    @property
-    def is_on(self) -> bool | None:
-        """None until the first webhook. Unlike markers, KNX objects have no authoritative
-        poll path, so a pre-webhook value would be a fabricated 'off' rather than a known state.
-        """
-        val = self._source_value
-        return None if val is None else float(val or 0) >= 1.0
 
 
 class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):

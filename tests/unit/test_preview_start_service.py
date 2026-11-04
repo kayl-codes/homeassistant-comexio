@@ -13,6 +13,11 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.services import misc, plan_actions
 
 
+def _entry() -> MagicMock:
+    """A config entry whose server ID is a string, as the store keys built from it need."""
+    return MagicMock(data={"server_id": "iosrv1"})
+
+
 def _run_start(
     *,
     armed: bool,
@@ -87,7 +92,7 @@ def test_a_reloaded_entry_answers_the_keepalive_as_a_new_instance(monkeypatch: p
     re-arm a preview the auto-stop ended (a forgotten browser tab).
     """
     monkeypatch.setattr(coordinator_module, "async_call_later", MagicMock())
-    before_reload, after_reload = (ComexioCoordinator(MagicMock(), MagicMock(), MagicMock()) for _ in range(2))
+    before_reload, after_reload = (ComexioCoordinator(MagicMock(), MagicMock(), _entry()) for _ in range(2))
     opened = _keepalive_instance(before_reload)
 
     before_reload._preview_plan_cache = _armed_cache(1)
@@ -111,7 +116,7 @@ def test_the_keepalive_sends_no_comexio_request(monkeypatch: pytest.MonkeyPatch)
 def _real_coordinator(monkeypatch: pytest.MonkeyPatch) -> ComexioCoordinator:
     """A real coordinator, so a renamed preview_instance_id attribute cannot hide behind a test double."""
     monkeypatch.setattr(coordinator_module, "async_call_later", MagicMock())
-    return ComexioCoordinator(MagicMock(), MagicMock(), MagicMock())
+    return ComexioCoordinator(MagicMock(), MagicMock(), _entry())
 
 
 def test_the_preview_instance_id_is_a_non_empty_string(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -707,7 +712,7 @@ def _timed_coordinator(monkeypatch: pytest.MonkeyPatch, now: list[float]) -> tup
     monkeypatch.setattr(coordinator_module.time, "monotonic", lambda: now[0])
     timers = _Timers()
     monkeypatch.setattr(coordinator_module, "async_call_later", timers)
-    return ComexioCoordinator(MagicMock(), MagicMock(), MagicMock()), timers
+    return ComexioCoordinator(MagicMock(), MagicMock(), _entry()), timers
 
 
 def test_a_card_reloaded_without_a_stop_does_not_hold_the_preview_past_its_keepalive(

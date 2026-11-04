@@ -542,7 +542,10 @@ class ComexioPlanChangedSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity
         self._attr_translation_key = "plan_changed"
 
     @property
-    def native_value(self) -> int:
+    def native_value(self) -> int | None:
+        # A setup from the saved config (#250) checks no plan backups: unknown, not 0.
+        if self.coordinator.started_from_saved_config:
+            return None
         return len(self.coordinator.last_changed_plans)
 
     @property
@@ -656,7 +659,8 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
 
     Not a CoordinatorEntity: while the entry is loaded it stays available when the polls fail on a changed
     certificate, which is just when an automation wants to see it. A setup that meets a changed certificate
-    does not load the entry, so after such a restart the sensor is unavailable and the repair alone remains.
+    loads the entry read only from the saved config (#250), so the sensor shows it after a restart too; only
+    without a saved config the entry does not load, the sensor is unavailable and the repair alone remains.
     Follows the certificate_changed repair through the issue registry; a new pin changes the entry data,
     which reloads the entry and so this sensor.
     The fingerprints are public certificate hashes, kept out of the recorder only because they never
@@ -785,7 +789,10 @@ class ComexioFunctionPlanCountSensor(ComexioFunctionPlanEntityMixin, Coordinator
         self._attr_translation_key = "function_plan_count"
 
     @property
-    def native_value(self) -> int:
+    def native_value(self) -> int | None:
+        # A setup from the saved config (#250) has read no plan list: unknown, not 0.
+        if self.coordinator.started_from_saved_config:
+            return None
         return len(self.coordinator.api.fub_data)
 
 
