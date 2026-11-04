@@ -3,6 +3,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Set as AbstractSet
 import contextlib
+import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import html
@@ -595,6 +596,68 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
     }
+
+
+# The parse_config keys _imported_data reads, as saved for a start while another certificate answers (#250): each
+# list with the item keys the setup reads without a default — an item without them would fail its whole platform.
+_SAVED_SOURCE_ITEM_KEYS = frozenset({"id", "type", "name", "ha_name"})
+_SAVED_IO_ITEM_KEYS = frozenset({"id", "ext_name", "identifier", "name", "ha_name"})
+_SAVED_CONFIG_ITEM_KEYS: dict[str, frozenset[str]] = {
+    "markers": _SAVED_SOURCE_ITEM_KEYS,
+    "io": _SAVED_IO_ITEM_KEYS,
+    "io_all": _SAVED_IO_ITEM_KEYS,
+    "knx": _SAVED_SOURCE_ITEM_KEYS,
+    QUICKBUS_IO_DATA_KEY: _SAVED_IO_ITEM_KEYS | {"quickbus"},
+    WEBIO_COMMAND_DUPLICATES_KEY: frozenset({"name"}),
+}
+_SAVED_CONFIG_LIST_KEYS = tuple(_SAVED_CONFIG_ITEM_KEYS)
+_SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "extensions")
+_SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
+
+
+def saved_config_store(hass: HomeAssistant, server_id: str) -> Store:
+    """The store of the config the last scraped poll saved for this server (#250).
+
+    Keyed by the slug: an entry set up before the setup flow refused path separators may carry one in its ID, and the
+    key becomes a path under .storage. The flow refuses two IDs with one slug, so no two entries share the store.
+    """
+    return Store(hass, 1, f"{DOMAIN}_saved_config_{slugify(server_id)}")
+
+
+def saved_config(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
+    """parse_config's result as saved for a start while another certificate answers (#250), without live values.
+
+    Unfiltered: the import_* options in force at that start decide what becomes an entity. A value is left out
+    because it may be long outdated by then — an entity rather shows unknown until Comexio pushes a new one.
+    """
+    saved: dict[str, Any] = {
+        key: [{**item, "value": None} if "value" in item else item for item in parsed_data.get(key, [])]
+        for key in _SAVED_CONFIG_LIST_KEYS
+    } | {key: parsed_data.get(key, {}) for key in _SAVED_CONFIG_DICT_KEYS}
+    # A copy: the store writes it later, while polls and pushes keep changing the parsed data.
+    return copy.deepcopy(saved)
+
+
+def _is_saved_item(key: str, item: Any) -> bool:
+    """Whether `item` of the saved list `key` carries what the setup reads from it."""
+    if not isinstance(item, dict) or _SAVED_CONFIG_ITEM_KEYS[key] - item.keys():
+        return False
+    # A Quickbus IO (in io and io_all as well) is read for its device's id and name; only other IOs have none.
+    if (quickbus := item.get("quickbus")) is None:
+        return key != QUICKBUS_IO_DATA_KEY
+    return isinstance(quickbus, dict) and quickbus.keys() >= _SAVED_QUICKBUS_DEVICE_KEYS
+
+
+def is_saved_config(stored: Any) -> bool:
+    """Whether `stored` has the layout saved_config writes (a damaged or foreign store file has not)."""
+    return (
+        isinstance(stored, dict)
+        and all(
+            isinstance(stored.get(key), list) and all(_is_saved_item(key, item) for item in stored[key])
+            for key in _SAVED_CONFIG_LIST_KEYS
+        )
+        and all(isinstance(stored.get(key), dict) for key in _SAVED_CONFIG_DICT_KEYS)
+    )
 
 
 def _ignore_list_prefix_chars(category: SourceCategory) -> str:
@@ -1317,6 +1380,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._full_poll_running = False
         # Set while polls keep the last data because another certificate answers; the warning goes out once.
         self._reading_through_certificate_change = False
+        # The config of the last scraped poll, saved for a setup that meets another certificate (#250), and whether
+        # this setup started from it (read only: no checks beside the poll, no entity cleanup, until the pin answers
+        # again; then _full_setup_due asks for the reload that sets the entry up in full).
+        self._saved_config_store = saved_config_store(hass, self.server_id)
+        self._saved_config: dict[str, Any] | None = None
+        self._scraped_config: Mapping[str, Any] | None = None
+        self.started_from_saved_config = False
+        self._full_setup_due = False
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -1339,6 +1410,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
         self._full_poll_running = True
+        # Only this poll's config may be saved, never one a failed poll left behind.
+        self._scraped_config = None
         mismatches_before = self.api.certificate_mismatch_count
         try:
             data = await self._async_fetch_and_audit()
@@ -1359,6 +1432,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # also when a login or config fetch alongside it cleared certificate_mismatch since.
             if self.api.certificate_mismatch is None and self.api.certificate_mismatch_count == mismatches_before:
                 self._clear_certificate_changed()
+            await self._async_save_config()
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
         if self._polled_plan_ids is not None:
@@ -1373,6 +1447,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.scraped_plan_ids = self._polled_plan_ids
             self.plan_scrape_generation += 1
         self._track_plan_list_read()
+        self._schedule_full_setup()
         return data
 
     def _track_plan_list_read(self) -> None:
@@ -1447,6 +1522,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
 
         raw_config, parsed_data, knx_live_states, io_type_tables = await self._async_fetch_parsed_config(conf)
+        self._scraped_config = parsed_data if self._last_poll_scraped else None
         # Unfiltered per-category counts — parsed_data carries every category regardless of
         # import_* opt-in, unlike final_data below. See available_source_counts docstring.
         # Held locally and only published to self.available_source_counts right before the
@@ -1478,12 +1554,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         self._prune_vanished_states(raw_config, parsed_data)
 
-        # Rebuild O(1) lookup index for webhook IO updates
-        self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
-        self._quickbus_index = {str(io["id"]): io for io in final_data[QUICKBUS_IO_DATA_KEY]}
-        # Quickbus IOs carry their host extension's offline flag — an extension with only Quickbus IOs
-        # (or import_ios off) must still be tracked, or its Quickbus entities stay available.
-        self._track_offline_extensions([*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]])
+        self._index_ios(final_data)
         self._update_entity_id_mismatch_issue(conf)
 
         # --- ORPHANED STATISTICS DETECTION ---
@@ -1525,15 +1596,20 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Reading goes on: webhook pushes keep updating the entities, which stay available instead of turning
         unavailable at every poll. Writes stay refused until the user accepts the certificate (repair or push).
-        Raises err when there is no data yet — the first refresh after setup has nothing to keep.
+        Raises _PollMetAnotherCertificate when there is no data yet: the first refresh after setup has nothing to
+        keep, the setup starts from the saved config instead (see last_poll_met_another_certificate).
         """
-        if self.data is None:
-            raise err
-        _LOGGER.debug("[%s] Poll keeps its last data, it met another certificate: %s", self.server_id, err)
         # The poll may have read the config page before it met the certificate: what it read is not the data it
         # keeps, so it must not pass as a scraped poll (uninstall/ignore-list cleanups, plan bookkeeping).
         self._last_poll_scraped = False
         self._polled_plan_ids = None
+        if self.data is None:
+            if isinstance(err, _PollMetAnotherCertificate):
+                raise err
+            raise _PollMetAnotherCertificate(
+                f"Comexio presents another certificate than the pinned one: {err}"
+            ) from err
+        _LOGGER.debug("[%s] Poll keeps its last data, it met another certificate: %s", self.server_id, err)
         if not self._reading_through_certificate_change:
             self._reading_through_certificate_change = True
             _LOGGER.warning(
@@ -1543,6 +1619,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.server_id,
             )
         return self.data
+
+    @property
+    def last_poll_met_another_certificate(self) -> bool:
+        """The last poll failed on a request that met another certificate than the pinned one (#250)."""
+        return isinstance(self.last_exception, _PollMetAnotherCertificate)
 
     async def _async_fetch_parsed_config(
         self, conf: dict[str, Any]
@@ -1778,6 +1859,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.knx_states[k["id"]] = k["value"]
             else:
                 k["value"] = self.knx_states.get(k["id"], k["value"])
+
+    def _index_ios(self, final_data: dict[str, Any]) -> None:
+        """Rebuild the O(1) lookups of the webhook IO updates and track the offline extensions."""
+        self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
+        self._quickbus_index = {str(io["id"]): io for io in final_data[QUICKBUS_IO_DATA_KEY]}
+        # Quickbus IOs carry their host extension's offline flag — an extension with only Quickbus IOs
+        # (or import_ios off) must still be tracked, or its Quickbus entities stay available.
+        self._track_offline_extensions([*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]])
 
     def _track_offline_extensions(self, io_items: list[dict[str, Any]]) -> None:
         """Track offline extensions and log transitions."""
@@ -4958,6 +5047,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         else:
             self._io_real_value_ids.add(io["id"])
             self._webhook_updated_io_ids.add(io["id"])  # R1: mark as received during possible fetch
+            if self.started_from_saved_config and io["ext_name"] in (offline := self.offline_extensions or set()):
+                # Saved as offline but reading, so it is back; no poll corrects the saved flag before the full setup.
+                self._handle_offline_extension_transitions(offline - {io["ext_name"]})
         return previous
 
     def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
@@ -5082,6 +5174,70 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         await self._knx_dpt_catalog_store.async_save({"catalog": catalog, "version": version})
         self._last_persisted_knx_dpt_catalog_version = version
+
+    async def _async_save_config(self) -> None:
+        """Save the config this scraped poll read, for a setup that meets another certificate (#250).
+
+        Written only when it changed: names, IOs and extensions rarely do, and no live value is saved.
+        """
+        if self._scraped_config is None:
+            return
+        saved, self._scraped_config = saved_config(self._scraped_config), None
+        if saved == self._saved_config:
+            return
+        await self._saved_config_store.async_save(saved)
+        self._saved_config = saved
+
+    async def async_start_from_saved_config(self) -> bool:
+        """Take the config the last scraped poll saved as this setup's data, read only (#250).
+
+        For a setup that meets another certificate than the pinned one: nothing goes out to that server, so the
+        entities come from what Comexio last said, without a value until it pushes one. Webhook pushes keep them up
+        to date; writes fail with the certificate as their cause. False when nothing usable was saved.
+        """
+        try:
+            # A store of a newer version (after a downgrade) raises NotImplementedError: no migration back; a file
+            # HA cannot read raises HomeAssistantError or OSError.
+            stored = await self._saved_config_store.async_load()
+            if stored is None:
+                return False
+            if not is_saved_config(stored):
+                raise TypeError("not a saved config")
+            conf = {**self.config_entry.data, **self.config_entry.options}
+            data = _imported_data(stored, conf)
+            self._index_ios(data)
+        except (
+            HomeAssistantError,
+            OSError,
+            NotImplementedError,
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as err:
+            # False keeps the setup retrying (ConfigEntryNotReady) instead of failing it for good.
+            _LOGGER.warning(
+                "[%s] Saved Comexio config is unreadable (%r); it cannot stand in for Comexio",
+                self.server_id,
+                err,
+                exc_info=True,
+            )
+            return False
+        self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
+        self.data = data
+        # Stands in for the first refresh, also one that failed on the certificate: the entities are available.
+        self.last_update_success = True
+        self.last_exception = None
+        self._saved_config = stored
+        self.started_from_saved_config = True
+        self._reading_through_certificate_change = True
+        _LOGGER.warning(
+            "[%s] Comexio presents another certificate than the pinned one (see Repairs): set up read only from the "
+            "config Comexio last sent — the entities take webhook pushes and show unknown until one arrives, nothing "
+            "is written, and the plan, bus load, system and firmware checks wait until the certificate is accepted",
+            self.server_id,
+        )
+        return True
 
     async def async_load_watchdog_history(self) -> None:
         """Restore the persisted Bus-Load-Watchdog event history (called once at setup)."""
@@ -5890,6 +6046,48 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._reading_through_certificate_change = False
             _LOGGER.info("[%s] Comexio presents the pinned certificate again; polls and writes resume", self.server_id)
         async_clear_certificate_changed(self.hass, self.config_entry.entry_id)
+        # The read-only setup left out the checks and the entity cleanup: a full one catches them up, once this
+        # poll is done (_async_update_data), so the reload does not tear the coordinator down under it.
+        self._full_setup_due = self.started_from_saved_config
+
+    def _schedule_full_setup(self) -> None:
+        """Reload a read-only setup (#250) into a full one; a reload that fails is tried again after the next poll."""
+        if not self._full_setup_due:
+            return
+        self._full_setup_due = self.started_from_saved_config = False
+        self.hass.async_create_task(
+            self._async_full_setup(), f"comexio reload after read-only start {self.config_entry.entry_id}"
+        )
+
+    async def _async_full_setup(self) -> None:
+        """Run the reload of _schedule_full_setup and report how it ended."""
+        if self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) is not self:
+            # Another reload replaced this coordinator before the task ran; the new setup decides on its own whether
+            # it starts read only, so a reload here would only tear it down again.
+            _LOGGER.debug(
+                "[%s] Reload after the read-only start skipped: the entry was reloaded or unloaded meanwhile",
+                self.server_id,
+            )
+            return
+        try:
+            reloaded = await self.async_reload_entry("pinned certificate answers again")
+        except Exception:
+            _LOGGER.exception("[%s] Reload after the read-only start failed", self.server_id)
+            reloaded = False
+        if self.hass.data.get(DOMAIN, {}).get(self.config_entry.entry_id) is self:
+            # Not replaced, so no reload ran: it failed, or a running sync skipped it (its closing reload is due).
+            _LOGGER.warning(
+                "[%s] Still set up read only after the pinned certificate answered; the reload is tried again after "
+                "the next poll",
+                self.server_id,
+            )
+            self.started_from_saved_config = True
+        elif not reloaded:
+            # Torn down or never set up again: Home Assistant's setup retry builds a new coordinator.
+            _LOGGER.warning(
+                "[%s] Reload after the read-only start did not complete; Home Assistant retries the setup",
+                self.server_id,
+            )
 
     def note_comexio_unreachable(self) -> None:
         """Comexio could not be reached (or HA rebooted it): the next successful read starts the boot grace."""

@@ -140,9 +140,14 @@ class ComexioMarkerSwitch(ComexioMarkerEntity, SwitchEntity):
         self._attr_device_class = SwitchDeviceClass.SWITCH
 
     @property
-    def is_on(self) -> bool:
-        """Return true if the digital source is active."""
-        return float(self._source_value or 0) >= 1.0
+    def is_on(self) -> bool | None:
+        """True if the digital source is active, None ("unknown") while no value is known.
+
+        A KNX object has no value until its first webhook, a marker none after a setup from the saved config
+        (#250): an 'off' then would be made up rather than known.
+        """
+        val = self._source_value
+        return None if val is None else float(val or 0) >= 1.0
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the source on."""
@@ -163,14 +168,6 @@ class ComexioMarkerSwitch(ComexioMarkerEntity, SwitchEntity):
 
 class ComexioKnxSwitch(ComexioKnxEntity, ComexioMarkerSwitch):
     """A digital Comexio KNX object as a Switch (blind implementation, see project_knx_objects memory)."""
-
-    @property
-    def is_on(self) -> bool | None:
-        """None until the first webhook. Unlike markers, KNX objects have no authoritative
-        poll path, so a pre-webhook value would be a fabricated 'off' rather than a known state.
-        """
-        val = self._source_value
-        return None if val is None else float(val or 0) >= 1.0
 
 
 class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):

@@ -181,6 +181,7 @@ def _webhook_coordinator(quickbus_ios: list[dict[str, Any]]) -> ComexioCoordinat
     coordinator._warned_unknown_webhook_ios = set()
     coordinator._warned_unknown_webhook_cap = False
     coordinator._io_identities = {}
+    coordinator.started_from_saved_config = False
     coordinator._async_publish_pushed_value = MagicMock()
     coordinator._fire_plan_event = MagicMock()
     coordinator.schedule_plan_preview_refresh = MagicMock()

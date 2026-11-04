@@ -57,6 +57,7 @@ def _coordinator(
         "_io_live_fetch_failing": False,
         "_io_identities": {},
         "_io_index": {},
+        "started_from_saved_config": False,
         "_fire_plan_event": MagicMock(),
         "async_update_listeners": MagicMock(),
         "schedule_plan_preview_refresh": MagicMock(),
