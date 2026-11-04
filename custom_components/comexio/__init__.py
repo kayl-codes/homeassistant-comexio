@@ -809,11 +809,10 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Drop the entry's repairs with nothing left to fix, the certificate push on the phones and its saved config."""
     async_remove_certificate_pushes(hass, entry)
-    # Not just a truthy ID: an entry set up before the flow refused an empty one may carry it, and saved a config.
     if (server_id := entry.data.get(CONF_SERVER_ID)) is not None:
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
-        # A new entry for this server must not set up from what this one saved (#250).
-        await saved_config_store(hass, server_id).async_remove()
+    # Nothing else reads it once the entry is gone: a new entry gets a new entry id (#250).
+    await saved_config_store(hass, entry.entry_id).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
