@@ -58,6 +58,7 @@ from .const import (
     function_plan_info,
     function_plan_run_state_unique_id,
     is_temperature_marker_name,
+    offline_io_skipped,
     system_info_signal,
 )
 from .coordinator import ComexioCoordinator
@@ -114,7 +115,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioIOSensor(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if not io.get("is_binary") and io.get("is_input", True) and (not io.get("offline") or include_offline)
+            if not io.get("is_binary") and io.get("is_input", True) and not offline_io_skipped(io, include_offline)
         )
 
     # Quickbus IOs (multitouch, motion detectors, ...) are read-only, outputs included

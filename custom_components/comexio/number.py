@@ -20,6 +20,7 @@ from .const import (
     WEBIO_MARKER_ANALOG_MIN,
     MarkerKind,
     is_temperature_marker_name,
+    offline_io_skipped,
 )
 from .coordinator import ComexioCoordinator
 from .entity import ComexioIOEntity, ComexioKnxEntity, ComexioMarkerEntity, write_failed
@@ -66,7 +67,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioIONumber(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
             # io_platform leaves out the outputs of an unsupported type (meter readings, #196).
-            if io_platform(io) == "number" and (not io.get("offline") or include_offline)
+            if io_platform(io) == "number" and not offline_io_skipped(io, include_offline)
         )
 
     async_add_entities(entities)

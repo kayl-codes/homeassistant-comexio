@@ -10,7 +10,7 @@ from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind
+from .const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN, MarkerKind, offline_io_skipped
 from .coordinator import ComexioCoordinator
 from .entity import (
     ComexioIOEntity,
@@ -62,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         entities.extend(
             ComexioIOSwitch(coordinator, coordinator.server_id, io)
             for io in coordinator.data.get("io", [])
-            if io.get("is_binary") and not io.get("is_input", True) and (not io.get("offline") or include_offline)
+            if io.get("is_binary") and not io.get("is_input", True) and not offline_io_skipped(io, include_offline)
         )
 
     entities.extend(

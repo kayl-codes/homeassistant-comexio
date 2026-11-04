@@ -13,6 +13,7 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.const import offline_io_skipped
 from custom_components.comexio.sensor import ComexioIOSensor
 from custom_components.comexio.unsupported_ios import (
     REASON_MEASUREMENT_OUTPUT,
@@ -104,3 +105,23 @@ def test_a_smart_meter_reading_becomes_a_sensor_of_its_kind(
     assert sensor.device_class == device_class
     assert sensor.state_class == state_class
     assert sensor.native_unit_of_measurement == unit
+
+
+@pytest.mark.parametrize(
+    ("io", "include_offline", "skipped"),
+    [
+        ({"ext_name": "vSM1", "offline": False}, False, False),
+        # Comexio reports every virtual extension offline: only the Smart Meters are taken in.
+        ({"ext_name": "vSM1", "offline": True}, False, False),
+        ({"ext_name": "vSM2", "offline": True}, False, False),
+        ({"ext_name": "vTP1", "offline": True}, False, True),
+        ({"ext_name": "vTP1", "offline": True}, True, False),
+        # The prefix is matched as Comexio spells it, an IO without an extension name is not taken in.
+        ({"ext_name": "vsm1", "offline": True}, False, True),
+        ({"offline": True}, False, True),
+    ],
+)
+def test_only_a_smart_meter_of_the_offline_extensions_gets_entities(
+    io: dict[str, Any], include_offline: bool, skipped: bool
+) -> None:
+    assert offline_io_skipped(io, include_offline) is skipped

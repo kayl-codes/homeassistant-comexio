@@ -26,7 +26,7 @@ BASELINE = {
     "api.py::ComexioAPI::function_plan_add_knx_bridge_pairs": 18,
     "api.py::ComexioAPI::_function_plan_trigger_wired_source_ids": 16,
     "api.py::ComexioAPI::_function_plan_paired_flanke_ids": 22,
-    "binary_sensor.py::async_setup_entry": 17,
+    "binary_sensor.py::async_setup_entry": 16,
     "button.py::ComexioSyncButton::_delta_sync_class": 21,
     "button.py::ComexioSyncButton::_sync_all_classes": 19,
     "button.py::ComexioSyncButton::_wire_knx_full": 17,
@@ -37,14 +37,12 @@ BASELINE = {
     "coordinator.py::ComexioCoordinator::_plan_knx_bridge_pairs": 18,
     "coordinator.py::ComexioCoordinator::_audit_trigger_pairs": 34,
     "ha_address.py::HaAddressResolver::_async_known_host": 16,
-    "number.py::async_setup_entry": 16,
     "plan_watchdog.py::ManagedPlanWatchdog::async_check": 17,
     "reference_monitor.py::ReferenceCatalogMonitor::check_plans": 17,
     "repairs.py::ComexioRepairFlow::async_step_select_action": 174,
-    "sensor.py::async_setup_entry": 18,
+    "sensor.py::async_setup_entry": 16,
     "services/_grid.py::_build_sorted_pairs": 18,
     "services/backup.py::_handle_function_plan_list_backups": 17,
-    "switch.py::async_setup_entry": 17,
 }
 
 

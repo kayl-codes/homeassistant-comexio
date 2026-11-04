@@ -32,6 +32,8 @@ METER_OUTPUT = {"is_binary": False, "is_input": False, "unit": "kWh"}
         ({}, False, "binary_sensor", None),
         ({"offline": True}, False, None, SKIPPED_OFFLINE_EXTENSION),
         ({"offline": True}, True, "binary_sensor", None),
+        # A Smart Meter's virtual extension counts as offline but is taken in (#249).
+        ({"ext_name": "vSM1", "offline": True}, False, "binary_sensor", None),
         (METER_OUTPUT, True, None, REASON_MEASUREMENT_OUTPUT),
         # Offline and unsupported: the type reason, which a later include_offline would not lift.
         ({**METER_OUTPUT, "offline": True}, False, None, REASON_MEASUREMENT_OUTPUT),
