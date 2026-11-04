@@ -1,0 +1,35 @@
+{
+  "FubModules": {
+    "1": {
+      "1": {
+        "extension": {"Id": 1, "Name": "BASE", "Identifier": "1000-2000-3000"},
+        "inoutput": {
+          "11": {"Id": 11, "Identifier": "Q1", "Description": "Licht Flur", "InOutputTypeId": 2, "Active": true, "IntIsOutput": 1}
+        }
+      },
+      "3": {
+        "extension": {"Id": 3, "Name": "vTP1", "Identifier": "3000-4000-5000"},
+        "inoutput": {
+          "31": {"Id": 31, "Identifier": "PIR1", "Description": "Bewegung Panel", "InOutputTypeId": 140, "Active": true, "IntIsOutput": 0},
+          "32": {"Id": 32, "Identifier": "PANIC1", "Description": "Panik", "InOutputTypeId": 140, "Active": true, "IntIsOutput": 0}
+        }
+      },
+      "4": {
+        "extension": {"Id": 4, "Name": "vSM1", "Identifier": "4000-5000-6000"},
+        "inoutput": {
+          "41": {"Id": 41, "Identifier": "E1", "Description": "Bezug", "InOutputTypeId": 81, "Active": true, "IntIsOutput": 0},
+          "42": {"Id": 42, "Identifier": "S1", "Description": "Scheinleistung L1", "InOutputTypeId": 82, "Active": true, "IntIsOutput": 0},
+          "43": {"Id": 43, "Identifier": "Q1", "Description": "Blindleistung L1", "InOutputTypeId": 83, "Active": true, "IntIsOutput": 0},
+          "44": {"Id": 44, "Identifier": "PF1", "Description": "Leistungsfaktor L1", "InOutputTypeId": 84, "Active": true, "IntIsOutput": 0}
+        }
+      },
+      "5": {
+        "extension": {"Id": 5, "Name": "vSM2", "Identifier": "5000-6000-7000"},
+        "inoutput": {
+          "51": {"Id": 51, "Identifier": "E1", "Description": "Bezug alt", "InOutputTypeId": 81, "Active": true}
+        }
+      }
+    },
+    "2": {}
+  }
+}
