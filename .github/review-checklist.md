@@ -174,10 +174,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
   credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
   info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
-- **User-entered IDs in storage keys are checked for path separators:** a value the user types (e.g. the server ID)
-  that ends up in a `Store` key or file name is rejected where it is entered if it contains `/` or `\`, because HA
-  uses the key as a file path under `.storage/`. Flag a typed value that reaches a storage key without that check
-  (#260: `config_flow._reject_path_separator`).
+- **User-entered IDs in storage keys stay inside `.storage/`:** HA uses a `Store` key as a file path under
+  `.storage/`, so a value the user types (e.g. the server ID) goes into a key or file name only slugified, and the
+  place it is entered rejects an empty value or one with `/` or `\` — an entry created before that check may still
+  carry one, so the check alone is not enough. Flag a typed value that reaches a storage key unslugified (#260:
+  `coordinator.saved_config_store`, `config_flow._reject_unusable_server_id`).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
