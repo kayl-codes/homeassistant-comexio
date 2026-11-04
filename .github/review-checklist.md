@@ -166,9 +166,18 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   An unknown value — a typo, a newer version's value after a downgrade, a hand-edited file — counts as "unknown",
   never as one of the known values by default. Flag code that branches on a stored value with an `else` that
   silently treats every other value as a known one (#222).
+- **Saved flags stay correctable in a degraded mode:** a state flag restored from a saved snapshot (e.g. the set of
+  offline extensions) and used in a read-only or degraded mode must still be corrected by the live data that mode
+  keeps receiving (webhook pushes) — the poll that normally corrects it does not run there, so the flag would
+  otherwise stay stale for good. Flag a restored flag that only the poll can clear (#260:
+  `coordinator._store_pushed_io_value`).
 - **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
   credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
   info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
+- **User-entered IDs in storage keys are checked for path separators:** a value the user types (e.g. the server ID)
+  that ends up in a `Store` key or file name is rejected where it is entered if it contains `/` or `\`, because HA
+  uses the key as a file path under `.storage/`. Flag a typed value that reaches a storage key without that check
+  (#260: `config_flow._reject_path_separator`).
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).
