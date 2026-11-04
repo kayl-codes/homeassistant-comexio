@@ -174,15 +174,14 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
   credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
   info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
-- **User-entered IDs in storage keys stay inside `.storage/`:** HA uses a `Store` key as a file path under
-  `.storage/`, so a value the user types (e.g. the server ID) goes into a new key or file name only slugified, and
-  the place it is entered rejects an empty value or one with `/` or `\` — an entry created before that check may
-  still carry one, so the check alone is not enough. Two typed values with one slug would share the key, so the flow
-  also refuses a value whose slug an existing entry already has. Flag a new storage key built from a typed value
-  unslugified, or a slugified key whose value the flow does not check for slug collisions (#260:
-  `coordinator.saved_config_store`, `config_flow._reject_unusable_server_id`, `config_flow._taken_server_id`). An existing key keeps its
-  spelling (e.g. the function plan backup and catalog stores): slugifying it changes the file `async_load()` reads
-  and orphans the saved data, so flag such a change unless it comes with a migration of the old file.
+- **New storage keys are built from the entry id:** HA uses a `Store` key as a file path under `.storage/`. A new
+  per-entry store takes `entry.entry_id` into its key — HA makes it unique and free of path separators — never a
+  value the user types (e.g. the server ID): an entry created before the flow refused empty IDs and path separators
+  (`config_flow._reject_unusable_server_id`) may still carry one, and before 2026-09-07 two entries could carry IDs
+  with one slug. Flag a new storage key or file name built from a typed value (#250:
+  `coordinator.saved_config_store`). An existing key keeps its spelling (e.g. the function plan backup and catalog
+  stores): changing it changes the file `async_load()` reads and orphans the saved data, so flag such a change
+  unless it comes with a migration of the old file.
 - **Audit categories:** a new category in `last_audit_results` that adds to the mismatch count also goes into the
   change hash in `_log_audit_summary`, the consolidated warning line in `_log_audit_details`, and a test — otherwise
   the summary reports issues that no category shows (#153).

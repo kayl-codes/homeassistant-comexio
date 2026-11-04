@@ -615,13 +615,14 @@ _SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "ex
 _SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
 
 
-def saved_config_store(hass: HomeAssistant, server_id: str) -> Store:
-    """The store of the config the last scraped poll saved for this server (#250).
+def saved_config_store(hass: HomeAssistant, entry_id: str) -> Store:
+    """The store of the config the last scraped poll saved for this entry (#250).
 
-    Keyed by the slug: an entry set up before the setup flow refused path separators may carry one in its ID, and the
-    key becomes a path under .storage. The flow refuses two IDs with one slug, so no two entries share the store.
+    Keyed by the entry id, not the server ID: HA makes it unique and keeps it free of path separators, so no two
+    entries share the file and none lands outside .storage; an entry added again for the same server gets a new one
+    and cannot set up from what the removed entry saved.
     """
-    return Store(hass, 1, f"{DOMAIN}_saved_config_{slugify(server_id)}")
+    return Store(hass, 1, f"{DOMAIN}_saved_config_{entry_id}")
 
 
 def saved_config(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
@@ -1383,7 +1384,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # The config of the last scraped poll, saved for a setup that meets another certificate (#250), and whether
         # this setup started from it (read only: no checks beside the poll, no entity cleanup, until the pin answers
         # again; then _full_setup_due asks for the reload that sets the entry up in full).
-        self._saved_config_store = saved_config_store(hass, self.server_id)
+        self._saved_config_store = saved_config_store(hass, entry.entry_id)
         self._saved_config: dict[str, Any] | None = None
         self._scraped_config: Mapping[str, Any] | None = None
         self.started_from_saved_config = False

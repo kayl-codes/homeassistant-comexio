@@ -1155,7 +1155,7 @@ async def _read_only_with_everything_saved_as_offline(
     await _setup(hass, entry)
     await hass.config_entries.async_unload(entry.entry_id)
     await hass.async_block_till_done()
-    saved = hass_storage[f"{DOMAIN}_saved_config_{SERVER_ID}"]["data"]
+    saved = hass_storage[f"{DOMAIN}_saved_config_{entry.entry_id}"]["data"]
     for io in [*saved["io"], *saved[QUICKBUS_IO_DATA_KEY]]:
         io["offline"] = True
     api_returns["login"] = False
@@ -1298,7 +1298,7 @@ async def test_removing_the_entry_removes_its_saved_config(
 ) -> None:
     # A new entry for this Comexio must not set up from what the removed one saved (#250).
     await _setup(hass, pinned_entry)
-    key = f"{DOMAIN}_saved_config_{SERVER_ID}"
+    key = f"{DOMAIN}_saved_config_{pinned_entry.entry_id}"
     assert key in hass_storage
 
     await hass.config_entries.async_remove(pinned_entry.entry_id)
@@ -1307,28 +1307,36 @@ async def test_removing_the_entry_removes_its_saved_config(
     assert key not in hass_storage
 
 
-async def test_the_saved_config_is_kept_under_the_slug_of_the_server_id(hass: HomeAssistant) -> None:
-    # Saving, loading and removing all go through this store, so its key decides where the file lands.
-    assert saved_config_store(hass, "My-Server").key == f"{DOMAIN}_saved_config_my_server"
+async def test_the_saved_config_is_kept_under_the_entry_id(hass: HomeAssistant) -> None:
+    # Saving, loading and removing all go through this store, so its key decides where the file lands: the entry
+    # id is unique and free of path separators, whatever server ID the entry carries.
+    assert saved_config_store(hass, "01JABCDEF").key == f"{DOMAIN}_saved_config_01JABCDEF"
 
 
 @pytest.mark.parametrize(
-    ("server_id", "key"),
-    [("", f"{DOMAIN}_saved_config_"), ("../../configuration", f"{DOMAIN}_saved_config_configuration")],
-    ids=["empty server id", "path separators"],
+    "server_id", [None, "", "../../configuration", "my-server"], ids=["missing", "empty", "path", "plain"]
 )
-async def test_removing_an_older_entry_removes_its_saved_config_inside_the_storage(
-    hass: HomeAssistant, hass_storage: dict[str, Any], server_id: str, key: str
+async def test_an_entry_added_again_does_not_share_the_removed_ones_saved_config(
+    hass: HomeAssistant, hass_storage: dict[str, Any], server_id: str | None
 ) -> None:
-    # Entries set up before the flow refused these ids: their saved config sits under the slug, inside .storage.
-    entry = MockConfigEntry(domain=DOMAIN, data={CONF_SERVER_ID: server_id})
-    entry.add_to_hass(hass)
-    hass_storage[key] = {"version": 1, "minor_version": 1, "key": key, "data": {}}
+    # Two entries with one server ID (or IDs with one slug) never share the file; removing one drops only its own,
+    # also when the entry carries no server ID at all.
+    data = {} if server_id is None else {CONF_SERVER_ID: server_id}
+    removed = MockConfigEntry(domain=DOMAIN, data=data)
+    kept = MockConfigEntry(domain=DOMAIN, data=data)
+    removed.add_to_hass(hass)
+    kept.add_to_hass(hass)
+    removed_key = saved_config_store(hass, removed.entry_id).key
+    kept_key = saved_config_store(hass, kept.entry_id).key
+    for key in (removed_key, kept_key):
+        hass_storage[key] = {"version": 1, "minor_version": 1, "key": key, "data": {}}
 
-    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.config_entries.async_remove(removed.entry_id)
     await hass.async_block_till_done()
 
-    assert key not in hass_storage
+    assert removed_key != kept_key
+    assert removed_key not in hass_storage
+    assert kept_key in hass_storage
 
 
 async def test_a_setup_with_the_pinned_certificate_drops_the_repair(
