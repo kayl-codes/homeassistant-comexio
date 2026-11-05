@@ -1,5 +1,5 @@
 # Version: 0.8.1
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 import contextlib
 from datetime import timedelta
 import logging
@@ -41,7 +41,10 @@ from .const import (
     QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
     SOURCE_CATEGORIES,
+    STATISTICS_UNIT_FIX_ATTEMPTS,
     STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC,
+    STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC,
+    STATISTICS_UNIT_FIX_RETRY_DELAY_SEC,
     STATISTICS_UNIT_FIX_START_DELAY_SEC,
     STATISTICS_UNITS_CHANGED_ISSUE_DOMAIN,
     STATISTICS_UNITS_CHANGED_ISSUE_PREFIX,
@@ -666,13 +669,101 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
     async_update_statistics_metadata (label-only update, no value conversion), wait
     for the recorder to commit, then explicitly delete stale repair issues that
     validate_statistics may have already created.
+
+    Runs up to STATISTICS_UNIT_FIX_ATTEMPTS times: a recorder that is not ready yet, or an
+    enabled entity without its first state, would otherwise leave the label wrong until the
+    next restart. A lookup that times out ends the retries: it still holds a recorder worker,
+    and another lookup would only queue behind it. A later setup or reload waits for that
+    same lookup instead of submitting a new one.
     """
     import asyncio
 
     await asyncio.sleep(STATISTICS_UNIT_FIX_START_DELAY_SEC)
+    pending: str | None = None
+    attempt = 0
+    for attempt in range(1, STATISTICS_UNIT_FIX_ATTEMPTS + 1):
+        try:
+            pending = await _async_fix_statistics_units_once(hass, server_id, entry_id)
+        except _StatisticsLookupStuck as err:
+            pending = str(err)
+            break
+        if pending is None:
+            return
+        if attempt < STATISTICS_UNIT_FIX_ATTEMPTS:
+            _LOGGER.debug(
+                "[%s] Statistics unit fix incomplete (%s); next check in %d s",
+                server_id,
+                pending,
+                STATISTICS_UNIT_FIX_RETRY_DELAY_SEC,
+            )
+            await asyncio.sleep(STATISTICS_UNIT_FIX_RETRY_DELAY_SEC)
+    _LOGGER.warning(
+        "[%s] Statistics unit fix incomplete after %d attempt(s) (%s); the next restart or reload tries again",
+        server_id,
+        attempt,
+        pending,
+    )
+
+
+class _StatisticsLookupStuck(Exception):
+    """The recorder did not answer the statistics lookup in time; its reason is the message."""
+
+
+# The statistics lookup in flight, shared by every entry and reload: a lookup stuck in the
+# recorder is awaited again instead of queueing another job behind it. A caller that joins it
+# gets that lookup's snapshot; statistics registered later are seen by the next attempt.
+_STATISTICS_LOOKUP_KEY = f"{DOMAIN}_statistics_lookup"
+
+
+def _shared_statistics_lookup(hass: HomeAssistant, instance: Any, list_statistic_ids: Callable[..., Any]) -> Any:
+    """Return the lookup still in flight, or submit a new one once the last has finished."""
+    import asyncio
+
+    lookup = hass.data.get(_STATISTICS_LOOKUP_KEY)
+    if lookup is not None and not lookup.done():
+        return lookup
+
+    def _finished(done: Any) -> None:
+        if hass.data.get(_STATISTICS_LOOKUP_KEY) is done:
+            del hass.data[_STATISTICS_LOOKUP_KEY]
+        # Retrieved here, so a lookup nobody awaits any more is logged, not "exception never retrieved".
+        if not done.cancelled() and (err := done.exception()) is not None:
+            _LOGGER.debug("Statistics unit check: shared statistics lookup failed: %r", err)
+
+    lookup = asyncio.ensure_future(instance.async_add_executor_job(list_statistic_ids, hass))
+    lookup.add_done_callback(_finished)
+    hass.data[_STATISTICS_LOOKUP_KEY] = lookup
+    return lookup
+
+
+async def _async_list_statistics(hass: HomeAssistant, instance: Any, list_statistic_ids: Callable[..., Any]) -> Any:
+    """Look up the recorder's statistics, raising _StatisticsLookupStuck when our time limit expires.
+
+    Our time limit only stops waiting: the shared lookup keeps running, and the next caller
+    waits for that same lookup. A TimeoutError from the database itself is not ours and
+    propagates as an ordinary failure.
+    """
+    import asyncio
+
+    lookup = _shared_statistics_lookup(hass, instance, list_statistic_ids)
+    try:
+        async with asyncio.timeout(STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC) as lookup_timeout:
+            return await asyncio.shield(lookup)
+    except TimeoutError as err:
+        if not lookup_timeout.expired():
+            raise
+        reason = (
+            f"statistics lookup timed out after {STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC} s, recorder busy?"
+            " No further attempt while it still runs"
+        )
+        raise _StatisticsLookupStuck(reason) from err
+
+
+async def _async_fix_statistics_units_once(hass: HomeAssistant, server_id: str, entry_id: str) -> str | None:
+    """One pass of the statistics unit fix. Returns why it is incomplete, or None when nothing is left."""
 
     if "recorder" not in hass.config.components:
-        return
+        return None
     try:
         from homeassistant.components.recorder import get_instance
         from homeassistant.components.recorder.statistics import (
@@ -681,39 +772,59 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
         )
     except ImportError:
         _LOGGER.debug("[%s] Recorder API unavailable; skipping statistics unit fix", server_id)
-        return
+        return None
 
     try:
-        instance = get_instance(hass)
-        all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
-    except Exception:
-        _LOGGER.debug("[%s] Statistics unit fix skipped: recorder unavailable", server_id)
-        return
+        all_stats = await _async_list_statistics(hass, get_instance(hass), list_statistic_ids)
+    except _StatisticsLookupStuck:
+        raise
+    except Exception as err:  # any other recorder failure means "try again later"
+        _LOGGER.debug("[%s] Statistics unit check: statistics lookup failed: %r", server_id, err)
+        return f"statistics lookup failed: {err!r}"
 
     server_slug = slugify(server_id)
+    # Ownership via the entity registry: the stable entity_ids (sensor.iosrv1_base_ai2) carry
+    # no comexio_ prefix, so a prefix test alone would never select them.
+    entries = er.async_entries_for_config_entry(er.async_get(hass), entry_id)
+    # A disabled entity never gets a state, so waiting for it would never end.
+    enabled_ids = {e.entity_id for e in entries if e.disabled_by is None}
+    waiting: list[str] = []
 
     def _current_unit(stat_id: str) -> str | None:
         state = hass.states.get(stat_id)
         if state is None:
             _LOGGER.debug("[%s] Skipping %s: entity state not available yet", server_id, stat_id)
+            if stat_id in enabled_ids:
+                waiting.append(stat_id)
             return None
         return state.attributes.get("unit_of_measurement") or ""
 
-    # Ownership via the entity registry: the stable entity_ids (sensor.iosrv1_base_ai2) carry
-    # no comexio_ prefix, so a prefix test alone would never select them.
-    ent_reg = er.async_get(hass)
     mismatches = find_unit_mismatches(
         all_stats,
-        owned_entity_ids={e.entity_id for e in er.async_entries_for_config_entry(ent_reg, entry_id)},
+        owned_entity_ids={e.entity_id for e in entries},
         legacy_prefixes=legacy_statistic_prefixes(server_slug),
         current_unit=_current_unit,
     )
+    pending = f"no state yet: {', '.join(sorted(set(waiting)))}" if waiting else None
     for stat_id, unit in mismatches:
         _LOGGER.debug("[%s] Unit mismatch: %s  entity=%r", server_id, stat_id, unit)
 
     if not mismatches:
         _LOGGER.debug("[%s] Statistics unit check: no mismatches found", server_id)
-        return
+        return pending
+
+    await _async_apply_statistics_unit_fixes(hass, server_id, mismatches, async_update_statistics_metadata)
+    return pending
+
+
+async def _async_apply_statistics_unit_fixes(
+    hass: HomeAssistant,
+    server_id: str,
+    mismatches: list[tuple[str, str]],
+    update_metadata: Callable[..., None],
+) -> None:
+    """Write the label-only metadata updates, then remove the unit-change repairs they settle."""
+    import asyncio
 
     # Schedule label-only metadata updates (no value conversion needed).
     # new_unit_class=None is always valid; the per-unit mapping would require
@@ -721,7 +832,7 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
     # HomeAssistantError for unknown values — None is the safe universal fallback.
     fixed_ids = [stat_id for stat_id, _ in mismatches]
     for stat_id, new_unit in mismatches:
-        async_update_statistics_metadata(
+        update_metadata(
             hass,
             stat_id,
             new_unit_of_measurement=new_unit,
