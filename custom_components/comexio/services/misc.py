@@ -43,9 +43,10 @@ _TITLE_SEARCH_ERR = "Function Plan Search — Error"
 _INSTANCE_NOT_RESOLVED_ERR = "Comexio instance not resolved."
 
 # Command syntax accepted by the set_value service (and the plan card's debug input):
-# "M107" (marker) or "IOX2#Q3" (extension#identifier).
+# "M107" (marker) or "IOX2#Q3" (extension#identifier). An extension name may hold spaces
+# ("IO-Extension A2#AO4", #259); blanks around the name and the "#" are dropped.
 _SET_VALUE_MARKER_RX = re.compile(r"^[mM](\d+)$")
-_SET_VALUE_IO_RX = re.compile(r"^([^#\s]+)#([^#\s]+)$")
+_SET_VALUE_IO_RX = re.compile(r"^\s*([^#\s](?:[^#]*[^#\s])?)\s*#\s*([^#\s]+)\s*$")
 
 
 def _build_label_matcher(query: str):

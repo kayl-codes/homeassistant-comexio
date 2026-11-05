@@ -31,7 +31,9 @@ def test_percentage_output_steps_in_whole_percent() -> None:
 def _write(number: ComexioIONumber, value: float) -> tuple[AsyncMock, MagicMock]:
     set_value = AsyncMock(return_value=True)
     update = MagicMock()
-    number.coordinator = SimpleNamespace(api=SimpleNamespace(set_value=set_value), update_io_by_name=update)
+    number.coordinator = SimpleNamespace(
+        api=SimpleNamespace(set_value=set_value), update_io_by_name=update, io_states={}
+    )
     number.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
     asyncio.run(number.async_set_native_value(value))
     return set_value, update
@@ -95,3 +97,48 @@ def test_minimum_lies_on_the_step_grid(io: dict[str, Any]) -> None:
     number = _io_number(**io)
 
     assert Decimal(str(number.native_min_value)) % Decimal(str(number.native_step)) == 0
+
+
+def test_analog_output_takes_a_fraction_of_a_percent() -> None:
+    """#259: the #253 rounding is the API's, an AO is written over the admin session and takes 30.6."""
+    number = _io_number(identifier="AO1", unit="%", min=0, max=100)
+
+    assert number.native_step == pytest.approx(0.1)
+    set_value, update = _write(number, 30.6)
+
+    set_value.assert_awaited_once_with("io", "12", 30.6, "LD1", "AO1")
+    update.assert_called_once_with("LD1", "AO1", 30.6)
+
+
+@pytest.mark.parametrize(
+    ("identifier", "raw", "shown"),
+    [("AO1", 30.1961, 30.2), ("AO2", 3.91304, 3.9), ("AO3", 6.43137, 6.4), ("Q1", 30.1961, 30.1961)],
+)
+def test_only_an_analog_output_shows_one_decimal(identifier: str, raw: float, shown: float) -> None:
+    """#259: an AO reports its raw step, Comexio shows it with one decimal; other outputs stay exact."""
+    number = _io_number(identifier=identifier, unit="%", min=0, max=100)
+    number.coordinator = SimpleNamespace(io_states={"12": raw})
+
+    assert number.native_value == pytest.approx(shown)
+
+
+def test_a_push_during_the_write_is_not_replaced_by_the_requested_value() -> None:
+    """#259, seen live: the push 5.4902 arrived before the write returned, and HA then showed 5.5."""
+    io_states = {"12": 8.39216}
+
+    async def write_and_push(*_: Any) -> bool:
+        io_states["12"] = 5.4902
+        return True
+
+    update = MagicMock()
+    number = _io_number(identifier="AO3", unit="V", min=0, max=10)
+    number.coordinator = SimpleNamespace(
+        api=SimpleNamespace(set_value=write_and_push), update_io_by_name=update, io_states=io_states
+    )
+    number.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+
+    asyncio.run(number.async_set_native_value(5.5))
+
+    update.assert_not_called()
+    number.async_write_ha_state.assert_called_once()
+    assert number.native_value == pytest.approx(5.5)

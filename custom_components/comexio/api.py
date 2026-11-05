@@ -29,6 +29,7 @@ from aiocomexio import (
     WebioCommandForm,
     config as comexio_config,
     fetch_certificate_fingerprint,
+    io_written_over_admin_session,
     webio as comexio_webio,
 )
 from aiocomexio.config import ParseOptions, iter_group
@@ -5598,7 +5599,7 @@ class ComexioAPI:
                 _LOGGER.error("Missing 'ext' or 'identifier' for non-marker API write. Type: %s", target_type)
                 return False
             else:
-                await self.client.set_io_value(ext, identifier, value)
+                await self._set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
             self._note_write_met_another_certificate(err, target_type, target_id)
             return False
@@ -5614,6 +5615,30 @@ class ComexioAPI:
             return True
         _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, failure)
         return False
+
+    async def _set_io_value(self, ext: str, identifier: str, value: float | int) -> None:
+        """client.set_io_value; an analog output goes over the admin session, so a lapsed login is renewed once.
+
+        /api/ answers "Forbidden" for the 0-10 V analog outputs (#259), aiocomexio writes them like Comexio's IO page.
+        """
+        if not io_written_over_admin_session(identifier):
+            await self.client.set_io_value(ext, identifier, value)
+            return
+        generation = self._login_generation
+        try:
+            await self.client.set_io_value(ext, identifier, value)
+        except ComexioAuthenticationError as err:
+            _LOGGER.debug(
+                "Comexio admin session lapsed before writing %s %s — logging in again",
+                one_line(ext),
+                one_line(identifier),
+            )
+            if not await self._full_login(generation):
+                raise ComexioAuthenticationError(
+                    f"admin session lapsed ({err}), re-login to Comexio failed ({self.last_login_error})"
+                ) from err
+            # self.client, read again: a re-login may have rebuilt it.
+            await self.client.set_io_value(ext, identifier, value)
 
     def _note_write_met_another_certificate(
         self, err: ComexioCertificateMismatchError, target_type: str, target_id: str | int

@@ -606,6 +606,8 @@ MARKER_INTERVAL_MAX_VALUE = 86400
 # minimum, so -273.15 with step 0.1 accepted only values ending in 5 (49.95, 50.05).
 MARKER_TEMPERATURE_MIN_VALUE = -273.0
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
+# Decimals HA shows of a 0-10 V analog output, the same as Comexio's own display (#259).
+ANALOG_OUTPUT_DISPLAY_DECIMALS = 1
 
 # A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
 # word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not
