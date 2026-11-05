@@ -14,6 +14,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **Analog outputs can be written:** `AO1`–`AO4` of an extension (0–10 V) can be set from Home Assistant and with `comexio.set_value`. The Comexio API refuses them with `Forbidden`, so the integration writes them over the admin session, like Comexio's own IO page, and logs in again once if that session lapsed. They step by 0.1 and show one decimal, like Comexio. They replace the read-only sensors these outputs had: the old sensor's recorded history stays under its former entity id, and the orphaned-statistics repair offers to remove it (#259).
 - **`comexio.set_value` takes extension names with spaces:** a target like `IO-Extension A2#AO4` was rejected as `Invalid target`, and the plan card's debug input refused it as an invalid command. Blanks around the name and the `#` are dropped too (#259).
 - **A refused write is an error:** a `Forbidden` answer of the Comexio API now fails the action instead of looking like a success (#259).
+- **Statistics unit fix retries:** a recorder that is not ready yet, or a sensor without its first state, no longer leaves a statistics label unfixed until the next restart. The check runs up to three times, a minute apart, and logs a warning naming what is still missing. A lookup the recorder does not answer within two minutes ends the retries with that warning, and a reload waits for that same lookup, so stuck lookups never pile up.
 
 ---
 

@@ -83,15 +83,19 @@ def find_unit_mismatches(
     entities), so it holds for every entity_id format; ``legacy_prefixes`` keeps old
     ``comexio_``-prefixed ids covered. ``current_unit`` returns the entity's current
     unit_of_measurement ("" for none) or None when its state is not available yet (skipped).
+    It is asked only for a statistic whose label could need the fix (empty or Comexio's spelling),
+    so a caller that waits for missing states never waits for a statistic that is fine.
     """
     mismatches: list[tuple[str, str]] = []
     for stat in stats:
         stat_id = stat["statistic_id"]
         if stat_id not in owned_entity_ids and not stat_id.startswith(legacy_prefixes):
             continue
-        unit = current_unit(stat_id)
         # HA 2024+ returns "statistics_unit_of_measurement"; older versions use "unit_of_measurement"
         stored_unit = stat.get("statistics_unit_of_measurement") or stat.get("unit_of_measurement") or ""
+        if stored_unit and stored_unit not in COMEXIO_UNIT_TO_HA_UNIT:
+            continue
+        unit = current_unit(stat_id)
         if unit and (not stored_unit or COMEXIO_UNIT_TO_HA_UNIT.get(stored_unit) == unit):
             mismatches.append((stat_id, unit))
     return mismatches
