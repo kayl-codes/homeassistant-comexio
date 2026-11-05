@@ -301,18 +301,26 @@ async def test_a_stuck_statistics_lookup_ends_the_retries_with_a_warning(
 
 
 async def test_a_reload_waits_for_the_stuck_lookup_instead_of_queueing_another(
-    hass: HomeAssistant, update_metadata: MagicMock
+    hass: HomeAssistant, update_metadata: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
     """Setups and reloads share the lookup in flight; a new one is submitted only once it has finished."""
     release = asyncio.Event()
+    fresh_stats = [{"statistic_id": stat_id, "statistics_unit_of_measurement": ""} for stat_id, _ in MISMATCHES]
 
-    async def _hang(*_args: object) -> list[dict[str, str]]:
-        await release.wait()
-        return []
+    async def _lookup(*_args: object) -> list[dict[str, str]]:
+        if recorder.async_add_executor_job.call_count == 1:
+            await release.wait()
+            return []
+        return fresh_stats
 
-    recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_hang))
+    recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_lookup))
     with (
         patch("homeassistant.components.recorder.get_instance", return_value=recorder),
+        # Mismatches only from the fresh lookup: a run that reused the stuck one would fix nothing.
+        patch(
+            "custom_components.comexio.find_unit_mismatches",
+            side_effect=lambda stats, **_: MISMATCHES if stats == fresh_stats else [],
+        ),
         patch("custom_components.comexio.STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC", 0.01),
         patch("custom_components.comexio.STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC", 0),
     ):
@@ -320,12 +328,22 @@ async def test_a_reload_waits_for_the_stuck_lookup_instead_of_queueing_another(
             await _async_fix_statistics_units(hass, SERVER_ID, "entry")
             await _async_fix_statistics_units(hass, SERVER_ID, "entry")
         assert recorder.async_add_executor_job.call_count == 1
+        update_metadata.assert_not_called()
 
         await _release(hass, release)
-        async with asyncio.timeout(5):
-            await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+        caplog.clear()
+        # A real time limit again: the 10 ms one would let a slow loop turn this lookup into a stuck one.
+        with patch("custom_components.comexio.STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC", 5):
+            async with asyncio.timeout(10):
+                await _async_fix_statistics_units(hass, SERVER_ID, "entry")
 
     assert recorder.async_add_executor_job.call_count == 2
+    # The run after the stuck lookup finished fixes what its own lookup found and ends without a warning.
+    assert update_metadata.call_args_list == [
+        call(hass, stat_id, new_unit_of_measurement=unit, new_unit_class=None) for stat_id, unit in MISMATCHES
+    ]
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert _issues(hass) == FOREIGN_ISSUES
 
 
 async def test_a_database_timeout_is_an_ordinary_failed_attempt(
