@@ -5634,6 +5634,9 @@ class ComexioAPI:
                 one_line(identifier),
             )
             if not await self._full_login(generation):
+                if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
+                    # _login already raised the repair; the write error names the certificate as its cause.
+                    _write_met_another_certificate.set(self)
                 raise ComexioAuthenticationError(
                     f"admin session lapsed ({err}), re-login to Comexio failed ({self.last_login_error})"
                 ) from err

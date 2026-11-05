@@ -1404,6 +1404,64 @@ def test_set_value_analog_output_retries_on_the_rebuilt_client(comexio_api: Come
     rebuilt.set_io_value.assert_awaited_once_with("UD1", "AO1", 50)
 
 
+def test_set_value_analog_output_takes_over_a_login_made_during_the_write(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # The generation is read before the write: a poll that logged in meanwhile is reused, not repeated.
+    comexio_api._logged_in_client = client
+
+    async def lapsed_then_relogged_elsewhere(*_args: object) -> None:
+        if client.set_io_value.await_count == 1:
+            comexio_api._login_generation += 1
+            raise LAPSED
+
+    client.set_io_value = AsyncMock(side_effect=lapsed_then_relogged_elsewhere)
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is True
+
+    assert client.set_io_value.await_count == 2
+    client.login.assert_not_awaited()
+
+
+def test_set_value_analog_output_other_failure_does_not_log_in_again(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    client.set_io_value = AsyncMock(side_effect=HTTP_ERROR)
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is False
+
+    client.set_io_value.assert_awaited_once()
+    client.login.assert_not_awaited()
+
+
+MISMATCH = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+
+
+@pytest.mark.parametrize(
+    ("login_error", "names_certificate"),
+    [
+        (MISMATCH, True),
+        (ComexioAuthenticationError("rejected"), False),
+        (HTTP_ERROR, False),  # a connection failure
+    ],
+)
+def test_set_value_analog_output_names_the_certificate_only_when_the_re_login_met_another(
+    comexio_api: ComexioAPI, client: MagicMock, login_error: Exception, names_certificate: bool
+) -> None:
+    client.set_io_value = AsyncMock(side_effect=LAPSED)
+    client.login = AsyncMock(side_effect=login_error)
+
+    async def write() -> tuple[bool, bool]:
+        # A context variable: read in the task that wrote.
+        written = await comexio_api.set_value("io", "272", 50, "UD1", "AO1")
+        return written, comexio_api.last_write_met_another_certificate
+
+    assert asyncio.run(write()) == (False, names_certificate)
+    assert (comexio_api.certificate_mismatch is MISMATCH) is names_certificate  # the repair has it
+
+
 @pytest.mark.parametrize("identifier", ["Q3", "AI1", "QI1"])
 def test_set_value_api_written_io_does_not_log_in_again(
     comexio_api: ComexioAPI, client: MagicMock, identifier: str

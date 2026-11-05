@@ -111,12 +111,18 @@ def test_analog_output_takes_a_fraction_of_a_percent() -> None:
 
 
 @pytest.mark.parametrize(
-    ("identifier", "raw", "shown"),
-    [("AO1", 30.1961, 30.2), ("AO2", 3.91304, 3.9), ("AO3", 6.43137, 6.4), ("Q1", 30.1961, 30.1961)],
+    ("identifier", "unit", "raw", "shown"),
+    [
+        ("AO1", "%", 30.1961, 30.2),
+        ("AO2", "%", 3.91304, 3.9),
+        ("AO3", "V", 6.43137, 6.4),
+        ("Q1", "%", 30.1961, 30.1961),
+        ("Q1", "V", 3.91304, 3.91304),
+    ],
 )
-def test_only_an_analog_output_shows_one_decimal(identifier: str, raw: float, shown: float) -> None:
+def test_only_an_analog_output_shows_one_decimal(identifier: str, unit: str, raw: float, shown: float) -> None:
     """#259: an AO reports its raw step, Comexio shows it with one decimal; other outputs stay exact."""
-    number = _io_number(identifier=identifier, unit="%", min=0, max=100)
+    number = _io_number(identifier=identifier, unit=unit, min=0, max=100 if unit == "%" else 10)
     number.coordinator = SimpleNamespace(io_states={"12": raw})
 
     assert number.native_value == pytest.approx(shown)
