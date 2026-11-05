@@ -38,6 +38,7 @@ from .certificate import (
     presented_fingerprint,
 )
 from .const import (
+    COMEXIO_UNIT_TO_HA_UNIT,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
@@ -92,7 +93,6 @@ UNIT_TO_DEVICE_CLASS = {
     "Pa": SensorDeviceClass.PRESSURE,
     "m/s": SensorDeviceClass.WIND_SPEED,
     "km/h": SensorDeviceClass.WIND_SPEED,
-    "%": SensorDeviceClass.HUMIDITY,  # Often used for humidity in Comexio
     # Smart Meter readings (#249)
     "Wh": SensorDeviceClass.ENERGY,
     "kWh": SensorDeviceClass.ENERGY,
@@ -102,6 +102,9 @@ UNIT_TO_DEVICE_CLASS = {
 # A meter counter can run backwards (Smart Meter E1-E3 net energy), so "total", not
 # "total_increasing", which would read every decrease as a meter reset.
 DEVICE_CLASS_TO_STATE_CLASS = {SensorDeviceClass.ENERGY: SensorStateClass.TOTAL}
+# "%" alone says nothing: it is also a dimmer's current input (QI), a volume or an RGB channel.
+# Only the identifier tells humidity apart (HUM on the Quickbus devices).
+HUMIDITY_IDENTIFIER_PREFIX = "hum"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -214,14 +217,22 @@ class _PlanRunStateSensorSync:
                 ent_reg.async_remove(entity_id)
 
 
+def _io_device_class(unit: str, identifier: str) -> SensorDeviceClass | None:
+    """The device class of an analog IO, from its unit and, for a percentage, its identifier."""
+    if unit == PERCENTAGE and identifier.casefold().startswith(HUMIDITY_IDENTIFIER_PREFIX):
+        return SensorDeviceClass.HUMIDITY
+    return UNIT_TO_DEVICE_CLASS.get(unit)
+
+
 class ComexioIOSensor(ComexioIOEntity, SensorEntity):
     """Representation of an analog Comexio Input/Output."""
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         super().__init__(coordinator, server_id, io)
         unit = io.get("unit", "")
+        unit = COMEXIO_UNIT_TO_HA_UNIT.get(unit, unit)
         self._attr_native_unit_of_measurement = unit
-        device_class = UNIT_TO_DEVICE_CLASS.get(unit)
+        device_class = _io_device_class(unit, str(io.get("identifier", "")))
         self._attr_device_class = device_class
         self._attr_state_class = DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
 

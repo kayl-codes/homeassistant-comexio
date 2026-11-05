@@ -1,5 +1,7 @@
 """Tests for the orphaned long-term statistics selection."""
 
+import pytest
+
 from custom_components.comexio.orphaned_statistics import (
     find_orphaned_statistic_ids,
     find_unit_mismatches,
@@ -98,6 +100,33 @@ def _mismatches(stats, *, owned=(), units=None):
         legacy_prefixes=LEGACY_PREFIXES,
         current_unit=units.get,
     )
+
+
+def test_unit_mismatch_found_for_statistics_stored_under_comexios_lux() -> None:
+    """Label-only fix, so a sensor that moved from "lux" to "lx" raises no units_changed repair."""
+    stats = [{"statistic_id": "sensor.iosrv1_qb346", "statistics_unit_of_measurement": "lux"}]
+    result = _mismatches(stats, owned=["sensor.iosrv1_qb346"], units={"sensor.iosrv1_qb346": "lx"})
+    assert result == [("sensor.iosrv1_qb346", "lx")]
+
+
+@pytest.mark.parametrize(
+    ("stored", "current"),
+    [("lx", "lx"), ("lux", "lm"), ("lux", ""), ("lux", None)],
+)
+def test_lux_label_fix_only_when_the_entity_now_reports_lx(stored: str, current: str | None) -> None:
+    stats = [{"statistic_id": "sensor.iosrv1_qb346", "statistics_unit_of_measurement": stored}]
+    assert _mismatches(stats, owned=["sensor.iosrv1_qb346"], units={"sensor.iosrv1_qb346": current}) == []
+
+
+def test_lux_label_fix_leaves_a_foreign_statistic_alone() -> None:
+    stats = [{"statistic_id": "sensor.other_lux", "statistics_unit_of_measurement": "lux"}]
+    assert _mismatches(stats, owned=["sensor.iosrv1_qb346"], units={"sensor.other_lux": "lx"}) == []
+
+
+def test_a_really_different_stored_unit_is_no_label_fix() -> None:
+    """kW to W needs a value conversion, HA's own repair decides that."""
+    stats = [{"statistic_id": "sensor.iosrv1_qb400", "statistics_unit_of_measurement": "kW"}]
+    assert _mismatches(stats, owned=["sensor.iosrv1_qb400"], units={"sensor.iosrv1_qb400": "W"}) == []
 
 
 def test_unit_mismatch_found_for_registry_owned_stable_id() -> None:

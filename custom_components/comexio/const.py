@@ -547,6 +547,9 @@ STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC = 5
 # domain "sensor", id "units_changed_{statistic_id}" (homeassistant/components/sensor/recorder.py).
 STATISTICS_UNITS_CHANGED_ISSUE_DOMAIN = "sensor"
 STATISTICS_UNITS_CHANGED_ISSUE_PREFIX = "units_changed_"
+# A unit Comexio spells differently than HA accepts for the device class: same quantity, same values.
+# Only for units without a unit class: the statistics label fix writes new_unit_class=None.
+COMEXIO_UNIT_TO_HA_UNIT = {"lux": "lx"}
 
 SCAN_INTERVAL_DEFAULT = 15
 SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "600", "1440"]

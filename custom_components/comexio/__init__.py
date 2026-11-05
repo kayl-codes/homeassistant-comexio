@@ -657,7 +657,7 @@ def _delete_stale_statistics_issues(hass: HomeAssistant, statistic_ids: Iterable
 
 
 async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry_id: str) -> None:
-    """Fix statistics unit mismatches from firmware upgrade (empty label → correct unit).
+    """Fix statistics unit labels: empty from a firmware upgrade, or Comexio's spelling (lux → lx).
 
     Values stored in the recorder are already in the correct unit — only the
     statistics_meta.unit_of_measurement label was absent before Comexio OS 11.0.2
@@ -709,7 +709,7 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
         current_unit=_current_unit,
     )
     for stat_id, unit in mismatches:
-        _LOGGER.debug("[%s] Unit mismatch: %s  stored=<empty>  entity=%r", server_id, stat_id, unit)
+        _LOGGER.debug("[%s] Unit mismatch: %s  entity=%r", server_id, stat_id, unit)
 
     if not mismatches:
         _LOGGER.debug("[%s] Statistics unit check: no mismatches found", server_id)
