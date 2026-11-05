@@ -27,6 +27,7 @@ These run on a live installation with the hardware connected.
 | | `AI1`–`AI8` (digital type) | `binary_sensor`, some with device class `motion` | read |
 | | `AI1`–`AI8` (0–10 V type) | `sensor` voltage (V) | read |
 | **Universal-Dimmer** | `Q2`–`Q4` (%) | `number` | read / write |
+| | `AO1`–`AO4` (0–10 V, 1–10 V types) | `number` in % or V depending on the type, step 0.1, one decimal; `switch` for the *Digital 10V* type | read / write |
 | | `I1`–`I8` | `binary_sensor` | read |
 | **LED Dimmer** | `Q1`–`Q9` (%) | `number` 0–100 | read / write |
 | | `QI1`–`QI9` (%) | `sensor` without device class | read |
@@ -53,7 +54,7 @@ Quickbus IOs are always read-only, because the Comexio API refuses writes to the
 
 | Module | IOs | Problem | Status |
 | :--- | :--- | :--- | :--- |
-| **IO-Server**, **IO-Extension 2G** | `AO1`–`AO4` (0–10 V) | The Comexio API refuses writes with `Forbidden`. A value set in Comexio was also reported as not showing up in Home Assistant. | Open, [#259](https://github.com/kayl-codes/homeassistant-comexio/issues/259) |
+| **IO-Server**, **IO-Extension 2G** | `AO1`–`AO4` (0–10 V) | Writing works since aiocomexio 0.8.3: the integration writes them like Comexio's own IO page, because the Comexio API refuses them with `Forbidden`. A value set in Comexio was also reported as not showing up in Home Assistant. | Writing tested live on a Universal-Dimmer; feedback for these modules and the missing value open, [#259](https://github.com/kayl-codes/homeassistant-comexio/issues/259) |
 
 ### Tested without hardware
 
@@ -66,7 +67,7 @@ These are offline on the test installation, so **no live value or write has ever
 | | `LuxSensor` | lux | `sensor` illuminance (lx) | ok in unit tests; `lux` to `lx` seen live only on Quickbus `LUX` |
 | **Universal-Aktor** | `Q1`–`Q16` | digital | `switch` | ok |
 | | `QI1`–`QI4`, `TL1`, `UL1` | A, °C, V | `sensor` | ok |
-| **0–10 V Output Module** (CME1210, `Uax-AO` in Comexio) | `AO1`–`AO4` | 0–10 V | `number`, step 0.1 | entity ok, write blocked (#259) |
+| **0–10 V Output Module** (CME1210, `Uax-AO` in Comexio) | `AO1`–`AO4` | 0–10 V | `number`, step 0.1 | entity ok; writes the same way as the Universal-Dimmer's AOs (#259) |
 | **Uax-PT1000** | `T1`, `T2` | −50 to 120 °C | `sensor` temperature | ok |
 | **Multibridge** | `Q1` | % | `number` 0–100 | ok |
 | | `I1`, `OVC1`, `OTMP` | digital | `binary_sensor` | ok |
@@ -125,6 +126,7 @@ Diese laufen auf einer Live-Installation mit angeschlossener Hardware.
 | | `AI1`–`AI8` (digitaler Typ) | `binary_sensor`, teils mit Geräteklasse `motion` | lesen |
 | | `AI1`–`AI8` (Typ 0–10 V) | `sensor` Spannung (V) | lesen |
 | **Universal-Dimmer** | `Q2`–`Q4` (%) | `number` | lesen / schreiben |
+| | `AO1`–`AO4` (Typen 0–10 V, 1–10 V) | `number` in % oder V je nach Typ, Schritt 0,1, eine Nachkommastelle; `switch` beim Typ *Digital 10V* | lesen / schreiben |
 | | `I1`–`I8` | `binary_sensor` | lesen |
 | **LED Dimmer** | `Q1`–`Q9` (%) | `number` 0–100 | lesen / schreiben |
 | | `QI1`–`QI9` (%) | `sensor` ohne Geräteklasse | lesen |
@@ -151,7 +153,7 @@ Quickbus-IOs sind immer nur lesbar, weil die Comexio-API Schreibzugriffe darauf 
 
 | Modul | IOs | Problem | Stand |
 | :--- | :--- | :--- | :--- |
-| **IO-Server**, **IO-Extension 2G** | `AO1`–`AO4` (0–10 V) | Die Comexio-API lehnt Schreibzugriffe mit `Forbidden` ab. Außerdem wurde gemeldet, dass ein in Comexio gesetzter Wert nicht in Home Assistant ankam. | Offen, [#259](https://github.com/kayl-codes/homeassistant-comexio/issues/259) |
+| **IO-Server**, **IO-Extension 2G** | `AO1`–`AO4` (0–10 V) | Schreiben geht seit aiocomexio 0.8.3: Die Integration schreibt sie wie Comexios eigene IO-Seite, weil die Comexio-API sie mit `Forbidden` ablehnt. Außerdem wurde gemeldet, dass ein in Comexio gesetzter Wert nicht in Home Assistant ankam. | Schreiben live an einem Universal-Dimmer getestet; Rückmeldung für diese Module und der fehlende Wert offen, [#259](https://github.com/kayl-codes/homeassistant-comexio/issues/259) |
 
 ### Ohne Hardware getestet
 
@@ -164,7 +166,7 @@ Diese sind auf der Testinstallation offline, deshalb **wurde noch nie ein Live-W
 | | `LuxSensor` | lux | `sensor` Beleuchtungsstärke (lx) | ok in Unit-Tests; `lux` zu `lx` live nur an Quickbus-`LUX` gesehen |
 | **Universal-Aktor** | `Q1`–`Q16` | digital | `switch` | ok |
 | | `QI1`–`QI4`, `TL1`, `UL1` | A, °C, V | `sensor` | ok |
-| **0–10 V Output Modul** (CME1210, `Uax-AO` in Comexio) | `AO1`–`AO4` | 0–10 V | `number`, Schritt 0,1 | Entität ok, Schreiben blockiert (#259) |
+| **0–10 V Output Modul** (CME1210, `Uax-AO` in Comexio) | `AO1`–`AO4` | 0–10 V | `number`, Schritt 0,1 | Entität ok; schreibt wie die AOs des Universal-Dimmers (#259) |
 | **Uax-PT1000** | `T1`, `T2` | −50 bis 120 °C | `sensor` Temperatur | ok |
 | **Multibridge** | `Q1` | % | `number` 0–100 | ok |
 | | `I1`, `OVC1`, `OTMP` | digital | `binary_sensor` | ok |
