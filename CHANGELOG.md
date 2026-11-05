@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### Fixed
+
+- **Percentage sensors are no longer all humidity:** only an IO whose identifier starts with `HUM` gets the humidity device class. Dimmer current inputs (`QI`), panel settings, RGB channels and volumes keep their % value and history, without a device class. So does a humidity probe on an IO with another identifier, for example `AI3`.
+- **Lux sensors are recognized:** Comexio's `lux` now becomes `lx` with the illuminance device class. Existing statistics move to the new unit by themselves, with their values and without a repair.
+
 ---
 
 ## [0.31.0] — 2026-11-04

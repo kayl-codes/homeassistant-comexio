@@ -4,6 +4,8 @@ from collections.abc import Callable, Iterable, Mapping
 import re
 from typing import Any
 
+from .const import COMEXIO_UNIT_TO_HA_UNIT
+
 
 def legacy_statistic_prefixes(server_slug: str) -> tuple[str, str]:
     """Statistic_id prefixes of the old ``comexio_``-prefixed entity_id naming of one server.
@@ -74,7 +76,8 @@ def find_unit_mismatches(
     legacy_prefixes: tuple[str, ...],
     current_unit: Callable[[str], str | None],
 ) -> list[tuple[str, str]]:
-    """Return (statistic_id, unit) for owned statistics stored without a unit the entity now has.
+    """Return (statistic_id, unit) for owned statistics stored without the unit the entity now has,
+    or stored under Comexio's spelling of it ("lux" for "lx").
 
     Ownership comes from the entity registry (``owned_entity_ids`` = this config entry's
     entities), so it holds for every entity_id format; ``legacy_prefixes`` keeps old
@@ -89,6 +92,6 @@ def find_unit_mismatches(
         unit = current_unit(stat_id)
         # HA 2024+ returns "statistics_unit_of_measurement"; older versions use "unit_of_measurement"
         stored_unit = stat.get("statistics_unit_of_measurement") or stat.get("unit_of_measurement") or ""
-        if unit and not stored_unit:
+        if unit and (not stored_unit or COMEXIO_UNIT_TO_HA_UNIT.get(stored_unit) == unit):
             mismatches.append((stat_id, unit))
     return mismatches
