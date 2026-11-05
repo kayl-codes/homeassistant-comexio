@@ -123,6 +123,23 @@ def test_lux_label_fix_leaves_a_foreign_statistic_alone() -> None:
     assert _mismatches(stats, owned=["sensor.iosrv1_qb346"], units={"sensor.other_lux": "lx"}) == []
 
 
+def test_the_current_unit_is_asked_only_where_a_label_fix_could_apply() -> None:
+    """A caller waits for the states it asks for, so a statistic that is fine must not be asked about."""
+    asked: list[str] = []
+    stats = [
+        {"statistic_id": "sensor.iosrv1_a", "statistics_unit_of_measurement": "V"},
+        {"statistic_id": "sensor.iosrv1_b", "statistics_unit_of_measurement": ""},
+        {"statistic_id": "sensor.iosrv1_c", "statistics_unit_of_measurement": "lux"},
+    ]
+    find_unit_mismatches(
+        stats,
+        owned_entity_ids={"sensor.iosrv1_a", "sensor.iosrv1_b", "sensor.iosrv1_c"},
+        legacy_prefixes=LEGACY_PREFIXES,
+        current_unit=asked.append,
+    )
+    assert asked == ["sensor.iosrv1_b", "sensor.iosrv1_c"]
+
+
 def test_a_really_different_stored_unit_is_no_label_fix() -> None:
     """kW to W needs a value conversion, HA's own repair decides that."""
     stats = [{"statistic_id": "sensor.iosrv1_qb400", "statistics_unit_of_measurement": "kW"}]
