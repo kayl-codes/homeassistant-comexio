@@ -32,7 +32,7 @@ def _write(number: ComexioIONumber, value: float) -> tuple[AsyncMock, MagicMock]
     set_value = AsyncMock(return_value=True)
     update = MagicMock()
     number.coordinator = SimpleNamespace(
-        api=SimpleNamespace(set_value=set_value), update_io_by_name=update, io_states={}
+        api=SimpleNamespace(set_value=set_value), update_io_by_name=update, io_push_count=lambda _io_id: 0
     )
     number.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
     asyncio.run(number.async_set_native_value(value))
@@ -46,14 +46,14 @@ def test_percentage_write_sends_the_whole_number(value: float, sent: float) -> N
     set_value, update = _write(_io_number(unit="%", min=0, max=100), value)
 
     set_value.assert_awaited_once_with("io", "12", sent, "LD1", "Q1")
-    update.assert_called_once_with("LD1", "Q1", sent)
+    update.assert_called_once_with("LD1", "Q1", sent, pushed=False)
 
 
 def test_fine_step_write_keeps_the_fraction() -> None:
     set_value, update = _write(_io_number(unit="V", min=0, max=10), 4.25)
 
     set_value.assert_awaited_once_with("io", "12", 4.25, "LD1", "Q1")
-    update.assert_called_once_with("LD1", "Q1", 4.25)
+    update.assert_called_once_with("LD1", "Q1", 4.25, pushed=False)
 
 
 @pytest.mark.parametrize(
@@ -107,7 +107,7 @@ def test_analog_output_takes_a_fraction_of_a_percent() -> None:
     set_value, update = _write(number, 30.6)
 
     set_value.assert_awaited_once_with("io", "12", 30.6, "LD1", "AO1")
-    update.assert_called_once_with("LD1", "AO1", 30.6)
+    update.assert_called_once_with("LD1", "AO1", 30.6, pushed=False)
 
 
 @pytest.mark.parametrize(
@@ -133,16 +133,16 @@ def test_only_an_analog_output_shows_one_decimal(identifier: str, unit: str, raw
 
 def test_a_push_during_the_write_is_not_replaced_by_the_requested_value() -> None:
     """#259, seen live: the push 5.4902 arrived before the write returned, and HA then showed 5.5."""
-    io_states = {"12": 8.39216}
+    pushes = [0]
 
     async def write_and_push(*_: Any) -> bool:
-        io_states["12"] = 5.4902
+        pushes[0] += 1
         return True
 
     update = MagicMock()
     number = _io_number(identifier="AO3", unit="V", min=0, max=10)
     number.coordinator = SimpleNamespace(
-        api=SimpleNamespace(set_value=write_and_push), update_io_by_name=update, io_states=io_states
+        api=SimpleNamespace(set_value=write_and_push), update_io_by_name=update, io_push_count=lambda _io_id: pushes[0]
     )
     number.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
 
@@ -150,7 +150,6 @@ def test_a_push_during_the_write_is_not_replaced_by_the_requested_value() -> Non
 
     update.assert_not_called()
     number.async_write_ha_state.assert_called_once()
-    assert io_states == {"12": 5.4902}  # the push, not the request (both display as 5.5)
 
 
 @pytest.mark.parametrize("raw", [float("inf"), float("-inf"), 1e30, -1e30])

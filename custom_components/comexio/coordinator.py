@@ -1235,6 +1235,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._webhook_updated_markers: set[str] = set()
         self._webhook_updated_io_ids: set[str] = set()
         self._webhook_updated_knx_ids: set[str] = set()
+        # Webhook pushes per IO id: a write compares the count before and after, so it never replaces a push that
+        # arrived while it was in flight, even one carrying the value cached before the write (#259).
+        self._io_push_counts: dict[str, int] = {}
         # Unknown IOs a webhook push was already warned about: a stale command pushes on every value
         # change, so only its first push warns (#251). Cleared with the coordinator on every reload.
         self._warned_unknown_webhook_ios: set[tuple[str, ...]] = set()
@@ -5053,7 +5056,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self._handle_offline_extension_transitions(offline - {io["ext_name"]})
         return previous
 
-    def update_io_by_name(self, ext_name: str, identifier: str, value: float | int | str) -> None:
+    def io_push_count(self, io_id: str) -> int:
+        """How many webhook pushes this IO has received; a write reads it before and after (#259)."""
+        return self._io_push_counts.get(io_id, 0)
+
+    def update_io_by_name(
+        self, ext_name: str, identifier: str, value: float | int | str, *, pushed: bool = True
+    ) -> None:
+        """Store an IO value; pushed=False marks HA's own write, which does not count as a push (#259)."""
         key = (ext_name.lower(), identifier.lower())
         if (io := self._io_index.get(key)) and self._names_another_io_now(io):
             _LOGGER.debug(
@@ -5062,6 +5072,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         elif io:
             previous = self._store_pushed_io_value(io, value)
+            if pushed and self.io_states.get(io["id"]) is not None:
+                # Only a reading counts: a junk push (stored as unknown) must not keep a successful write's value out.
+                self._io_push_counts[io["id"]] = self._io_push_counts.get(io["id"], 0) + 1
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)

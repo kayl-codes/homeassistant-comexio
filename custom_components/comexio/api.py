@@ -847,14 +847,14 @@ class ComexioAPI:
 
     @staticmethod
     def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
-        """What client.login() authenticates with; the API user (Basic Auth for writes) plays no part."""
+        """What client.login() authenticates with; the API user (Basic Auth for writes except AO*) plays no part."""
         return credentials[:3]
 
     def _login_outdated(self, client_credentials: tuple[str, ...]) -> bool:
         """Whether host, admin credentials or the pinned certificate changed since client_credentials.
 
-        The API user (Basic Auth for writes) plays no part in the login, so a change of it leaves a
-        login running with the old client valid.
+        The API user (Basic Auth for writes; AO* go over the admin session, #259) plays no part in the login, so a
+        change of it leaves a login running with the old client valid.
         """
         login_part = (*self._admin_login_part(client_credentials), client_credentials[-1])
         return login_part != (*self._login_credentials(), self.fingerprint or "")

@@ -257,12 +257,13 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
             # A service call can still pass a fraction, which Comexio rounds (#253): send the whole
             # number instead, so HA's own state matches the output at once instead of after the push.
             value = float(Decimal(str(value)).to_integral_value(ROUND_HALF_UP))
-        before_write = self.coordinator.io_states.get(self._io_id)
+        pushes_before = self.coordinator.io_push_count(self._io_id)
         if not await self.coordinator.api.set_value("io", self._io_id, value, self._ext_name, self._identifier):
             raise write_failed(
                 self.coordinator, f"Failed to set value {value} for IO {self._ext_name} {self._identifier}"
             )
-        # A push that arrived during the write holds the output's real value: don't replace it (#259).
-        if self.coordinator.io_states.get(self._io_id) == before_write:
-            self.coordinator.update_io_by_name(self._ext_name, self._identifier, value)
+        # A push that arrived during the write holds the output's real value, even when it equals the value cached
+        # before: don't replace it (#259).
+        if self.coordinator.io_push_count(self._io_id) == pushes_before:
+            self.coordinator.update_io_by_name(self._ext_name, self._identifier, value, pushed=False)
         self.async_write_ha_state()
