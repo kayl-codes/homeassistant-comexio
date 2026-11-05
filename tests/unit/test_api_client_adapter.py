@@ -1345,6 +1345,173 @@ def test_set_value_rejects_incomplete_targets(
     assert asyncio.run(comexio_api.set_value(*args)) is False
 
 
+LAPSED = ComexioAuthenticationError("admin session lapsed")
+
+
+@pytest.mark.parametrize(
+    ("writes", "login", "result", "write_count"),
+    [
+        ([LAPSED, None], None, True, 2),  # lapsed admin session: one re-login, the write goes through
+        ([LAPSED, LAPSED], None, False, 2),  # still refused after the re-login: no third attempt
+        ([LAPSED], ComexioAuthenticationError("rejected"), False, 1),  # re-login refused: no second write
+    ],
+)
+def test_set_value_analog_output_logs_in_again_once(
+    comexio_api: ComexioAPI,
+    client: MagicMock,
+    writes: list[Exception | None],
+    login: Exception | None,
+    result: bool,
+    write_count: int,
+) -> None:
+    # An AO* write goes over the admin session (/api/ answers "Forbidden", #259), which can lapse.
+    client.set_io_value = AsyncMock(side_effect=writes)
+    client.login = AsyncMock(side_effect=login)
+    order = MagicMock()
+    order.attach_mock(client.set_io_value, "write")
+    order.attach_mock(client.login, "login")
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is result
+
+    assert client.set_io_value.await_args_list == [call("UD1", "AO1", 50)] * write_count  # the retry writes the same
+    # The retry follows the re-login, not the expired session.
+    assert [name for name, *_ in order.mock_calls] == ["write", "login", "write"][: write_count + 1]
+
+
+def test_set_value_analog_output_failed_re_login_names_the_cause(
+    comexio_api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    client.set_io_value = AsyncMock(side_effect=LAPSED)
+    client.login = AsyncMock(side_effect=ComexioAuthenticationError("rejected"))
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is False
+
+    assert (
+        f"admin session lapsed ({LAPSED}), re-login to Comexio failed ({comexio_api.last_login_error})" in caplog.text
+    )
+
+
+def test_set_value_analog_output_retries_on_the_rebuilt_client(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    # The retry reads self.client again: a re-login may have replaced it.
+    rebuilt = MagicMock()
+    rebuilt.set_io_value = AsyncMock()
+
+    async def login() -> None:
+        comexio_api._client = rebuilt
+
+    client.set_io_value = AsyncMock(side_effect=LAPSED)
+    client.login = AsyncMock(side_effect=login)
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is True
+
+    client.set_io_value.assert_awaited_once()
+    rebuilt.set_io_value.assert_awaited_once_with("UD1", "AO1", 50)
+
+
+@pytest.mark.parametrize(
+    ("setting", "repeated"),
+    [
+        ("host", False),
+        ("username", False),
+        ("password", False),
+        ("fingerprint", False),
+        ("api_user", True),  # the API user plays no part in the admin session the write goes over
+        ("api_pass", True),
+    ],
+)
+def test_set_value_analog_output_is_not_repeated_on_replaced_connection_settings(
+    comexio_api: ComexioAPI, client: MagicMock, setting: str, repeated: bool
+) -> None:
+    # A reconfigure while the write was on its way: on another server the same IO name may be another output.
+    rebuilt = MagicMock()
+    rebuilt.set_io_value = AsyncMock()
+    rebuilt.login = AsyncMock()
+
+    async def write_then_reconfigure(*_args: object) -> None:
+        setattr(comexio_api, setting, "f" * 64 if setting == "fingerprint" else "other")
+        raise LAPSED
+
+    client.set_io_value = AsyncMock(side_effect=write_then_reconfigure)
+    comexio_api._new_client = MagicMock(return_value=rebuilt)
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is repeated
+
+    rebuilt.login.assert_awaited_once()  # the re-login on the new settings succeeded either way
+    assert rebuilt.set_io_value.await_args_list == ([call("UD1", "AO1", 50)] if repeated else [])
+
+
+def test_set_value_analog_output_takes_over_a_login_made_during_the_write(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # The generation is read before the write: a poll that logged in meanwhile is reused, not repeated.
+    comexio_api._logged_in_client = client
+
+    async def lapsed_then_relogged_elsewhere(*_args: object) -> None:
+        if client.set_io_value.await_count == 1:
+            comexio_api._login_generation += 1
+            raise LAPSED
+
+    client.set_io_value = AsyncMock(side_effect=lapsed_then_relogged_elsewhere)
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is True
+
+    assert client.set_io_value.await_count == 2
+    client.login.assert_not_awaited()
+
+
+def test_set_value_analog_output_other_failure_does_not_log_in_again(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    client.set_io_value = AsyncMock(side_effect=HTTP_ERROR)
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is False
+
+    client.set_io_value.assert_awaited_once()
+    client.login.assert_not_awaited()
+
+
+MISMATCH = ComexioCertificateMismatchError("foreign", expected="a" * 64, actual="b" * 64)
+
+
+@pytest.mark.parametrize(
+    ("login_error", "names_certificate"),
+    [
+        (MISMATCH, True),
+        (ComexioAuthenticationError("rejected"), False),
+        (HTTP_ERROR, False),  # a connection failure
+    ],
+)
+def test_set_value_analog_output_names_the_certificate_only_when_the_re_login_met_another(
+    comexio_api: ComexioAPI, client: MagicMock, login_error: Exception, names_certificate: bool
+) -> None:
+    client.set_io_value = AsyncMock(side_effect=LAPSED)
+    client.login = AsyncMock(side_effect=login_error)
+
+    async def write() -> tuple[bool, bool]:
+        # A context variable: read in the task that wrote.
+        written = await comexio_api.set_value("io", "272", 50, "UD1", "AO1")
+        return written, comexio_api.last_write_met_another_certificate
+
+    assert asyncio.run(write()) == (False, names_certificate)
+    assert (comexio_api.certificate_mismatch is MISMATCH) is names_certificate  # the repair has it
+
+
+@pytest.mark.parametrize("identifier", ["Q3", "AI1", "QI1"])
+def test_set_value_api_written_io_does_not_log_in_again(
+    comexio_api: ComexioAPI, client: MagicMock, identifier: str
+) -> None:
+    # /api/ uses the API user: its authentication error is no lapsed admin session.
+    client.set_io_value = AsyncMock(side_effect=LAPSED)
+    client.login = AsyncMock()
+
+    assert asyncio.run(comexio_api.set_value("io", "3", 1, "IOX2", identifier)) is False
+
+    client.set_io_value.assert_awaited_once()
+    client.login.assert_not_awaited()
+
+
 def test_set_value_failure_is_false(comexio_api: ComexioAPI, client: MagicMock) -> None:
     _fail(client, "set_marker_value", ComexioAuthenticationError("API credentials rejected"))
     assert asyncio.run(comexio_api.set_value("marker", 5, 1)) is False

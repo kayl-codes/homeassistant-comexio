@@ -192,16 +192,17 @@ class ComexioIOSwitch(ComexioIOEntity, SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Turn the relay on via API."""
-        if not await self.coordinator.api.set_value("io", self._io_id, 1, self._ext_name, self._identifier):
-            raise write_failed(self.coordinator, f"Failed to turn on IO {self._ext_name} {self._identifier}")
-
-        self.coordinator.update_io_by_name(self._ext_name, self._identifier, 1)
-        self.async_write_ha_state()
+        await self._async_write(1, "on")
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Turn the relay off via API."""
-        if not await self.coordinator.api.set_value("io", self._io_id, 0, self._ext_name, self._identifier):
-            raise write_failed(self.coordinator, f"Failed to turn off IO {self._ext_name} {self._identifier}")
+        await self._async_write(0, "off")
 
-        self.coordinator.update_io_by_name(self._ext_name, self._identifier, 0)
+    async def _async_write(self, value: int, action: str) -> None:
+        pushes_before = self.coordinator.io_push_count(self._io_id)
+        if not await self.coordinator.api.set_value("io", self._io_id, value, self._ext_name, self._identifier):
+            raise write_failed(self.coordinator, f"Failed to turn {action} IO {self._ext_name} {self._identifier}")
+        # A push that arrived during the write holds the output's real state: don't replace it (#259).
+        if self.coordinator.io_push_count(self._io_id) == pushes_before:
+            self.coordinator.update_io_by_name(self._ext_name, self._identifier, value, pushed=False)
         self.async_write_ha_state()

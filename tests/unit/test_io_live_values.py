@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
 from custom_components.comexio.api import ComexioAPI
@@ -20,6 +21,7 @@ from custom_components.comexio.coordinator import (
     _PollMetAnotherCertificate,
     _webhook_warn_key,
 )
+from custom_components.comexio.number import ComexioIONumber
 from custom_components.comexio.switch import ComexioIOSwitch
 from tests.common import load_json_fixture
 
@@ -63,6 +65,7 @@ def _coordinator(
         "schedule_plan_preview_refresh": MagicMock(),
         "_webhook_updated_markers": set(),
         "_webhook_updated_io_ids": set(),
+        "_io_push_counts": {},
         "_warned_unknown_webhook_ios": set(),
         "_warned_unknown_webhook_cap": False,
         "_last_poll_scraped": False,
@@ -899,3 +902,107 @@ def test_a_poll_meeting_another_certificate_keeps_the_io_identities_of_its_data(
 
     assert kept == (1.0, True, ("1", "I1", None, 1))
     assert coordinator.io_states["11"] == 0.0
+
+
+def test_only_a_webhook_push_counts_as_one(api: ComexioAPI) -> None:
+    """A write compares io_push_count before and after (#259): HA's own write must not count, a push with an
+    unchanged value must."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+
+    coordinator.update_io_by_name("BASE", "Q1", 1, pushed=False)
+    own_write = coordinator.io_push_count("12")
+    coordinator.update_io_by_name("BASE", "Q1", 1)
+    coordinator.update_io_by_name("BASE", "Q1", 1)
+    coordinator.update_io_by_name("BASE", "Q1", "nan")  # junk, stored as unknown: no reading, no push
+    coordinator.update_io_by_name("BASE", "ZZ9", 1)  # unknown IO
+
+    assert (own_write, coordinator.io_push_count("12"), coordinator.io_push_count("11")) == (0, 2, 0)
+    assert coordinator._io_push_counts == {"12": 2}
+
+
+def _io_switch(coordinator: Any) -> ComexioIOSwitch:
+    switch = ComexioIOSwitch.__new__(ComexioIOSwitch)
+    switch.coordinator = coordinator
+    switch._io_id, switch._ext_name, switch._identifier = "12", "BASE", "Q1"
+    switch.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+    return switch
+
+
+def test_a_push_during_a_switch_write_is_kept_even_with_the_cached_value(api: ComexioAPI) -> None:
+    """#259: turn_on is answered by a push of 0, the value already cached (logic holds the output off): HA must
+    show the push, not the requested 1."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    coordinator.update_io_by_name("BASE", "Q1", 0)
+
+    async def write_and_push(*_: Any) -> bool:
+        coordinator.update_io_by_name("BASE", "Q1", 0)
+        return True
+
+    api.set_value = AsyncMock(side_effect=write_and_push)  # type: ignore[method-assign]
+    switch = _io_switch(coordinator)
+
+    asyncio.run(switch.async_turn_on())
+
+    assert (coordinator.io_states["12"], switch.is_on) == (0.0, False)
+    switch.async_write_ha_state.assert_called_once()
+
+
+def test_a_switch_write_without_a_push_shows_the_requested_state(api: ComexioAPI) -> None:
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    api.set_value = AsyncMock(return_value=True)  # type: ignore[method-assign]
+    switch = _io_switch(coordinator)
+
+    asyncio.run(switch.async_turn_on())
+    on = switch.is_on
+    asyncio.run(switch.async_turn_off())
+
+    assert (on, switch.is_on, coordinator.io_push_count("12")) == (True, False, 0)
+    api.set_value.assert_awaited_with("io", "12", 0, "BASE", "Q1")
+
+
+@pytest.mark.parametrize(("action", "value"), [("async_turn_on", 1), ("async_turn_off", 0)])
+def test_a_failed_switch_write_changes_nothing(api: ComexioAPI, action: str, value: int) -> None:
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    coordinator.update_io_by_name("BASE", "Q1", 1 - value)
+    api.set_value = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    switch = _io_switch(coordinator)
+    write = getattr(switch, action)()
+    message = f"Failed to turn {action.removeprefix('async_turn_')} IO BASE Q1"
+
+    with pytest.raises(HomeAssistantError, match=message):
+        asyncio.run(write)
+
+    assert (coordinator.io_states["12"], coordinator.io_push_count("12")) == (float(1 - value), 1)
+    switch.async_write_ha_state.assert_not_called()
+
+
+def test_a_push_of_the_cached_value_during_a_number_write_is_kept(api: ComexioAPI) -> None:
+    """#259, Sourcery's case: the output reads 5.0, a write of 8.0 is answered by a push of 5.0 (logic holds it).
+    Comparing values saw no change and stored 8.0; the push count sees the push."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    coordinator.update_io_by_name("BASE", "Q1", 5.0)
+
+    async def write_and_push(*_: Any) -> bool:
+        coordinator.update_io_by_name("BASE", "Q1", 5.0)
+        return True
+
+    api.set_value = AsyncMock(side_effect=write_and_push)  # type: ignore[method-assign]
+    number = ComexioIONumber(
+        coordinator, "iosrv1", {"id": "12", "ext_name": "BASE", "identifier": "Q1", "ha_name": "Q1"}
+    )
+    number.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+
+    asyncio.run(number.async_set_native_value(8.0))
+
+    assert (coordinator.io_states["12"], number.native_value) == (5.0, 5.0)
+    number.async_write_ha_state.assert_called_once()

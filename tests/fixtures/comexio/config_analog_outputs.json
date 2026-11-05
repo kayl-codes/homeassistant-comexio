@@ -1,0 +1,48 @@
+{
+  "FubModules": {
+    "1": {
+      "6": {
+        "extension": {
+          "Id": 6,
+          "Name": "IO-Extension A2",
+          "Identifier": "6000-7000-8000"
+        },
+        "inoutput": {
+          "61": {
+            "Id": 61,
+            "Identifier": "AO1",
+            "Description": "Ausgang 1",
+            "InOutputTypeId": 118,
+            "Active": true,
+            "IntIsOutput": 1
+          },
+          "62": {
+            "Id": 62,
+            "Identifier": "AO2",
+            "Description": "Ausgang 2",
+            "InOutputTypeId": 117,
+            "Active": true,
+            "IntIsOutput": 1
+          },
+          "63": {
+            "Id": 63,
+            "Identifier": "AO3",
+            "Description": "Ausgang 3",
+            "InOutputTypeId": 1,
+            "Active": true,
+            "IntIsOutput": 1
+          },
+          "64": {
+            "Id": 64,
+            "Identifier": "AO4",
+            "Description": "Ausgang 4",
+            "InOutputTypeId": 120,
+            "Active": true,
+            "IntIsOutput": 1
+          }
+        }
+      }
+    },
+    "2": {}
+  }
+}
