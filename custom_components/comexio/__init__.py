@@ -672,14 +672,20 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
 
     Runs up to STATISTICS_UNIT_FIX_ATTEMPTS times: a recorder that is not ready yet, or an
     enabled entity without its first state, would otherwise leave the label wrong until the
-    next restart.
+    next restart. A lookup that times out ends the retries: it still holds a recorder worker,
+    and another lookup would only queue behind it.
     """
     import asyncio
 
     await asyncio.sleep(STATISTICS_UNIT_FIX_START_DELAY_SEC)
     pending: str | None = None
+    attempt = 0
     for attempt in range(1, STATISTICS_UNIT_FIX_ATTEMPTS + 1):
-        pending = await _async_fix_statistics_units_once(hass, server_id, entry_id)
+        try:
+            pending = await _async_fix_statistics_units_once(hass, server_id, entry_id)
+        except _StatisticsLookupStuck as err:
+            pending = str(err)
+            break
         if pending is None:
             return
         if attempt < STATISTICS_UNIT_FIX_ATTEMPTS:
@@ -691,11 +697,35 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
             )
             await asyncio.sleep(STATISTICS_UNIT_FIX_RETRY_DELAY_SEC)
     _LOGGER.warning(
-        "[%s] Statistics unit fix incomplete after %d attempts (%s); the next restart or reload tries again",
+        "[%s] Statistics unit fix incomplete after %d attempt(s) (%s); the next restart or reload tries again",
         server_id,
-        STATISTICS_UNIT_FIX_ATTEMPTS,
+        attempt,
         pending,
     )
+
+
+class _StatisticsLookupStuck(Exception):
+    """The recorder did not answer the statistics lookup in time; its reason is the message."""
+
+
+async def _async_list_statistics(hass: HomeAssistant, instance: Any, list_statistic_ids: Callable[..., Any]) -> Any:
+    """Look up the recorder's statistics, raising _StatisticsLookupStuck when our time limit expires.
+
+    A TimeoutError from the database itself is not ours and propagates as an ordinary failure.
+    """
+    import asyncio
+
+    try:
+        async with asyncio.timeout(STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC) as lookup_timeout:
+            return await instance.async_add_executor_job(list_statistic_ids, hass)
+    except TimeoutError as err:
+        if not lookup_timeout.expired():
+            raise
+        reason = (
+            f"statistics lookup timed out after {STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC} s, recorder busy?"
+            " No further attempt while it still runs"
+        )
+        raise _StatisticsLookupStuck(reason) from err
 
 
 async def _async_fix_statistics_units_once(hass: HomeAssistant, server_id: str, entry_id: str) -> str | None:
@@ -713,17 +743,11 @@ async def _async_fix_statistics_units_once(hass: HomeAssistant, server_id: str, 
         _LOGGER.debug("[%s] Recorder API unavailable; skipping statistics unit fix", server_id)
         return None
 
-    import asyncio
-
     try:
-        instance = get_instance(hass)
-        async with asyncio.timeout(STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC):
-            all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
-    except TimeoutError:
-        reason = f"statistics lookup timed out after {STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC} s, recorder busy?"
-        _LOGGER.debug("[%s] Statistics unit check: %s", server_id, reason)
-        return reason
-    except Exception as err:  # any recorder failure means "try again later"
+        all_stats = await _async_list_statistics(hass, get_instance(hass), list_statistic_ids)
+    except _StatisticsLookupStuck:
+        raise
+    except Exception as err:  # any other recorder failure means "try again later"
         _LOGGER.debug("[%s] Statistics unit check: statistics lookup failed: %r", server_id, err)
         return f"statistics lookup failed: {err!r}"
 

@@ -83,7 +83,11 @@ async def test_a_recorder_failure_is_retried(hass: HomeAssistant, update_metadat
     recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=[RuntimeError("not ready"), retry_stats]))
     with (
         patch("homeassistant.components.recorder.get_instance", return_value=recorder),
-        patch("custom_components.comexio.find_unit_mismatches", return_value=MISMATCHES) as find,
+        # Mismatches only from the retry's rows: a retry that ignored its lookup would fix nothing.
+        patch(
+            "custom_components.comexio.find_unit_mismatches",
+            side_effect=lambda stats, **_: MISMATCHES if stats == retry_stats else [],
+        ) as find,
         patch("custom_components.comexio.STATISTICS_UNIT_FIX_RETRY_DELAY_SEC", 0),
         patch("custom_components.comexio.STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC", 0),
     ):
@@ -110,7 +114,7 @@ async def test_a_recorder_that_stays_down_ends_with_a_warning(
     update_metadata.assert_not_called()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert warnings == [
-        f"[{SERVER_ID}] Statistics unit fix incomplete after {STATISTICS_UNIT_FIX_ATTEMPTS} attempts "
+        f"[{SERVER_ID}] Statistics unit fix incomplete after {STATISTICS_UNIT_FIX_ATTEMPTS} attempt(s) "
         "(statistics lookup failed: RuntimeError('not ready')); the next restart or reload tries again"
     ]
 
@@ -147,7 +151,7 @@ async def test_an_enabled_entity_without_a_state_is_checked_again(
     assert recorder.async_add_executor_job.await_count == checks
     update.assert_not_called()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
-    expected = f"incomplete after {STATISTICS_UNIT_FIX_ATTEMPTS} attempts (no state yet: {entity.entity_id})"
+    expected = f"incomplete after {STATISTICS_UNIT_FIX_ATTEMPTS} attempt(s) (no state yet: {entity.entity_id})"
     assert [expected in w for w in warnings] == ([True] if disabled_by is None else [])
 
 
@@ -255,35 +259,10 @@ async def test_a_statistic_that_needs_no_fix_does_not_wait_for_a_state(
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
-async def test_a_stuck_statistics_lookup_counts_as_a_failed_attempt(
-    hass: HomeAssistant, update_metadata: MagicMock
-) -> None:
-    """A lookup hanging behind the recorder must not halt the retries."""
-    stuck = asyncio.Event()
-
-    async def _lookup(*_args: object) -> list[dict[str, str]]:
-        if recorder.async_add_executor_job.await_count == 1:
-            await stuck.wait()
-        return []
-
-    recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_lookup))
-    with (
-        patch("homeassistant.components.recorder.get_instance", return_value=recorder),
-        patch("custom_components.comexio.STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC", 0.01),
-        patch("custom_components.comexio.STATISTICS_UNIT_FIX_RETRY_DELAY_SEC", 0),
-        patch("custom_components.comexio.STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC", 0),
-    ):
-        async with asyncio.timeout(5):
-            await _async_fix_statistics_units(hass, SERVER_ID, "entry")
-
-    assert recorder.async_add_executor_job.await_count == 2
-    assert update_metadata.call_count == len(MISMATCHES)
-
-
-async def test_a_lookup_that_always_hangs_ends_with_a_timeout_warning(
+async def test_a_stuck_statistics_lookup_ends_the_retries_with_a_warning(
     hass: HomeAssistant, update_metadata: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """Every attempt timing out ends the task with a warning that says so, instead of hanging."""
+    """A lookup hanging behind the recorder still holds a worker, so no second lookup queues behind it."""
 
     async def _hang(*_args: object) -> None:
         await asyncio.Event().wait()
@@ -297,8 +276,51 @@ async def test_a_lookup_that_always_hangs_ends_with_a_timeout_warning(
         async with asyncio.timeout(5):
             await _async_fix_statistics_units(hass, SERVER_ID, "entry")
 
-    assert recorder.async_add_executor_job.await_count == STATISTICS_UNIT_FIX_ATTEMPTS
+    assert recorder.async_add_executor_job.await_count == 1
     update_metadata.assert_not_called()
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert warnings == [
+        f"[{SERVER_ID}] Statistics unit fix incomplete after 1 attempt(s) "
+        "(statistics lookup timed out after 0.01 s, recorder busy? No further attempt while it still runs); "
+        "the next restart or reload tries again"
+    ]
+
+
+async def test_a_database_timeout_is_an_ordinary_failed_attempt(
+    hass: HomeAssistant, update_metadata: MagicMock
+) -> None:
+    """Only our own lookup limit stops the retries; a TimeoutError from the database is retried."""
+    recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=[TimeoutError("db"), []]))
+    with (
+        patch("homeassistant.components.recorder.get_instance", return_value=recorder),
+        patch("custom_components.comexio.STATISTICS_UNIT_FIX_RETRY_DELAY_SEC", 0),
+        patch("custom_components.comexio.STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC", 0),
+    ):
+        await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+
+    assert recorder.async_add_executor_job.await_count == 2
+
+
+async def test_a_timeout_after_a_failed_attempt_reports_both_attempts(
+    hass: HomeAssistant, update_metadata: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The warning names the attempt that timed out and the timeout as the reason, not the earlier failure."""
+
+    async def _lookup(*_args: object) -> None:
+        if recorder.async_add_executor_job.await_count == 1:
+            raise RuntimeError("not ready")
+        await asyncio.Event().wait()
+
+    recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_lookup))
+    with (
+        patch("homeassistant.components.recorder.get_instance", return_value=recorder),
+        patch("custom_components.comexio.STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC", 0.01),
+        patch("custom_components.comexio.STATISTICS_UNIT_FIX_RETRY_DELAY_SEC", 0),
+    ):
+        async with asyncio.timeout(5):
+            await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+
+    assert recorder.async_add_executor_job.await_count == 2
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
     assert len(warnings) == 1
-    assert "(statistics lookup timed out after 0.01 s, recorder busy?)" in warnings[0]
+    assert "incomplete after 2 attempt(s) (statistics lookup timed out after 0.01 s" in warnings[0]
