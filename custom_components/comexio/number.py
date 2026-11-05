@@ -1,6 +1,7 @@
 # Version: 0.7.5
 from decimal import ROUND_HALF_UP, Decimal
 import logging
+import math
 from typing import Any
 
 from aiocomexio import io_written_over_admin_session
@@ -239,8 +240,12 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
             number = float(val)
         except (ValueError, TypeError):
             return None
-        # An AO reports its raw step (30 → 30.1961), which Comexio itself shows with one decimal (#259).
-        return round(number, ANALOG_OUTPUT_DISPLAY_DECIMALS) if self._analog_output else number
+        if not self._analog_output or not math.isfinite(number):
+            return number
+        # An AO reports its raw step (30 → 30.1961), which Comexio itself shows with one decimal, rounded half away
+        # from zero (round() would turn 1.25 into 1.2) (#259).
+        shown = Decimal(str(number)).quantize(Decimal(1).scaleb(-ANALOG_OUTPUT_DISPLAY_DECIMALS), ROUND_HALF_UP)
+        return float(shown)
 
     async def async_set_native_value(self, value: float) -> None:
         """Write value to Comexio IO output via API."""

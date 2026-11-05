@@ -18,18 +18,19 @@ _DATA: dict[str, Any] = {
 
 
 @pytest.mark.parametrize(
-    ("target", "io_id"),
+    ("target", "io"),
     [
-        ("IO-Extension A2#AO4", "58"),
-        ("io-extension a2#ao4", "58"),
-        ("  IO-Extension A2 # AO4  ", "58"),
-        ("IOX2#Q3", "3"),
+        ("IO-Extension A2#AO4", ("58", "IO-Extension A2", "AO4")),
+        ("io-extension a2#ao4", ("58", "IO-Extension A2", "AO4")),
+        ("  IO-Extension A2 # AO4  ", ("58", "IO-Extension A2", "AO4")),
+        ("IOX2#Q3", ("3", "IOX2", "Q3")),
     ],
 )
-def test_io_target_with_spaces_in_the_extension_name(target: str, io_id: str) -> None:
+def test_io_target_with_spaces_in_the_extension_name(target: str, io: tuple[str, str, str]) -> None:
     kwargs, error = _resolve_set_value_target(target, 1.0, _DATA)
 
-    assert (error, kwargs and kwargs["target_id"]) == ("", io_id)
+    io_id, ext, identifier = io
+    assert (error, kwargs) == ("", {"target_type": "io", "target_id": io_id, "ext": ext, "identifier": identifier})
 
 
 @pytest.mark.parametrize("target", ["#AO4", "   #AO4", "IOX2#", "IOX2#Q 3", "A#B#C", "IOX2Q3"])

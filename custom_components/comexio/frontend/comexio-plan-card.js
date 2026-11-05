@@ -40,7 +40,7 @@ import {
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.55";
+const CARD_VERSION = "0.9.56";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -2459,12 +2459,14 @@ ${warning}`;
     }
     // "M107=1" or "IOX2#Q3=0,5" — a trailing "!" forces sending even when the target is
     // not part of the currently shown plan (the service still validates it globally).
-    const m = raw.match(/^([^=\s!]+)\s*=\s*(-?[\d.,]+)\s*(!?)$/);
+    // An extension name may hold spaces: "IO-Extension A2#AO4=5" (#259).
+    const m = raw.match(/^([^=!]*[^=\s!])\s*=\s*(-?[\d.,]+)\s*(!?)$/);
     if (!m) {
       this._debugLine(`Ungültiger Befehl: "${raw}" — erwartet z. B. M107=1 oder IOX2#Q3=0 (! erzwingt)`, "err");
       return;
     }
-    const [, target, value, force] = m;
+    const [, typed, value, force] = m;
+    const target = typed.replace(/\s*#\s*/, "#");
     const info = this._lookupTarget(target);
     if (!force) {
       const guardError = this._targetGuardError(target, value, info);
@@ -2606,12 +2608,12 @@ ${warning}`;
 
   _updateSuggestions() {
     this._histIdx = null; // typing ends history navigation
-    const m = this._cmdInput.value.match(/^\s*([^=\s]+)$/); // only while the target is typed (no '=' yet)
+    const m = this._cmdInput.value.match(/^\s*([^=]*[^=\s])$/); // only while the target is typed (no '=' yet)
     if (!this._debugOn || !m) {
       this._hideSuggestions();
       return;
     }
-    const q = m[1].toLowerCase();
+    const q = m[1].replace(/\s*#\s*/, "#").toLowerCase(); // same target "_sendCommand" sends
     const starts = [];
     const contains = [];
     for (const [target, info] of this._targets) {

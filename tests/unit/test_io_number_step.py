@@ -118,6 +118,8 @@ def test_analog_output_takes_a_fraction_of_a_percent() -> None:
         ("AO3", "V", 6.43137, 6.4),
         ("Q1", "%", 30.1961, 30.1961),
         ("Q1", "V", 3.91304, 3.91304),
+        ("AO3", "V", 1.25, 1.3),  # half up like Comexio, not round()'s half to even
+        ("AO3", "V", 3.65, 3.7),
     ],
 )
 def test_only_an_analog_output_shows_one_decimal(identifier: str, unit: str, raw: float, shown: float) -> None:
@@ -148,3 +150,12 @@ def test_a_push_during_the_write_is_not_replaced_by_the_requested_value() -> Non
     update.assert_not_called()
     number.async_write_ha_state.assert_called_once()
     assert number.native_value == pytest.approx(5.5)
+
+
+@pytest.mark.parametrize("raw", [float("inf"), float("-inf")])
+def test_an_analog_output_passes_a_non_finite_value_through(raw: float) -> None:
+    # Decimal cannot quantize it; native_value must not raise and break the entity's state.
+    number = _io_number(identifier="AO3", unit="V", min=0, max=10)
+    number.coordinator = SimpleNamespace(io_states={"12": raw})
+
+    assert number.native_value == raw
