@@ -5629,6 +5629,7 @@ class ComexioAPI:
             await self.client.set_io_value(ext, identifier, value)
             return
         generation = self._login_generation
+        credentials = self._credentials()
         try:
             await self.client.set_io_value(ext, identifier, value)
         except ComexioAuthenticationError as err:
@@ -5643,6 +5644,12 @@ class ComexioAPI:
                     _write_met_another_certificate.set(self)
                 raise ComexioAuthenticationError(
                     f"admin session lapsed ({err}), re-login to Comexio failed ({self.last_login_error})"
+                ) from err
+            if self._login_outdated(credentials):
+                # A reconfigure replaced host, credentials or pin meanwhile: the same IO name may be
+                # another output there.
+                raise ComexioError(
+                    f"admin session lapsed ({err}), connection settings changed meanwhile: not repeated on the new ones"
                 ) from err
             # self.client, read again: a re-login may have rebuilt it.
             await self.client.set_io_value(ext, identifier, value)

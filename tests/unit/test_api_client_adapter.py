@@ -1367,11 +1367,15 @@ def test_set_value_analog_output_logs_in_again_once(
     # An AO* write goes over the admin session (/api/ answers "Forbidden", #259), which can lapse.
     client.set_io_value = AsyncMock(side_effect=writes)
     client.login = AsyncMock(side_effect=login)
+    order = MagicMock()
+    order.attach_mock(client.set_io_value, "write")
+    order.attach_mock(client.login, "login")
 
     assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is result
 
     assert client.set_io_value.await_args_list == [call("UD1", "AO1", 50)] * write_count  # the retry writes the same
-    client.login.assert_awaited_once()
+    # The retry follows the re-login, not the expired session.
+    assert [name for name, *_ in order.mock_calls] == ["write", "login", "write"][: write_count + 1]
 
 
 def test_set_value_analog_output_failed_re_login_names_the_cause(
@@ -1402,6 +1406,38 @@ def test_set_value_analog_output_retries_on_the_rebuilt_client(comexio_api: Come
 
     client.set_io_value.assert_awaited_once()
     rebuilt.set_io_value.assert_awaited_once_with("UD1", "AO1", 50)
+
+
+@pytest.mark.parametrize(
+    ("setting", "repeated"),
+    [
+        ("host", False),
+        ("username", False),
+        ("password", False),
+        ("fingerprint", False),
+        ("api_user", True),  # the API user plays no part in the admin session the write goes over
+        ("api_pass", True),
+    ],
+)
+def test_set_value_analog_output_is_not_repeated_on_replaced_connection_settings(
+    comexio_api: ComexioAPI, client: MagicMock, setting: str, repeated: bool
+) -> None:
+    # A reconfigure while the write was on its way: on another server the same IO name may be another output.
+    rebuilt = MagicMock()
+    rebuilt.set_io_value = AsyncMock()
+    rebuilt.login = AsyncMock()
+
+    async def write_then_reconfigure(*_args: object) -> None:
+        setattr(comexio_api, setting, "f" * 64 if setting == "fingerprint" else "other")
+        raise LAPSED
+
+    client.set_io_value = AsyncMock(side_effect=write_then_reconfigure)
+    comexio_api._new_client = MagicMock(return_value=rebuilt)
+
+    assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is repeated
+
+    rebuilt.login.assert_awaited_once()  # the re-login on the new settings succeeded either way
+    assert rebuilt.set_io_value.await_args_list == ([call("UD1", "AO1", 50)] if repeated else [])
 
 
 def test_set_value_analog_output_takes_over_a_login_made_during_the_write(
