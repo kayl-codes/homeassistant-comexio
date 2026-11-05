@@ -673,7 +673,8 @@ async def _async_fix_statistics_units(hass: HomeAssistant, server_id: str, entry
     Runs up to STATISTICS_UNIT_FIX_ATTEMPTS times: a recorder that is not ready yet, or an
     enabled entity without its first state, would otherwise leave the label wrong until the
     next restart. A lookup that times out ends the retries: it still holds a recorder worker,
-    and another lookup would only queue behind it.
+    and another lookup would only queue behind it. A later setup or reload waits for that
+    same lookup instead of submitting a new one.
     """
     import asyncio
 
@@ -708,16 +709,46 @@ class _StatisticsLookupStuck(Exception):
     """The recorder did not answer the statistics lookup in time; its reason is the message."""
 
 
+# The statistics lookup in flight, shared by every entry and reload: a lookup stuck in the
+# recorder is awaited again instead of queueing another job behind it. A caller that joins it
+# gets that lookup's snapshot; statistics registered later are seen by the next attempt.
+_STATISTICS_LOOKUP_KEY = f"{DOMAIN}_statistics_lookup"
+
+
+def _shared_statistics_lookup(hass: HomeAssistant, instance: Any, list_statistic_ids: Callable[..., Any]) -> Any:
+    """Return the lookup still in flight, or submit a new one once the last has finished."""
+    import asyncio
+
+    lookup = hass.data.get(_STATISTICS_LOOKUP_KEY)
+    if lookup is not None and not lookup.done():
+        return lookup
+
+    def _finished(done: Any) -> None:
+        if hass.data.get(_STATISTICS_LOOKUP_KEY) is done:
+            del hass.data[_STATISTICS_LOOKUP_KEY]
+        # Retrieved here, so a lookup nobody awaits any more is logged, not "exception never retrieved".
+        if not done.cancelled() and (err := done.exception()) is not None:
+            _LOGGER.debug("Statistics unit check: shared statistics lookup failed: %r", err)
+
+    lookup = asyncio.ensure_future(instance.async_add_executor_job(list_statistic_ids, hass))
+    lookup.add_done_callback(_finished)
+    hass.data[_STATISTICS_LOOKUP_KEY] = lookup
+    return lookup
+
+
 async def _async_list_statistics(hass: HomeAssistant, instance: Any, list_statistic_ids: Callable[..., Any]) -> Any:
     """Look up the recorder's statistics, raising _StatisticsLookupStuck when our time limit expires.
 
-    A TimeoutError from the database itself is not ours and propagates as an ordinary failure.
+    Our time limit only stops waiting: the shared lookup keeps running, and the next caller
+    waits for that same lookup. A TimeoutError from the database itself is not ours and
+    propagates as an ordinary failure.
     """
     import asyncio
 
+    lookup = _shared_statistics_lookup(hass, instance, list_statistic_ids)
     try:
         async with asyncio.timeout(STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC) as lookup_timeout:
-            return await instance.async_add_executor_job(list_statistic_ids, hass)
+            return await asyncio.shield(lookup)
     except TimeoutError as err:
         if not lookup_timeout.expired():
             raise

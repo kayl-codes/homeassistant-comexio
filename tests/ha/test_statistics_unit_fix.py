@@ -9,7 +9,7 @@ from homeassistant.helpers import entity_registry as er, issue_registry as ir
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.comexio import _async_fix_statistics_units
+from custom_components.comexio import _STATISTICS_LOOKUP_KEY, _async_fix_statistics_units
 from custom_components.comexio.const import DOMAIN, STATISTICS_UNIT_FIX_ATTEMPTS
 
 from .conftest import SERVER_ID
@@ -42,6 +42,15 @@ def update_metadata(hass: HomeAssistant) -> Generator[MagicMock]:
         patch("homeassistant.components.recorder.statistics.async_update_statistics_metadata") as update,
     ):
         yield update
+
+
+async def _release(hass: HomeAssistant, release: asyncio.Event) -> None:
+    """Let the hanging shared lookup finish and wait for it, so the next call submits a new one."""
+    lookup = hass.data[_STATISTICS_LOOKUP_KEY]
+    release.set()
+    async with asyncio.timeout(5):
+        await lookup
+    assert _STATISTICS_LOOKUP_KEY not in hass.data
 
 
 def _issues(hass: HomeAssistant) -> set[tuple[str, str]]:
@@ -79,7 +88,7 @@ async def test_cancel_during_commit_wait_still_removes_own_issues(
 
 async def test_a_recorder_failure_is_retried(hass: HomeAssistant, update_metadata: MagicMock) -> None:
     """A recorder not ready at the first check no longer leaves the labels wrong until the next restart."""
-    retry_stats = [{"statistic_id": MISMATCHES[0][0], "statistics_unit_of_measurement": "lux"}]
+    retry_stats = [{"statistic_id": stat_id, "statistics_unit_of_measurement": ""} for stat_id, _ in MISMATCHES]
     recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=[RuntimeError("not ready"), retry_stats]))
     with (
         patch("homeassistant.components.recorder.get_instance", return_value=recorder),
@@ -96,7 +105,9 @@ async def test_a_recorder_failure_is_retried(hass: HomeAssistant, update_metadat
     assert recorder.async_add_executor_job.await_count == 2
     # The mismatches come from what the retry looked up, not from the failed first attempt.
     assert [c.args[0] for c in find.call_args_list] == [retry_stats]
-    assert update_metadata.call_count == len(MISMATCHES)
+    assert update_metadata.call_args_list == [
+        call(hass, stat_id, new_unit_of_measurement=unit, new_unit_class=None) for stat_id, unit in MISMATCHES
+    ]
     assert _issues(hass) == FOREIGN_ISSUES
 
 
@@ -263,9 +274,11 @@ async def test_a_stuck_statistics_lookup_ends_the_retries_with_a_warning(
     hass: HomeAssistant, update_metadata: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A lookup hanging behind the recorder still holds a worker, so no second lookup queues behind it."""
+    release = asyncio.Event()
 
-    async def _hang(*_args: object) -> None:
-        await asyncio.Event().wait()
+    async def _hang(*_args: object) -> list[dict[str, str]]:
+        await release.wait()
+        return []
 
     recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_hang))
     with (
@@ -275,6 +288,7 @@ async def test_a_stuck_statistics_lookup_ends_the_retries_with_a_warning(
     ):
         async with asyncio.timeout(5):
             await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+    await _release(hass, release)
 
     assert recorder.async_add_executor_job.await_count == 1
     update_metadata.assert_not_called()
@@ -284,6 +298,34 @@ async def test_a_stuck_statistics_lookup_ends_the_retries_with_a_warning(
         "(statistics lookup timed out after 0.01 s, recorder busy? No further attempt while it still runs); "
         "the next restart or reload tries again"
     ]
+
+
+async def test_a_reload_waits_for_the_stuck_lookup_instead_of_queueing_another(
+    hass: HomeAssistant, update_metadata: MagicMock
+) -> None:
+    """Setups and reloads share the lookup in flight; a new one is submitted only once it has finished."""
+    release = asyncio.Event()
+
+    async def _hang(*_args: object) -> list[dict[str, str]]:
+        await release.wait()
+        return []
+
+    recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_hang))
+    with (
+        patch("homeassistant.components.recorder.get_instance", return_value=recorder),
+        patch("custom_components.comexio.STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC", 0.01),
+        patch("custom_components.comexio.STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC", 0),
+    ):
+        async with asyncio.timeout(5):
+            await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+            await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+        assert recorder.async_add_executor_job.call_count == 1
+
+        await _release(hass, release)
+        async with asyncio.timeout(5):
+            await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+
+    assert recorder.async_add_executor_job.call_count == 2
 
 
 async def test_a_database_timeout_is_an_ordinary_failed_attempt(
@@ -306,10 +348,13 @@ async def test_a_timeout_after_a_failed_attempt_reports_both_attempts(
 ) -> None:
     """The warning names the attempt that timed out and the timeout as the reason, not the earlier failure."""
 
-    async def _lookup(*_args: object) -> None:
+    release = asyncio.Event()
+
+    async def _lookup(*_args: object) -> list[dict[str, str]]:
         if recorder.async_add_executor_job.await_count == 1:
             raise RuntimeError("not ready")
-        await asyncio.Event().wait()
+        await release.wait()
+        return []
 
     recorder = MagicMock(async_add_executor_job=AsyncMock(side_effect=_lookup))
     with (
@@ -319,6 +364,7 @@ async def test_a_timeout_after_a_failed_attempt_reports_both_attempts(
     ):
         async with asyncio.timeout(5):
             await _async_fix_statistics_units(hass, SERVER_ID, "entry")
+    await _release(hass, release)
 
     assert recorder.async_add_executor_job.await_count == 2
     warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
