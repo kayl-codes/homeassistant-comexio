@@ -4,7 +4,7 @@
 
 Which Comexio extensions and Quickbus devices work with this integration, and how far each one has been tested. For the entity types in general, see the [README](README.md#-supported-entities).
 
-**Tested with:** integration v0.31.0 plus the percentage and lux fixes after it, Comexio firmware 11.1.5, on one installation. Modules are listed by their type as Comexio shows it on its IO page, not by the name you give them.
+**Tested with:** integration v0.32.0, Comexio firmware 11.1.5, on one installation. Modules are listed by their type as Comexio shows it on its IO page, not by the name you give them.
 
 How the integration chooses the entity:
 
@@ -103,7 +103,7 @@ These are offline on the test installation, so **no live value or write has ever
 
 Welche Comexio-Erweiterungen und Quickbus-Geräte mit dieser Integration funktionieren und wie weit sie jeweils getestet sind. Die Entitätstypen allgemein stehen in der [README](README.md#-unterstützte-entitäten).
 
-**Getestet mit:** Integration v0.31.0 samt den %- und Lux-Fixes danach, Comexio-Firmware 11.1.5, auf einer Installation. Die Module stehen hier mit ihrem Typ, wie ihn Comexio auf der IO-Seite anzeigt, nicht mit dem selbst vergebenen Namen.
+**Getestet mit:** Integration v0.32.0, Comexio-Firmware 11.1.5, auf einer Installation. Die Module stehen hier mit ihrem Typ, wie ihn Comexio auf der IO-Seite anzeigt, nicht mit dem selbst vergebenen Namen.
 
 So wählt die Integration die Entität:
 
