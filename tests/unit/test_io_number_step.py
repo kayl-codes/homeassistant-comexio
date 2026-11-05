@@ -149,7 +149,7 @@ def test_a_push_during_the_write_is_not_replaced_by_the_requested_value() -> Non
 
     update.assert_not_called()
     number.async_write_ha_state.assert_called_once()
-    assert number.native_value == pytest.approx(5.5)
+    assert io_states == {"12": 5.4902}  # the push, not the request (both display as 5.5)
 
 
 @pytest.mark.parametrize("raw", [float("inf"), float("-inf")])

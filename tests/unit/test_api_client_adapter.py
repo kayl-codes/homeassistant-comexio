@@ -1370,7 +1370,7 @@ def test_set_value_analog_output_logs_in_again_once(
 
     assert asyncio.run(comexio_api.set_value("io", "272", 50, "UD1", "AO1")) is result
 
-    assert client.set_io_value.await_count == write_count
+    assert client.set_io_value.await_args_list == [call("UD1", "AO1", 50)] * write_count  # the retry writes the same
     client.login.assert_awaited_once()
 
 

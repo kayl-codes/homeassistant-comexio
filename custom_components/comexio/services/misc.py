@@ -607,7 +607,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
 
 
 async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | None:
-    """Write a raw value to a Comexio marker or IO via the Basic-Auth API.
+    """Write a raw value to a Comexio marker or IO (ComexioAPI.set_value: Basic-Auth API, AO* over the admin session).
 
     Backend of the plan card's debug command input ('M107=1' / 'IOX2#Q3=0') — target
     tokens match the labels the preview shows. Success is reported via the service
