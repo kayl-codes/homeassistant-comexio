@@ -5588,7 +5588,11 @@ class ComexioAPI:
         ext: str | None = None,
         identifier: str | None = None,
     ) -> bool:
-        """API write via Basic Auth; False if Comexio refused it or could not be reached."""
+        """Write a value; False if Comexio refused it or could not be reached.
+
+        Markers, KNX objects and IOs go to /api/ with the API user (Basic Auth). An analog output AO* goes over the
+        admin session instead, since /api/ answers "Forbidden" for it (#259).
+        """
         _write_met_another_certificate.set(None)
         try:
             if target_type == "marker":
