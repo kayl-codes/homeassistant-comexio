@@ -120,6 +120,7 @@ def test_analog_output_takes_a_fraction_of_a_percent() -> None:
         ("Q1", "V", 3.91304, 3.91304),
         ("AO3", "V", 1.25, 1.3),  # half up like Comexio, not round()'s half to even
         ("AO3", "V", 3.65, 3.7),
+        ("AO3", "V", 123456789.25, 123456789.3),  # a large finite value still rounds
     ],
 )
 def test_only_an_analog_output_shows_one_decimal(identifier: str, unit: str, raw: float, shown: float) -> None:
@@ -152,9 +153,10 @@ def test_a_push_during_the_write_is_not_replaced_by_the_requested_value() -> Non
     assert io_states == {"12": 5.4902}  # the push, not the request (both display as 5.5)
 
 
-@pytest.mark.parametrize("raw", [float("inf"), float("-inf")])
-def test_an_analog_output_passes_a_non_finite_value_through(raw: float) -> None:
-    # Decimal cannot quantize it; native_value must not raise and break the entity's state.
+@pytest.mark.parametrize("raw", [float("inf"), float("-inf"), 1e30, -1e30])
+def test_an_analog_output_passes_an_unroundable_value_through(raw: float) -> None:
+    # Decimal cannot quantize it (non-finite, or more digits than its context holds); native_value must not raise
+    # and break the entity's state.
     number = _io_number(identifier="AO3", unit="V", min=0, max=10)
     number.coordinator = SimpleNamespace(io_states={"12": raw})
 

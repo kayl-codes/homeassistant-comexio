@@ -1,5 +1,5 @@
 # Version: 0.7.5
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 import logging
 import math
 from typing import Any
@@ -244,7 +244,11 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
             return number
         # An AO reports its raw step (30 → 30.1961), which Comexio itself shows with one decimal, rounded half away
         # from zero (round() would turn 1.25 into 1.2) (#259).
-        shown = Decimal(str(number)).quantize(Decimal(1).scaleb(-ANALOG_OUTPUT_DISPLAY_DECIMALS), ROUND_HALF_UP)
+        try:
+            shown = Decimal(str(number)).quantize(Decimal(1).scaleb(-ANALOG_OUTPUT_DISPLAY_DECIMALS), ROUND_HALF_UP)
+        except InvalidOperation:
+            # Too many digits for the decimal context (from ~1e27): no decimal left to round, like ±inf above.
+            return number
         return float(shown)
 
     async def async_set_native_value(self, value: float) -> None:
