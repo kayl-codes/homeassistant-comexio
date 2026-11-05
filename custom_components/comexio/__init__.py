@@ -43,6 +43,7 @@ from .const import (
     SOURCE_CATEGORIES,
     STATISTICS_UNIT_FIX_ATTEMPTS,
     STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC,
+    STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC,
     STATISTICS_UNIT_FIX_RETRY_DELAY_SEC,
     STATISTICS_UNIT_FIX_START_DELAY_SEC,
     STATISTICS_UNITS_CHANGED_ISSUE_DOMAIN,
@@ -712,9 +713,16 @@ async def _async_fix_statistics_units_once(hass: HomeAssistant, server_id: str, 
         _LOGGER.debug("[%s] Recorder API unavailable; skipping statistics unit fix", server_id)
         return None
 
+    import asyncio
+
     try:
         instance = get_instance(hass)
-        all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
+        async with asyncio.timeout(STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC):
+            all_stats = await instance.async_add_executor_job(list_statistic_ids, hass)
+    except TimeoutError:
+        reason = f"statistics lookup timed out after {STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC} s, recorder busy?"
+        _LOGGER.debug("[%s] Statistics unit check: %s", server_id, reason)
+        return reason
     except Exception as err:  # any recorder failure means "try again later"
         _LOGGER.debug("[%s] Statistics unit check: statistics lookup failed: %r", server_id, err)
         return f"statistics lookup failed: {err!r}"

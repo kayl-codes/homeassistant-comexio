@@ -546,6 +546,9 @@ STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC = 5
 # A recorder not ready yet, or an entity without its first state, gets the check again later.
 STATISTICS_UNIT_FIX_ATTEMPTS = 3
 STATISTICS_UNIT_FIX_RETRY_DELAY_SEC = 60
+# A statistics lookup stuck behind the recorder counts as a failed attempt instead of halting the retries.
+# Generous: right after startup the recorder may still migrate or purge a large database.
+STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC = 120
 # Repair issue HA's sensor recorder platform files per statistic with a changed unit:
 # domain "sensor", id "units_changed_{statistic_id}" (homeassistant/components/sensor/recorder.py).
 STATISTICS_UNITS_CHANGED_ISSUE_DOMAIN = "sensor"
