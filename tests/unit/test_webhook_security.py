@@ -38,6 +38,7 @@ class _Store:
         self.stored = stored
         self.async_load = AsyncMock(side_effect=lambda: self.stored)
         self.async_save = AsyncMock(side_effect=self._save)
+        self.async_delay_save = MagicMock()
 
     async def _save(self, data: Any) -> None:
         self.stored = data

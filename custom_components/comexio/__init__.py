@@ -1,6 +1,5 @@
 # Version: 0.8.1
 from collections.abc import Iterable
-import contextlib
 from datetime import timedelta
 import logging
 from typing import Any
@@ -160,10 +159,15 @@ def _dispatch_push(coordinator: ComexioCoordinator, data: dict[str, Any]) -> Non
         coordinator.update_marker(item_id, val)
 
 
-def _setup_webhooks(
-    hass: HomeAssistant, entry: ConfigEntry, coordinator: ComexioCoordinator, security: WebhookSecurity
-) -> None:
-    """Register the webhook of every Web-IO command (dg), and keep the registrations in step with the items."""
+def _unregister_webhooks(hass: HomeAssistant, registered: set[str]) -> None:
+    """Unregister every id in registered and empty it, so a second call (unload, then its callback) is a no-op."""
+    for webhook_id in registered:
+        webhook.async_unregister(hass, webhook_id)
+    registered.clear()
+
+
+def _webhook_handler(coordinator: ComexioCoordinator, security: WebhookSecurity):
+    """The handler every webhook id of the entry is registered with."""
     server_id = coordinator.server_id
 
     async def handle_webhook(hass, webhook_id, request):
@@ -173,13 +177,39 @@ def _setup_webhooks(
             except Exception:
                 _LOGGER.error("Received non-JSON payload on a Comexio webhook")
                 return
-            if not isinstance(data, dict) or not security.accepts(webhook_id, data):
+            if not isinstance(data, dict):
+                _LOGGER.warning("[%s] Webhook request refused: its payload is not a JSON object", server_id)
+                return
+            if not security.accepts(webhook_id, data):
                 _LOGGER.warning("[%s] Webhook request refused: its id does not belong to its payload", server_id)
                 return
             _dispatch_push(coordinator, data)
         except Exception as e:
             _LOGGER.exception("Webhook Error: %s", e)
 
+    return handle_webhook
+
+
+def _register_webhooks(hass: HomeAssistant, handler, server_id: str, registered: set[str], wanted: set[str]) -> None:
+    """Bring the registered ids to wanted; an id another registration holds is skipped, never taken over."""
+    for webhook_id in registered - wanted:
+        webhook.async_unregister(hass, webhook_id)
+    registered.difference_update(registered - wanted)
+    for webhook_id in wanted - registered:
+        try:
+            webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handler)
+        except ValueError:
+            _LOGGER.warning("[%s] Webhook id %s... is already registered, skipped", server_id, webhook_id[:8])
+            continue
+        registered.add(webhook_id)
+
+
+def _setup_webhooks(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: ComexioCoordinator, security: WebhookSecurity
+) -> None:
+    """Register the webhook of every Web-IO command (dg), and keep the registrations in step with the items."""
+    server_id = coordinator.server_id
+    handler = _webhook_handler(coordinator, security)
     registered: set[str] = set()
     hass.data[DOMAIN][f"{entry.entry_id}_webhooks"] = registered
 
@@ -189,17 +219,14 @@ def _setup_webhooks(
         wanted = coordinator.webhook_command_ids()
         if security.legacy_enabled:
             wanted.add(legacy_webhook_id(server_id))
-        for webhook_id in registered - wanted:
-            webhook.async_unregister(hass, webhook_id)
-        for webhook_id in wanted - registered:
-            with contextlib.suppress(ValueError):
-                webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handle_webhook)
-        registered.clear()
-        registered.update(wanted)
+        _register_webhooks(hass, handler, server_id, registered, wanted)
 
     coordinator.sync_webhooks = sync_webhooks
     sync_webhooks()
     entry.async_on_unload(coordinator.async_add_listener(sync_webhooks))
+    # HA runs these callbacks also when the setup fails after this point (a retry would otherwise meet the ids of
+    # the failed attempt, registered with its stale handler).
+    entry.async_on_unload(lambda: _unregister_webhooks(hass, registered))
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -853,8 +880,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     try:
         if running is not None and hasattr(running, "api"):
             await running.async_wait_before_unload()
-        for webhook_id in hass.data[DOMAIN].get(f"{entry.entry_id}_webhooks", ()):
-            webhook.async_unregister(hass, webhook_id)
+        _unregister_webhooks(hass, hass.data[DOMAIN].get(f"{entry.entry_id}_webhooks", set()))
         unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     finally:
         if not unload_ok and running is not None and hasattr(running, "api"):

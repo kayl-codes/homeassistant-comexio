@@ -5537,6 +5537,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
             pending.append((name, cmd, device, target))
         return pending
 
+    def _unmigrated_webhook_commands(self, security: WebhookSecurity) -> list[str]:
+        """Names of the stored commands that should carry their own path but are not in the ledger.
+
+        A superset of what _pending_webhook_migrations can rewrite: a command without a command id or device id
+        cannot be rewritten, yet still POSTs to the old id, so it must hold the old id switched on.
+        """
+        targets = self._webio_range_targets()
+        return [
+            name for name in self.data.get("webio_commands", {}) if name in targets and name not in security.migrated
+        ]
+
     async def _async_webhook_migration_tick(self, _now: datetime | None = None) -> str:
         """Rewrite the Web-IO commands that still POST to the old webhook id, within the nightly budget.
 
@@ -5548,9 +5559,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         security = self.api.webhook_security
         if security is None or not self.data or self.unloading or not security.legacy_enabled:
             return WEBHOOK_MIGRATION_SKIPPED
-        written, failed = await self._async_rewrite_pending_webhooks(security)
-        await security.async_save()
-        remaining = len(self._pending_webhook_migrations())
+        try:
+            written, failed = await self._async_rewrite_pending_webhooks(security)
+        finally:
+            # The commands rewritten before an unexpected error are in Comexio already; keep them in the ledger.
+            await security.async_save()
+        remaining = len(self._unmigrated_webhook_commands(security))
         _LOGGER.info(
             "[%s] Webhook id migration: %d rewritten, %d failed, %d left", self.server_id, written, failed, remaining
         )
@@ -5586,7 +5600,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         boot_time = self.system_info.boot_time
         if security is None:
             return WEBHOOK_MIGRATION_SKIPPED
-        if security.last_write is not None and (boot_time is None or boot_time <= security.last_write):
+        if security.last_write is not None and (boot_time is None or dt_util.as_utc(boot_time) <= security.last_write):
             persistent_notification.async_create(
                 self.hass,
                 f"All Web-IO commands of {self.server_id} now use a webhook id of their own, but Comexio only sends "

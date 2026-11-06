@@ -26,8 +26,9 @@ from typing import Any
 
 from aiocomexio.const import WebioClass
 from homeassistant.components import webhook
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 
@@ -36,6 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 WEBHOOK_PATH_PREFIX = "/api/webhook/"
 # 128 bit of the HMAC: as strong as HA's own generated ids, and a path HA's router takes without fuss.
 _ID_HEX_LENGTH = 32
+_SAVE_DELAY_SEC = 10
 _KEY_SECRET = "secret"  # nosec B105 - a storage key, not a password
 _KEY_MIGRATED = "migrated"
 _KEY_LEGACY = "legacy"
@@ -99,6 +101,14 @@ class WebhookSecurity:
         """Read the store, creating the secret on first use."""
         stored = await self._store.async_load()
         if not isinstance(stored, dict) or not isinstance(stored.get(_KEY_SECRET), str) or not stored[_KEY_SECRET]:
+            if stored is not None:
+                # Every command already rewritten POSTs to an id of the lost secret and is refused until the
+                # migration (its ledger is reset with the secret) rewrites it again, so this must not pass quietly.
+                _LOGGER.error(
+                    "[%s] The webhook secret store is unreadable; a new secret was generated. Web-IO commands "
+                    "already moved to their own webhook id are refused until the nightly migration rewrites them",
+                    self.server_id,
+                )
             self.secret = webhook.async_generate_id()
             await self._async_save()
             return
@@ -108,23 +118,31 @@ class WebhookSecurity:
         self.migrated = {name for name in migrated if isinstance(name, str)} if isinstance(migrated, list) else set()
         written = stored.get(_KEY_WRITTEN)
         try:
-            self.last_write = datetime.fromisoformat(written) if isinstance(written, str) else None
+            # as_utc: a naive stamp (a hand-edited store) would make the comparison with the aware boot time raise.
+            self.last_write = dt_util.as_utc(datetime.fromisoformat(written)) if isinstance(written, str) else None
         except ValueError:
             self.last_write = None
 
+    def _data(self) -> dict[str, Any]:
+        return {
+            _KEY_SECRET: self.secret,
+            _KEY_LEGACY: self.legacy_enabled,
+            _KEY_MIGRATED: sorted(self.migrated),
+            _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
+        }
+
     async def _async_save(self) -> None:
-        await self._store.async_save(
-            {
-                _KEY_SECRET: self.secret,
-                _KEY_LEGACY: self.legacy_enabled,
-                _KEY_MIGRATED: sorted(self.migrated),
-                _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
-            }
-        )
+        await self._store.async_save(self._data())
 
     async def async_save(self) -> None:
         """Persist the ledger and the legacy switch."""
         await self._async_save()
+
+    @callback
+    def schedule_save(self) -> None:
+        """Persist soon (a sync writes commands outside the nightly run, and a lost last_write could switch the old
+        id off before Comexio has restarted)."""
+        self._store.async_delay_save(self._data, _SAVE_DELAY_SEC)
 
     def path_for(self, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
         return command_path(self.secret, webio_class, item)

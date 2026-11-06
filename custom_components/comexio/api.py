@@ -1959,6 +1959,7 @@ class ComexioAPI:
             and not path.endswith(legacy_webhook_id(security.server_id))
         ):
             security.mark_written(name, dt_util.utcnow())
+            security.schedule_save()
 
     async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
@@ -2070,6 +2071,7 @@ class ComexioAPI:
         try:
             commands = json.loads(web_io_json).get("commands", [])
         except (ValueError, AttributeError):
+            _LOGGER.warning("The uploaded Web-IO class template is unreadable; its commands are not in the ledger")
             return
         for cmd in commands:
             if isinstance(cmd, dict):
