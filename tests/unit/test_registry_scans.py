@@ -9,12 +9,13 @@ only. A scan that has to see more goes into ALLOWED with the reason.
 A scan is an access to a registry mapping or a use of an HA helper that also returns other integrations' entries
 (`async_entries_for_area` and the like): as an attribute, a name (import aliases resolved), or a literal name in
 `getattr` / `attrgetter` (dotted paths too).
-Each use counts per function and mapping or helper, so a second scan added to a listed function fails too, and so does
-a listed scan swapped for another one. A name counts on any object, since an alias of the registry looks like any other
-name: a false alarm goes into ALLOWED, a missed scan would not.
-Not followed: `getattr` with a computed name or bound to another name (`get = getattr`), a scan reached through a helper
-outside the integration, and whether the entry_id passed to async_entries_for_config_entry is this entry's - the
-integration holds no other entry.
+Each access counts per function and mapping or helper, so a second access added to a listed function fails too, and so
+does a listed scan swapped for another one. A name counts on any object, since an alias of the registry looks like any
+other name: a false alarm goes into ALLOWED, a missed scan would not.
+Not followed: `getattr` with a computed name or bound to another name (`get = getattr`); a mapping or helper bound to a
+local variable, which counts once where it is bound, not at each later use; a scan reached through a helper outside the
+integration; whether the entry_id passed to async_entries_for_config_entry is this entry's - the integration holds no
+other entry; and what a listed function does with what it reads - that is for the review of the diff that changes it.
 """
 
 import ast
