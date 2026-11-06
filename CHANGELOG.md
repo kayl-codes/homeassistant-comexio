@@ -9,6 +9,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.32.0] — 2026-11-05
+
+Covers everything since v0.31.0.
+
+### ✨ New Features
+- **Analog outputs can be written:** `AO1`–`AO4` of an extension (0–10 V) can be set from Home Assistant and with `comexio.set_value`. The Comexio API refuses them with `Forbidden`, so the integration writes them over the admin session, like Comexio's own IO page, and logs in again once if that session lapsed. They step by 0.1 and show one decimal, like Comexio. They replace the read-only sensors these outputs had: the old sensor's recorded history stays under its former entity id, and the orphaned-statistics repair offers to remove it (#259, #266).
+- **Supported hardware list:** the new [SUPPORTED_HARDWARE.md](SUPPORTED_HARDWARE.md) (English and German, linked from the README) lists which extensions and Quickbus devices are tested, which entities they get, and what does not work yet (#265).
+
+### 🛠️ Core & Stability Improvements
+- **A refused write is an error:** a `Forbidden` answer of the Comexio API now fails the action instead of looking like a success (#259, #266).
+- **Statistics unit fix retries:** a recorder that is not ready yet, or a sensor without its first state, no longer leaves a statistics label unfixed until the next restart. The check runs up to three times, a minute apart, and logs a warning naming what is still missing. A lookup the recorder does not answer within two minutes ends the retries with that warning, and a reload waits for that same lookup, so stuck lookups never pile up (#267, #268).
+
+### 🐛 Bug Fixes & Refactoring
+- **Percentage sensors are no longer all humidity:** only an IO whose identifier starts with `HUM` gets the humidity device class. Dimmer current inputs (`QI`), panel settings, RGB channels and volumes keep their % value and history, without a device class. So does a humidity probe on an IO with another identifier, for example `AI3` (#265).
+- **Lux sensors are recognized:** Comexio's `lux` now becomes `lx` with the illuminance device class. Existing statistics move to the new unit by themselves, with their values and without a repair (#265).
+- **`comexio.set_value` takes extension names with spaces:** a target like `IO-Extension A2#AO4` was rejected as `Invalid target`, and the plan card's debug input refused it as an invalid command. Blanks around the name and the `#` are dropped too (#259, #266).
+
+### ⚠️ Requirements & Notes
+- **Restart required** after updating.
+- **Dependency:** `aiocomexio==0.8.3` (installed automatically by Home Assistant).
+- **Analog outputs become `number` entities:** the read-only `sensor` of `AO1`–`AO4` goes away (the *Digital 10V* type becomes a `switch`). Automations or dashboards using the old sensor must switch to the new entity (#259).
+- **Fewer humidity sensors:** a `%` IO that does not start with `HUM` loses the humidity device class; its value and history stay (#265).
+
+---
+
 ## [0.31.0] — 2026-11-04
 
 Covers everything since v0.30.0, including the pre-release v0.30.1-rc1.
@@ -410,7 +435,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.31.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.32.0...HEAD
+[0.32.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.10.0...v0.30.0
 [0.10.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.9.5...v0.10.0

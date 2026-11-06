@@ -30,6 +30,7 @@ from aiocomexio import (
     WebioCommandForm,
     config as comexio_config,
     fetch_certificate_fingerprint,
+    io_written_over_admin_session,
     webio as comexio_webio,
 )
 from aiocomexio.config import ParseOptions, iter_group
@@ -854,14 +855,14 @@ class ComexioAPI:
 
     @staticmethod
     def _admin_login_part(credentials: tuple[str, ...]) -> tuple[str, ...]:
-        """What client.login() authenticates with; the API user (Basic Auth for writes) plays no part."""
+        """What client.login() authenticates with; the API user (Basic Auth for writes except AO*) plays no part."""
         return credentials[:3]
 
     def _login_outdated(self, client_credentials: tuple[str, ...]) -> bool:
         """Whether host, admin credentials or the pinned certificate changed since client_credentials.
 
-        The API user (Basic Auth for writes) plays no part in the login, so a change of it leaves a
-        login running with the old client valid.
+        The API user (Basic Auth for writes; AO* go over the admin session, #259) plays no part in the login, so a
+        change of it leaves a login running with the old client valid.
         """
         login_part = (*self._admin_login_part(client_credentials), client_credentials[-1])
         return login_part != (*self._login_credentials(), self.fingerprint or "")
@@ -5626,7 +5627,11 @@ class ComexioAPI:
         ext: str | None = None,
         identifier: str | None = None,
     ) -> bool:
-        """API write via Basic Auth; False if Comexio refused it or could not be reached."""
+        """Write a value; False if Comexio refused it or could not be reached.
+
+        Markers, KNX objects and IOs go to /api/ with the API user (Basic Auth). An analog output AO* goes over the
+        admin session instead, since /api/ answers "Forbidden" for it (#259).
+        """
         _write_met_another_certificate.set(None)
         try:
             if target_type == "marker":
@@ -5637,7 +5642,7 @@ class ComexioAPI:
                 _LOGGER.error("Missing 'ext' or 'identifier' for non-marker API write. Type: %s", target_type)
                 return False
             else:
-                await self.client.set_io_value(ext, identifier, value)
+                await self._set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
             self._note_write_met_another_certificate(err, target_type, target_id)
             return False
@@ -5653,6 +5658,40 @@ class ComexioAPI:
             return True
         _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, failure)
         return False
+
+    async def _set_io_value(self, ext: str, identifier: str, value: float | int) -> None:
+        """client.set_io_value; an analog output goes over the admin session, so a lapsed login is renewed once.
+
+        /api/ answers "Forbidden" for the 0-10 V analog outputs (#259), aiocomexio writes them like Comexio's IO page.
+        """
+        if not io_written_over_admin_session(identifier):
+            await self.client.set_io_value(ext, identifier, value)
+            return
+        generation = self._login_generation
+        credentials = self._credentials()
+        try:
+            await self.client.set_io_value(ext, identifier, value)
+        except ComexioAuthenticationError as err:
+            _LOGGER.debug(
+                "Comexio admin session lapsed before writing %s %s — logging in again",
+                one_line(ext),
+                one_line(identifier),
+            )
+            if not await self._full_login(generation):
+                if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
+                    # _login already raised the repair; the write error names the certificate as its cause.
+                    _write_met_another_certificate.set(self)
+                raise ComexioAuthenticationError(
+                    f"admin session lapsed ({err}), re-login to Comexio failed ({self.last_login_error})"
+                ) from err
+            if self._login_outdated(credentials):
+                # A reconfigure replaced host, credentials or pin meanwhile: the same IO name may be
+                # another output there.
+                raise ComexioError(
+                    f"admin session lapsed ({err}), connection settings changed meanwhile: not repeated on the new ones"
+                ) from err
+            # self.client, read again: a re-login may have rebuilt it.
+            await self.client.set_io_value(ext, identifier, value)
 
     def _note_write_met_another_certificate(
         self, err: ComexioCertificateMismatchError, target_type: str, target_id: str | int

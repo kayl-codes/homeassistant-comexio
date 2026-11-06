@@ -439,7 +439,9 @@ function_plan_visualize:
     source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
     captured, entirely offline; (2) "Plan" (live) — render the plan's current
     state in Comexio. With a response requested, the text diagram is also
-    returned as `text`, the SVG as its `url`.
+    returned as `text`, the SVG as the Preview image's `url` on the
+    authenticated image proxy (`url` is null while the Preview image entity
+    is disabled).
   fields:
     config_entry:
       name: Comexio instance
@@ -550,7 +552,8 @@ function_plan_flow_diagram:
 set_value:
   name: Set Value
   description: >
-    Writes a raw value to a Comexio marker or IO via the Comexio API (Basic Auth).
+    Writes a raw value to a Comexio marker or IO via the Comexio API (Basic Auth with the API user);
+    an analog output AO1–AO4 goes over the admin session, since the API refuses it.
     Same write path the switch/number entities use — this is the backend of the plan
     card's debug command input. Only targets known from the current Comexio
     configuration are accepted. Failures are reported as a notification.

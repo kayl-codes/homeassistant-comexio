@@ -1,8 +1,10 @@
 # Version: 0.7.5
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 import logging
+import math
 from typing import Any
 
+from aiocomexio import io_written_over_admin_session
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
@@ -10,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
+    ANALOG_OUTPUT_DISPLAY_DECIMALS,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_INTERVAL_MAX_VALUE,
@@ -213,7 +216,9 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         self._attr_native_max_value = float(_raw_max if _raw_max is not None else WEBIO_MARKER_ANALOG_MAX)
 
         unit = io.get("unit", "")
-        self._whole_percent = io_number_takes_whole_percent(
+        # An AO is no dimmer: its admin-session write takes a fraction, the #253 rounding is the API's (#259).
+        self._analog_output = io_written_over_admin_session(self._identifier)
+        self._whole_percent = not self._analog_output and io_number_takes_whole_percent(
             unit, self._attr_native_min_value, self._attr_native_max_value
         )
         self._attr_native_step = 1.0 if self._whole_percent else 0.1
@@ -232,9 +237,19 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
         if val is None:
             return None
         try:
-            return float(val)
+            number = float(val)
         except (ValueError, TypeError):
             return None
+        if not self._analog_output or not math.isfinite(number):
+            return number
+        # An AO reports its raw step (30 → 30.1961), which Comexio itself shows with one decimal, rounded half away
+        # from zero (round() would turn 1.25 into 1.2) (#259).
+        try:
+            shown = Decimal(str(number)).quantize(Decimal(1).scaleb(-ANALOG_OUTPUT_DISPLAY_DECIMALS), ROUND_HALF_UP)
+        except InvalidOperation:
+            # Too many digits for the decimal context (from ~1e27): no decimal left to round, like ±inf above.
+            return number
+        return float(shown)
 
     async def async_set_native_value(self, value: float) -> None:
         """Write value to Comexio IO output via API."""
@@ -242,9 +257,13 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
             # A service call can still pass a fraction, which Comexio rounds (#253): send the whole
             # number instead, so HA's own state matches the output at once instead of after the push.
             value = float(Decimal(str(value)).to_integral_value(ROUND_HALF_UP))
+        pushes_before = self.coordinator.io_push_count(self._io_id)
         if not await self.coordinator.api.set_value("io", self._io_id, value, self._ext_name, self._identifier):
             raise write_failed(
                 self.coordinator, f"Failed to set value {value} for IO {self._ext_name} {self._identifier}"
             )
-        self.coordinator.update_io_by_name(self._ext_name, self._identifier, value)
+        # A push that arrived during the write holds the output's real value, even when it equals the value cached
+        # before: don't replace it (#259).
+        if self.coordinator.io_push_count(self._io_id) == pushes_before:
+            self.coordinator.update_io_by_name(self._ext_name, self._identifier, value, pushed=False)
         self.async_write_ha_state()

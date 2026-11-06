@@ -330,6 +330,58 @@ def test_no_poll_starts_while_the_entry_unloads() -> None:
     coordinator.hass.async_create_task.assert_not_called()
 
 
+def _coordinator_with_a_pending_preview(
+    monkeypatch: pytest.MonkeyPatch, base_shutdown: AsyncMock
+) -> ComexioCoordinator:
+    coordinator = _coordinator(INFO, UPTIME)
+    for helper in ("_stop_connection_poll", "_cancel_preview_card_sweep", "_disarm_preview_cache"):
+        monkeypatch.setattr(coordinator, helper, MagicMock(), raising=False)
+    coordinator._knx_dpt_reload_cancel = None
+    coordinator._preview_refresh_cancel = None
+    coordinator._plan_preview_rendered = True
+    coordinator._plan_preview_store_closed = False
+    coordinator.last_plan_preview = None
+    coordinator.last_plan_preview_svg = None
+    coordinator._plan_preview_store = MagicMock(async_save=AsyncMock())
+    monkeypatch.setattr(coordinator_module.DataUpdateCoordinator, "async_shutdown", base_shutdown)
+    return coordinator
+
+
+def test_a_failing_preview_save_skips_nothing_of_the_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The save runs last, so it cannot leave a poll running on the API session async_unload_entry closes."""
+    base_shutdown = AsyncMock()
+    coordinator = _coordinator_with_a_pending_preview(monkeypatch, base_shutdown)
+    seen: list[tuple[bool, int]] = []
+
+    async def scenario() -> None:
+        poll = asyncio.create_task(asyncio.sleep(60))
+        coordinator._system_info_task = poll
+
+        async def failing_save(_data: object) -> None:
+            seen.append((poll.cancelled(), base_shutdown.await_count))
+            raise RuntimeError("store failed")
+
+        coordinator._plan_preview_store.async_save = failing_save
+        await coordinator.async_shutdown()
+
+    run = scenario()
+    with pytest.raises(RuntimeError, match="store failed"):
+        asyncio.run(run)
+
+    assert seen == [(True, 1)]
+
+
+def test_a_failing_base_shutdown_still_saves_the_pending_preview(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _coordinator_with_a_pending_preview(monkeypatch, AsyncMock(side_effect=RuntimeError("base failed")))
+
+    shutdown = coordinator.async_shutdown()
+    with pytest.raises(RuntimeError, match="base failed"):
+        asyncio.run(shutdown)
+
+    coordinator._plan_preview_store.async_save.assert_awaited_once()
+    assert coordinator._plan_preview_store_closed is True
+
+
 def test_shutdown_cancels_a_running_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     """Review (Sourcery, #204): a poll in flight must not outlive the API session async_unload_entry closes."""
     coordinator = _coordinator(INFO, UPTIME)
@@ -337,6 +389,8 @@ def test_shutdown_cancels_a_running_poll(monkeypatch: pytest.MonkeyPatch) -> Non
         monkeypatch.setattr(coordinator, helper, MagicMock(), raising=False)
     coordinator._knx_dpt_reload_cancel = None
     coordinator._preview_refresh_cancel = None
+    coordinator._plan_preview_rendered = False
+    coordinator._plan_preview_store_closed = False
     monkeypatch.setattr(coordinator_module.DataUpdateCoordinator, "async_shutdown", AsyncMock())
 
     async def scenario() -> asyncio.Task[None]:

@@ -543,10 +543,19 @@ DEFAULT_NAME = "Comexio"
 # entities' first states before comparing units, then for the recorder to commit the metadata.
 STATISTICS_UNIT_FIX_START_DELAY_SEC = 15
 STATISTICS_UNIT_FIX_COMMIT_WAIT_SEC = 5
+# A recorder not ready yet, or an entity without its first state, gets the check again later.
+STATISTICS_UNIT_FIX_ATTEMPTS = 3
+STATISTICS_UNIT_FIX_RETRY_DELAY_SEC = 60
+# A statistics lookup stuck behind the recorder ends the retries with a warning instead of halting them.
+# Generous: right after startup the recorder may still migrate or purge a large database.
+STATISTICS_UNIT_FIX_LOOKUP_TIMEOUT_SEC = 120
 # Repair issue HA's sensor recorder platform files per statistic with a changed unit:
 # domain "sensor", id "units_changed_{statistic_id}" (homeassistant/components/sensor/recorder.py).
 STATISTICS_UNITS_CHANGED_ISSUE_DOMAIN = "sensor"
 STATISTICS_UNITS_CHANGED_ISSUE_PREFIX = "units_changed_"
+# A unit Comexio spells differently than HA accepts for the device class: same quantity, same values.
+# Only for units without a unit class: the statistics label fix writes new_unit_class=None.
+COMEXIO_UNIT_TO_HA_UNIT = {"lux": "lx"}
 
 SCAN_INTERVAL_DEFAULT = 15
 SCAN_INTERVAL_OPTIONS = ["1", "5", "10", "15", "30", "45", "60", "120", "300", "600", "1440"]
@@ -606,6 +615,8 @@ MARKER_INTERVAL_MAX_VALUE = 86400
 # minimum, so -273.15 with step 0.1 accepted only values ending in 5 (49.95, 50.05).
 MARKER_TEMPERATURE_MIN_VALUE = -273.0
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
+# Decimals HA shows of a 0-10 V analog output, the same as Comexio's own display (#259).
+ANALOG_OUTPUT_DISPLAY_DECIMALS = 1
 
 # A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
 # word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not
@@ -890,6 +901,10 @@ FUNCTION_PLAN_RUN_STATE_PREVIEW_DEBUG_INTERVAL_SEC = 10
 # An open plan card counts as gone once its keepalive (every 30 s) stays away this long. Generous on
 # purpose: browsers throttle timers in background tabs to about once a minute.
 PREVIEW_CARD_ALIVE_SEC = 150
+# The last rendered plan preview is kept in .storage for a restart, at most this long after a render. A live
+# preview re-renders every few seconds; the delay bundles those renders into one write (HA's final write on
+# shutdown and the entry unload save a pending one).
+PLAN_PREVIEW_SAVE_DELAY_SEC = 30
 # Consecutive failed run-state fetches before the plan run-state sensors turn unavailable
 # instead of showing the last known state forever.
 FUNCTION_PLAN_RUN_STATE_FAIL_STREAK_THRESHOLD = 3

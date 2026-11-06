@@ -68,6 +68,8 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `button` (configuration) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
 | `button` (configuration, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX / Quickbus part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
 
+📖 **[Supported hardware →](SUPPORTED_HARDWARE.md)** — which extensions and Quickbus devices are tested, and what does not work yet.
+
 ## 🚀 Installation
 
 ### Option 1: HACS (Recommended)
@@ -354,6 +356,8 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `button` (Konfiguration) | Integration | `Web-IO Range Check` — löst die nächtliche Analog-Min/Max-Bereichsprüfung manuell auf Abruf aus. |
 | `button` (Konfiguration) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |
 | `button` (Konfiguration, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-/Quickbus-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
+
+📖 **[Unterstützte Hardware →](SUPPORTED_HARDWARE.md#-deutsch)** — welche Erweiterungen und Quickbus-Geräte getestet sind und was noch nicht funktioniert.
 
 ## 🚀 Installation
 

@@ -670,11 +670,12 @@ def test_the_svg_visualize_renders_under_the_selection_lock_and_supersedes_queue
     coordinator = _follow_coordinator(following=True)
     seen: list[tuple[bool, int]] = []
 
-    async def generate(*_args: object) -> str:
+    async def generate(*_args: object) -> None:
         seen.append((coordinator.preview_follow_lock.locked(), coordinator.preview_follow_generation))
-        return "/local/preview.svg"
 
     coordinator.async_generate_plan_preview = AsyncMock(side_effect=generate)
+    proxy_url = "/api/image_proxy/image.visualize_under_lock_test"
+    coordinator.plan_preview_image_url = MagicMock(return_value=proxy_url)
     coordinator.snapshot_block_settings_for_source = MagicMock(return_value=None)
     coordinator.snapshot_paper_format_for_source = MagicMock(return_value=None)
     source = (coordinator, None, 3, "Plan", {}, {}, "live", None)
@@ -684,7 +685,8 @@ def test_the_svg_visualize_renders_under_the_selection_lock_and_supersedes_queue
         patch.object(plan_actions.persistent_notification, "async_create"),
     ):
         result = asyncio.run(plan_actions.handle_function_plan_visualize(SimpleNamespace(), call))  # type: ignore[arg-type]
-    assert result == {"plan_name": "Plan", "url": "/local/preview.svg"}
+    coordinator.plan_preview_image_url.assert_called_once_with()
+    assert result == {"plan_name": "Plan", "url": proxy_url}
     assert seen == [(True, 1)]
 
 
@@ -941,11 +943,11 @@ def test_a_follow_queued_before_a_visualize_never_renders_after_it() -> None:
             coordinator.preview_follow_lock.release()
             await asyncio.gather(follow, visualize)
 
-    async def generate(*_args: object) -> str:
+    async def generate(*_args: object) -> None:
         order.append("visualize")
-        return "/local/preview.svg"
 
     coordinator.async_generate_plan_preview = AsyncMock(side_effect=generate)
+    coordinator.plan_preview_image_url = MagicMock(return_value="/api/image_proxy/image.cx1_plan_preview")
     coordinator.snapshot_block_settings_for_source = MagicMock(return_value=None)
     coordinator.snapshot_paper_format_for_source = MagicMock(return_value=None)
     source = (coordinator, None, 3, "Plan", {}, {}, "live", None)

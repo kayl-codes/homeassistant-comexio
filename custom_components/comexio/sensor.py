@@ -1,10 +1,7 @@
 # Version: 0.7.5
-from collections.abc import Mapping
 from datetime import datetime
 import logging
-import pathlib
 from typing import Any
-from urllib.parse import quote
 
 from aiocomexio import format_fingerprint
 from homeassistant.components.sensor import (
@@ -15,8 +12,6 @@ from homeassistant.components.sensor import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import (
     PERCENTAGE,
-    STATE_UNAVAILABLE,
-    STATE_UNKNOWN,
     EntityCategory,
     UnitOfTemperature,
 )
@@ -38,6 +33,7 @@ from .certificate import (
     presented_fingerprint,
 )
 from .const import (
+    COMEXIO_UNIT_TO_HA_UNIT,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
@@ -92,7 +88,6 @@ UNIT_TO_DEVICE_CLASS = {
     "Pa": SensorDeviceClass.PRESSURE,
     "m/s": SensorDeviceClass.WIND_SPEED,
     "km/h": SensorDeviceClass.WIND_SPEED,
-    "%": SensorDeviceClass.HUMIDITY,  # Often used for humidity in Comexio
     # Smart Meter readings (#249)
     "Wh": SensorDeviceClass.ENERGY,
     "kWh": SensorDeviceClass.ENERGY,
@@ -102,6 +97,9 @@ UNIT_TO_DEVICE_CLASS = {
 # A meter counter can run backwards (Smart Meter E1-E3 net energy), so "total", not
 # "total_increasing", which would read every decrease as a meter reset.
 DEVICE_CLASS_TO_STATE_CLASS = {SensorDeviceClass.ENERGY: SensorStateClass.TOTAL}
+# "%" alone says nothing: it is also a dimmer's current input (QI), a volume or an RGB channel.
+# Only the identifier tells humidity apart (HUM on the Quickbus devices).
+HUMIDITY_IDENTIFIER_PREFIX = "hum"
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -214,14 +212,22 @@ class _PlanRunStateSensorSync:
                 ent_reg.async_remove(entity_id)
 
 
+def _io_device_class(unit: str, identifier: str) -> SensorDeviceClass | None:
+    """The device class of an analog IO, from its unit and, for a percentage, its identifier."""
+    if unit == PERCENTAGE and identifier.casefold().startswith(HUMIDITY_IDENTIFIER_PREFIX):
+        return SensorDeviceClass.HUMIDITY
+    return UNIT_TO_DEVICE_CLASS.get(unit)
+
+
 class ComexioIOSensor(ComexioIOEntity, SensorEntity):
     """Representation of an analog Comexio Input/Output."""
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str, io: dict[str, Any]) -> None:
         super().__init__(coordinator, server_id, io)
         unit = io.get("unit", "")
+        unit = COMEXIO_UNIT_TO_HA_UNIT.get(unit, unit)
         self._attr_native_unit_of_measurement = unit
-        device_class = UNIT_TO_DEVICE_CLASS.get(unit)
+        device_class = _io_device_class(unit, str(io.get("identifier", "")))
         self._attr_device_class = device_class
         self._attr_state_class = DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
 
@@ -878,29 +884,17 @@ class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
         }
 
 
-def restored_plan_preview(state: str, attributes: Mapping[str, Any]) -> dict[str, Any] | None:
-    """The last_plan_preview a 'Preview info' state from before a restart stands for, or None."""
-    generated_at = attributes.get("generated_at")
-    if state in (STATE_UNKNOWN, STATE_UNAVAILABLE) or not isinstance(generated_at, str):
-        return None
-    return {
-        "fub_id": attributes.get("fub_id"),
-        "plan_name": state,
-        "source": attributes.get("source"),
-        "generated_at": generated_at,
-    }
-
-
-class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, RestoreEntity, SensorEntity):
-    """Diagnostic sensor showing the last generated Function Plan preview (SVG) as entity_picture.
+class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
+    """Diagnostic sensor naming the last generated Function Plan preview (plan, source, time).
 
     Fed by coordinator.async_generate_plan_preview, called either from plan_preview (plan card,
     'Plan'/'Backup' selection) or a function_plan_visualize service call with format=svg (live or a stored
     backup snapshot) — both paths update the same coordinator.last_plan_preview, so this
     sensor always reflects whatever was last generated, regardless of the trigger.
-    Like the preview image (which falls back to the SVG file), it survives a restart: the last
-    state is restored as long as that file still exists, instead of showing unknown until the
-    next render.
+    Like the preview image, it survives a restart: coordinator.async_load_plan_preview restores
+    last_plan_preview from .storage before the platforms are set up. No entity_picture: the
+    picture is the preview image, served only through HA's authenticated image proxy — a
+    /local/ file would be readable by anyone reaching HA.
     """
 
     _attr_has_entity_name = True
@@ -912,26 +906,6 @@ class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity
         super().__init__(coordinator)
         self._attr_unique_id = f"comexio_{server_id}_plan_preview_sensor"
         self._attr_translation_key = "plan_preview"
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        if self.coordinator.last_plan_preview is not None or (last := await self.async_get_last_state()) is None:
-            return
-        restored = restored_plan_preview(last.state, last.attributes)
-        svg_path = pathlib.Path(self.hass.config.path("www", f"comexio_{self.coordinator.server_id}_plan_preview.svg"))
-        if restored is not None and await self.hass.async_add_executor_job(svg_path.is_file):
-            self.coordinator.last_plan_preview = restored
-            self.async_write_ha_state()
-
-    @property
-    def entity_picture(self) -> str | None:
-        preview = self.coordinator.last_plan_preview
-        if not preview:
-            return None
-        # Cache-buster: the SVG file is overwritten in place on every new preview, so the
-        # frontend needs a changing query param to notice the update.
-        cache_buster = quote(str(preview.get("generated_at", "")), safe="")
-        return f"/local/comexio_{self.coordinator.server_id}_plan_preview.svg?v={cache_buster}"
 
     @property
     def native_value(self) -> str | None:
