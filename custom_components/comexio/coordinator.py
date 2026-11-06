@@ -431,6 +431,28 @@ def _remove_legacy_preview_file(path: pathlib.Path) -> bool:
     return True
 
 
+async def async_remove_legacy_plan_preview(hass: HomeAssistant, server_id: str) -> None:
+    """Delete the preview older releases wrote to config/www; it is never read back, the store keeps it now.
+
+    First at every setup (async_setup_entry), before any step that can fail: an entry whose setup keeps
+    failing (Comexio unreachable) must not leave the public copy in place.
+    """
+    legacy_path = legacy_plan_preview_path(hass, server_id)
+    try:
+        removed = await hass.async_add_executor_job(_remove_legacy_preview_file, legacy_path)
+    except OSError as err:
+        _LOGGER.warning(
+            "[%s] Could not delete the old plan preview %s, which HA serves without authentication under "
+            "/local/ — please delete it by hand: %s",
+            server_id,
+            legacy_path,
+            err,
+        )
+        return
+    if removed:
+        _LOGGER.info("[%s] Deleted the old plan preview %s (now kept in .storage)", server_id, legacy_path)
+
+
 def _parse_snapshot_source(source: str) -> tuple[str, int]:
     """Split async_generate_plan_preview's 'snapshot:<kind>:<slot>' source back into its parts."""
     _prefix, kind, slot = source.split(":", 2)
@@ -1276,7 +1298,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # _plan_preview_store for a restart (async_load_plan_preview), so both always name the same render.
         self.last_plan_preview_svg: str | None = None
         self._plan_preview_store: Store = plan_preview_store(hass, entry.entry_id)
-        self._plan_preview_save_pending = False
+        self._plan_preview_rendered = False  # since this coordinator started: its shutdown saves once more
         self._plan_preview_store_closed = False
         # Live-value preview refresh (Stufe 1): plan structure of the last LIVE preview is
         # cached so webhook pushes can re-render it with fresh values without re-fetching
@@ -4295,12 +4317,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if self._plan_preview_store_closed:
             _LOGGER.debug("[%s] Plan preview rendered after the shutdown: not saved", self.server_id)
             return
-        self._plan_preview_save_pending = True
+        self._plan_preview_rendered = True
         self._plan_preview_store.async_delay_save(self._plan_preview_store_data, PLAN_PREVIEW_SAVE_DELAY_SEC)
 
     def _plan_preview_store_data(self) -> dict[str, Any]:
         """What plan_preview_store holds: the last preview's SVG and its last_plan_preview."""
-        self._plan_preview_save_pending = False
         return {"svg": self.last_plan_preview_svg, "preview": self.last_plan_preview}
 
     def plan_preview_image_url(self) -> str | None:
@@ -4311,13 +4332,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         return f"/api/image_proxy/{entity_id}" if entity is not None and not entity.disabled else None
 
     async def async_load_plan_preview(self) -> None:
-        """Delete the copy older releases left in config/www and restore the last preview from .storage.
+        """Restore the last preview from .storage.
 
         Called once at setup, before the platforms: the image and the Plan Preview Info sensor then show the
-        last preview right away. An unreadable store only leaves the preview empty until the next render: it
-        must neither fail the setup nor keep the public copy from being deleted, hence that delete goes first.
+        last preview right away. An unreadable store only leaves the preview empty until the next render, it
+        never fails the setup. The copy older releases left in config/www is not imported: the plan card renders
+        a fresh preview when it opens (async_remove_legacy_plan_preview deletes it earlier in the setup).
         """
-        await self._async_remove_legacy_plan_preview()
         try:
             stored = await self._plan_preview_store.async_load()
         except HomeAssistantError as err:
@@ -4330,27 +4351,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         elif stored is not None:
             _LOGGER.warning("[%s] Ignoring the stored plan preview: it has no usable SVG or timestamp", self.server_id)
 
-    async def _async_remove_legacy_plan_preview(self) -> None:
-        """Delete the preview older releases wrote to config/www; it is never read back, the store keeps it now."""
-        legacy_path = legacy_plan_preview_path(self.hass, self.server_id)
-        try:
-            removed = await self.hass.async_add_executor_job(_remove_legacy_preview_file, legacy_path)
-        except OSError as err:
-            _LOGGER.warning(
-                "[%s] Could not delete the old plan preview %s, which HA serves without authentication under "
-                "/local/ — please delete it by hand: %s",
-                self.server_id,
-                legacy_path,
-                err,
-            )
-            return
-        if removed:
-            _LOGGER.info("[%s] Deleted the old plan preview %s (now kept in .storage)", self.server_id, legacy_path)
-
     async def _async_close_plan_preview_store(self) -> None:
-        """Save a preview whose delayed save is still pending, for the next coordinator; no render saves after this."""
+        """Save the last render for the next coordinator; no render saves after this.
+
+        After any render of this coordinator, also when its delayed save already ran: HA's Store only logs a
+        failed write, so this is its retry (one write per shutdown). async_save also cancels a pending timer.
+        Once only: async_shutdown can run twice (the explicit unload call and the base class's own).
+        """
+        if self._plan_preview_store_closed:
+            return
         self._plan_preview_store_closed = True
-        if self._plan_preview_save_pending:
+        if self._plan_preview_rendered:
             await self._plan_preview_store.async_save(self._plan_preview_store_data())
 
     def live_plan_list(self) -> dict[str, Any] | None:

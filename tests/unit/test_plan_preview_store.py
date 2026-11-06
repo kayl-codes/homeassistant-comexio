@@ -39,7 +39,7 @@ def _coordinator(config_dir: pathlib.Path, stored: Any = None) -> ComexioCoordin
     coordinator.hass.config.path = lambda *parts: str(config_dir.joinpath(*parts))
     coordinator.hass.async_add_executor_job = _run_in_executor
     coordinator._plan_preview_store = MagicMock(async_load=AsyncMock(return_value=stored), async_save=AsyncMock())
-    coordinator._plan_preview_save_pending = False
+    coordinator._plan_preview_rendered = False
     coordinator._plan_preview_store_closed = False
     coordinator.last_plan_preview = None
     coordinator.last_plan_preview_svg = None
@@ -85,7 +85,12 @@ def test_nothing_usable_is_not_restored(stored: Any) -> None:
     assert stored_plan_preview(stored) is None
 
 
-def test_loading_restores_the_preview_and_deletes_the_public_www_copy(tmp_path: pathlib.Path) -> None:
+def _remove_legacy(coordinator: ComexioCoordinator) -> None:
+    asyncio.run(coordinator_module.async_remove_legacy_plan_preview(coordinator.hass, SERVER_ID))
+
+
+def test_loading_restores_the_preview_and_leaves_the_www_folder_alone(tmp_path: pathlib.Path) -> None:
+    """The www copy is not imported (the plan card renders anew when it opens): its delete runs before."""
     legacy = _legacy_file(tmp_path)
     coordinator = _coordinator(tmp_path, stored=STORED)
 
@@ -93,26 +98,22 @@ def test_loading_restores_the_preview_and_deletes_the_public_www_copy(tmp_path: 
 
     assert coordinator.last_plan_preview_svg == "<svg x='1'/>"
     assert coordinator.last_plan_preview == PREVIEW
-    assert not legacy.exists()
+    assert legacy.read_text(encoding="utf-8") == "<svg/>"
 
 
-def test_loading_without_a_stored_preview_still_deletes_the_www_copy(tmp_path: pathlib.Path) -> None:
-    """The first start after the update: the store is still empty, the old file must go all the same."""
+def test_the_public_www_copy_is_deleted(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
     legacy = _legacy_file(tmp_path)
     coordinator = _coordinator(tmp_path)
 
-    asyncio.run(coordinator.async_load_plan_preview())
+    with caplog.at_level("INFO", logger=coordinator_module.__name__):
+        _remove_legacy(coordinator)
 
-    assert coordinator.last_plan_preview_svg is None
-    assert coordinator.last_plan_preview is None
     assert not legacy.exists()
+    assert "Deleted the old plan preview" in caplog.text
 
 
-def test_an_unreadable_store_neither_fails_the_setup_nor_keeps_the_www_copy(
-    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
-) -> None:
-    """A preview is not worth a failed setup, and the public copy must go even then."""
-    legacy = _legacy_file(tmp_path)
+def test_an_unreadable_store_does_not_fail_the_setup(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
+    """A preview is not worth a failed setup."""
     coordinator = _coordinator(tmp_path)
     coordinator._plan_preview_store.async_load = AsyncMock(side_effect=HomeAssistantError("read error"))
 
@@ -121,7 +122,6 @@ def test_an_unreadable_store_neither_fails_the_setup_nor_keeps_the_www_copy(
 
     assert "Could not read the last plan preview" in caplog.text
     assert coordinator.last_plan_preview is None
-    assert not legacy.exists()
 
 
 def test_a_store_without_a_usable_preview_is_logged(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -137,23 +137,23 @@ def test_a_store_without_a_usable_preview_is_logged(tmp_path: pathlib.Path, capl
 def test_a_www_copy_that_cannot_be_deleted_is_logged(
     tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    coordinator = _coordinator(tmp_path, stored=STORED)
+    coordinator = _coordinator(tmp_path)
 
     def refuse(_path: pathlib.Path) -> bool:
         raise PermissionError("read-only")
 
     monkeypatch.setattr(coordinator_module, "_remove_legacy_preview_file", refuse)
     with caplog.at_level("WARNING", logger=coordinator_module.__name__):
-        asyncio.run(coordinator.async_load_plan_preview())
+        _remove_legacy(coordinator)  # does not raise: the setup goes on
 
     assert "delete it by hand" in caplog.text
-    assert coordinator.last_plan_preview == PREVIEW  # the restore does not depend on the delete
 
 
 def test_no_www_copy_is_nothing_to_report(tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture) -> None:
     coordinator = _coordinator(tmp_path)
 
     with caplog.at_level("INFO", logger=coordinator_module.__name__):
+        _remove_legacy(coordinator)
         asyncio.run(coordinator.async_load_plan_preview())
 
     assert caplog.text == ""
@@ -186,6 +186,19 @@ def test_shutdown_saves_a_pending_preview_once(tmp_path: pathlib.Path) -> None:
     coordinator._plan_preview_store.async_save.assert_awaited_once()
     saved = coordinator._plan_preview_store.async_save.await_args.args[0]
     assert saved == {"svg": coordinator.last_plan_preview_svg, "preview": coordinator.last_plan_preview}
+
+
+def test_shutdown_saves_again_after_the_delayed_save_ran(tmp_path: pathlib.Path) -> None:
+    """Review (Sourcery, #272): HA's Store only logs a failed delayed write, the shutdown is its retry."""
+    coordinator = _coordinator(tmp_path)
+    asyncio.run(coordinator._async_publish_plan_preview(1, "Plan", "live", "<svg/>"))
+    data_func, _delay = coordinator._plan_preview_store.async_delay_save.call_args.args
+    data_func()  # the delayed save ran (its write may have failed, HA does not tell)
+
+    asyncio.run(coordinator._async_close_plan_preview_store())
+
+    coordinator._plan_preview_store.async_save.assert_awaited_once()
+    assert coordinator._plan_preview_store.async_save.await_args.args[0]["preview"]["plan_name"] == "Plan"
 
 
 def test_a_render_during_an_unload_that_may_still_be_refused_keeps_its_timer(tmp_path: pathlib.Path) -> None:

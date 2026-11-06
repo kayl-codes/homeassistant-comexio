@@ -338,7 +338,8 @@ def _coordinator_with_a_pending_preview(
         monkeypatch.setattr(coordinator, helper, MagicMock(), raising=False)
     coordinator._knx_dpt_reload_cancel = None
     coordinator._preview_refresh_cancel = None
-    coordinator._plan_preview_save_pending = True
+    coordinator._plan_preview_rendered = True
+    coordinator._plan_preview_store_closed = False
     coordinator.last_plan_preview = None
     coordinator.last_plan_preview_svg = None
     coordinator._plan_preview_store = MagicMock(async_save=AsyncMock())
@@ -388,7 +389,8 @@ def test_shutdown_cancels_a_running_poll(monkeypatch: pytest.MonkeyPatch) -> Non
         monkeypatch.setattr(coordinator, helper, MagicMock(), raising=False)
     coordinator._knx_dpt_reload_cancel = None
     coordinator._preview_refresh_cancel = None
-    coordinator._plan_preview_save_pending = False
+    coordinator._plan_preview_rendered = False
+    coordinator._plan_preview_store_closed = False
     monkeypatch.setattr(coordinator_module.DataUpdateCoordinator, "async_shutdown", AsyncMock())
 
     async def scenario() -> asyncio.Task[None]:

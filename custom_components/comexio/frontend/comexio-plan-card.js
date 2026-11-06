@@ -40,7 +40,7 @@ import {
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.57";
+const CARD_VERSION = "0.9.58";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -1254,12 +1254,25 @@ class ComexioPlanCard extends HTMLElement {
     if (this._inFlight || this._failures > 0 || this._refetchOnConnect) {
       return; // fetched when the current fetch completes, by the pending retry, or on reattach
     }
-    void this._loadSvg(st.attributes.entity_picture, st.state);
+    void this._loadSvg(this._pictureUrl(st), st.state);
+  }
+
+  // Where the SVG is fetched from: the image entity's entity_picture (HA's authenticated image proxy, its
+  // token rotates, so it is read anew for every fetch). A card fed by the Plan Preview sensor fetches the
+  // image on the sensor's device: the sensor has no picture of its own since the preview left /local/ (dh).
+  _pictureUrl(st) {
+    const own = st.attributes.entity_picture;
+    const entry = this._hass?.entities?.[this._config.entity];
+    // Only for the Plan Preview sensor (same translation key as the image): another entity has no preview.
+    if (own || _isPreviewImage(this._config.entity) || entry?.translation_key !== PREVIEW_TRANSLATION_KEY) {
+      return own;
+    }
+    return this._previewImageOnDevice(entry.device_id)?.attributes.entity_picture;
   }
 
   async _loadSvg(url, stamp) {
     if (!url) {
-      console.warn(`comexio-plan-card: ${this._config.entity} has no entity_picture, nothing to load`);
+      console.warn(`comexio-plan-card: ${this._config.entity} has no preview image to load`);
       this._failures = 0; // nothing left to retry — don't keep new stamps gated
       return;
     }
@@ -1402,7 +1415,7 @@ class ComexioPlanCard extends HTMLElement {
   _reloadCurrentStamp() {
     const st = this._hass?.states[this._config.entity];
     if (st && st.state === this._stamp) {
-      void this._loadSvg(st.attributes.entity_picture, st.state);
+      void this._loadSvg(this._pictureUrl(st), st.state);
     }
   }
 
@@ -1485,14 +1498,18 @@ class ComexioPlanCard extends HTMLElement {
     return cards.length > 0 ? _agreedPreview(cards) : this._identityOf(st);
   }
 
-  // The plan preview image of the backup selector's Comexio instance: both sit on the same
-  // function plan device (the frontend's entity registry carries device_id and platform, not
-  // always the config entry). The lookup (also a miss) is cached until HA hands over a new
-  // entity registry — `set hass` runs on every state change, a scan each time would be wasted.
+  // The plan preview image of the backup selector's Comexio instance.
   _previewEntityState() {
+    return this._previewImageOnDevice(this._hass?.entities?.[this._config.backup_entity]?.device_id);
+  }
+
+  // The plan preview image on `deviceId`: the image, the Plan Preview sensor and the backup selector
+  // all sit on the function plan device (the frontend's entity registry carries device_id and
+  // platform, not always the config entry). The lookup (also a miss) is cached until HA hands over a
+  // new entity registry — `set hass` runs on every state change, a scan each time would be wasted.
+  _previewImageOnDevice(deviceId) {
     const entities = this._hass?.entities;
-    const deviceId = entities?.[this._config.backup_entity]?.device_id;
-    if (!deviceId) {
+    if (!entities || !deviceId) {
       return null;
     }
     const cached = this._previewEntity;

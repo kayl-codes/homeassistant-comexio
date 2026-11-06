@@ -3,8 +3,9 @@
 from http import HTTPStatus
 import pathlib
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
+from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 import pytest
@@ -162,6 +163,34 @@ def _preview_store_key(entry: MockConfigEntry) -> str:
     return f"{DOMAIN}_plan_preview_{entry.entry_id}"
 
 
+async def _write_public_file(hass: HomeAssistant, entry: MockConfigEntry) -> pathlib.Path:
+    """The preview copy older releases left in config/www, served under /local/ without authentication."""
+    public_file = pathlib.Path(hass.config.path("www", f"comexio_{entry.data[CONF_SERVER_ID]}_plan_preview.svg"))
+
+    def write() -> None:
+        public_file.parent.mkdir(parents=True, exist_ok=True)
+        public_file.write_text("<svg/>", encoding="utf-8")
+
+    await hass.async_add_executor_job(write)
+    return public_file
+
+
+@pytest.mark.logged_exception  # the coordinator logs the failed first refresh with its traceback
+async def test_a_setup_that_cannot_reach_comexio_still_deletes_the_public_file(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+) -> None:
+    """Review (Sourcery, #272): while Comexio stays unreachable the setup retries, the public copy must not stay."""
+    public_file = await _write_public_file(hass, mock_config_entry)
+    api_returns["get_raw_config"] = OSError("connection reset")
+    mock_config_entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert not await hass.async_add_executor_job(public_file.exists)
+
+
 async def test_a_restart_restores_the_preview_from_the_store_and_deletes_the_public_file(
     hass: HomeAssistant,
     mock_config_entry: MockConfigEntry,
@@ -170,13 +199,7 @@ async def test_a_restart_restores_the_preview_from_the_store_and_deletes_the_pub
 ) -> None:
     """Loaded before the platforms: image and info sensor name the last preview right after the setup."""
     server_id = mock_config_entry.data[CONF_SERVER_ID]
-    public_file = pathlib.Path(hass.config.path("www", f"comexio_{server_id}_plan_preview.svg"))
-
-    def write_public_file() -> None:
-        public_file.parent.mkdir(parents=True, exist_ok=True)
-        public_file.write_text("<svg/>", encoding="utf-8")
-
-    await hass.async_add_executor_job(write_public_file)
+    public_file = await _write_public_file(hass, mock_config_entry)
     hass_storage[_preview_store_key(mock_config_entry)] = {
         "version": 1,
         "key": _preview_store_key(mock_config_entry),
@@ -255,4 +278,22 @@ async def test_removing_the_entry_removes_its_stored_preview(
     await hass.config_entries.async_remove(loaded_entry.entry_id)
     await hass.async_block_till_done()
 
+    assert _preview_store_key(loaded_entry) not in hass_storage
+
+
+async def test_a_failing_saved_config_removal_still_removes_the_stored_preview(
+    hass: HomeAssistant, loaded_entry: MockConfigEntry, hass_storage: dict[str, Any]
+) -> None:
+    """Review (Sourcery, #272): the preview names the user's wiring, it must go even if the other store stays."""
+    await _rendered_ref_id(hass, loaded_entry, "live", block_settings=None)
+    await hass.config_entries.async_unload(loaded_entry.entry_id)
+    await hass.async_block_till_done()
+    assert _preview_store_key(loaded_entry) in hass_storage
+    saved_config = MagicMock(async_remove=AsyncMock(side_effect=OSError("read-only")))
+
+    with patch("custom_components.comexio.saved_config_store", return_value=saved_config):
+        await hass.config_entries.async_remove(loaded_entry.entry_id)
+        await hass.async_block_till_done()
+
+    saved_config.async_remove.assert_awaited_once()
     assert _preview_store_key(loaded_entry) not in hass_storage
