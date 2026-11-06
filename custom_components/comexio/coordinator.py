@@ -5548,6 +5548,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
             name for name in self.data.get("webio_commands", {}) if name in targets and name not in security.migrated
         ]
 
+    def _warn_unrewritable_webhooks(self, unmigrated: list[str]) -> None:
+        """Name the commands the run cannot rewrite (no command id or device id): they keep the old id switched on."""
+        pending = {name for name, *_ in self._pending_webhook_migrations()}
+        stuck = [name for name in unmigrated if name not in pending]
+        if stuck:
+            _LOGGER.warning(
+                "[%s] %d Web-IO commands cannot be moved to their own webhook id (no command or device id found, a "
+                "sync may fix it), so the old id stays on: %s",
+                self.server_id,
+                len(stuck),
+                ", ".join(one_line(name) for name in stuck[:10]),
+            )
+
     async def _async_webhook_migration_tick(self, _now: datetime | None = None) -> str:
         """Rewrite the Web-IO commands that still POST to the old webhook id, within the nightly budget.
 
@@ -5563,8 +5576,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             written, failed = await self._async_rewrite_pending_webhooks(security)
         finally:
             # The commands rewritten before an unexpected error are in Comexio already; keep them in the ledger.
-            await security.async_save()
-        remaining = len(self._unmigrated_webhook_commands(security))
+            # A failing save must not replace that error, so it is logged here.
+            try:
+                await security.async_save()
+            except Exception:
+                _LOGGER.exception("[%s] The webhook ledger could not be saved", self.server_id)
+        unmigrated = self._unmigrated_webhook_commands(security)
+        remaining = len(unmigrated)
+        self._warn_unrewritable_webhooks(unmigrated)
         _LOGGER.info(
             "[%s] Webhook id migration: %d rewritten, %d failed, %d left", self.server_id, written, failed, remaining
         )
@@ -5610,6 +5629,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 notification_id=f"{DOMAIN}_{self.server_id}_webhook_restart",
             )
             return WEBHOOK_MIGRATION_NEEDS_RESTART
+        _LOGGER.debug(
+            "[%s] Switching the old webhook id off (Comexio boot %s, last write %s)",
+            self.server_id,
+            boot_time,
+            security.last_write,
+        )
         security.legacy_enabled = False
         await security.async_save()
         persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.server_id}_webhook_restart")

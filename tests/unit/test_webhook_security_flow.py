@@ -60,8 +60,8 @@ def test_a_naive_stored_stamp_becomes_aware_so_the_boot_time_comparison_cannot_r
 
     _run(security.async_load())
 
-    assert security.last_write is not None
-    assert security.last_write.tzinfo is not None
+    assert security.last_write == NOW  # the naive 12:00 read as UTC, comparable with an aware boot time
+    assert security.last_write <= NOW + timedelta(hours=1)
 
 
 def test_an_unreadable_store_is_reported_but_a_first_start_is_not(
@@ -89,6 +89,47 @@ def test_a_command_the_run_cannot_rewrite_keeps_the_old_id_on(monkeypatch: pytes
     assert _run(coordinator._async_webhook_migration_tick()) == "pending"
 
     assert coordinator.api.webhook_security.legacy_enabled
+
+
+def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any) -> Any:
+    coordinator = _coordinator(monkeypatch, boot=boot, written=NOW)
+    coordinator.unloading = False
+    coordinator._restore_lock = SimpleNamespace(locked=lambda: False)
+    coordinator._sync_lock = _NoLock()
+    coordinator.data = {
+        "webio_commands": {"HA m": {"cmdId": cmd_id, "webioClass": "marker"}},
+        "webio_devices": {"marker": {"device_id": "7", "base_id": "8"}},
+    }
+    coordinator._webio_range_targets = lambda: {"HA m": {"Name": "HA m"}}
+    coordinator.api.save_single_command = AsyncMock(
+        side_effect=lambda *_a, **_k: coordinator.api.webhook_security.migrated.add("HA m") or True
+    )
+    return coordinator
+
+
+def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _tick_coordinator(monkeypatch, cmd_id="", boot=NOW + timedelta(hours=1))
+    security = coordinator.api.webhook_security
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "pending"
+    assert "cannot be moved to their own webhook id" in caplog.text
+    assert "HA m" not in security.migrated
+    assert security.legacy_enabled
+
+    coordinator.data["webio_commands"]["HA m"]["cmdId"] = "9"
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    assert "HA m" in security.migrated
+    assert not security.legacy_enabled
+    coordinator.sync_webhooks.assert_called_once_with()
+
+
+def test_a_naive_boot_time_is_compared_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _coordinator(monkeypatch, boot=(NOW + timedelta(hours=1)).replace(tzinfo=None), written=NOW)
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "done"
 
 
 def test_the_tick_saves_the_ledger_even_when_the_run_fails_unexpectedly(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -174,22 +215,43 @@ def test_the_registered_ids_follow_the_items_and_the_legacy_switch(monkeypatch: 
     coordinator.sync_webhooks()
     assert set(unregistered) == {ws.legacy_webhook_id(SERVER), "b" * 32}
 
-    entry.async_on_unload.call_args_list[-1].args[0]()  # the unload callback
-    assert "a" * 32 in unregistered
+    unload_callbacks = [call.args[0] for call in entry.async_on_unload.call_args_list]
+    unregister_callback = unload_callbacks[1]
+    unregister_callback()
+    unregister_callback()  # a second run (unload, then the callback) unregisters nothing twice
+    assert unregistered.count("a" * 32) == 1
     assert hass.data[_DOMAIN]["e1_webhooks"] == set()
 
+    _run(unload_callbacks[2]())  # the flush of the ledger
+    security._store.async_save.assert_awaited()
 
-def test_an_id_another_registration_holds_is_not_taken_over(monkeypatch: pytest.MonkeyPatch) -> None:
-    def refuse(*_args: Any) -> None:
-        raise ValueError("taken")
 
-    monkeypatch.setattr(ha_webhook, "async_register", refuse)
+def test_an_id_another_registration_holds_is_skipped_warned_once_and_retried(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    taken = {"c" * 32}
+    registered: list[str] = []
+
+    def register(_h: Any, _d: Any, _n: Any, webhook_id: str, _handler: Any) -> None:
+        if webhook_id in taken:
+            raise ValueError("taken")
+        registered.append(webhook_id)
+
+    monkeypatch.setattr(ha_webhook, "async_register", register)
     security = _security(monkeypatch)
     security.legacy_enabled = False
 
-    hass, _entry, _coordinator_stub = _setup(security, {"c" * 32})
+    hass, _entry, coordinator = _setup(security, {"c" * 32, "d" * 32})
+    coordinator.sync_webhooks()
+    coordinator.sync_webhooks()
 
-    assert hass.data[_DOMAIN]["e1_webhooks"] == set()
+    assert hass.data[_DOMAIN]["e1_webhooks"] == {"d" * 32}
+    assert caplog.text.count("already registered") == 1
+
+    taken.clear()
+    coordinator.sync_webhooks()
+
+    assert hass.data[_DOMAIN]["e1_webhooks"] == {"c" * 32, "d" * 32}
 
 
 class _Request:
@@ -197,6 +259,8 @@ class _Request:
         self._body = body
 
     async def json(self) -> Any:
+        if isinstance(self._body, Exception):
+            raise self._body
         return self._body
 
 
@@ -210,7 +274,9 @@ def _handler(monkeypatch: pytest.MonkeyPatch, security: ws.WebhookSecurity, coor
     return handlers[0]
 
 
-def test_the_handler_forwards_a_push_only_on_the_id_of_its_own_command(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_handler_forwards_a_push_only_on_the_id_of_its_own_command(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     security = _security(monkeypatch)
     coordinator = MagicMock()
     handler = _handler(monkeypatch, security, coordinator)
@@ -218,8 +284,11 @@ def test_the_handler_forwards_a_push_only_on_the_id_of_its_own_command(monkeypat
     other = ws.derive_webhook_id(security.secret, "marker:6")
 
     _run(handler(None, other, _Request({"type": "marker", "id": "5", "value": 1, "server": SERVER})))
-    coordinator.update_marker.assert_not_called()
+    assert "does not belong to its payload" in caplog.text
     _run(handler(None, own, _Request([1])))
+    assert "not a JSON object" in caplog.text
+    _run(handler(None, own, _Request(ValueError("not json"))))
+    assert "non-JSON payload" in caplog.text
     coordinator.update_marker.assert_not_called()
     _run(handler(None, own, _Request({"type": "marker", "id": "5", "value": 1, "server": SERVER})))
 

@@ -190,17 +190,26 @@ def _webhook_handler(coordinator: ComexioCoordinator, security: WebhookSecurity)
     return handle_webhook
 
 
-def _register_webhooks(hass: HomeAssistant, handler, server_id: str, registered: set[str], wanted: set[str]) -> None:
-    """Bring the registered ids to wanted; an id another registration holds is skipped, never taken over."""
+def _register_webhooks(
+    hass: HomeAssistant, handler, server_id: str, registered: set[str], refused: set[str], wanted: set[str]
+) -> None:
+    """Bring the registered ids to wanted; an id another registration holds is skipped, never taken over.
+
+    refused remembers the skipped ids, so the warning comes once per id and not with every coordinator update.
+    """
     for webhook_id in registered - wanted:
         webhook.async_unregister(hass, webhook_id)
     registered.difference_update(registered - wanted)
+    refused.intersection_update(wanted)
     for webhook_id in wanted - registered:
         try:
             webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handler)
         except ValueError:
-            _LOGGER.warning("[%s] Webhook id %s... is already registered, skipped", server_id, webhook_id[:8])
+            if webhook_id not in refused:
+                _LOGGER.warning("[%s] Webhook id %s... is already registered, skipped", server_id, webhook_id[:8])
+                refused.add(webhook_id)
             continue
+        refused.discard(webhook_id)
         registered.add(webhook_id)
 
 
@@ -211,6 +220,7 @@ def _setup_webhooks(
     server_id = coordinator.server_id
     handler = _webhook_handler(coordinator, security)
     registered: set[str] = set()
+    refused: set[str] = set()
     hass.data[DOMAIN][f"{entry.entry_id}_webhooks"] = registered
 
     @callback
@@ -219,7 +229,7 @@ def _setup_webhooks(
         wanted = coordinator.webhook_command_ids()
         if security.legacy_enabled:
             wanted.add(legacy_webhook_id(server_id))
-        _register_webhooks(hass, handler, server_id, registered, wanted)
+        _register_webhooks(hass, handler, server_id, registered, refused, wanted)
 
     coordinator.sync_webhooks = sync_webhooks
     sync_webhooks()
@@ -227,6 +237,9 @@ def _setup_webhooks(
     # HA runs these callbacks also when the setup fails after this point (a retry would otherwise meet the ids of
     # the failed attempt, registered with its stale handler).
     entry.async_on_unload(lambda: _unregister_webhooks(hass, registered))
+    # A sync ends with a reload, which builds a new WebhookSecurity from the store: write what a delayed save still
+    # holds (a lost last_write could switch the old id off before Comexio has restarted).
+    entry.async_on_unload(security.async_save)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):

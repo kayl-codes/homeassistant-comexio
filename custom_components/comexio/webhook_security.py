@@ -37,7 +37,7 @@ _LOGGER = logging.getLogger(__name__)
 WEBHOOK_PATH_PREFIX = "/api/webhook/"
 # 128 bit of the HMAC: as strong as HA's own generated ids, and a path HA's router takes without fuss.
 _ID_HEX_LENGTH = 32
-_SAVE_DELAY_SEC = 10
+_SAVE_DELAY_SEC = 2
 _KEY_SECRET = "secret"  # nosec B105 - a storage key, not a password
 _KEY_MIGRATED = "migrated"
 _KEY_LEGACY = "legacy"
