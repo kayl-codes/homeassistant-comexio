@@ -1,8 +1,10 @@
 """(dh) The plan preview is kept in .storage, never in config/www, which HA serves without authentication."""
 
+import ast
 import asyncio
 from collections.abc import Callable
 import pathlib
+import re
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -144,6 +146,7 @@ def test_a_store_without_a_usable_preview_is_logged(tmp_path: pathlib.Path, capl
 
     assert "Ignoring the stored plan preview" in caplog.text
     assert coordinator.last_plan_preview is None
+    assert coordinator.last_plan_preview_svg is None
 
 
 def test_a_www_copy_that_cannot_be_deleted_is_logged(
@@ -300,15 +303,49 @@ def test_no_image_proxy_url_for_an_image_nobody_can_load(monkeypatch: pytest.Mon
     assert coordinator.plan_preview_image_url() is None
 
 
+def _names_a_public_path(text: str) -> bool:
+    segments = re.split(r"[/\\]", text)
+    return "www" in segments or segments[:2] == ["", "local"]  # a docstring mentioning /local/ is no path
+
+
+def _names_the_www_folder(source: str) -> bool:
+    """Parsed string literals: the quote style does not matter, a comment does not count."""
+    return any(
+        isinstance(node, ast.Constant) and isinstance(node.value, str) and _names_a_public_path(node.value)
+        for node in ast.walk(ast.parse(source))
+    )
+
+
 def test_only_the_legacy_cleanup_still_names_the_www_folder() -> None:
     """Anything under config/www is served without authentication: no new code may write a preview there."""
     users = [
         path.relative_to(COMPONENT_DIR).as_posix()
         for path in COMPONENT_DIR.rglob("*.py")
-        if '"www"' in (source := path.read_text(encoding="utf-8")) or "/local/comexio" in source
+        if _names_the_www_folder(path.read_text(encoding="utf-8"))
     ]
 
     assert users == ["coordinator.py"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "path('www')",
+        'path("www")',
+        "path('www/comexio.svg')",
+        "url = '/local/comexio/plan.svg'",
+        "url = '/local/x.svg'",
+        "url = '/local' + name",
+        r"path('config\\www')",
+    ],
+)
+def test_the_www_guard_sees_a_public_path_in_any_quote_style(source: str) -> None:
+    assert _names_the_www_folder(source)
+
+
+@pytest.mark.parametrize("source", ["# www", "url = 'https://www.comexio.com/'", "path('.storage')"])
+def test_the_www_guard_ignores_what_is_no_public_path(source: str) -> None:
+    assert not _names_the_www_folder(source)
 
 
 def test_an_orphan_preview_that_was_not_shown_is_an_error(monkeypatch: pytest.MonkeyPatch) -> None:
