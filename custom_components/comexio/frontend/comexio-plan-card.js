@@ -40,7 +40,7 @@ import {
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.58";
+const CARD_VERSION = "0.9.59";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -1229,7 +1229,7 @@ class ComexioPlanCard extends HTMLElement {
     if (this._debugOn) {
       void this._ensureDebugSubscription(); // deferred until hass exists (also re-arms after reconnect)
     }
-    const st = hass.states[this._config.entity];
+    const st = this._sourceState();
     if (!st || st.state === "unavailable" || st.state === "unknown") {
       this._stamp = null;
       ++this._fetchSeq; // an in-flight fetch must not overwrite this message or start a retry
@@ -1240,7 +1240,7 @@ class ComexioPlanCard extends HTMLElement {
       // textContent, not innerHTML — entity id and state are outside data.
       const msg = document.createElement("div");
       msg.className = "msg";
-      msg.textContent = `Keine Vorschau verfügbar (${this._config.entity}: ${st ? st.state : "nicht gefunden"}).`;
+      msg.textContent = `Keine Vorschau verfügbar (${st ? st.entity_id : this._config.entity}: ${st ? st.state : "nicht gefunden"}).`;
       this._planEl.replaceChildren(msg);
       if (this._shownPreview) {
         this._setShownPreview(null);
@@ -1254,20 +1254,22 @@ class ComexioPlanCard extends HTMLElement {
     if (this._inFlight || this._failures > 0 || this._refetchOnConnect) {
       return; // fetched when the current fetch completes, by the pending retry, or on reattach
     }
-    void this._loadSvg(this._pictureUrl(st), st.state);
+    void this._loadSvg(st.attributes.entity_picture, st.state);
   }
 
-  // Where the SVG is fetched from: the image entity's entity_picture (HA's authenticated image proxy, its
-  // token rotates, so it is read anew for every fetch). A card fed by the Plan Preview sensor fetches the
-  // image on the sensor's device: the sensor has no picture of its own since the preview left /local/ (dh).
-  _pictureUrl(st) {
-    const own = st.attributes.entity_picture;
-    const entry = this._hass?.entities?.[this._config.entity];
-    // Only for the Plan Preview sensor (same translation key as the image): another entity has no preview.
-    if (own || _isPreviewImage(this._config.entity) || entry?.translation_key !== PREVIEW_TRANSLATION_KEY) {
-      return own;
+  // The state the preview is fetched by: its entity_picture is HA's authenticated image proxy (the token
+  // rotates, so it is read anew for every fetch), its state the stamp. A card fed by the Plan Preview sensor
+  // goes by the preview image on the sensor's device: the sensor has no picture since the preview left
+  // /local/ (dh), and its state is the plan name, which a new render of the same plan does not change.
+  // Undefined while that image is missing, so the card shows why and checks again on the next update.
+  _sourceState() {
+    const entityId = this._config.entity;
+    const st = this._hass?.states[entityId];
+    const entry = this._hass?.entities?.[entityId];
+    if (!st || _isPreviewImage(entityId) || entry?.translation_key !== PREVIEW_TRANSLATION_KEY) {
+      return st;
     }
-    return this._previewImageOnDevice(entry.device_id)?.attributes.entity_picture;
+    return this._previewImageOnDevice(entry.device_id);
   }
 
   async _loadSvg(url, stamp) {
@@ -1413,9 +1415,9 @@ class ComexioPlanCard extends HTMLElement {
   }
 
   _reloadCurrentStamp() {
-    const st = this._hass?.states[this._config.entity];
+    const st = this._sourceState();
     if (st && st.state === this._stamp) {
-      void this._loadSvg(this._pictureUrl(st), st.state);
+      void this._loadSvg(st.attributes.entity_picture, st.state);
     }
   }
 
@@ -1423,13 +1425,12 @@ class ComexioPlanCard extends HTMLElement {
   // so the image swapped in later keeps the identity it was fetched as. Null when the state
   // moved on meanwhile or the entity reports none (an integration without these attributes).
   _previewIdentity(stamp) {
-    const st = this._hass?.states[this._config.entity];
+    const st = this._sourceState();
     if (st?.state !== stamp) {
       return null;
     }
-    // Only the image entity names its render. A card fed by the Plan Preview sensor has none to
-    // go by (its state is the plan name, not the render stamp) — null, so its buttons warn.
-    return _isPreviewImage(this._config.entity) ? this._identityOf(st) : null;
+    // Only the image entity names its render; a card fed by the Plan Preview sensor goes by the image too.
+    return _isPreviewImage(st.entity_id) ? this._identityOf(st) : null;
   }
 
   // Full card: record which plan the image on screen shows and let trigger-only cards re-check.

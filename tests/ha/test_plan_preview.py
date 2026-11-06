@@ -281,6 +281,20 @@ async def test_removing_the_entry_removes_its_stored_preview(
     assert _preview_store_key(loaded_entry) not in hass_storage
 
 
+async def test_removing_an_entry_that_never_ran_the_new_setup_deletes_the_public_file(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """Review (Sourcery, #272): a disabled entry removed after the upgrade never ran the setup that deletes it."""
+    public_file = await _write_public_file(hass, mock_config_entry)
+    mock_config_entry.add_to_hass(hass)
+    assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
+
+    await hass.config_entries.async_remove(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert not await hass.async_add_executor_job(public_file.exists)
+
+
 async def test_a_failing_saved_config_removal_still_removes_the_stored_preview(
     hass: HomeAssistant, loaded_entry: MockConfigEntry, hass_storage: dict[str, Any]
 ) -> None:

@@ -931,6 +931,8 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     async_remove_certificate_pushes(hass, entry)
     if (server_id := entry.data.get(CONF_SERVER_ID)) is not None:
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
+        # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).
+        await async_remove_legacy_plan_preview(hass, server_id)
     # Nothing else reads them once the entry is gone: a new entry gets a new entry id (#250).
     # finally: a failed delete of one must not keep the other, the preview names the user's wiring.
     try:
