@@ -1075,9 +1075,11 @@ def test_visualize_text_returns_a_response() -> None:
     assert response["text"] == notify.call_args.args[1]
 
 
-def test_visualize_svg_returns_the_preview_url() -> None:
+def test_visualize_svg_returns_the_preview_images_proxy_url() -> None:
+    """(dh) The SVG is no /local/ file any more: the response names the authenticated image proxy."""
     coordinator = SimpleNamespace(
-        async_generate_plan_preview=AsyncMock(return_value="/local/comexio/plan_5.svg"),
+        async_generate_plan_preview=AsyncMock(),
+        plan_preview_image_url=MagicMock(return_value="/api/image_proxy/image.cx1_plan_preview"),
         snapshot_block_settings_for_source=MagicMock(return_value=None),
         snapshot_paper_format_for_source=MagicMock(return_value=None),
         preview_follow_lock=asyncio.Lock(),
@@ -1090,7 +1092,7 @@ def test_visualize_svg_returns_the_preview_url() -> None:
         patch.object(plan_actions.persistent_notification, "async_create"),
     ):
         response = asyncio.run(plan_actions.handle_function_plan_visualize(MagicMock(), call))
-    assert response == {"plan_name": PLAN, "url": "/local/comexio/plan_5.svg"}
+    assert response == {"plan_name": PLAN, "url": "/api/image_proxy/image.cx1_plan_preview"}
 
 
 def _visualize_api(live_fubs: dict[str, Any] | list | None) -> SimpleNamespace:

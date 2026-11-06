@@ -1,5 +1,7 @@
 """The plan preview renders a block's extended view from the right block settings (#146 follow-up)."""
 
+from http import HTTPStatus
+import pathlib
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -7,6 +9,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import CONF_SERVER_ID, DOMAIN
@@ -131,7 +134,7 @@ async def test_the_backup_selector_shares_its_device_with_the_only_preview_image
 async def test_a_restored_preview_without_a_render_names_no_plan(
     hass: HomeAssistant, loaded_entry: MockConfigEntry
 ) -> None:
-    """After a restart only last_plan_preview is restored, the SVG file may be newer: no identity."""
+    """A last_plan_preview without an SVG names no image: no identity."""
     coordinator = hass.data[DOMAIN][loaded_entry.entry_id]
     coordinator.last_plan_preview = {
         "fub_id": 1,
@@ -144,3 +147,112 @@ async def test_a_restored_preview_without_a_render_names_no_plan(
     await hass.async_block_till_done()
 
     assert _preview_image_attributes(hass, loaded_entry) == dict.fromkeys(PREVIEW_ATTRIBUTES)
+
+
+STORED_PREVIEW = {
+    "fub_id": 3,
+    "plan_name": "Garage",
+    "source": "live",
+    "captured_at": None,
+    "generated_at": "2026-01-02T03:04:05+00:00",
+}
+
+
+def _preview_store_key(entry: MockConfigEntry) -> str:
+    return f"{DOMAIN}_plan_preview_{entry.entry_id}"
+
+
+async def test_a_restart_restores_the_preview_from_the_store_and_deletes_the_public_file(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    hass_storage: dict[str, Any],
+) -> None:
+    """Loaded before the platforms: image and info sensor name the last preview right after the setup."""
+    server_id = mock_config_entry.data[CONF_SERVER_ID]
+    public_file = pathlib.Path(hass.config.path("www", f"comexio_{server_id}_plan_preview.svg"))
+
+    def write_public_file() -> None:
+        public_file.parent.mkdir(parents=True, exist_ok=True)
+        public_file.write_text("<svg/>", encoding="utf-8")
+
+    await hass.async_add_executor_job(write_public_file)
+    hass_storage[_preview_store_key(mock_config_entry)] = {
+        "version": 1,
+        "key": _preview_store_key(mock_config_entry),
+        "data": {"svg": "<svg/>", "preview": STORED_PREVIEW},
+    }
+    mock_config_entry.add_to_hass(hass)
+
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert _preview_image_attributes(hass, mock_config_entry) == {
+        "fub_id": 3,
+        "plan_name": "Garage",
+        "source": "live",
+        "captured_at": None,
+    }
+    sensor_id = er.async_get(hass).async_get_entity_id("sensor", DOMAIN, f"comexio_{server_id}_plan_preview_sensor")
+    assert sensor_id is not None
+    sensor_state = hass.states.get(sensor_id)
+    assert sensor_state is not None
+    assert sensor_state.state == "Garage"
+    assert "entity_picture" not in sensor_state.attributes
+    assert not await hass.async_add_executor_job(public_file.exists)
+
+
+async def test_the_restored_preview_is_only_served_with_authentication(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    hass_storage: dict[str, Any],
+    hass_client: ClientSessionGenerator,
+    hass_client_no_auth: ClientSessionGenerator,
+) -> None:
+    """The point of (dh): the URL the service returns serves the SVG to a logged-in client only."""
+    hass_storage[_preview_store_key(mock_config_entry)] = {
+        "version": 1,
+        "key": _preview_store_key(mock_config_entry),
+        "data": {"svg": "<svg/>", "preview": STORED_PREVIEW},
+    }
+    mock_config_entry.add_to_hass(hass)
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    url = hass.data[DOMAIN][mock_config_entry.entry_id].plan_preview_image_url()
+    assert url is not None
+    image_state = hass.states.get(url.removeprefix("/api/image_proxy/"))
+    assert image_state is not None
+    assert image_state.state == STORED_PREVIEW["generated_at"]
+
+    response = await (await hass_client()).get(url)
+    assert response.status == HTTPStatus.OK
+    assert await response.read() == b"<svg/>"
+    assert (await (await hass_client_no_auth()).get(url)).status == HTTPStatus.FORBIDDEN
+
+
+async def test_a_reload_keeps_a_preview_whose_delayed_save_was_still_pending(
+    hass: HomeAssistant, loaded_entry: MockConfigEntry, hass_storage: dict[str, Any]
+) -> None:
+    await _rendered_ref_id(hass, loaded_entry, "snapshot:change:2", block_settings={})
+    assert _preview_store_key(loaded_entry) not in hass_storage
+
+    assert await hass.config_entries.async_reload(loaded_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert _preview_image_attributes(hass, loaded_entry)["source"] == "snapshot:change:2"
+
+
+async def test_removing_the_entry_removes_its_stored_preview(
+    hass: HomeAssistant, loaded_entry: MockConfigEntry, hass_storage: dict[str, Any]
+) -> None:
+    await _rendered_ref_id(hass, loaded_entry, "live", block_settings=None)
+    await hass.config_entries.async_unload(loaded_entry.entry_id)
+    await hass.async_block_till_done()
+    assert _preview_store_key(loaded_entry) in hass_storage
+
+    await hass.config_entries.async_remove(loaded_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert _preview_store_key(loaded_entry) not in hass_storage

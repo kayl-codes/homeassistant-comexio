@@ -251,7 +251,8 @@ def test_the_svg_visualize_of_a_backup_renders_with_its_paper_format() -> None:
         preview_follow_generation=0,
         snapshot_block_settings_for_source=MagicMock(return_value=None),
         snapshot_paper_format_for_source=MagicMock(return_value=A5),
-        async_generate_plan_preview=AsyncMock(return_value="/local/preview.svg"),
+        async_generate_plan_preview=AsyncMock(),
+        plan_preview_image_url=MagicMock(return_value="/api/image_proxy/image.cx1_plan_preview"),
     )
     source = (coordinator, None, 7, "Lights", {}, {}, SNAPSHOT_SOURCE, None)
     call = SimpleNamespace(data={"format": "svg", "snapshot": "7:auto:1:Lights"}, return_response=True)
@@ -372,7 +373,7 @@ def _render_coordinator() -> ComexioCoordinator:
     coordinator._build_preview_title_and_canvas = MagicMock(return_value=("", None))  # type: ignore[method-assign]
     coordinator._resolve_preview_connection_values = AsyncMock(return_value=({}, {}))  # type: ignore[method-assign]
     coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
-    coordinator._async_publish_plan_preview = AsyncMock(return_value="/local/x.svg")  # type: ignore[method-assign]
+    coordinator._async_publish_plan_preview = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
     return coordinator
 
@@ -881,6 +882,20 @@ def test_a_backup_of_a_deleted_plan_shows_its_own_format() -> None:
     assert coordinator._build_preview_title_and_canvas(7) == ("", None)
 
 
+def _orphan_render_coordinator(snapshot: dict[str, Any] | None) -> ComexioCoordinator:
+    coordinator = _preview_coordinator()
+    coordinator.server_id = SERVER_ID
+    coordinator.hass = MagicMock()
+    coordinator._preview_cache_generation = 0
+    coordinator.stop_preview = MagicMock()  # type: ignore[method-assign]
+    coordinator.function_plan_backup = SimpleNamespace(async_get_snapshot=AsyncMock(return_value=snapshot))
+    coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
+    coordinator._resolve_preview_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
+    coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
+    coordinator._async_publish_plan_preview = AsyncMock()  # type: ignore[method-assign]
+    return coordinator
+
+
 @pytest.mark.parametrize(
     ("stored", "title", "canvas"),
     [
@@ -900,17 +915,7 @@ def test_a_backup_of_a_deleted_plan_shows_its_own_format() -> None:
 def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
     stored: dict[str, Any], title: str, canvas: tuple | None
 ) -> None:
-    coordinator = _preview_coordinator()
-    coordinator.server_id = SERVER_ID
-    coordinator.hass = MagicMock()
-    coordinator._preview_cache_generation = 0
-    coordinator.stop_preview = MagicMock()  # type: ignore[method-assign]
-    snapshot = {"elements": {}, "connections": {}, **stored}
-    coordinator.function_plan_backup = SimpleNamespace(async_get_snapshot=AsyncMock(return_value=snapshot))
-    coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
-    coordinator._resolve_preview_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
-    coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
-    coordinator._async_publish_plan_preview = AsyncMock(return_value="/local/x.svg")  # type: ignore[method-assign]
+    coordinator = _orphan_render_coordinator({"elements": {}, "connections": {}, **stored})
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
 
     with (
@@ -918,8 +923,9 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
         patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
         patch.object(coordinator_module, "render_plan_svg", return_value=PREVIEW_SVG) as render,
     ):
-        asyncio.run(coordinator.async_generate_orphaned_plan_preview(7, "Lights", "auto", 0))
+        shown = asyncio.run(coordinator.async_generate_orphaned_plan_preview(7, "Lights", "auto", 0))
 
+    assert shown is True
     assert render.call_args.args[7] == title
     assert render.call_args.kwargs["canvas"] == canvas
     assert render.call_args.kwargs["block_values"] == stored.get(SNAPSHOT_BLOCK_SETTINGS)
@@ -927,6 +933,31 @@ def test_the_preview_of_an_orphaned_backup_uses_its_paper_format(
     coordinator._async_publish_plan_preview.assert_awaited_once_with(
         7, "Lights", "orphan:auto:0", PREVIEW_SVG, captured_at=stored.get("captured_at")
     )
+
+
+def test_an_orphan_render_of_a_snapshot_deleted_meanwhile_shows_nothing() -> None:
+    coordinator = _orphan_render_coordinator(None)
+
+    assert asyncio.run(coordinator.async_generate_orphaned_plan_preview(7, "Lights", "auto", 0)) is False
+    coordinator._async_publish_plan_preview.assert_not_awaited()
+
+
+def test_an_orphan_render_overtaken_by_a_newer_preview_shows_nothing() -> None:
+    coordinator = _orphan_render_coordinator({"elements": {}, "connections": {}})
+
+    def overtaken(*_args: Any, **_kwargs: Any) -> str:
+        coordinator._preview_cache_generation += 1
+        return PREVIEW_SVG
+
+    with (
+        patch.object(coordinator_module, "_build_sun_times", return_value={}),
+        patch.object(coordinator_module, "expand_autohide_blocks", return_value=({}, {})),
+        patch.object(coordinator_module, "render_plan_svg", side_effect=overtaken),
+    ):
+        shown = asyncio.run(coordinator.async_generate_orphaned_plan_preview(7, "Lights", "auto", 0))
+
+    assert shown is False
+    coordinator._async_publish_plan_preview.assert_not_awaited()
 
 
 def _orphan_load_coordinator(options: list[tuple[str, dict[str, Any]]]) -> ComexioCoordinator:
@@ -951,10 +982,10 @@ def test_loading_an_orphaned_plan_renders_in_turn_with_the_selection_follows() -
     coordinator = _orphan_load_coordinator([("Lights", _ORPHAN_ROW)])
     seen: dict[str, Any] = {}
 
-    async def render(*args: Any) -> str:
+    async def render(*args: Any) -> bool:
         seen.update(locked=coordinator.preview_follow_lock.locked(), generation=coordinator.preview_follow_generation)
         seen["args"] = args
-        return "/local/x.svg"
+        return True
 
     coordinator.async_generate_orphaned_plan_preview = render  # type: ignore[method-assign]
     registry = SimpleNamespace(async_get_entity_id=lambda _domain, _platform, unique_id: f"select.{unique_id}")
@@ -963,6 +994,18 @@ def test_loading_an_orphaned_plan_renders_in_turn_with_the_selection_follows() -
 
     assert loaded is True
     assert seen == {"locked": True, "generation": 4, "args": (7, "Lights", "auto", 0)}
+
+
+def test_loading_an_orphaned_plan_reports_a_render_that_showed_nothing() -> None:
+    """The repair relies on it: a snapshot gone while it rendered is no loaded plan."""
+    coordinator = _orphan_load_coordinator([("Lights", _ORPHAN_ROW)])
+    coordinator.async_generate_orphaned_plan_preview = AsyncMock(return_value=False)  # type: ignore[method-assign]
+    registry = SimpleNamespace(async_get_entity_id=lambda _domain, _platform, unique_id: f"select.{unique_id}")
+
+    with patch.object(coordinator_module.er, "async_get", return_value=registry):
+        loaded = asyncio.run(coordinator.async_load_orphaned_plan_into_preview(7, "Lights"))
+
+    assert loaded is False
 
 
 def test_loading_an_orphaned_plan_reads_the_backup_choice_once_it_holds_the_lock() -> None:
@@ -1068,17 +1111,16 @@ def test_a_preview_without_a_root_tag_to_stamp_is_published_with_a_warning(
     """(Review #233) Unstamped, the plan card keeps warning before a delete: the log says why."""
     coordinator = _preview_coordinator()
     coordinator.server_id = SERVER_ID
-    coordinator.hass = MagicMock()
-    coordinator.hass.config.path = lambda *parts: "/".join(("/config", *parts))
-    coordinator.hass.async_add_executor_job = AsyncMock()
+    coordinator._plan_preview_store = MagicMock()
+    coordinator._plan_preview_store_closed = False
 
     with caplog.at_level("WARNING", logger=coordinator_module.__name__):
         asyncio.run(coordinator._async_publish_plan_preview(7, "Lights", "live", svg))
 
-    written = coordinator.hass.async_add_executor_job.await_args.args[2]
+    published = coordinator.last_plan_preview_svg
     assert ("no <svg> root tag" in caplog.text) is warned
-    assert (written == svg) is warned  # unstamped, but published unchanged all the same
-    assert coordinator.last_plan_preview_svg == written
+    assert (published == svg) is warned  # unstamped, but published unchanged all the same
+    coordinator._plan_preview_store.async_delay_save.assert_called_once()
 
 
 def test_a_backup_preview_without_a_known_format_names_none() -> None:

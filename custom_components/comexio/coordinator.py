@@ -154,6 +154,7 @@ from .const import (
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
     PLAN_FAILURE_UNREADABLE_PLAN_LIST,
+    PLAN_PREVIEW_SAVE_DELAY_SEC,
     PLAN_TRANSITION_STARTING,
     PREVIEW_CARD_ALIVE_SEC,
     QUICKBUS_IO_DATA_KEY,
@@ -396,10 +397,38 @@ def stamp_preview_identity(svg_content: str, source: str, captured_at: str | Non
     return _SVG_ROOT_TAG_RE.sub(lambda match: match.group(0) + attributes, svg_content, count=1)
 
 
-def _write_preview_svg(path: pathlib.Path, svg_content: str) -> None:
-    """Blocking file write — always run via hass.async_add_executor_job."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(svg_content, encoding="utf-8")
+def plan_preview_store(hass: HomeAssistant, entry_id: str) -> Store:
+    """The store of the last rendered plan preview (its SVG and what it shows), kept for a restart.
+
+    In .storage, never in config/www: HA serves that folder under /local/ without authentication, and a
+    preview names the user's markers, IOs and wiring with their live values. Only the image entity serves it,
+    through HA's authenticated image proxy. Keyed by the entry id, like saved_config_store.
+    """
+    return Store(hass, 1, f"{DOMAIN}_plan_preview_{entry_id}")
+
+
+def legacy_plan_preview_path(hass: HomeAssistant, server_id: str) -> pathlib.Path:
+    """Where older releases wrote the preview: config/www, which anyone reaching HA could read under /local/."""
+    return pathlib.Path(hass.config.path("www", f"comexio_{server_id}_plan_preview.svg"))
+
+
+def stored_plan_preview(stored: Any) -> tuple[str, dict[str, Any]] | None:
+    """(svg, last_plan_preview) from the plan preview store's data; None when it holds no usable preview."""
+    if not isinstance(stored, dict):
+        return None
+    svg, preview = stored.get("svg"), stored.get("preview")
+    if not isinstance(svg, str) or not isinstance(preview, dict) or not isinstance(preview.get("generated_at"), str):
+        return None
+    return svg, preview
+
+
+def _remove_legacy_preview_file(path: pathlib.Path) -> bool:
+    """Blocking delete — always run via hass.async_add_executor_job. True when there was a file to remove."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return False
+    return True
 
 
 def _parse_snapshot_source(source: str) -> tuple[str, int]:
@@ -1243,9 +1272,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._warned_unknown_webhook_ios: set[tuple[str, ...]] = set()
         self._warned_unknown_webhook_cap = False
         self.last_plan_preview: dict[str, Any] | None = None
-        # In-memory copy of the last rendered preview SVG, served directly by the
-        # image entity (image.py) without touching the config/www file.
+        # The last rendered preview SVG, served by the image entity (image.py). Kept with last_plan_preview in
+        # _plan_preview_store for a restart (async_load_plan_preview), so both always name the same render.
         self.last_plan_preview_svg: str | None = None
+        self._plan_preview_store: Store = plan_preview_store(hass, entry.entry_id)
+        self._plan_preview_save_pending = False
+        self._plan_preview_store_closed = False
         # Live-value preview refresh (Stufe 1): plan structure of the last LIVE preview is
         # cached so webhook pushes can re-render it with fresh values without re-fetching
         # the plan from Comexio; a shown snapshot clears the cache (it must not be
@@ -4105,14 +4137,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
         label_metadata: dict[str, dict[str, str]] | None = None,
         block_settings: Mapping[str, Mapping[str, str]] | None = None,
         paper_format: tuple[str, int, str] | None = None,
-    ) -> str:
-        """Render elements/connections (live plan or backup snapshot) to a preview SVG file.
+    ) -> None:
+        """Render elements/connections (live plan or backup snapshot) to the preview SVG.
 
-        Writes to config/www so the frontend can serve it under /local/. One rotating file
-        per server_id — each call overwrites the previous preview. Updates last_plan_preview
-        so the Plan Preview sensor (entity_picture) reflects whatever was last generated,
-        whether triggered by plan_preview (plan card, 'Plan'/'Backup' selection) or a
-        function_plan_visualize service call with format=svg. Returns the /local/ URL.
+        One preview per entry — each call replaces the previous one (see _async_publish_plan_preview).
+        Updates last_plan_preview so the preview image and the Plan Preview Info sensor reflect
+        whatever was last generated, whether triggered by plan_preview (plan card, 'Plan'/'Backup'
+        selection) or a function_plan_visualize service call with format=svg.
 
         A snapshot render's wiring/elements stay frozen at the stored snapshot — see
         select.py's ComexioPlanBackupSelectEntity — but its per-connection VALUES still track
@@ -4173,13 +4204,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # The plan card switched to a deleted plan's backup while this render was in flight —
             # publishing now would replace that frozen preview with this plan.
             _LOGGER.debug("[%s] Plan preview skipped: the orphaned-plans view took over meanwhile", self.server_id)
-            return f"/local/comexio_{self.server_id}_plan_preview.svg"
-        url = await self._async_publish_plan_preview(fub_id, plan_name, source, svg_content)
+            return
+        await self._async_publish_plan_preview(fub_id, plan_name, source, svg_content)
         # The preview may have been stopped (or auto-stopped, disarmed after repeated poll
         # failures, shut down, or re-armed by a concurrent render for a different plan) while
         # the awaits above were in flight — committing the cache now would resurrect a preview
         # that was explicitly told to stop, or clobber a newer render with a stale one (#77).
-        # The already-written SVG/last_plan_preview above stay as the last rendered frame
+        # The SVG/last_plan_preview published above stay as the last rendered frame
         # either way; only the re-arming is skipped.
         if cache_generation_before == self._preview_cache_generation:
             if source == "live":
@@ -4206,7 +4237,6 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Not async_set_updated_data: a live preview re-renders every few seconds and would keep
         # postponing the periodic poll, like the webhook pushes (see _async_publish_pushed_value).
         self.async_update_listeners()
-        return url
 
     def snapshot_paper_format_for_source(self, fub_id: int, plan_name: str, source: str) -> tuple[str, int, str] | None:
         """The stored paper format of a 'snapshot:<kind>:<slot>' preview source; None for "live".
@@ -4233,14 +4263,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     async def _async_publish_plan_preview(
         self, fub_id: int, plan_name: str, source: str, svg_content: str, captured_at: str | None = None
-    ) -> str:
-        """Write a rendered preview to config/www and record it as the last preview; returns its /local/ URL.
+    ) -> None:
+        """Record a rendered preview as the last preview and schedule its save for a restart.
 
-        captured_at: the rendered snapshot's capture time (orphaned-plans view only; see
-        image.ComexioPlanPreviewImage.extra_state_attributes).
+        Only in memory and .storage (plan_preview_store), never under config/www: the image entity serves it
+        through HA's authenticated image proxy. captured_at: the rendered snapshot's capture time
+        (orphaned-plans view only; see image.ComexioPlanPreviewImage.extra_state_attributes).
         """
-        filename = f"comexio_{self.server_id}_plan_preview.svg"
-        file_path = pathlib.Path(self.hass.config.path("www", filename))
         stamped = stamp_preview_identity(svg_content, source, captured_at)
         if stamped == svg_content:
             # Shown anyway; the plan card then never trusts its identity and keeps warning before a delete.
@@ -4250,10 +4279,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 one_line(plan_name),
                 source,
             )
-        svg_content = stamped
-        await self.hass.async_add_executor_job(_write_preview_svg, file_path, svg_content)
-
-        self.last_plan_preview_svg = svg_content
+        self.last_plan_preview_svg = stamped
         self.last_plan_preview = {
             "fub_id": fub_id,
             "plan_name": plan_name,
@@ -4261,7 +4287,71 @@ class ComexioCoordinator(DataUpdateCoordinator):
             "captured_at": captured_at,
             "generated_at": dt_util.utcnow().isoformat(),
         }
-        return f"/local/{filename}"
+        # Delayed: a live preview re-renders every few seconds. Each render pushes the save back, so nothing is
+        # written while it runs; the save follows once it stops (auto-stop) or at the shutdown. A crash before
+        # that loses this preview only. The data is read when the save runs, so the store always holds the
+        # newest render with the metadata naming it.
+        # Not after async_shutdown: a timer outliving it could overwrite a newer preview of the next coordinator.
+        if self._plan_preview_store_closed:
+            _LOGGER.debug("[%s] Plan preview rendered after the shutdown: not saved", self.server_id)
+            return
+        self._plan_preview_save_pending = True
+        self._plan_preview_store.async_delay_save(self._plan_preview_store_data, PLAN_PREVIEW_SAVE_DELAY_SEC)
+
+    def _plan_preview_store_data(self) -> dict[str, Any]:
+        """What plan_preview_store holds: the last preview's SVG and its last_plan_preview."""
+        self._plan_preview_save_pending = False
+        return {"svg": self.last_plan_preview_svg, "preview": self.last_plan_preview}
+
+    def plan_preview_image_url(self) -> str | None:
+        """The preview image's path on HA's authenticated image proxy; None without an enabled image entity."""
+        registry = er.async_get(self.hass)
+        entity_id = registry.async_get_entity_id("image", DOMAIN, f"comexio_{self.server_id}_plan_preview_image")
+        entity = registry.async_get(entity_id) if entity_id else None
+        return f"/api/image_proxy/{entity_id}" if entity is not None and not entity.disabled else None
+
+    async def async_load_plan_preview(self) -> None:
+        """Delete the copy older releases left in config/www and restore the last preview from .storage.
+
+        Called once at setup, before the platforms: the image and the Plan Preview Info sensor then show the
+        last preview right away. An unreadable store only leaves the preview empty until the next render: it
+        must neither fail the setup nor keep the public copy from being deleted, hence that delete goes first.
+        """
+        await self._async_remove_legacy_plan_preview()
+        try:
+            stored = await self._plan_preview_store.async_load()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "[%s] Could not read the last plan preview, it stays empty for now: %s", self.server_id, err
+            )
+            return
+        if (restored := stored_plan_preview(stored)) is not None:
+            self.last_plan_preview_svg, self.last_plan_preview = restored
+        elif stored is not None:
+            _LOGGER.warning("[%s] Ignoring the stored plan preview: it has no usable SVG or timestamp", self.server_id)
+
+    async def _async_remove_legacy_plan_preview(self) -> None:
+        """Delete the preview older releases wrote to config/www; it is never read back, the store keeps it now."""
+        legacy_path = legacy_plan_preview_path(self.hass, self.server_id)
+        try:
+            removed = await self.hass.async_add_executor_job(_remove_legacy_preview_file, legacy_path)
+        except OSError as err:
+            _LOGGER.warning(
+                "[%s] Could not delete the old plan preview %s, which HA serves without authentication under "
+                "/local/ — please delete it by hand: %s",
+                self.server_id,
+                legacy_path,
+                err,
+            )
+            return
+        if removed:
+            _LOGGER.info("[%s] Deleted the old plan preview %s (now kept in .storage)", self.server_id, legacy_path)
+
+    async def _async_close_plan_preview_store(self) -> None:
+        """Save a preview whose delayed save is still pending, for the next coordinator; no render saves after this."""
+        self._plan_preview_store_closed = True
+        if self._plan_preview_save_pending:
+            await self._plan_preview_store.async_save(self._plan_preview_store_data())
 
     def live_plan_list(self) -> dict[str, Any] | None:
         """The cached plan list ($Fubs) to judge deleted plans by, None until a full poll read one.
@@ -4348,21 +4438,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 )
                 return False
             self.preview_follow_generation += 1
-            url = await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
-        return url is not None
+            return await self.async_generate_orphaned_plan_preview(fub_id, plan_name, choice["kind"], choice["slot"])
 
     def _orphan_label_selected(self, backup_eid: str, label: str) -> bool:
         """True while the 'Plan' selector shows the orphaned-plans view and the backup selector this label."""
         backup_state = self.hass.states.get(backup_eid)
         return self.orphaned_plans_view_active() and backup_state is not None and backup_state.state == label
 
-    async def async_generate_orphaned_plan_preview(
-        self, fub_id: int, plan_name: str, kind: str, slot: int
-    ) -> str | None:
+    async def async_generate_orphaned_plan_preview(self, fub_id: int, plan_name: str, kind: str, slot: int) -> bool:
         """Render a backup of a deleted function plan as a frozen preview.
 
-        Returns the preview's /local/ URL, or None when the snapshot is gone (deleted
-        meanwhile). Unlike a snapshot render of an existing plan, no live values are
+        Returns True once it is the preview, False when the snapshot is gone (deleted meanwhile)
+        or a newer preview took over while it rendered. Unlike a snapshot render of an existing plan, no live values are
         overlaid: the live plan under this fub_id (if any) is an unrelated plan that reused
         the id, so translating its connection values would color the wires with foreign
         data. Stops the preview poll for the same reason, and keeps the snapshot's stored
@@ -4380,7 +4467,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 one_line(plan_name),
                 fub_id,
             )
-            return None
+            return False
         markers_by_id, webio_by_id, ios_by_id = self._resolve_preview_label_maps(snapshot.get("labels"))
         catalog = await self.function_plan_catalog.async_get_catalog()
         block_settings = snapshot_block_settings(snapshot)
@@ -4407,14 +4494,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if cache_generation_before != self._preview_cache_generation:
             # A newer render (another plan picked meanwhile) owns the preview now.
             _LOGGER.debug("[%s] Orphaned plan preview skipped: a newer preview was armed meanwhile", self.server_id)
-            return None
+            return False
         # captured_at from the snapshot read above, before any await: it names what was rendered,
         # even when a delete shifted the slots meanwhile.
-        url = await self._async_publish_plan_preview(
+        await self._async_publish_plan_preview(
             fub_id, plan_name, f"orphan:{kind}:{slot}", svg_content, captured_at=snapshot.get("captured_at")
         )
         self.async_update_listeners()
-        return url
+        return True
 
     def _armed_snapshot_live_id_map(self, fub_id: int, source: str) -> dict[str, str] | None:
         """The already-armed snapshot's live-id translation table, if this render refreshes it.
@@ -4935,7 +5022,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Wait until it has stopped: async_unload_entry closes the API session right after.
             # asyncio.wait does not raise, so a cancellation of this shutdown itself still propagates.
             await asyncio.wait([self._system_info_task])
-        await super().async_shutdown()
+        try:
+            await super().async_shutdown()
+        finally:
+            # Last: a failing save must not skip the cleanup above.
+            await self._async_close_plan_preview_store()
 
     def _fire_plan_system_event(self, message: str) -> None:
         """Publish a card-only status line (not a signal value) — see _fire_plan_event.

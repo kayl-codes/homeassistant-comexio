@@ -200,8 +200,8 @@ async def _resolve_visualize_live_source(hass: HomeAssistant, call: ServiceCall,
 async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall) -> dict | None:
     """Service to visualize a function plan (live or a stored backup snapshot) as a text
     diagram (also returned as 'text'), or — format='svg' — render it to the Function Plan
-    preview SVG and return its /local/ URL (used by coordinator.async_generate_plan_preview / the comexio-plan-card
-    frontend, see [[project-logikplan-preview]]).
+    preview SVG (coordinator.async_generate_plan_preview, shown by the preview image and the comexio-plan-card)
+    and return the preview image's path on HA's authenticated image proxy as 'url'.
 
     Snapshot resolution mirrors _handle_function_plan_restore: a 'snapshot' field (composite
     'fub_id:kind:slot:plan_name' dropdown value) targets one exact stored backup, entirely
@@ -232,7 +232,7 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
         # request it supersedes selection follows still queued, so none of them overwrites it.
         async with coordinator.preview_follow_lock:
             coordinator.preview_follow_generation += 1
-            preview_url = await coordinator.async_generate_plan_preview(
+            await coordinator.async_generate_plan_preview(
                 fub_id, plan_name, elements, connections, source, label_metadata, block_settings, paper_format
             )
         persistent_notification.async_create(
@@ -240,7 +240,7 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
             f"Preview for '{one_line(plan_name)}' updated — see the Preview image.",
             title=f"Function Plan Visualize — {one_line(plan_name)}",
         )
-        return {"plan_name": plan_name, "url": preview_url}
+        return {"plan_name": plan_name, "url": coordinator.plan_preview_image_url()}
 
     markers_by_id, webio_by_id, ios_by_id = coordinator.function_plan_label_maps()
     if label_metadata:
