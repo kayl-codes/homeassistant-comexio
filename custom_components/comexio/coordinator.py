@@ -7819,11 +7819,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def marker_entities_by_id(self, marker_ids: list[int], unique_id_infix: str = "m") -> dict[int, er.RegistryEntry]:
         """Return registry entries for the given source ids that still have an HA entity.
 
-        Single pass over the registry regardless of how many marker_ids are checked, instead
-        of one full registry scan per marker. Shared by the audit check (read-only) and the
+        Single pass over this config entry's entities regardless of how many marker_ids are
+        checked, instead of one scan per marker. Shared by the audit check (read-only) and the
         cleanup button (which also deletes the returned entries) to avoid divergent matching
         logic between the two. unique_id_infix distinguishes source categories sharing this
         helper (e.g. "m" for markers, "k" for KNX objects, see SourceCategory.unique_id_infix).
+
+        Only this entry's entities count: a unique_id is unique per integration, not across
+        HA, so another integration's entity with the same unique_id must never be deleted.
         """
         ent_reg = er.async_get(self.hass)
         marker_id_by_unique_id = {
@@ -7831,7 +7834,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         return {
             marker_id: entity
-            for entity in ent_reg.entities.values()
+            for entity in er.async_entries_for_config_entry(ent_reg, self.config_entry.entry_id)
             if (marker_id := marker_id_by_unique_id.get((entity.unique_id or "").lower())) is not None
         }
 
