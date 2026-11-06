@@ -178,20 +178,24 @@ async def _write_public_file(hass: HomeAssistant, entry: MockConfigEntry) -> pat
 
 @pytest.mark.logged_exception  # the coordinator logs the failed first refresh with its traceback
 async def test_a_setup_that_cannot_reach_comexio_still_deletes_the_public_file(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], api_returns: dict
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    certificate_handshake: AsyncMock,
 ) -> None:
     """Review (Sourcery, #272): while Comexio stays unreachable the setup retries, the public copy must not stay."""
     public_file = await _write_public_file(hass, mock_config_entry)
     api_returns["get_raw_config"] = OSError("connection reset")
     mock_config_entry.add_to_hass(hass)
     delete = comexio_init.async_remove_legacy_plan_preview
-    api_calls_before_delete: list[int] = []
+    network_calls_before_delete: list[int] = []
 
     async def delete_first(hass: HomeAssistant, server_id: str) -> None:
-        # Gone before the first call that can fail, not merely by the end of the setup.
-        api_calls_before_delete.append(
-            sum(api.login.await_count + api.get_raw_config.await_count for api in mock_comexio_api)
-        )
+        # Gone before the first call that can fail (any stubbed API coroutine or the certificate handshake), not
+        # merely by the end of the setup.
+        api_mocks = [m for api in mock_comexio_api for m in vars(api).values() if isinstance(m, AsyncMock)]
+        network_calls_before_delete.append(certificate_handshake.await_count + sum(m.await_count for m in api_mocks))
         await delete(hass, server_id)
 
     with patch.object(comexio_init, "async_remove_legacy_plan_preview", delete_first):
@@ -199,7 +203,7 @@ async def test_a_setup_that_cannot_reach_comexio_still_deletes_the_public_file(
         await hass.async_block_till_done()
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
-    assert api_calls_before_delete == [0]
+    assert network_calls_before_delete == [0]
     assert not await hass.async_add_executor_job(public_file.exists)
 
 
