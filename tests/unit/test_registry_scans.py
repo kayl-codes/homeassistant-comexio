@@ -6,12 +6,15 @@ the result then damages that integration (found in the HACS inclusion review, fi
 could delete a foreign entity). er.async_entries_for_config_entry / dr.async_entries_for_config_entry see this entry
 only. A scan that has to see more goes into ALLOWED with the reason.
 
-A scan is an access to a registry mapping (an attribute, or `getattr` / `attrgetter` with its name as a literal) or a
-call or import of an HA helper that also returns other integrations' entries (`async_entries_for_area` and the like).
+A scan is an access to a registry mapping or a use of an HA helper that also returns other integrations' entries
+(`async_entries_for_area` and the like): as an attribute, a name (import aliases resolved), or a literal name in
+`getattr` / `attrgetter` (dotted paths too).
 Each use counts per function and mapping or helper, so a second scan added to a listed function fails too, and so does
 a listed scan swapped for another one. A name counts on any object, since an alias of the registry looks like any other
 name: a false alarm goes into ALLOWED, a missed scan would not.
-Not followed: `getattr` with a computed name, and a scan reached through a helper outside the integration.
+Not followed: `getattr` with a computed name or bound to another name (`get = getattr`), a scan reached through a helper
+outside the integration, and whether the entry_id passed to async_entries_for_config_entry is this entry's - the
+integration holds no other entry.
 """
 
 import ast
@@ -29,8 +32,7 @@ REGISTRY_MAPPINGS = frozenset({ENTITIES, DELETED_ENTITIES, DEVICES, DELETED_DEVI
 FOREIGN_ENTRY_HELPERS = frozenset(
     {"async_entries_for_area", "async_entries_for_category", "async_entries_for_device", "async_entries_for_label"}
 )
-GETATTRS = frozenset({"getattr", "builtins.getattr"})
-ATTRGETTERS = frozenset({"attrgetter", "operator.attrgetter"})
+SCANNED_NAMES = REGISTRY_MAPPINGS | FOREIGN_ENTRY_HELPERS
 
 ORPHANED_STATISTICS = "ComexioCoordinator.async_detect_orphaned_statistics"
 
@@ -51,32 +53,50 @@ ALLOWED = {
 }
 
 
-def _read_names(node: ast.Call) -> list[ast.expr]:
+def _import_aliases(tree: ast.AST) -> dict[str, str]:
+    """`from x import name as alias` -> {alias: name}, so an alias reads like the name it stands for."""
+    return {
+        alias.asname: alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+        if alias.asname
+    }
+
+
+def _called_name(func: ast.expr, aliases: dict[str, str]) -> str:
+    """The plain name a call calls: `operator.attrgetter`, `op.attrgetter` and an alias all read `attrgetter`."""
+    if isinstance(func, ast.Name):
+        return aliases.get(func.id, func.id)
+    return func.attr if isinstance(func, ast.Attribute) else ""
+
+
+def _read_names(node: ast.Call, aliases: dict[str, str]) -> list[ast.expr]:
     """The arguments that name an attribute: getattr's second one (not its default), every one of attrgetter's."""
-    func = ast.unparse(node.func)
-    if func in GETATTRS:
+    func = _called_name(node.func, aliases)
+    if func == "getattr":
         return node.args[1:2]
-    return node.args if func in ATTRGETTERS else []
+    return node.args if func == "attrgetter" else []
 
 
-def _scanned(node: ast.AST) -> list[str]:
+def _scanned(node: ast.AST, aliases: dict[str, str]) -> list[str]:
     """The registry mappings and foreign-entry helpers this node reaches."""
-    if isinstance(node, ast.Attribute) and node.attr in REGISTRY_MAPPINGS | FOREIGN_ENTRY_HELPERS:
+    if isinstance(node, ast.Attribute) and node.attr in SCANNED_NAMES:
         return [node.attr]
-    if isinstance(node, ast.Name) and node.id in FOREIGN_ENTRY_HELPERS:
-        return [node.id]
-    # The import itself counts, so an `as` alias cannot hide the helper's calls.
-    if isinstance(node, ast.alias) and node.name in FOREIGN_ENTRY_HELPERS:
-        return [node.name]
+    if isinstance(node, ast.Name) and aliases.get(node.id, node.id) in FOREIGN_ENTRY_HELPERS:
+        return [aliases.get(node.id, node.id)]
     if isinstance(node, ast.Call):
-        names = (arg.value for arg in _read_names(node) if isinstance(arg, ast.Constant))
-        return [name for name in names if name in REGISTRY_MAPPINGS]
+        # A dotted attrgetter path ("entities.values") reaches every part of it.
+        paths = (arg.value for arg in _read_names(node, aliases) if isinstance(arg, ast.Constant))
+        return [part for path in paths if isinstance(path, str) for part in path.split(".") if part in SCANNED_NAMES]
     return []
 
 
 def _scan_users(source: str) -> Counter[tuple[str, str]]:
     """Registry scans per (function, mapping or helper): Class.method, nested functions dotted, module level ''."""
     users: Counter[tuple[str, str]] = Counter()
+    tree = ast.parse(source)
+    aliases = _import_aliases(tree)
 
     def visit(node: ast.AST, owner: str) -> None:
         for child in ast.iter_child_nodes(node):
@@ -84,10 +104,10 @@ def _scan_users(source: str) -> Counter[tuple[str, str]]:
             if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
                 name = f"{owner}.{child.name}" if owner else child.name
             else:
-                users.update((owner, scanned) for scanned in _scanned(child))
+                users.update((owner, scanned) for scanned in _scanned(child, aliases))
             visit(child, name)
 
-    visit(ast.parse(source), "")
+    visit(tree, "")
     return users
 
 
@@ -131,7 +151,16 @@ def test_detector_finds_scans_by_name_and_through_helpers() -> None:
     area = "def room(reg, area):\n    return er.async_entries_for_area(reg, area)\n"
     imported = "def tagged(reg, label):\n    return async_entries_for_label(reg, label)\n"
     getter_of_two = "def pair(reg):\n    return operator.attrgetter('entities', 'devices')(reg)\n"
-    aliased = "from homeassistant.helpers.entity_registry import async_entries_for_area as area_entries\n"
+    plain_import = "from homeassistant.helpers.entity_registry import async_entries_for_area\n"
+    imported_and_called = plain_import + "def room(reg, area):\n    return async_entries_for_area(reg, area)\n"
+    aliased = (
+        "from homeassistant.helpers.entity_registry import async_entries_for_area as area_entries\n"
+        "def room(reg, area):\n    return area_entries(reg, area)\n"
+    )
+    aliased_getter = "from operator import attrgetter as ag\ndef get(reg):\n    return ag('devices')(reg)\n"
+    module_alias = "def get(reg):\n    return op.attrgetter('entities')(reg)\n"
+    dotted = "def walk(reg):\n    return operator.attrgetter('entities.values')(reg)()\n"
+    helper_by_name = "def room(area):\n    return getattr(er, 'async_entries_for_area')(reg, area)\n"
     other_attribute = "def flag(self):\n    return getattr(self.watchdog, 'auto_restart')\n"
     default_value = "def mode(self):\n    return getattr(self, 'mode', 'devices')\n"
 
@@ -141,7 +170,14 @@ def test_detector_finds_scans_by_name_and_through_helpers() -> None:
     assert _scan_users(getter_of_two) == {("pair", ENTITIES): 1, ("pair", DEVICES): 1}
     assert _scan_users(area) == {("room", "async_entries_for_area"): 1}
     assert _scan_users(imported) == {("tagged", "async_entries_for_label"): 1}
-    assert _scan_users(aliased) == {("", "async_entries_for_area"): 1}
+    # The call counts where it happens; an unused import reads nothing.
+    assert _scan_users(imported_and_called) == {("room", "async_entries_for_area"): 1}
+    assert not _scan_users(plain_import)
+    assert _scan_users(aliased) == {("room", "async_entries_for_area"): 1}
+    assert _scan_users(aliased_getter) == {("get", DEVICES): 1}
+    assert _scan_users(module_alias) == {("get", ENTITIES): 1}
+    assert _scan_users(dotted) == {("walk", ENTITIES): 1}
+    assert _scan_users(helper_by_name) == {("room", "async_entries_for_area"): 1}
     assert not _scan_users(other_attribute)
     assert not _scan_users(default_value)
 
