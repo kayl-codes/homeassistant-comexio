@@ -115,6 +115,10 @@ cards:
   themselves automatically while values just change.
 - After a Home Assistant restart, the preview image and **Preview info** keep showing the
   last render until the card is opened again — no `unknown` state in between.
+- The preview names your markers, IOs, wiring and live values, so it is kept only in Home
+  Assistant's `.storage` folder and served only through the authenticated image proxy of the
+  preview image — never as a public `/local/` file. Older versions wrote it to
+  `config/www/comexio_<server>_plan_preview.svg`; the first start after the update deletes that file.
 - To preview a **stored backup** instead of the live plan, pick it in the **Backup**
   select, or use the `function_plan_visualize` action with its `snapshot` field and
   `format: svg` — both work fully offline.
@@ -589,7 +593,10 @@ function_plan_visualize:
     notification or as an SVG diagram (Preview image). Two ways to pick the
     source — use only ONE: (1) "Snapshot" — render a stored backup exactly as
     captured, entirely offline; (2) "Plan" (live) — render the plan's current
-    state in Comexio.
+    state in Comexio. With a response requested, the text diagram is also
+    returned as `text`, the SVG as the Preview image's `url` on the
+    authenticated image proxy (`url` is null while the Preview image entity
+    is disabled).
   fields:
     config_entry:
       name: Comexio instance
@@ -962,6 +969,10 @@ cards:
   hingegen aktualisieren sich von selbst, solange sich nur Werte ändern.
 - Nach einem Home-Assistant-Neustart zeigen Vorschaubild und **Vorschau-Info** weiter den
   letzten Stand, bis die Karte wieder geöffnet wird — kein `unknown` zwischendurch.
+- Die Vorschau nennt Merker, IOs, Verdrahtung und Live-Werte. Sie liegt deshalb nur im
+  `.storage`-Ordner von Home Assistant und wird nur über den authentifizierten Bild-Proxy des
+  Vorschaubilds ausgeliefert — nie als öffentliche `/local/`-Datei. Ältere Versionen schrieben sie nach
+  `config/www/comexio_<server>_plan_preview.svg`; der erste Start nach dem Update löscht diese Datei.
 - Um stattdessen ein **gespeichertes Backup** anzuzeigen, es in der **Backup**-Auswahl
   wählen oder die Aktion `function_plan_visualize` mit dem Feld `snapshot` und
   `format: svg` verwenden — beides funktioniert vollständig offline.

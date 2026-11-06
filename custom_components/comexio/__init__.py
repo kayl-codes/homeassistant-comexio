@@ -62,7 +62,12 @@ from .const import (
     stable_object_id,
     webio_range_check_entity_id,
 )
-from .coordinator import ComexioCoordinator, saved_config_store
+from .coordinator import (
+    ComexioCoordinator,
+    async_remove_legacy_plan_preview,
+    plan_preview_store,
+    saved_config_store,
+)
 from .entity import track_quickbus_devices
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
@@ -149,6 +154,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         AIOCOMEXIO_VERSION,
         HA_VERSION,
     )
+    # Before anything that can fail: the copy older releases left under /local/ is public (dh).
+    await async_remove_legacy_plan_preview(hass, server_id)
 
     # Initialize API (an entry still on plain HTTP is switched to HTTPS here when Comexio serves it)
     try:
@@ -215,6 +222,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Restore the Bus-Load-Watchdog's persisted event history before its poll starts (below),
     # so an event written early after restart can't race the load and be lost.
     await coordinator.async_load_watchdog_history()
+    # Before the platforms, so the preview image and its info sensor show the last preview right away.
+    await coordinator.async_load_plan_preview()
 
     # One-time migration: the Web-IO range-check button's entity_id used to be derived from
     # its translated name at first registration, which could freeze in a nonsense object_id
@@ -917,12 +926,19 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Drop the entry's repairs with nothing left to fix, the certificate push on the phones and its saved config."""
+    """Drop the entry's repairs with nothing left to fix, the certificate push on the phones, its saved config and
+    its last plan preview."""
     async_remove_certificate_pushes(hass, entry)
     if (server_id := entry.data.get(CONF_SERVER_ID)) is not None:
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
-    # Nothing else reads it once the entry is gone: a new entry gets a new entry id (#250).
-    await saved_config_store(hass, entry.entry_id).async_remove()
+        # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).
+        await async_remove_legacy_plan_preview(hass, server_id)
+    # Nothing else reads them once the entry is gone: a new entry gets a new entry id (#250).
+    # finally: a failed delete of one must not keep the other, the preview names the user's wiring.
+    try:
+        await saved_config_store(hass, entry.entry_id).async_remove()
+    finally:
+        await plan_preview_store(hass, entry.entry_id).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):

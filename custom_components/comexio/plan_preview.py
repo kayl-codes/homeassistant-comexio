@@ -55,10 +55,10 @@ async def _async_render_orphaned(coordinator: ComexioCoordinator) -> None:
     choice = coordinator.orphaned_backup_choice(label) if label is not None else None
     if choice is None:
         raise HomeAssistantError("No backup of a deleted plan is selected in the function plan 'Backup' selector.")
-    url = await coordinator.async_generate_orphaned_plan_preview(
+    shown = await coordinator.async_generate_orphaned_plan_preview(
         choice["fub_id"], choice["plan_name"], choice["kind"], choice["slot"]
     )
-    if url is None:
+    if not shown:
         raise HomeAssistantError(
             f"The backup {choice['kind']}[{choice['slot']}] of deleted plan '{one_line(choice['plan_name'])}' "
             "could not be shown — it was deleted meanwhile or another preview took over."

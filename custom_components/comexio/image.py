@@ -1,14 +1,14 @@
 # Version: 0.8.2
 """Image platform exposing the last generated Function Plan preview SVG.
 
-Unlike the Plan Preview sensor (entity_picture + /local/ file + cache-buster), an image
-entity is a first-class picture source for the frontend: the built-in picture-entity card
-accepts it natively and swaps the image URL in place on every state change — no DOM
-rebuild, no flicker, no polling. The bytes are served straight from the coordinator's
-in-memory SVG cache; the config/www file is only used as a fallback after a restart.
+An image entity is a first-class picture source for the frontend: the built-in picture-entity
+card accepts it natively and swaps the image URL in place on every state change — no DOM
+rebuild, no flicker, no polling. The bytes are served straight from the coordinator's SVG
+(restored from .storage after a restart, see coordinator.async_load_plan_preview) and only
+through HA's authenticated image proxy: the preview names markers, IOs, wiring and live values,
+so it is never written to config/www, which HA serves without authentication under /local/.
 """
 
-import pathlib
 from typing import Any
 
 from homeassistant.components.image import ImageEntity
@@ -49,7 +49,6 @@ class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         CoordinatorEntity.__init__(self, coordinator)
         ImageEntity.__init__(self, hass)
         self._attr_unique_id = f"comexio_{server_id}_plan_preview_image"
-        self._preview_path = pathlib.Path(hass.config.path("www", f"comexio_{server_id}_plan_preview.svg"))
         self._sync_timestamp()
 
     def _sync_timestamp(self) -> None:
@@ -62,18 +61,6 @@ class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         self._sync_timestamp()
         super()._handle_coordinator_update()
 
-    async def async_added_to_hass(self) -> None:
-        """Fall back to the persisted SVG file's mtime so the preview survives HA restarts."""
-        await super().async_added_to_hass()
-        if self._attr_image_last_updated is None:
-            self._attr_image_last_updated = await self.hass.async_add_executor_job(self._preview_file_mtime)
-
-    def _preview_file_mtime(self) -> Any:
-        try:
-            return dt_util.utc_from_timestamp(self._preview_path.stat().st_mtime)
-        except OSError:
-            return None
-
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Which plan and source the served SVG shows.
@@ -81,13 +68,13 @@ class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         Read by comexio-plan-card.js: in the orphaned-plans view it compares the image on screen
         (a trigger-only card without its own image: this entity's newest render) with the backup
         selector's choice before a delete/keep action. captured_at names an orphan render's
-        snapshot (its slot shifts after a delete); None for every other source. Only for an SVG rendered
-        in this run: after a restart the file fallback may be newer than the restored
-        last_plan_preview (an unclean shutdown skips the last state dump), so the identity stays
-        None — the card then warns — until the next render.
+        snapshot (its slot shifts after a delete); None for every other source. Only with an SVG on hand
+        (rendered in this run or restored with last_plan_preview from the same store entry): a
+        last_plan_preview without one names no image, so the identity stays None — the card then
+        warns — until the next render.
         """
-        rendered_here = self.coordinator.last_plan_preview_svg is not None
-        preview = (self.coordinator.last_plan_preview if rendered_here else None) or {}
+        has_svg = self.coordinator.last_plan_preview_svg is not None
+        preview = (self.coordinator.last_plan_preview if has_svg else None) or {}
         return {
             "fub_id": preview.get("fub_id"),
             "plan_name": preview.get("plan_name"),
@@ -96,13 +83,6 @@ class ComexioPlanPreviewImage(ComexioFunctionPlanEntityMixin, CoordinatorEntity,
         }
 
     async def async_image(self) -> bytes | None:
-        """Return the preview SVG bytes (in-memory cache, file fallback after restart)."""
-        if (svg := self.coordinator.last_plan_preview_svg) is not None:
-            return svg.encode("utf-8")
-        return await self.hass.async_add_executor_job(self._read_preview_file)
-
-    def _read_preview_file(self) -> bytes | None:
-        try:
-            return self._preview_path.read_bytes()
-        except OSError:
-            return None
+        """Return the preview SVG bytes; None before the first preview."""
+        svg = self.coordinator.last_plan_preview_svg
+        return svg.encode("utf-8") if svg is not None else None
