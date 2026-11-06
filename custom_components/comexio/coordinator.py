@@ -412,12 +412,25 @@ def legacy_plan_preview_path(hass: HomeAssistant, server_id: str) -> pathlib.Pat
     return pathlib.Path(hass.config.path("www", f"comexio_{server_id}_plan_preview.svg"))
 
 
+def _is_timestamp(value: Any) -> bool:
+    """True for a string dt_util parses; a well-formed but impossible date (month 13) raises there instead of None."""
+    if not isinstance(value, str):
+        return False
+    try:
+        return dt_util.parse_datetime(value) is not None
+    except ValueError:
+        return False
+
+
 def stored_plan_preview(stored: Any) -> tuple[str, dict[str, Any]] | None:
-    """(svg, last_plan_preview) from the plan preview store's data; None when it holds no usable preview."""
+    """(svg, last_plan_preview) from the plan preview store's data; None when it holds no usable preview.
+
+    generated_at must parse: it is the image's image_last_updated, the stamp the plan card fetches by.
+    """
     if not isinstance(stored, dict):
         return None
     svg, preview = stored.get("svg"), stored.get("preview")
-    if not isinstance(svg, str) or not isinstance(preview, dict) or not isinstance(preview.get("generated_at"), str):
+    if not isinstance(svg, str) or not isinstance(preview, dict) or not _is_timestamp(preview.get("generated_at")):
         return None
     return svg, preview
 

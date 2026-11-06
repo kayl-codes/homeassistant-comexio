@@ -78,8 +78,20 @@ def test_a_stored_preview_is_restored_as_svg_and_metadata() -> None:
         {"svg": "<svg/>"},
         {"svg": "<svg/>", "preview": None},
         {"svg": "<svg/>", "preview": {**PREVIEW, "generated_at": None}},
+        {"svg": "<svg/>", "preview": {**PREVIEW, "generated_at": "yesterday"}},
+        {"svg": "<svg/>", "preview": {**PREVIEW, "generated_at": "2026-02-30T10:00:00+00:00"}},
     ],
-    ids=["never-saved", "not-a-dict", "empty", "no-svg", "no-preview", "preview-none", "no-timestamp"],
+    ids=[
+        "never-saved",
+        "not-a-dict",
+        "empty",
+        "no-svg",
+        "no-preview",
+        "preview-none",
+        "no-timestamp",
+        "bad-timestamp",
+        "impossible-date",
+    ],
 )
 def test_nothing_usable_is_not_restored(stored: Any) -> None:
     assert stored_plan_preview(stored) is None
@@ -168,10 +180,12 @@ def test_a_published_preview_is_saved_delayed_with_the_newest_render(tmp_path: p
 
     # Every render schedules again, which pushes HA's pending timer back: no write while the preview runs.
     assert coordinator._plan_preview_store.async_delay_save.call_count == 2
+    coordinator._plan_preview_store.async_save.assert_not_awaited()  # an immediate save would cancel the delay
     data_func, delay = coordinator._plan_preview_store.async_delay_save.call_args.args
     assert delay == PLAN_PREVIEW_SAVE_DELAY_SEC
     data = data_func()
-    assert data["svg"] == coordinator.last_plan_preview_svg == '<svg data-comexio-source="live"/>'
+    assert coordinator.last_plan_preview_svg == '<svg data-comexio-source="live"/>'
+    assert data["svg"] == coordinator.last_plan_preview_svg
     assert data["preview"] is coordinator.last_plan_preview
     assert data["preview"]["plan_name"] == "New"
     assert not (tmp_path / "www").exists()  # nothing lands where /local/ would serve it
@@ -188,6 +202,8 @@ def test_shutdown_saves_a_pending_preview_once(tmp_path: pathlib.Path) -> None:
     coordinator._plan_preview_store.async_save.assert_awaited_once()
     saved = coordinator._plan_preview_store.async_save.await_args.args[0]
     assert saved == {"svg": coordinator.last_plan_preview_svg, "preview": coordinator.last_plan_preview}
+    # What the publish path writes, the next setup restores: the generated_at stamp it writes must parse.
+    assert stored_plan_preview(saved) == (coordinator.last_plan_preview_svg, coordinator.last_plan_preview)
 
 
 def test_shutdown_saves_again_after_the_delayed_save_ran(tmp_path: pathlib.Path) -> None:
