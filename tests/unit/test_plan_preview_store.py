@@ -166,6 +166,8 @@ def test_a_published_preview_is_saved_delayed_with_the_newest_render(tmp_path: p
     asyncio.run(coordinator._async_publish_plan_preview(1, "Old", "live", "<svg/>"))
     asyncio.run(coordinator._async_publish_plan_preview(2, "New", "live", "<svg/>"))
 
+    # Every render schedules again, which pushes HA's pending timer back: no write while the preview runs.
+    assert coordinator._plan_preview_store.async_delay_save.call_count == 2
     data_func, delay = coordinator._plan_preview_store.async_delay_save.call_args.args
     assert delay == PLAN_PREVIEW_SAVE_DELAY_SEC
     data = data_func()

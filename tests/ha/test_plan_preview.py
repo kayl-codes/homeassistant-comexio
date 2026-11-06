@@ -12,6 +12,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
+from custom_components import comexio as comexio_init
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import CONF_SERVER_ID, DOMAIN
 
@@ -183,11 +184,22 @@ async def test_a_setup_that_cannot_reach_comexio_still_deletes_the_public_file(
     public_file = await _write_public_file(hass, mock_config_entry)
     api_returns["get_raw_config"] = OSError("connection reset")
     mock_config_entry.add_to_hass(hass)
+    delete = comexio_init.async_remove_legacy_plan_preview
+    api_calls_before_delete: list[int] = []
 
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    async def delete_first(hass: HomeAssistant, server_id: str) -> None:
+        # Gone before the first call that can fail, not merely by the end of the setup.
+        api_calls_before_delete.append(
+            sum(api.login.await_count + api.get_raw_config.await_count for api in mock_comexio_api)
+        )
+        await delete(hass, server_id)
+
+    with patch.object(comexio_init, "async_remove_legacy_plan_preview", delete_first):
+        await hass.config_entries.async_setup(mock_config_entry.entry_id)
+        await hass.async_block_till_done()
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert api_calls_before_delete == [0]
     assert not await hass.async_add_executor_job(public_file.exists)
 
 
