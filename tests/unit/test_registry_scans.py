@@ -12,10 +12,11 @@ A scan is an access to a registry mapping or a use of an HA helper that also ret
 Each access counts per function and mapping or helper, so a second access added to a listed function fails too, and so
 does a listed scan swapped for another one. A name counts on any object, since an alias of the registry looks like any
 other name: a false alarm goes into ALLOWED, a missed scan would not.
-Not followed: `getattr` with a computed name or bound to another name (`get = getattr`); a mapping or helper bound to a
-local variable, which counts once where it is bound, not at each later use; a scan reached through a helper outside the
-integration; whether the entry_id passed to async_entries_for_config_entry is this entry's - the integration holds no
-other entry; and what a listed function does with what it reads - that is for the review of the diff that changes it.
+Not followed: `getattr` with a computed name; `getattr` / `attrgetter` bound to a local name (`get = getattr`); a
+mapping or helper bound to a local variable, which counts once where it is bound, not at each later use; import aliases
+per scope (one target per alias name and file); a scan reached through a helper outside the integration; whether the
+entry_id passed to async_entries_for_config_entry is this entry's - the integration holds no other entry; and what a
+listed function does with what it reads - that is for the review of the diff that changes it.
 """
 
 import ast
