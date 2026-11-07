@@ -656,7 +656,7 @@ def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: 
     # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
     # cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
-    # Free storage, time server settings, uptime: own slow poll (see const.SYSTEM_INFO_POLL_INTERVAL_SEC).
+    # Uptime: own 5-minute poll (see const.UPTIME_POLL_INTERVAL_SEC). Free storage and time server ride the config poll.
     entry.async_on_unload(coordinator.async_start_system_info_poll())
     # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
     entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
