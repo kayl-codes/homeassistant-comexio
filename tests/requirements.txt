@@ -1,7 +1,7 @@
 # Test dependencies for the unit test suite (tests/unit/).
 # homeassistant is pinned to the same version as homeassistant-stubs in .github/workflows/ci.yml:
 # the tested modules import it at module level even though the unit tests never start an HA instance.
-homeassistant==2026.8.3
+homeassistant==2026.10.4
 # certifi: homeassistant only sets a floor (>=2021.5.30); this one keeps out the emSign roots with
 # compromised intermediates (PYSEC-2026-4320), so OSV-Scanner resolves a fixed version too.
 certifi>=2026.10.19
