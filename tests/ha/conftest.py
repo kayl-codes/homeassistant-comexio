@@ -32,12 +32,15 @@ HOST = "192.168.1.10"
 HA_ADDRESS = "192.168.1.2"
 
 
-def device_by_identifier(
-    hass: HomeAssistant, entry_id: str, identifiers: set[tuple[str, str]]
-) -> dr.DeviceEntry | None:
-    """Main device with the one identifier, owned by the entry (async_get_device is deprecated since HA 2026.10)."""
+def device_by_identifier(hass: HomeAssistant, entry_id: str, identifiers: set[tuple[str, str]]) -> dr.DeviceEntry:
+    """Main device with the one identifier, owned by the entry; fails with a clear message if it is missing.
+
+    Replaces device_registry.async_get_device, which HA deprecates because identifiers are not unique across entries.
+    """
     (identifier,) = identifiers
-    return dr.async_get(hass).async_get_device_by_identifier(identifier, entry_id)
+    device = dr.async_get(hass).async_get_device_by_identifier(identifier, entry_id)
+    assert device is not None, f"no device {identifier} owned by config entry {entry_id}"
+    return device
 
 
 LOGGED_EXCEPTION_MARKER = "logged_exception"
