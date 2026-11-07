@@ -7,7 +7,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 
-from .conftest import SERVER_ID
+from .conftest import SERVER_ID, device_by_identifier
 
 
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
@@ -57,7 +57,7 @@ async def test_firmware_and_io_entities_share_the_tagged_device_and_keep_their_i
 async def test_marker_device_keeps_its_plain_name(hass: HomeAssistant, mock_config_entry: MockConfigEntry) -> None:
     await _setup(hass, mock_config_entry)
 
-    device = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_markers")})
+    device = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_markers")})
     assert device.name == f"{SERVER_ID} Markers"
 
 
@@ -67,7 +67,7 @@ async def test_extension_rename_moves_the_device_to_the_tagged_new_name(
 ) -> None:
     await _setup(hass, entry_with_ud1)
     dev_reg = dr.async_get(hass)
-    old = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_ud 1")})
+    old = device_by_identifier(hass, entry_with_ud1.entry_id, {(DOMAIN, f"{SERVER_ID}_ud 1")})
     coordinator = hass.data[DOMAIN][entry_with_ud1.entry_id]
 
     await coordinator._migrate_extension_entities("UD 1", "UD\n9")
