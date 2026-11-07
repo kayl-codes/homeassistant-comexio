@@ -37,7 +37,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
 
-from .api import ComexioAPI, SystemInfoReading
+from .api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, SystemInfoReading
 from .certificate import async_clear_certificate_changed, async_report_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
@@ -282,6 +282,8 @@ _IMPORT_QUICKBUS_KEY = "import_quickbus"
 
 # Errors that mean Comexio could not be reached at all (not: answered with an error or odd data).
 UNREACHABLE_ERRORS = (ComexioConnectionError, aiohttp.ClientError, TimeoutError)
+# Cause of a free storage and time server reading that is dropped because its config poll failed.
+CONFIG_POLL_FAILED_CAUSE = "config poll failed"
 
 
 class _PollMetAnotherCertificate(UpdateFailed):
@@ -1484,8 +1486,15 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Only this poll's config may be saved, never one a failed poll left behind.
         self._scraped_config = None
         mismatches_before = self.api.certificate_mismatch_count
+        fetched = False
         try:
             data = await self._async_fetch_and_audit()
+            fetched = True
+            # Free storage and time server ride the config poll. Still inside the full-poll block, so a
+            # run-state tick waits for it (the IO-Server answers the requests in order). Not during a sync:
+            # then the poll skipped the audit and fetched nothing.
+            if not self.in_sync:
+                await self._async_refresh_system_info_storage()
         except _PollMetAnotherCertificate as err:
             return self._keep_data_through_certificate_change(err)
         except UNREACHABLE_ERRORS as err:
@@ -1497,8 +1506,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return self._keep_data_through_certificate_change(err)
         finally:
             self._full_poll_running = False
+            if not fetched:
+                # A poll that failed fetched no storage either: it counts as a failed storage fetch.
+                self._note_system_info_dropped(
+                    self.system_info.apply_storage(None),
+                    SystemInfoReading(None, None, CONFIG_POLL_FAILED_CAUSE),
+                )
         if self._last_poll_scraped:
-            await self._async_refresh_system_info_storage()
             self._note_comexio_reachable()
             # A request of this poll (or one alongside it) that met another certificate keeps its repair,
             # also when a login or config fetch alongside it cleared certificate_mismatch since.
@@ -5677,14 +5691,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._note_system_info_dropped(self.system_info.apply_uptime(reading.uptime, dt_util.utcnow()), reading)
 
     async def _async_refresh_system_info_storage(self) -> None:
-        """Fetch free storage and time server settings; called by each successful config poll."""
-        reading = await self.api.get_system_info(uptime=False)
+        """Fetch free storage and time server settings; called by each config poll that fetched.
+
+        Never raises into the config poll: an unexpected error is logged and counts as a failed fetch,
+        ConfigEntryAuthFailed still propagates.
+        """
+        try:
+            reading = await self.api.get_system_info(uptime=False)
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception:
+            _LOGGER.exception("[%s] Free storage fetch failed unexpectedly", self.server_id)
+            reading = SystemInfoReading(None, None, "unexpected error")
         self._note_system_info_dropped(self.system_info.apply_storage(reading.info), reading)
 
     def _note_system_info_dropped(self, dropped: list[str], reading: SystemInfoReading) -> None:
         """Warn once per part whose readings just turned unknown, then tell the entities."""
         causes = {PART_SYSTEM_INFO: reading.info_error, PART_UPTIME: reading.uptime_error}
         for part in dropped:
+            if causes[part] == SYSTEM_INFO_CERTIFICATE_CHANGED:
+                # The certificate repair is already raised; the readings still turn unknown, without a warning.
+                continue
             _LOGGER.warning(
                 "[%s] System info poll failed %s times in a row, %s reset to unknown: %s",
                 self.server_id,

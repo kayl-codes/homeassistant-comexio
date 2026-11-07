@@ -1,6 +1,7 @@
 """Comexio system info readings (free storage, time server, boot time) kept between polls.
 
-Pure state, no I/O: the coordinator's system info poll feeds every result in through apply().
+Pure state, no I/O: the coordinator feeds each fetch in through apply_storage() (config poll) or
+apply_uptime() (uptime tick).
 """
 
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from aiocomexio import SystemInfo, TimeServerSettings
 
 from .const import SYSTEM_BOOT_TIME_TOLERANCE_SEC, SYSTEM_INFO_FAIL_STREAK_THRESHOLD
 
-# The parts apply() reports as dropped, named after the readings they carry (used in the log).
+# The parts apply_storage() / apply_uptime() report as dropped, named after the readings they carry (used in the log).
 PART_SYSTEM_INFO = "free storage and time server"
 PART_UPTIME = "last boot"
 

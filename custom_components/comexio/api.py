@@ -537,7 +537,8 @@ SYSTEM_INFO_CERTIFICATE_CHANGED = "certificate changed"
 
 
 class SystemInfoReading(NamedTuple):
-    """One system info poll (see ComexioAPI.get_system_info): a part is None if its fetch failed, with the cause."""
+    """One system info poll (see ComexioAPI.get_system_info): a part is None if it was not asked for or its
+    fetch failed; a failed fetch carries the cause."""
 
     info: SystemInfo | None
     uptime: timedelta | None
