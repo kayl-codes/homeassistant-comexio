@@ -9,6 +9,8 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioConnectionError, SystemInfo, TimeServerSettings
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
@@ -28,6 +30,14 @@ from tests.common import load_json_fixture
 SERVER_ID = "iosrv1"
 HOST = "192.168.1.10"
 HA_ADDRESS = "192.168.1.2"
+
+
+def device_by_identifier(
+    hass: HomeAssistant, entry_id: str, identifiers: set[tuple[str, str]]
+) -> dr.DeviceEntry | None:
+    """Main device with the one identifier, owned by the entry (async_get_device is deprecated since HA 2026.10)."""
+    (identifier,) = identifiers
+    return dr.async_get(hass).async_get_device_by_identifier(identifier, entry_id)
 
 
 LOGGED_EXCEPTION_MARKER = "logged_exception"
