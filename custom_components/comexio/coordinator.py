@@ -1492,7 +1492,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             fetched = True
             # Free storage and time server ride the config poll. Still inside the full-poll block, so a
             # run-state tick waits for it (the IO-Server answers the requests in order). Not during a sync:
-            # then the poll skipped the audit and fetched nothing.
+            # then the poll skipped the audit and fetched nothing. A sync started while this request is in
+            # flight overlaps it: the sync lock does not wait for the poll, and the audit overlaps a new sync
+            # the same way. Accepted: one dashboard request per config poll.
             if not self.in_sync:
                 await self._async_refresh_system_info_storage()
         except _PollMetAnotherCertificate as err:
