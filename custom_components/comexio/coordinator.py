@@ -37,7 +37,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
 
-from .api import ComexioAPI
+from .api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, SystemInfoReading
 from .certificate import async_clear_certificate_changed, async_report_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
@@ -168,8 +168,8 @@ from .const import (
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
-    SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
+    UPTIME_POLL_INTERVAL_SEC,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_FORMER_IO_LOG_MSG,
@@ -282,6 +282,8 @@ _IMPORT_QUICKBUS_KEY = "import_quickbus"
 
 # Errors that mean Comexio could not be reached at all (not: answered with an error or odd data).
 UNREACHABLE_ERRORS = (ComexioConnectionError, aiohttp.ClientError, TimeoutError)
+# Cause of a free storage and time server reading that is dropped because its config poll failed.
+CONFIG_POLL_FAILED_CAUSE = "config poll failed"
 
 
 class _PollMetAnotherCertificate(UpdateFailed):
@@ -1484,8 +1486,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Only this poll's config may be saved, never one a failed poll left behind.
         self._scraped_config = None
         mismatches_before = self.api.certificate_mismatch_count
+        fetched = False
         try:
             data = await self._async_fetch_and_audit()
+            fetched = True
+            # Free storage and time server ride the config poll. Still inside the full-poll block, so a
+            # run-state tick waits for it (the IO-Server answers the requests in order). Not during a sync:
+            # then the poll skipped the audit and fetched nothing. A sync started while this request is in
+            # flight overlaps it: the sync lock does not wait for the poll, and the audit overlaps a new sync
+            # the same way. Accepted: one dashboard request per config poll.
+            if not self.in_sync:
+                await self._async_refresh_system_info_storage()
         except _PollMetAnotherCertificate as err:
             return self._keep_data_through_certificate_change(err)
         except UNREACHABLE_ERRORS as err:
@@ -1497,6 +1508,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return self._keep_data_through_certificate_change(err)
         finally:
             self._full_poll_running = False
+            if not fetched:
+                # A poll that failed fetched no storage either: it counts as a failed storage fetch.
+                self._note_system_info_dropped(
+                    self.system_info.apply_storage(None),
+                    SystemInfoReading(None, None, CONFIG_POLL_FAILED_CAUSE),
+                )
         if self._last_poll_scraped:
             self._note_comexio_reachable()
             # A request of this poll (or one alongside it) that met another certificate keeps its repair,
@@ -5644,13 +5661,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
 
     def async_start_system_info_poll(self):
-        """Start the system info poll (free storage, time server, uptime); returns the cancel callback.
+        """Start the uptime poll; returns the cancel callback.
 
-        Fires one immediate tick, like async_start_bus_load_poll, so the readings are there right after setup.
+        Fires one immediate tick, like async_start_bus_load_poll, so the uptime is there right after setup.
+        The free storage and time server part is read by the config poll (see _async_refresh_system_info_storage).
         """
         self._async_schedule_system_info_tick()
         return async_track_time_interval(
-            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=UPTIME_POLL_INTERVAL_SEC)
         )
 
     @callback
@@ -5670,10 +5688,32 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
-        """Fetch the system info and uptime into self.system_info and notify its entities."""
-        reading = await self.api.get_system_info()
+        """Fetch the uptime into self.system_info and notify its entities."""
+        reading = await self.api.get_system_info(storage=False)
+        self._note_system_info_dropped(self.system_info.apply_uptime(reading.uptime, dt_util.utcnow()), reading)
+
+    async def _async_refresh_system_info_storage(self) -> None:
+        """Fetch free storage and time server settings; called by each config poll that fetched.
+
+        Never raises into the config poll: an unexpected error is logged and counts as a failed fetch,
+        ConfigEntryAuthFailed still propagates.
+        """
+        try:
+            reading = await self.api.get_system_info(uptime=False)
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception:
+            _LOGGER.exception("[%s] Free storage fetch failed unexpectedly", self.server_id)
+            reading = SystemInfoReading(None, None, "unexpected error")
+        self._note_system_info_dropped(self.system_info.apply_storage(reading.info), reading)
+
+    def _note_system_info_dropped(self, dropped: list[str], reading: SystemInfoReading) -> None:
+        """Warn once per part whose readings just turned unknown, then tell the entities."""
         causes = {PART_SYSTEM_INFO: reading.info_error, PART_UPTIME: reading.uptime_error}
-        for part in self.system_info.apply(reading.info, reading.uptime, dt_util.utcnow()):
+        for part in dropped:
+            if causes[part] == SYSTEM_INFO_CERTIFICATE_CHANGED:
+                # The certificate repair is already raised; the readings still turn unknown, without a warning.
+                continue
             _LOGGER.warning(
                 "[%s] System info poll failed %s times in a row, %s reset to unknown: %s",
                 self.server_id,

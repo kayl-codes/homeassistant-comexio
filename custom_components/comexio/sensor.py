@@ -619,8 +619,8 @@ class ComexioBusLoadSensor(SensorEntity):
 class _ComexioSystemInfoSensor(ComexioStableEntityIdMixin, SensorEntity):
     """Base of the system info sensors: fed by the coordinator's own system info poll.
 
-    Not a CoordinatorEntity, like ComexioBusLoadSensor: the readings arrive via system_info_signal,
-    on their own cadence (const.SYSTEM_INFO_POLL_INTERVAL_SEC), not with the config poll.
+    Not a CoordinatorEntity, like ComexioBusLoadSensor: the readings arrive via system_info_signal, from
+    the config poll (free storage) and the uptime tick (boot time), not from the entity's own update.
     """
 
     _attr_has_entity_name = True
