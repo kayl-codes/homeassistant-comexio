@@ -37,6 +37,7 @@ def device_by_identifier(hass: HomeAssistant, entry_id: str, identifiers: set[tu
 
     Replaces device_registry.async_get_device, which HA deprecates because identifiers are not unique across entries.
     """
+    assert len(identifiers) == 1, f"expected exactly one identifier, got {identifiers}"
     (identifier,) = identifiers
     device = dr.async_get(hass).async_get_device_by_identifier(identifier, entry_id)
     assert device is not None, f"no device {identifier} owned by config entry {entry_id}"
