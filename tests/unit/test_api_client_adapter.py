@@ -2199,3 +2199,15 @@ def test_system_info_uptime_only_leaves_the_storage_alone(comexio_api: ComexioAP
 
     assert asyncio.run(comexio_api.get_system_info(storage=False)) == (None, timedelta(days=3), None, None)
     client.get_system_info.assert_not_awaited()
+
+
+def test_system_info_without_any_part_is_refused(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Asking for neither part is a caller bug: it must not read as two unrequested, successful parts."""
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+
+    reading = comexio_api.get_system_info(storage=False, uptime=False)
+    with pytest.raises(ValueError, match="needs storage, uptime or both"):
+        asyncio.run(reading)
+    client.get_system_info.assert_not_awaited()
+    client.get_uptime.assert_not_awaited()

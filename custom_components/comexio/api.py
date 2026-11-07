@@ -5696,6 +5696,8 @@ class ComexioAPI:
         at debug level here. A lapsed admin session is logged in again once per call, like the config
         poll does, so the readings do not go unknown until the next config poll.
         """
+        if not (storage or uptime):
+            raise ValueError("get_system_info needs storage, uptime or both")
         # This call's one re-login, shared by both fetches: None when it worked, else the failure cause.
         relogin: list[str | None] = []
         # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
