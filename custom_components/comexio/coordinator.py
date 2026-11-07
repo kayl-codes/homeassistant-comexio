@@ -37,7 +37,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
 
-from .api import ComexioAPI
+from .api import ComexioAPI, SystemInfoReading
 from .certificate import async_clear_certificate_changed, async_report_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
@@ -168,8 +168,8 @@ from .const import (
     SYNC_DURATION_FUNCTION_PLAN_ELEMENT,
     SYNC_DURATION_FUNCTION_PLAN_FINALIZE,
     SYSTEM_INFO_FAIL_STREAK_THRESHOLD,
-    SYSTEM_INFO_POLL_INTERVAL_SEC,
     UNINSTALL_CLEANUP_PROGRESS_EVERY,
+    UPTIME_POLL_INTERVAL_SEC,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_FORMER_IO_LOG_MSG,
@@ -1498,6 +1498,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         finally:
             self._full_poll_running = False
         if self._last_poll_scraped:
+            await self._async_refresh_system_info_storage()
             self._note_comexio_reachable()
             # A request of this poll (or one alongside it) that met another certificate keeps its repair,
             # also when a login or config fetch alongside it cleared certificate_mismatch since.
@@ -5644,13 +5645,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
 
     def async_start_system_info_poll(self):
-        """Start the system info poll (free storage, time server, uptime); returns the cancel callback.
+        """Start the uptime poll; returns the cancel callback.
 
-        Fires one immediate tick, like async_start_bus_load_poll, so the readings are there right after setup.
+        Fires one immediate tick, like async_start_bus_load_poll, so the uptime is there right after setup.
+        The free storage and time server part is read by the config poll (see _async_refresh_system_info_storage).
         """
         self._async_schedule_system_info_tick()
         return async_track_time_interval(
-            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=SYSTEM_INFO_POLL_INTERVAL_SEC)
+            self.hass, self._async_schedule_system_info_tick, timedelta(seconds=UPTIME_POLL_INTERVAL_SEC)
         )
 
     @callback
@@ -5670,10 +5672,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
         )
 
     async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
-        """Fetch the system info and uptime into self.system_info and notify its entities."""
-        reading = await self.api.get_system_info()
+        """Fetch the uptime into self.system_info and notify its entities."""
+        reading = await self.api.get_system_info(storage=False)
+        self._note_system_info_dropped(self.system_info.apply_uptime(reading.uptime, dt_util.utcnow()), reading)
+
+    async def _async_refresh_system_info_storage(self) -> None:
+        """Fetch free storage and time server settings; called by each successful config poll."""
+        reading = await self.api.get_system_info(uptime=False)
+        self._note_system_info_dropped(self.system_info.apply_storage(reading.info), reading)
+
+    def _note_system_info_dropped(self, dropped: list[str], reading: SystemInfoReading) -> None:
+        """Warn once per part whose readings just turned unknown, then tell the entities."""
         causes = {PART_SYSTEM_INFO: reading.info_error, PART_UPTIME: reading.uptime_error}
-        for part in self.system_info.apply(reading.info, reading.uptime, dt_util.utcnow()):
+        for part in dropped:
             _LOGGER.warning(
                 "[%s] System info poll failed %s times in a row, %s reset to unknown: %s",
                 self.server_id,

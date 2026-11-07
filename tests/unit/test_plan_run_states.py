@@ -232,6 +232,7 @@ class _FakeCoordinator(SimpleNamespace):
     _dismiss_stale_push = ComexioCoordinator._dismiss_stale_push
     note_comexio_unreachable = ComexioCoordinator.note_comexio_unreachable
     _note_comexio_reachable = ComexioCoordinator._note_comexio_reachable
+    _async_refresh_system_info_storage = AsyncMock()
     _in_plan_watch_boot_grace = ComexioCoordinator._in_plan_watch_boot_grace
     _plan_watch_held = ComexioCoordinator._plan_watch_held
     _watchdog_grace_run_state = ComexioCoordinator._watchdog_grace_run_state

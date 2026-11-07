@@ -31,30 +31,33 @@ class SystemInfoState:
     # The last uptime read: one that went down since is a reboot, however close to the known boot time.
     _last_uptime: timedelta | None = None
 
-    def apply(self, info: SystemInfo | None, uptime: timedelta | None, now: datetime) -> list[str]:
-        """Take one poll's results (None = that fetch failed); the parts whose readings just turned unknown."""
-        dropped: list[str] = []
+    def apply_storage(self, info: SystemInfo | None) -> list[str]:
+        """Take one storage/time server fetch (None = failed); [PART_SYSTEM_INFO] once its readings turn unknown."""
         if info is None:
             self._info_fail_streak += 1
             if self._info_fail_streak == SYSTEM_INFO_FAIL_STREAK_THRESHOLD:
                 self.free_storage_percent = None
                 self.time_server = None
-                dropped.append(PART_SYSTEM_INFO)
-        else:
-            self._info_fail_streak = 0
-            self.free_storage_percent = info.free_storage_percent
-            self.time_server = info.time_server
+                return [PART_SYSTEM_INFO]
+            return []
+        self._info_fail_streak = 0
+        self.free_storage_percent = info.free_storage_percent
+        self.time_server = info.time_server
+        return []
+
+    def apply_uptime(self, uptime: timedelta | None, now: datetime) -> list[str]:
+        """Take one uptime fetch (None = it failed); [PART_UPTIME] if the boot time just turned unknown."""
         if uptime is None:
             self._uptime_fail_streak += 1
             if self._uptime_fail_streak == SYSTEM_INFO_FAIL_STREAK_THRESHOLD:
                 self.boot_time = None
-                dropped.append(PART_UPTIME)
-        else:
-            self._uptime_fail_streak = 0
-            rebooted = self._last_uptime is not None and uptime < self._last_uptime
-            self.boot_time = now - uptime if rebooted else stable_boot_time(self.boot_time, now - uptime)
-            self._last_uptime = uptime
-        return dropped
+                return [PART_UPTIME]
+            return []
+        self._uptime_fail_streak = 0
+        rebooted = self._last_uptime is not None and uptime < self._last_uptime
+        self.boot_time = now - uptime if rebooted else stable_boot_time(self.boot_time, now - uptime)
+        self._last_uptime = uptime
+        return []
 
     @property
     def time_server_problem(self) -> bool | None:

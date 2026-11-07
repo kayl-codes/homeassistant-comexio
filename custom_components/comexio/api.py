@@ -5686,34 +5686,39 @@ class ComexioAPI:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
 
-    async def get_system_info(self) -> SystemInfoReading:
+    async def get_system_info(self, *, storage: bool = True, uptime: bool = True) -> SystemInfoReading:
         """System info (free storage, time server settings) and uptime, each with the cause if its fetch failed.
 
-        Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
-        failures and warns with the cause — so they are logged at debug level here. A lapsed admin
-        session is logged in again once per call, like the config poll does: this poll runs more
-        often, and its readings would otherwise go unknown until the next config poll.
+        storage / uptime pick the parts to fetch; a part not asked for is None without a cause. The
+        storage part rides the config poll, the uptime part its own 5-minute tick (see
+        coordinator._async_system_info_tick). Failures are counted and warned there, so they are logged
+        at debug level here. A lapsed admin session is logged in again once per call, like the config
+        poll does, so the readings do not go unknown until the next config poll.
         """
         # This call's one re-login, shared by both fetches: None when it worked, else the failure cause.
         relogin: list[str | None] = []
+        # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
+        storage_fetch = (lambda: self.client.get_system_info()) if storage else None  # noqa: PLW0108
+        uptime_fetch = (lambda: self.client.get_uptime()) if uptime else None  # noqa: PLW0108
         try:
-            # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
-            info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)  # noqa: PLW0108
-            uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)  # noqa: PLW0108
+            info, info_error = await self._system_info_part(storage_fetch, relogin)
+            uptime_value, uptime_error = await self._system_info_part(uptime_fetch, relogin)
         except ComexioCertificateMismatchError as err:
             # Raises the repair; the other fetch would only meet the same certificate.
             self._note_certificate_mismatch(err, "System info not fetched")
             return SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
-        return SystemInfoReading(info, uptime, info_error, uptime_error)
+        return SystemInfoReading(info, uptime_value, info_error, uptime_error)
 
     async def _system_info_part[T](
-        self, fetch: Callable[[], Awaitable[T]], relogin: list[str | None]
+        self, fetch: Callable[[], Awaitable[T]] | None, relogin: list[str | None]
     ) -> tuple[T | None, str | None]:
-        """fetch()'s result, or None and the failure cause.
+        """fetch()'s result, or None and the failure cause; None without a fetch (part not asked for).
 
         A lapsed session is logged in again once per relogin — not with credentials Comexio refused
         (see _login): then the cause is "re-login failed (rejected)" without a request.
         """
+        if fetch is None:
+            return None, None
         generation = self._login_generation
         try:
             try:
