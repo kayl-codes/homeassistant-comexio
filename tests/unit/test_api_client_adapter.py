@@ -2207,7 +2207,7 @@ def test_system_info_without_any_part_is_refused(comexio_api: ComexioAPI, client
     client.get_uptime = AsyncMock(return_value=timedelta(days=3))
 
     reading = comexio_api.get_system_info(storage=False, uptime=False)
-    with pytest.raises(ValueError, match="needs storage, uptime or both"):
+    with pytest.raises(ValueError, match=api_module.SYSTEM_INFO_NO_PART_ERROR):
         asyncio.run(reading)
     client.get_system_info.assert_not_awaited()
     client.get_uptime.assert_not_awaited()

@@ -436,6 +436,34 @@ def test_a_system_info_poll_meeting_another_certificate_raises_the_repair(
     client.get_uptime.assert_not_awaited()
 
 
+def test_a_storage_only_system_info_poll_meeting_another_certificate_leaves_the_uptime_unrequested(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # Only the requested part carries the certificate cause; the unrequested uptime reports no failure.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock(side_effect=_mismatch())
+    client.get_uptime = AsyncMock()
+    reading = asyncio.run(comexio_api.get_system_info(uptime=False))
+    assert reading == SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, None)
+    hook.assert_called_once_with(OTHER)
+    client.get_uptime.assert_not_awaited()
+
+
+def test_an_uptime_only_system_info_poll_meeting_another_certificate_leaves_the_storage_unrequested(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    # Mirror of the storage-only case: the uptime tick reports its own cause only.
+    hook = MagicMock()
+    comexio_api.on_certificate_mismatch = hook
+    client.get_system_info = AsyncMock()
+    client.get_uptime = AsyncMock(side_effect=_mismatch())
+    reading = asyncio.run(comexio_api.get_system_info(storage=False))
+    assert reading == SystemInfoReading(None, None, None, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    hook.assert_called_once_with(OTHER)
+    client.get_system_info.assert_not_awaited()
+
+
 def test_a_mismatch_on_an_admin_write_whose_transport_failures_raise_is_no_transport_failure(
     comexio_api: ComexioAPI, client: MagicMock
 ) -> None:

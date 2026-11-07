@@ -534,6 +534,8 @@ class KnxBridgeReset(NamedTuple):
 
 # The failure cause of both system info parts when Comexio presents a certificate other than the pinned one.
 SYSTEM_INFO_CERTIFICATE_CHANGED = "certificate changed"
+# Raised by get_system_info when called without any part; the test pins the same text.
+SYSTEM_INFO_NO_PART_ERROR = "get_system_info needs storage, uptime or both"
 
 
 class SystemInfoReading(NamedTuple):
@@ -5697,7 +5699,7 @@ class ComexioAPI:
         poll does, so the readings do not go unknown until the next config poll.
         """
         if not (storage or uptime):
-            raise ValueError("get_system_info needs storage, uptime or both")
+            raise ValueError(SYSTEM_INFO_NO_PART_ERROR)
         # This call's one re-login, shared by both fetches: None when it worked, else the failure cause.
         relogin: list[str | None] = []
         # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
@@ -5709,7 +5711,13 @@ class ComexioAPI:
         except ComexioCertificateMismatchError as err:
             # Raises the repair; the other fetch would only meet the same certificate.
             self._note_certificate_mismatch(err, "System info not fetched")
-            return SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
+            # Only the parts this call asked for report the certificate change; the other one stays unrequested.
+            return SystemInfoReading(
+                None,
+                None,
+                SYSTEM_INFO_CERTIFICATE_CHANGED if storage else None,
+                SYSTEM_INFO_CERTIFICATE_CHANGED if uptime else None,
+            )
         return SystemInfoReading(info, uptime_value, info_error, uptime_error)
 
     async def _system_info_part[T](
