@@ -851,10 +851,12 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 # silently keeping the last successful reading forever.
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 
-# System info (free storage, time server settings, uptime): own slow poll, independent of the
-# config audit (skipped during a sync) — the values change slowly, a reboot shows within one interval.
-SYSTEM_INFO_POLL_INTERVAL_SEC = 300
+# System info: the uptime has its own 5-minute poll, so a reboot shows within one interval. Free storage
+# and time server settings ride the config poll (their interval is the user's scan interval): the dashboard
+# page they come from is the slow request of the system info, and Comexio answers it in seconds.
+UPTIME_POLL_INTERVAL_SEC = 300
 # Consecutive failed polls before the readings fall back to "unknown" (one hiccup keeps the last values).
+# Counted per source: 2 failed uptime ticks, or 2 failed config polls for the storage and time server part.
 SYSTEM_INFO_FAIL_STREAK_THRESHOLD = 2
 # The boot time is now - uptime, which moves by the request latency on every poll: an estimate
 # within this many seconds of the known boot time keeps it (no state change, no recorder row).
