@@ -336,18 +336,14 @@ OWN_ID_HOOK_CLASSES = frozenset({"update.ComexioExtensionFirmwareUpdate"})
 
 
 def _requests_its_entity_id(cls: type) -> bool:
-    """The mixin's async_prepare_to_add_to_hass runs only if it precedes Entity in the MRO.
+    """True when the first class in the MRO that defines the hook is an id mixin.
 
-    A class that overrides the hook itself does not count through the mixin: the override may skip the id
-    (a no-op passed before). Such classes must be listed in OWN_ID_HOOK_CLASSES instead.
+    Only that class's hook runs: a no-op inherited from a base listed before the mixin shadows the mixin.
+    A class that overrides the hook itself does not count either (its override may skip the id); such
+    classes must be listed in OWN_ID_HOOK_CLASSES instead.
     """
-    mro = cls.__mro__
-    if "async_prepare_to_add_to_hass" in vars(cls):
-        return False
-    return any(
-        mixin in mro and mro.index(mixin) < mro.index(Entity)
-        for mixin in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
-    )
+    owner = next((base for base in cls.__mro__ if "async_prepare_to_add_to_hass" in vars(base)), None)
+    return owner in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
 
 
 def test_every_entity_class_requests_a_stable_entity_id() -> None:
@@ -369,6 +365,24 @@ def test_every_entity_class_requests_a_stable_entity_id() -> None:
         "Entity classes without ComexioStableEntityIdMixin / ComexioFunctionPlanEntityMixin "
         f"(add the mixin, or list them in HA_DERIVED_ENTITY_ID_CLASSES if that is deliberate): {unstable}"
     )
+
+
+class _NoOpHookBase:
+    async def async_prepare_to_add_to_hass(self) -> None:
+        """Overrides the hook without requesting any entity_id."""
+
+
+class _ShadowedByNoOpBase(_NoOpHookBase, ComexioStableEntityIdMixin, Entity):
+    """The no-op base comes before the mixin in the MRO, so the mixin's hook never runs."""
+
+
+class _PlainIdMixinEntity(ComexioStableEntityIdMixin, Entity):
+    """Nothing shadows the mixin's hook."""
+
+
+def test_inherited_no_op_hook_before_the_mixin_does_not_count_as_an_id_request() -> None:
+    assert not _requests_its_entity_id(_ShadowedByNoOpBase)
+    assert _requests_its_entity_id(_PlainIdMixinEntity)
 
 
 def test_ha_derived_entity_id_allowlist_has_no_stale_entries() -> None:
