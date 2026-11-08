@@ -37,7 +37,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util, slugify
 
-from .api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, SystemInfoReading
+from .api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, OneWireReading, SystemInfoReading
 from .certificate import async_clear_certificate_changed, async_report_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
@@ -150,6 +150,9 @@ from .const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
+    ONEWIRE_DATA_KEY,
+    ONEWIRE_FAIL_STREAK_THRESHOLD,
+    ONEWIRE_POLL_INTERVAL_SEC,
     PLAN_FAILURE_AFTER_GONE_MEMBER,
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
@@ -220,6 +223,7 @@ from .const import (
     io_plan_overflow,
     io_plan_shifted,
     one_line,
+    onewire_signal,
     parse_ignored_ids,
     parse_keyword_list,
     parse_watchdog_user_plan_pick,
@@ -257,6 +261,7 @@ from .ha_address import (
     is_loopback_address,
     webio_device_hints,
 )
+from .onewire import TRANSITION_DROPPED, TRANSITION_RECOVERED, OneWireState
 from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
@@ -661,6 +666,8 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "webio_names": parsed_data.get("webio_names", {}),
         "webio_devices": parsed_data.get("webio_devices", {}),
         "extensions": parsed_data.get("extensions", {}),
+        # Not an import_* category: 1-Wire sensors have no Web-IO command, so their entities always come along.
+        ONEWIRE_DATA_KEY: parsed_data.get(ONEWIRE_DATA_KEY),
     }
 
 
@@ -1402,6 +1409,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Free storage, time server settings, boot time (see async_start_system_info_poll).
         self.system_info = SystemInfoState()
         self._system_info_task: asyncio.Task[None] | None = None
+        # 1-Wire sensor states (see async_start_onewire_poll).
+        self.onewire = OneWireState()
+        self._onewire_task: asyncio.Task[None] | None = None
+        # Log an outage once: its warning (to pair it with the recovery) and an unexpected error's traceback.
+        self._onewire_outage_warned = False
+        self._onewire_traceback_logged = False
         # Function plan run states (see async_start_plan_run_state_poll): the fetched states go
         # into api.fub_data's Active flags; the api reports the changes HA itself causes
         # (run_fup / stop_fup) through the listener, so the plan selector and the run-state
@@ -5058,11 +5071,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # (e.g. an in-progress async_generate_plan_preview) could commit its cache after
         # HA has already moved on, one of the disarm paths missed by the original fix (#77).
         self._disarm_preview_cache()
-        if self._system_info_task is not None:
-            self._system_info_task.cancel()
-            # Wait until it has stopped: async_unload_entry closes the API session right after.
+        if polls := [task for task in (self._system_info_task, self._onewire_task) if task is not None]:
+            for task in polls:
+                task.cancel()
+            # Wait until they have stopped: async_unload_entry closes the API session right after.
             # asyncio.wait does not raise, so a cancellation of this shutdown itself still propagates.
-            await asyncio.wait([self._system_info_task])
+            await asyncio.wait(polls)
         try:
             await super().async_shutdown()
         finally:
@@ -5722,6 +5736,75 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 causes[part],
             )
         async_dispatcher_send(self.hass, system_info_signal(self.server_id))
+
+    def async_start_onewire_poll(self):
+        """Start the 1-Wire status poll; returns the cancel callback.
+
+        Fires one immediate tick, like async_start_system_info_poll, so the states are there right after setup.
+        """
+        self._async_schedule_onewire_tick()
+        return async_track_time_interval(
+            self.hass, self._async_schedule_onewire_tick, timedelta(seconds=ONEWIRE_POLL_INTERVAL_SEC)
+        )
+
+    @callback
+    def _async_schedule_onewire_tick(self, _now: datetime | None = None) -> None:
+        """Start a 1-Wire status poll, unless one still runs, the entry unloads or no sensor is configured.
+
+        One poll at a time, so an older answer never overwrites a newer one; async_shutdown cancels the running
+        one before the API session closes under it. Without configured sensors there is nothing to poll — an
+        unknown sensor list (start from the saved config, #250) still polls, as the entities may exist.
+        """
+        if self.unloading or (self.data or {}).get(ONEWIRE_DATA_KEY) == {}:
+            return
+        if self._onewire_task is not None and not self._onewire_task.done():
+            _LOGGER.debug("[%s] 1-Wire status poll still running, skipping this tick", self.server_id)
+            return
+        self._onewire_task = self.hass.async_create_task(
+            self._async_onewire_tick(), name=f"comexio_{self.server_id}_onewire_tick"
+        )
+
+    async def _async_onewire_tick(self) -> None:
+        """Fetch the 1-Wire states into self.onewire and notify their entities."""
+        reading = await self._async_fetch_onewire_status()
+        self._note_onewire_transition(self.onewire.apply_status(reading.statuses), reading)
+        async_dispatcher_send(self.hass, onewire_signal(self.server_id))
+
+    async def _async_fetch_onewire_status(self) -> OneWireReading:
+        """The 1-Wire status poll; an unexpected error counts as a failed poll.
+
+        So it neither ends the task unseen nor leaves the entities on their last states. Its traceback is logged
+        once, not every minute, until a poll works again.
+        """
+        try:
+            reading = await self.api.get_onewire_status()
+        except Exception as err:
+            if self._onewire_traceback_logged:
+                _LOGGER.debug("[%s] 1-Wire status poll still fails unexpectedly", self.server_id, exc_info=True)
+            else:
+                self._onewire_traceback_logged = True
+                _LOGGER.exception("[%s] 1-Wire status poll failed unexpectedly", self.server_id)
+            return OneWireReading(None, f"unexpected error ({type(err).__name__})")
+        if reading.statuses is not None:
+            self._onewire_traceback_logged = False
+        return reading
+
+    def _note_onewire_transition(self, transition: str | None, reading: OneWireReading) -> None:
+        """Warn once when the 1-Wire states turn unknown, and say once when the poll works again after that warning."""
+        if transition == TRANSITION_DROPPED:
+            if reading.error == SYSTEM_INFO_CERTIFICATE_CHANGED:
+                # The certificate repair is already raised; the states still turn unknown, without a warning.
+                return
+            self._onewire_outage_warned = True
+            _LOGGER.warning(
+                "[%s] 1-Wire status poll failed %s times in a row, 1-Wire sensors unavailable: %s",
+                self.server_id,
+                ONEWIRE_FAIL_STREAK_THRESHOLD,
+                reading.error,
+            )
+        elif transition == TRANSITION_RECOVERED and self._onewire_outage_warned:
+            self._onewire_outage_warned = False
+            _LOGGER.info("[%s] 1-Wire status poll works again, 1-Wire sensors available", self.server_id)
 
     def async_start_plan_run_state_poll(self):
         """Start the function plan run-state poll; returns the cancel callback.

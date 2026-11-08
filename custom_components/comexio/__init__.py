@@ -6,6 +6,7 @@ import logging
 from typing import Any
 
 from aiocomexio import __version__ as AIOCOMEXIO_VERSION
+from aiocomexio.onewire import OneWireSensor
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as HA_VERSION
@@ -38,6 +39,7 @@ from .const import (
     DOMAIN,
     LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
+    ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
     SOURCE_CATEGORIES,
@@ -57,6 +59,9 @@ from .const import (
     known_extension_names,
     migrate_entry_options,
     offline_io_skipped,
+    onewire_problem_unique_id,
+    onewire_unique_id,
+    onewire_unique_id_prefix,
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
@@ -69,6 +74,7 @@ from .coordinator import (
     saved_config_store,
 )
 from .entity import track_quickbus_devices
+from .onewire import onewire_platform
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
 from .services import async_setup_services
@@ -384,6 +390,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             active_unique_ids.add(io_unique_id(server_id, io))
     quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
     active_unique_ids |= quickbus_platforms.keys()
+    onewire_uids, onewire_platforms = _onewire_entity_uids(server_id, coordinator.data, ent_reg, entry.entry_id)
+    active_unique_ids |= onewire_uids
 
     # Server-level buttons and sensors (these are always active)
     active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
@@ -446,6 +454,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         if io_has_entity(io, include_offline) and (platform := io_platform(io)):
             expected_platform[io_unique_id(server_id, io)] = platform
     expected_platform.update(quickbus_platforms)
+    expected_platform.update(onewire_platforms)
     # The run-state sensors were binary sensors before they became enum sensors.
     expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
 
@@ -587,6 +596,8 @@ def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: 
     entry.async_on_unload(coordinator.async_start_bus_load_poll())
     # Uptime: own 5-minute poll (see const.UPTIME_POLL_INTERVAL_SEC). Free storage and time server ride the config poll.
     entry.async_on_unload(coordinator.async_start_system_info_poll())
+    # 1-Wire sensor states: own poll (see const.ONEWIRE_POLL_INTERVAL_SEC), the sensor list rides the config poll.
+    entry.async_on_unload(coordinator.async_start_onewire_poll())
     # Function plan run states between the full polls (see const.FUNCTION_PLAN_RUN_STATE_*).
     entry.async_on_unload(coordinator.async_start_plan_run_state_poll())
     # After the platforms: the auto-start switches have restored the user's choice by now.
@@ -616,6 +627,26 @@ def _quickbus_entity_uids(
         else:
             active[uid] = quickbus_io_platform(io)
     return active, offline
+
+
+def _onewire_entity_uids(
+    server_id: str, data: dict[str, Any], ent_reg: er.EntityRegistry, entry_id: str
+) -> tuple[set[str], dict[str, str]]:
+    """(unique_ids of the 1-Wire entities, unique_id → platform of those whose platform is known).
+
+    The entities are the configured sensors and, with any sensor, the problem sensor. While the sensor list is
+    unknown (None: no config parsed it yet), the existing 1-Wire entities are kept with no platform to enforce:
+    one bad config page must not remove them, nor their history.
+    """
+    sensors: dict[str, OneWireSensor] | None = data.get(ONEWIRE_DATA_KEY)
+    if sensors is None:
+        prefix = onewire_unique_id_prefix(server_id)
+        entries = er.async_entries_for_config_entry(ent_reg, entry_id)
+        return {e.unique_id for e in entries if e.unique_id.startswith(prefix)}, {}
+    platforms = {onewire_unique_id(server_id, address): onewire_platform(sensor) for address, sensor in sensors.items()}
+    if sensors:
+        platforms[onewire_problem_unique_id(server_id)] = "binary_sensor"
+    return set(platforms), platforms
 
 
 def _setup_unreachable_entries(hass: HomeAssistant) -> set[str]:

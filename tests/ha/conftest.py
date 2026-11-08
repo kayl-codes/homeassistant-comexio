@@ -15,7 +15,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio import api as api_module
-from custom_components.comexio.api import ComexioAPI, SystemInfoReading
+from custom_components.comexio.api import ComexioAPI, OneWireReading, SystemInfoReading
 from custom_components.comexio.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -129,6 +129,8 @@ def api_returns() -> dict[str, Any]:
         # An unreadable form, as the real method returns it. The nightly range check (04:20 test time) runs in any
         # test whose loaded entry spans that minute; it counts the command as not checked.
         "get_webio_command_form": None,
+        # Never None either: a failed poll is None plus the cause. No sensor answered.
+        "get_onewire_status": OneWireReading({}),
     }
 
 

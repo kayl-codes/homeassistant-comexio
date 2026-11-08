@@ -335,6 +335,9 @@
       "managed_plans_problem": {
         "name": "Problem verwaltete Pläne"
       },
+      "onewire_problem": {
+        "name": "Sensoren"
+      },
       "time_server_problem": {
         "name": "Zeitserver-Setting"
       }

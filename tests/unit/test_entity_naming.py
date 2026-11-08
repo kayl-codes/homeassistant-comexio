@@ -23,6 +23,7 @@ from custom_components.comexio.const import (
     hub_era_object_id,
     marker_device_name,
     migrate_entry_options,
+    onewire_device_name,
     quickbus_device_name,
     stable_object_id,
 )
@@ -37,6 +38,8 @@ from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, Com
         ("comexio_iosrv1_k5", "iosrv1_k5"),
         ("comexio_iosrv1_k1_k2", "iosrv1_k1_k2"),
         ("comexio_iosrv1_qb211", "iosrv1_qb211"),
+        ("comexio_iosrv1_onewire_ot1", "iosrv1_onewire_ot1"),
+        ("comexio_iosrv1_onewire_problem", "iosrv1_onewire_problem"),
         ("comexio_iosrv1_fub19", "iosrv1_fub19"),
         ("comexio_iosrv1_orphaned_backups", "iosrv1_orphaned_backups"),
         ("comexio_iosrv1_managed_plans_problem", "iosrv1_managed_plans_problem"),
@@ -356,6 +359,7 @@ def test_ha_derived_entity_id_allowlist_has_no_stale_entries() -> None:
         (quickbus_device_name("iosrv1", "MT1"), "iosrv1 QB - MT1"),
         (quickbus_device_name("iosrv1", "MT\n1"), "iosrv1 QB - MT 1"),
         (marker_device_name("iosrv1"), "iosrv1 Markers"),
+        (onewire_device_name("iosrv1"), "iosrv1 1-Wire"),
     ],
 )
 def test_sub_device_names_group_by_kind(device_name: str, expected: str) -> None:

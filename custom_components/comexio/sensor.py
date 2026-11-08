@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 from aiocomexio import format_fingerprint
+from aiocomexio.onewire import OneWireSensor
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -38,6 +39,8 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
+    ONEWIRE_PREFIX_HUMIDITY,
+    ONEWIRE_PREFIX_TEMPERATURE,
     PLAN_RUN_STATE_RUNNING,
     PLAN_RUN_STATE_STOPPED,
     PLAN_RUN_STATES,
@@ -63,10 +66,12 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioOneWireEntity,
     ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
     hub_device_info,
+    onewire_sensors_for_platform,
     quickbus_ios_for_platform,
 )
 from .function_plan_backup import summarize_orphaned_backups
@@ -146,6 +151,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             and knx.get("knx_composite") is None
         )
 
+    # 1-Wire sensors: no Web-IO command, no import_* option — every configured one gets an entity.
+    entities.extend(_onewire_sensors(coordinator))
+
     entities.extend(
         [
             ComexioSyncStatusSensor(coordinator, coordinator.server_id),
@@ -172,6 +180,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     sync_plan_sensors = _PlanRunStateSensorSync(hass, coordinator, async_add_entities)
     sync_plan_sensors()
     entry.async_on_unload(coordinator.async_add_listener(sync_plan_sensors))
+
+
+# The unit and device class of a 1-Wire reading, by the sensor's prefix; any other prefix shows the bare number.
+_ONEWIRE_PREFIX_UNITS: dict[str, tuple[SensorDeviceClass, str]] = {
+    ONEWIRE_PREFIX_TEMPERATURE: (SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS),
+    ONEWIRE_PREFIX_HUMIDITY: (SensorDeviceClass.HUMIDITY, PERCENTAGE),
+}
+
+
+def _onewire_sensors(coordinator: ComexioCoordinator) -> list[SensorEntity]:
+    """An entity per configured analog 1-Wire sensor (and per one whose kind is unknown)."""
+    return [ComexioOneWireSensor(coordinator, sensor) for sensor in onewire_sensors_for_platform(coordinator, "sensor")]
+
+
+class ComexioOneWireSensor(ComexioOneWireEntity, SensorEntity):
+    """An analog 1-Wire sensor (or one whose kind the config does not tell), its reading from the 1-Wire monitor."""
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ComexioCoordinator, sensor: OneWireSensor) -> None:
+        super().__init__(coordinator, sensor)
+        if unit := _ONEWIRE_PREFIX_UNITS.get(sensor.prefix.upper()):
+            self._attr_device_class, self._attr_native_unit_of_measurement = unit
+
+    @property
+    def native_value(self) -> float | None:
+        return status.value if (status := self._status) is not None else None
 
 
 class _PlanRunStateSensorSync:

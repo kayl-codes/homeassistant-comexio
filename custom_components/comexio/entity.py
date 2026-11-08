@@ -4,10 +4,13 @@ from collections.abc import Callable
 import logging
 from typing import Any
 
+from aiocomexio.onewire import OneWireSensor, OneWireStatus
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
+from homeassistant.helpers.entity import Entity
 from homeassistant.helpers.entity_platform import EntityPlatform
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -15,6 +18,7 @@ from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
+    ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
     WebioClass,
@@ -23,12 +27,16 @@ from .const import (
     io_unique_id,
     marker_device_name,
     one_line,
+    onewire_device_name,
+    onewire_signal,
+    onewire_unique_id,
     quickbus_device_name,
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
 )
 from .coordinator import ComexioCoordinator
+from .onewire import onewire_entity_name, onewire_platform
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -171,6 +179,58 @@ class ComexioStableEntityIdMixin:
         super().add_to_platform_start(hass, platform, parallel_updates)  # type: ignore[misc]
         if self.unique_id:
             self.entity_id = f"{platform.domain}.{stable_object_id(self.unique_id)}"
+
+
+def onewire_device_info(coordinator: ComexioCoordinator) -> DeviceInfo:
+    """Sub-device of the 1-Wire bus, carrying every 1-Wire sensor and the 1-Wire problem sensor."""
+    return build_device_info(
+        coordinator,
+        identifiers={(DOMAIN, f"{coordinator.server_id}_onewire")},
+        name=onewire_device_name(coordinator.server_id),
+        model="1-Wire Bus",
+    )
+
+
+def onewire_sensors_for_platform(coordinator: ComexioCoordinator, platform: str) -> list[OneWireSensor]:
+    """The configured 1-Wire sensors whose entity lives on ``platform`` (none while the sensor list is unknown)."""
+    sensors: dict[str, OneWireSensor] = (coordinator.data or {}).get(ONEWIRE_DATA_KEY) or {}
+    return [sensor for sensor in sensors.values() if onewire_platform(sensor) == platform]
+
+
+class ComexioOneWireEntity(ComexioStableEntityIdMixin, Entity):
+    """Shared base of the 1-Wire sensor entities, fed by the 1-Wire status poll via onewire_signal.
+
+    Not a CoordinatorEntity: the states come from their own poll, not from the config poll. Unavailable while
+    the status is unknown, the sensor is not found or has a read error — a read error can still carry a value,
+    which must not show as a reading.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+
+    def __init__(self, coordinator: ComexioCoordinator, sensor: OneWireSensor) -> None:
+        self.coordinator = coordinator
+        self._address = sensor.address
+        self._attr_unique_id = onewire_unique_id(coordinator.server_id, sensor.address)
+        self._attr_name = onewire_entity_name(sensor)
+        self._attr_extra_state_attributes = {"address": sensor.address, "hw_id": sensor.hw_id}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return onewire_device_info(self.coordinator)
+
+    @property
+    def _status(self) -> OneWireStatus | None:
+        return self.coordinator.onewire.status(self._address)
+
+    @property
+    def available(self) -> bool:
+        return (status := self._status) is not None and status.ok
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, onewire_signal(self.coordinator.server_id), self.async_write_ha_state)
+        )
 
 
 class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):

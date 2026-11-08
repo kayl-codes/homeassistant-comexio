@@ -880,6 +880,43 @@ def system_info_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_system_info_update"
 
 
+# 1-Wire sensors: their live state (value, read error, not found) comes from Comexio's 1-Wire monitor on its
+# own poll; no webhook carries it. The sensor list itself rides the config poll ($FubModules group 12).
+ONEWIRE_POLL_INTERVAL_SEC = 60
+# Consecutive failed status polls before the 1-Wire states fall back to "unknown" (one hiccup keeps them).
+ONEWIRE_FAIL_STREAK_THRESHOLD = 2
+# parse_config() output key of the configured 1-Wire sensors ({address: OneWireSensor}); None while unknown.
+ONEWIRE_DATA_KEY = "onewire"
+# Prefixes whose reading has a known unit: OT temperature (°C), OH humidity (%), as Comexio shows them.
+ONEWIRE_PREFIX_TEMPERATURE = "OT"
+ONEWIRE_PREFIX_HUMIDITY = "OH"
+
+
+def onewire_signal(server_id: str) -> str:
+    """Dispatcher signal fired after every 1-Wire status poll (see coordinator._async_onewire_tick)."""
+    return f"{DOMAIN}_{server_id}_onewire_update"
+
+
+def onewire_unique_id_prefix(server_id: str) -> str:
+    """Common start of every 1-Wire sensor's unique_id (the cleanup keeps them while the sensor list is unknown)."""
+    return f"comexio_{server_id}_onewire_"
+
+
+def onewire_unique_id(server_id: str, address: str) -> str:
+    """unique_id of a 1-Wire sensor: its address only (OT1, OH3, ...), never its renamable name."""
+    return f"{onewire_unique_id_prefix(server_id)}{address.lower()}"
+
+
+def onewire_problem_unique_id(server_id: str) -> str:
+    """unique_id of the 1-Wire problem sensor (on while a configured sensor is not found or has a read error)."""
+    return f"comexio_{server_id}_onewire_problem"
+
+
+def onewire_device_name(server_id: str) -> str:
+    """HA device name of the 1-Wire bus: "<server> 1-Wire"."""
+    return f"{server_id} 1-Wire"
+
+
 def plan_watch_signal(server_id: str) -> str:
     """Dispatcher signal fired after every plan watchdog check (keeps the problem sensor's last_check current)."""
     return f"{DOMAIN}_{server_id}_plan_watch"

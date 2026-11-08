@@ -17,9 +17,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
+    ONEWIRE_DATA_KEY,
     MarkerKind,
     bus_load_signal,
     offline_io_skipped,
+    onewire_problem_unique_id,
+    onewire_signal,
     plan_watch_signal,
     system_info_signal,
 )
@@ -28,10 +31,13 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioOneWireEntity,
     ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
     hub_device_info,
+    onewire_device_info,
+    onewire_sensors_for_platform,
     quickbus_ios_for_platform,
 )
 
@@ -82,6 +88,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             and int(knx["id"]) not in ignored_knx
             and knx.get("knx_composite") is None
         )
+
+    # 1-Wire sensors: no Web-IO command, no import_* option — every configured one gets an entity.
+    entities.extend(_onewire_binary_sensors(coordinator))
 
     entities.extend(
         (
@@ -268,6 +277,76 @@ class ComexioTimeServerProblemSensor(ComexioStableEntityIdMixin, BinarySensorEnt
     async def async_added_to_hass(self) -> None:
         self.async_on_remove(
             async_dispatcher_connect(self.hass, system_info_signal(self.server_id), self.async_write_ha_state)
+        )
+
+
+def _onewire_binary_sensors(coordinator: ComexioCoordinator) -> list[BinarySensorEntity]:
+    """An entity per configured digital 1-Wire sensor, and the 1-Wire problem sensor where any sensor is configured.
+
+    While the sensor list is unknown, no problem sensor is set up; the cleanup keeps its registry entry.
+    """
+    entities: list[BinarySensorEntity] = [
+        ComexioOneWireBinarySensor(coordinator, sensor)
+        for sensor in onewire_sensors_for_platform(coordinator, "binary_sensor")
+    ]
+    if (coordinator.data or {}).get(ONEWIRE_DATA_KEY):
+        entities.append(ComexioOneWireProblemSensor(coordinator, coordinator.server_id))
+    return entities
+
+
+class ComexioOneWireBinarySensor(ComexioOneWireEntity, BinarySensorEntity):
+    """A digital 1-Wire sensor: on while its reading is not 0."""
+
+    @property
+    def is_on(self) -> bool | None:
+        if (status := self._status) is None or status.value is None:
+            return None
+        return status.value != 0
+
+
+class ComexioOneWireProblemSensor(ComexioStableEntityIdMixin, BinarySensorEntity):
+    """On while a configured 1-Wire sensor is not found, has a read error or is missing from Comexio's 1-Wire monitor.
+
+    Fed by the 1-Wire status poll via onewire_signal; unknown while that poll's states are unknown. The attributes
+    list the addresses per problem, so an automation can name the sensor.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_translation_key = "onewire_problem"
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self.server_id = server_id
+        self._attr_unique_id = onewire_problem_unique_id(server_id)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return onewire_device_info(self.coordinator)
+
+    @property
+    def _problems(self) -> dict[str, list[str]] | None:
+        # None (unknown) also while the sensor list is: "no problem" would claim sensors that nothing checked.
+        if (sensors := (self.coordinator.data or {}).get(ONEWIRE_DATA_KEY)) is None:
+            return None
+        return self.coordinator.onewire.problems(sensors)
+
+    @property
+    def is_on(self) -> bool | None:
+        if (problems := self._problems) is None:
+            return None
+        return any(problems.values())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        # read_error, not_found, missing: the addresses per problem (none while the states are unknown).
+        return self._problems or {}
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            async_dispatcher_connect(self.hass, onewire_signal(self.server_id), self.async_write_ha_state)
         )
 
 

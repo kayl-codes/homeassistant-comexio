@@ -34,6 +34,7 @@ from aiocomexio import (
 )
 from aiocomexio.config import ParseOptions, iter_group
 from aiocomexio.const import WebioClass
+from aiocomexio.onewire import OneWireSensor, OneWireStatus, parse_onewire_config
 from aiocomexio.reference_catalog import KIND_FUB_BASE, ReferenceCheck
 from aiocomexio.session import session_kwargs
 import aiohttp
@@ -75,6 +76,7 @@ from .const import (
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
+    ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
@@ -548,6 +550,13 @@ class SystemInfoReading(NamedTuple):
     uptime_error: str | None = None
 
 
+class OneWireReading(NamedTuple):
+    """One 1-Wire status poll (see ComexioAPI.get_onewire_status): statuses None if it failed, with the cause."""
+
+    statuses: dict[str, OneWireStatus] | None
+    error: str | None = None
+
+
 def _strip_marker_kind_suffixes(name: str) -> str:
     """name without every trailing kind suffix ("Rollo [TRIG] [K3]" -> "Rollo")."""
     while (stripped := MARKER_KIND_SUFFIX_RE.sub("", name)) != name:
@@ -832,6 +841,10 @@ class ComexioAPI:
         # run-state answer whose fetch began before such a write may be older than its Active flags.
         self._fub_cache_epoch = 0
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
+        # The configured 1-Wire sensors of the last config that parsed (see _parse_onewire); None before the first.
+        self._onewire_sensors: dict[str, OneWireSensor] | None = None
+        # The cause last warned about when the 1-Wire group did not parse; None while it parses.
+        self._onewire_parse_error: str | None = None
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
@@ -1676,6 +1689,7 @@ class ComexioAPI:
         # QUICKBUS_IO_DATA_KEY). io_all keeps them for plan labels.
         data[QUICKBUS_IO_DATA_KEY] = [io for io in data["io"] if io.get("quickbus")]
         data["io"] = [io for io in data["io"] if not io.get("quickbus")]
+        data[ONEWIRE_DATA_KEY] = self._parse_onewire(conf.get("FubModules"))
         _LOGGER.info(
             "Audit: %d Markers, %d IOs, %d Quickbus IOs, %d KNX, %d Webhooks in Comexio for %s",
             len(data["markers"]),
@@ -1686,6 +1700,29 @@ class ComexioAPI:
             webio_name,
         )
         return data
+
+    def _parse_onewire(self, fub_modules: Any) -> dict[str, OneWireSensor] | None:
+        """The configured 1-Wire sensors of $FubModules; the last ones that parsed if these do not (None before).
+
+        A missing or empty $FubModules is a failed fetch, not an installation without 1-Wire sensors, and a
+        changed group (ComexioDataError) is warned about: either way the sensors stay as they were, so their
+        entities are neither removed nor shown as gone over one bad page. The warning comes once per cause, not on
+        every config poll, until the sensors parse again.
+        """
+        if not isinstance(fub_modules, Mapping) or not fub_modules:
+            _LOGGER.debug("Comexio config carries no $FubModules, keeping the last known 1-Wire sensors")
+            return self._onewire_sensors
+        try:
+            self._onewire_sensors = parse_onewire_config(fub_modules)
+        except ComexioDataError as err:
+            if (cause := str(err)) != self._onewire_parse_error:
+                self._onewire_parse_error = cause
+                _LOGGER.warning("1-Wire sensors not read from the Comexio config, keeping the last known ones: %s", err)
+            else:
+                _LOGGER.debug("1-Wire sensors still not read from the Comexio config: %s", err)
+        else:
+            self._onewire_parse_error = None
+        return self._onewire_sensors
 
     def _load_config_names(self) -> tuple[str, str, str, str, str]:
         """Load configuration names from config_entry."""
@@ -5706,8 +5743,8 @@ class ComexioAPI:
         storage_fetch = (lambda: self.client.get_system_info()) if storage else None  # noqa: PLW0108
         uptime_fetch = (lambda: self.client.get_uptime()) if uptime else None  # noqa: PLW0108
         try:
-            info, info_error = await self._system_info_part(storage_fetch, relogin)
-            uptime_value, uptime_error = await self._system_info_part(uptime_fetch, relogin)
+            info, info_error = await self._admin_poll_part(storage_fetch, relogin)
+            uptime_value, uptime_error = await self._admin_poll_part(uptime_fetch, relogin)
         except ComexioCertificateMismatchError as err:
             # Raises the repair; the other fetch would only meet the same certificate.
             self._note_certificate_mismatch(err, "System info not fetched")
@@ -5720,10 +5757,26 @@ class ComexioAPI:
             )
         return SystemInfoReading(info, uptime_value, info_error, uptime_error)
 
-    async def _system_info_part[T](
+    async def get_onewire_status(self) -> OneWireReading:
+        """The live state of the 1-Wire sensors Comexio's monitor reports, or None and the failure cause.
+
+        Called on its own poll (see coordinator._async_onewire_tick), which counts and warns about failures, so
+        they are logged at debug level here. A lapsed admin session is logged in again once, as for the system info.
+        """
+        try:
+            statuses, error = await self._admin_poll_part(lambda: self.client.get_onewire_status(), [])  # noqa: PLW0108
+        except ComexioCertificateMismatchError as err:
+            # Polled between the config polls, like the bus workload: quiet, the repair is raised all the same.
+            self._note_certificate_mismatch(err, "1-Wire status not fetched", quiet=True)
+            return OneWireReading(None, SYSTEM_INFO_CERTIFICATE_CHANGED)
+        return OneWireReading(statuses, error)
+
+    async def _admin_poll_part[T](
         self, fetch: Callable[[], Awaitable[T]] | None, relogin: list[str | None]
     ) -> tuple[T | None, str | None]:
         """fetch()'s result, or None and the failure cause; None without a fetch (part not asked for).
+
+        For the polls between the config polls (system info, 1-Wire status).
 
         A lapsed session is logged in again once per relogin — not with credentials Comexio refused
         (see _login): then the cause is "re-login failed (rejected)" without a request.
@@ -5736,15 +5789,15 @@ class ComexioAPI:
                 return await fetch(), None
             except ComexioAuthenticationError:
                 if not relogin:
-                    _LOGGER.debug("Comexio admin session lapsed during the system info poll — logging in again")
+                    _LOGGER.debug("Comexio admin session lapsed during a poll — logging in again")
                     relogin.append(self._relogin_failure(await self._full_login(generation)))
                 if relogin[0] is not None:
                     return None, relogin[0]
                 return await fetch(), None
         except ComexioCertificateMismatchError:
-            raise  # get_system_info raises the repair
+            raise  # the caller raises the repair
         except ComexioError as err:
-            _LOGGER.debug("System info fetch failed: %s", err)
+            _LOGGER.debug("Poll fetch failed: %s", err)
             return None, str(err) or type(err).__name__
 
     def _relogin_failure(self, logged_in: bool) -> str | None:

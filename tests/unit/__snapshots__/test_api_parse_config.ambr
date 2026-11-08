@@ -320,6 +320,8 @@
         'value': 0.0,
       }),
     ]),
+    'onewire': dict({
+    }),
     'quickbus_devices': dict({
     }),
     'quickbus_io': list([

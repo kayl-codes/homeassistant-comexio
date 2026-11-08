@@ -139,6 +139,8 @@ Column plans — IO extensions (`{prefix} - IO [A,B]`, option `logikplan_io_exte
 | Marker entity | `comexio_{server_id}_m{id}` | `{domain}.{server_id}_m{id}` |
 | KNX entity | `comexio_{server_id}_k{id}` | `{domain}.{server_id}_k{id}` |
 | Quickbus IO entity (read-only) | `comexio_{server_id}_qb{io_id}` | `{binary_sensor|sensor}.{server_id}_qb{io_id}` |
+| 1-Wire sensor (read-only) | `comexio_{server_id}_onewire_{address}` (address lower-cased, e.g. `ot1`) | `{sensor|binary_sensor}.{server_id}_onewire_{address}` |
+| 1-Wire problem sensor | `comexio_{server_id}_onewire_problem` | `binary_sensor.{server_id}_onewire_problem` |
 | IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
 | Function plan run state | `comexio_{server_id}_fub{id}` | `sensor.{server_id}_fub{id}` |
 | Orphaned backups sensor | `comexio_{server_id}_orphaned_backups` | `sensor.{server_id}_orphaned_backups` |
@@ -155,7 +157,7 @@ The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.Comex
 
 ### Device names
 
-Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name` / `marker_device_name`): `<server> BASE` (onboard IOs, no tag, matched case-insensitively), `<server> EXT - <ext>`, `<server> QB - <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> Markers` (no tag). Plain letter tags, no brackets: the HA frontend sorts with ICU, where `[` would sort before `#` and push `<server> # Function plans` away from the hub. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}`. An entity whose entity_id HA derives from its device name must not pick up a tag: the extension firmware entity requests its pre-tag id `const.extension_firmware_object_id` (`update.{server}_{ext}_firmware`).
+Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name` / `marker_device_name` / `onewire_device_name`): `<server> BASE` (onboard IOs, no tag, matched case-insensitively), `<server> EXT - <ext>`, `<server> QB - <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> Markers` (no tag), `<server> 1-Wire` (no tag, all 1-Wire sensors). Plain letter tags, no brackets: the HA frontend sorts with ICU, where `[` would sort before `#` and push `<server> # Function plans` away from the hub. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}` / `{server_id}_onewire`. An entity whose entity_id HA derives from its device name must not pick up a tag: the extension firmware entity requests its pre-tag id `const.extension_firmware_object_id` (`update.{server}_{ext}_firmware`).
 
 ### Entity naming (configurable)
 
