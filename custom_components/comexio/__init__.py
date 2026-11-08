@@ -145,21 +145,27 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
 _WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX"}
 
 
-def _dispatch_push(coordinator: ComexioCoordinator, data: dict[str, Any]) -> None:
-    """Hand the value of one webhook payload to the coordinator, by the kind of item it names."""
+def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:
+    """Hand the value of one webhook payload to the coordinator, by the kind of item it names.
+
+    A malformed push is logged throttled and without its payload: the old id is guessable while it is on, and
+    the sender is anybody who can reach the endpoint.
+    """
     val = data.get("value")
     webhook_type = data.get("type")
+    server_id = coordinator.server_id
     if webhook_type == "io":
         ext = data.get("ext")
         io_id = data.get("io")
         if not ext or not io_id:
-            _LOGGER.warning("Webhook IO event missing ext/io: %s", data)
+            security.warn_refused("missing-io", "[%s] Webhook IO event missing ext/io", server_id)
             return
         coordinator.update_io_by_name(ext, io_id, val)
         return
     item_id = data.get("id")
     if item_id is None:
-        _LOGGER.warning("Webhook %s event missing id: %s", _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker"), data)
+        label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
+        security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
     elif webhook_type == "quickbus":
         coordinator.update_quickbus_io(item_id, val)
     elif webhook_type == "knx":
@@ -208,7 +214,7 @@ def _webhook_handler(coordinator: ComexioCoordinator, security: WebhookSecurity)
                     "id-mismatch", "[%s] Webhook request refused: its id does not belong to its payload", server_id
                 )
                 return
-            _dispatch_push(coordinator, data)
+            _dispatch_push(coordinator, security, data)
         except Exception as e:
             _LOGGER.exception("Webhook Error: %s", e)
 

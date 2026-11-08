@@ -760,7 +760,9 @@ def test_a_missing_quickbus_or_knx_id_is_logged_under_the_name_of_its_kind(
 
     assert "Webhook Quickbus event missing id" in caplog.text
     assert "Webhook KNX event missing id" in caplog.text
-    assert caplog.text.count("Webhook marker event missing id") == 2
+    # the second marker line is throttled (same kind inside the interval), and no line carries the payload
+    assert caplog.text.count("Webhook marker event missing id") == 1
+    assert "odd" not in caplog.text
 
 
 def test_removing_the_entry_drops_the_webhook_store_even_when_the_saved_config_store_fails(
