@@ -1498,7 +1498,7 @@ def test_set_value_analog_output_names_the_certificate_only_when_the_re_login_me
     assert (comexio_api.certificate_mismatch is MISMATCH) is names_certificate  # the repair has it
 
 
-@pytest.mark.parametrize("identifier", ["Q3", "AI1", "QI1"])
+@pytest.mark.parametrize("identifier", ["Q3", "DG1"])
 def test_set_value_api_written_io_does_not_log_in_again(
     comexio_api: ComexioAPI, client: MagicMock, identifier: str
 ) -> None:
