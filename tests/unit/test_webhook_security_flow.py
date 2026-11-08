@@ -97,6 +97,8 @@ def test_a_command_the_run_cannot_rewrite_keeps_the_old_id_on(monkeypatch: pytes
 
 
 def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any) -> Any:
+    # the real bookkeeping stamps the write with the clock: pin it to NOW, the time the boot is measured from
+    monkeypatch.setattr("custom_components.comexio.api.dt_util.utcnow", lambda: NOW)
     coordinator = _coordinator(monkeypatch, boot=boot, written=NOW)
     coordinator.unloading = False
     coordinator._restore_lock = SimpleNamespace(locked=lambda: False)
@@ -126,7 +128,7 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
 def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    coordinator = _tick_coordinator(monkeypatch, cmd_id="", boot=NOW + timedelta(hours=1))
+    coordinator = _tick_coordinator(monkeypatch, cmd_id="", boot=NOW - timedelta(hours=1))  # booted before the write
     security = coordinator.api.webhook_security
 
     assert _run(coordinator._async_webhook_migration_tick()) == "pending"

@@ -8,11 +8,16 @@ deviation); this scan makes a new place a finding before a bot or a user has to 
 
 What counts as printing: a call of a logging method (debug, info, warning, ... on any receiver), `print`,
 `warn_refused`, `persistent_notification.async_create`, the repair creators `async_create_issue` /
-`async_create_entry_issue` (their placeholders), and the text of a `raise`. What counts as carrying an id: a name or
-attribute in SECRET_NAMES, the form field `Parameter` (a command's path), or a local name assigned from such an
-expression in the same function. `redact_webhook_ids(...)` makes its argument safe, so a use under it is fine.
+`async_create_entry_issue` (their placeholders), and the text of a `raise` (also its cause) or an `assert`.
+What counts as carrying an id: a name or attribute in SECRET_NAMES, the form field `Parameter` (a command's path), or
+a local name assigned from such an expression in the same function (tuple targets and annotated assignments included;
+a logging method bound to a local name counts as a sink). A bare id or secret handed to `redact_webhook_ids` stays
+tainted: it only redacts ids inside a webhook path. `redact_webhook_ids(...)` makes its argument safe, so a use under
+it is fine.
 
-Not followed: an id handed through an attribute or another function, and the texts the aiocomexio library puts into its
+Not followed: an id handed through an attribute or another function, a logging alias or tainted name from an outer
+scope (module level, enclosing function), reassignments in a branch or loop, augmented assignments, walrus and loop
+targets, and the texts the aiocomexio library puts into its
 own exceptions (they quote Comexio's answer, not our request). Those stay for the review of the diff.
 
 A second check keeps the Comexio host bound to the ledger: `WebhookSecurity(...)` must be given the host of the entry,
@@ -32,6 +37,9 @@ FORM_PATH_FIELD = "Parameter"
 LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "log", "fatal"})
 PRINTING_CALLS = frozenset({"print", "warn_refused", "async_create", "async_create_issue", "async_create_entry_issue"})
 SAFE_WRAPPERS = frozenset({"redact_webhook_ids"})
+WEBHOOK_PATH = "/api/webhook/"
+HOST_KEYWORD = "host"
+HOST_SOURCE = "CONF_HOST"  # the entry's own host option
 
 # (file relative to the integration, Class.method) -> (uses counted there, why the id is not shown there). Each use
 # counts, so a second one in a listed function fails too.
@@ -43,39 +51,71 @@ def _call_name(node: ast.Call) -> str:
     return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else ""
 
 
-def _is_printing(node: ast.Call) -> bool:
+def _is_printing(node: ast.Call, aliases: frozenset[str] = frozenset()) -> bool:
     name = _call_name(node)
     if name in PRINTING_CALLS:
         return True
+    if isinstance(node.func, ast.Name):
+        return name in aliases
     return isinstance(node.func, ast.Attribute) and name in LOG_METHODS
+
+
+def _is_bare_secret(node: ast.AST, tainted: frozenset[str]) -> bool:
+    """A value that is an id or the secret itself: redact_webhook_ids only knows ids inside a webhook path."""
+    if isinstance(node, ast.Name):
+        return node.id in SECRET_NAMES or node.id in tainted
+    if isinstance(node, ast.Attribute):
+        return node.attr in SECRET_NAMES
+    return isinstance(node, ast.Call) and _call_name(node) in SECRET_NAMES
+
+
+def _survives_redaction(node: ast.AST, tainted: frozenset[str]) -> bool:
+    """What redact_webhook_ids leaves: a bare id, or an id in a text that is not shaped like a webhook path."""
+    if _is_bare_secret(node, tainted):
+        return True
+    if isinstance(node, ast.JoinedStr):
+        in_path = any(isinstance(p, ast.Constant) and WEBHOOK_PATH in str(p.value) for p in node.values)
+        return not in_path and _carries_id(node, tainted)
+    return False
 
 
 def _carries_id(node: ast.AST, tainted: frozenset[str] = frozenset()) -> bool:
     """Whether an expression names the secret, reads a command's path field or a tainted name, outside redaction."""
     if isinstance(node, ast.Call) and _call_name(node) in SAFE_WRAPPERS:
-        return False
-    if isinstance(node, ast.Name) and (node.id in SECRET_NAMES or node.id in tainted):
-        return True
-    if isinstance(node, ast.Attribute) and node.attr in SECRET_NAMES:
+        return any(_survives_redaction(arg, tainted) for arg in node.args)
+    if _is_bare_secret(node, tainted) and not isinstance(node, ast.Call):
         return True
     if isinstance(node, ast.Constant) and node.value == FORM_PATH_FIELD:
         return True
     return any(_carries_id(child, tainted) for child in ast.iter_child_nodes(node))
 
 
+def _target_names(target: ast.AST) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [name for element in target.elts for name in _target_names(element)]
+    if isinstance(target, ast.Starred):
+        return _target_names(target.value)
+    return []
+
+
 class _Scan(ast.NodeVisitor):
     def __init__(self) -> None:
         self.scope: list[str] = []
         self.tainted: list[set[str]] = [set()]
+        self.aliases: list[set[str]] = [set()]
         self.hits: list[tuple[str, int]] = []
 
     def _enter(self, node: ast.AST, name: str, *, function: bool) -> None:
         self.scope.append(name)
         if function:
             self.tainted.append(set())
+            self.aliases.append(set())
         self.generic_visit(node)
         if function:
             self.tainted.pop()
+            self.aliases.pop()
         self.scope.pop()
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -89,21 +129,38 @@ class _Scan(ast.NodeVisitor):
     def _hit(self, node: ast.AST) -> None:
         self.hits.append((".".join(self.scope), node.lineno))
 
+    def _assign(self, targets: list[ast.expr], value: ast.expr | None) -> None:
+        names = [name for target in targets for name in _target_names(target)]
+        if isinstance(value, ast.Attribute) and value.attr in LOG_METHODS:
+            self.aliases[-1].update(names)
+        if value is not None and _carries_id(value, frozenset(self.tainted[-1])):
+            self.tainted[-1].update(names)
+        else:
+            self.tainted[-1].difference_update(names)
+
     def visit_Assign(self, node: ast.Assign) -> None:
-        if _carries_id(node.value, frozenset(self.tainted[-1])):
-            self.tainted[-1].update(t.id for t in node.targets if isinstance(t, ast.Name))
+        self._assign(node.targets, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        self._assign([node.target], node.value)
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
         tainted = frozenset(self.tainted[-1])
-        if _is_printing(node) and any(
-            _carries_id(arg, tainted) for arg in (*node.args, *(k.value for k in node.keywords))
-        ):
+        arguments = (*node.args, *(k.value for k in node.keywords))
+        if _is_printing(node, frozenset(self.aliases[-1])) and any(_carries_id(arg, tainted) for arg in arguments):
             self._hit(node)
         self.generic_visit(node)
 
     def visit_Raise(self, node: ast.Raise) -> None:
-        if node.exc is not None and _carries_id(node.exc, frozenset(self.tainted[-1])):
+        tainted = frozenset(self.tainted[-1])
+        if any(part is not None and _carries_id(part, tainted) for part in (node.exc, node.cause)):
+            self._hit(node)
+        self.generic_visit(node)
+
+    def visit_Assert(self, node: ast.Assert) -> None:
+        if node.msg is not None and _carries_id(node.msg, frozenset(self.tainted[-1])):
             self._hit(node)
         self.generic_visit(node)
 
@@ -143,6 +200,16 @@ class C:
         url = f"/api/webhook/{webhook_id}"
         _LOGGER.error("url %s", url)
         raise ValueError(f"bad {webhook_id}")
+        log = _LOGGER.warning
+        log("alias %s", webhook_id)
+        ann: str = webhook_id
+        _LOGGER.info("ann %s", ann)
+        first, second = cmd["Parameter"], 1
+        _LOGGER.info("tuple %s", first)
+        raise ValueError("x") from OSError(webhook_id)
+        assert ok, f"bad {webhook_id}"
+        _LOGGER.info(redact_webhook_ids(webhook_id))
+        _LOGGER.info(redact_webhook_ids(f"id {webhook_id}"))
 
     async def async_leaks(self, webhook_id):
         print(webhook_id)
@@ -154,10 +221,14 @@ class C:
         url = f"/api/other/{cmd}"
         _LOGGER.info("url %s", url)
         raise ValueError("bad value")
+        _LOGGER.info("p %s", redact_webhook_ids(f"/api/webhook/{webhook_id}"))
+        again = webhook_id
+        again = "safe now"
+        _LOGGER.info("again %s", again)
 """
     scopes = Counter(scope for scope, _line in _scan(source))
 
-    assert scopes == {"C.leaks": 8, "C.async_leaks": 1}
+    assert scopes == {"C.leaks": 15, "C.async_leaks": 1}
 
 
 def test_every_webhook_security_is_built_with_the_host_of_its_entry() -> None:
@@ -166,15 +237,8 @@ def test_every_webhook_security_is_built_with_the_host_of_its_entry() -> None:
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Call) and _call_name(node) == "WebhookSecurity":
                 built += 1
-                host = (
-                    node.args[3]
-                    if len(node.args) >= 4
-                    else next((k.value for k in node.keywords if k.arg == "host"), None)
-                )
-                assert host is not None, (
-                    f"{path.name}:{node.lineno} builds WebhookSecurity without the host of the entry"
-                )
-                assert "host" in ast.unparse(host).lower(), (
-                    f"{path.name}:{node.lineno} passes {ast.unparse(host)}, no host"
-                )
+                host = node.args[3] if len(node.args) >= 4 else None
+                host = host or next((k.value for k in node.keywords if k.arg == HOST_KEYWORD), None)
+                assert host is not None, f"{path.name}:{node.lineno} builds WebhookSecurity without the host"
+                assert HOST_SOURCE in ast.unparse(host), f"{path.name}:{node.lineno} passes {ast.unparse(host)}"
     assert built, "no WebhookSecurity(...) found: the check no longer looks where the entry builds it"
