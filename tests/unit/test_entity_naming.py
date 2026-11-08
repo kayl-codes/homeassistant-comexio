@@ -329,14 +329,14 @@ def _integration_entity_classes() -> dict[str, type]:
     return classes
 
 
-def _requests_its_entity_id(cls: type) -> bool:
-    """The mixin's async_prepare_to_add_to_hass runs only if it precedes Entity in the MRO.
+# Classes that set their entity_id in their own async_prepare_to_add_to_hass instead of a mixin. A method
+# being present proves nothing (a no-op hook passes), so each one is listed here and pinned by its own unit test.
+OWN_ID_HOOK_CLASSES = frozenset({"update.ComexioExtensionFirmwareUpdate"})
 
-    A class may also request its id in its own async_prepare_to_add_to_hass (the extension firmware entity).
-    """
+
+def _requests_its_entity_id(cls: type) -> bool:
+    """The mixin's async_prepare_to_add_to_hass runs only if it precedes Entity in the MRO."""
     mro = cls.__mro__
-    if "async_prepare_to_add_to_hass" in vars(cls):
-        return True
     return any(
         mixin in mro and mro.index(mixin) < mro.index(Entity)
         for mixin in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
@@ -348,10 +348,13 @@ def test_every_entity_class_requests_a_stable_entity_id() -> None:
     classes = _integration_entity_classes()
     # Guards against a discovery that silently finds nothing: one class per id mixin and platform kind.
     assert {"sensor.ComexioMarkerSensor", "select.ComexioPlanSelectEntity", "light.ComexioKnxLight"} <= classes.keys()
+    assert all("async_prepare_to_add_to_hass" in vars(classes[key]) for key in OWN_ID_HOOK_CLASSES)
     unstable = sorted(
         key
         for key, cls in classes.items()
-        if not _requests_its_entity_id(cls) and key not in HA_DERIVED_ENTITY_ID_CLASSES
+        if not _requests_its_entity_id(cls)
+        and key not in HA_DERIVED_ENTITY_ID_CLASSES
+        and key not in OWN_ID_HOOK_CLASSES
     )
 
     assert not unstable, (
