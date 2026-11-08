@@ -4,7 +4,6 @@ import logging
 import math
 from typing import Any
 
-from aiocomexio import io_written_over_admin_session
 from homeassistant.components.number import NumberDeviceClass, NumberEntity, NumberMode
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfTemperature
@@ -22,6 +21,7 @@ from .const import (
     WEBIO_MARKER_ANALOG_MAX,
     WEBIO_MARKER_ANALOG_MIN,
     MarkerKind,
+    is_analog_output,
     is_temperature_marker_name,
     offline_io_skipped,
 )
@@ -217,7 +217,7 @@ class ComexioIONumber(ComexioIOEntity, NumberEntity):
 
         unit = io.get("unit", "")
         # An AO is no dimmer: its admin-session write takes a fraction, the #253 rounding is the API's (#259).
-        self._analog_output = io_written_over_admin_session(self._identifier)
+        self._analog_output = is_analog_output(self._identifier)
         self._whole_percent = not self._analog_output and io_number_takes_whole_percent(
             unit, self._attr_native_min_value, self._attr_native_max_value
         )

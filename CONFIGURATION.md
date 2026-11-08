@@ -27,7 +27,7 @@ Navigate to **Settings → Devices & Services → Add Integration** and search f
 | **② Host / IP** | IP address or hostname of your Comexio IO-Server, optionally with a port (`comexio.local:8443`). Pre-filled with the address of the first `comexio.<domain>` that resolves and is not set up yet, otherwise `192.168.1.100`. A server that is already set up — same host or same address — is refused. |
 | **③ Username** | Admin UI username (default: `admin`). |
 | **④ Password** | Admin UI password. |
-| **⑤ API Username** | Basic Auth username for fast value writes (optional). The analog outputs AO1–AO4 are written over the admin login instead: Comexio refuses them over the API. |
+| **⑤ API Username** | Basic Auth username for fast value writes (optional). Only the digital outputs `Q*` and `DG*` use it. Every other IO, the analog outputs AO1–AO4 among them, is written over the admin login instead: Comexio refuses those over the API. |
 | **⑥ API Password** | Basic Auth password (optional). |
 | **⑦ Create marker entities** | Import Comexio Markers as HA entities. |
 | **⑧ Create IO entities** | Import physical IOs as HA entities. |
