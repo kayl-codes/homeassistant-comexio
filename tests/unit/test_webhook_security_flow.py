@@ -751,3 +751,23 @@ def test_removing_the_entry_drops_the_webhook_store_even_when_the_saved_config_s
         _run(removal)
 
     assert removed == ["saved", "security", "preview"]
+
+
+def test_a_refused_webhook_id_is_warned_once_and_never_shown(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review (Sourcery, #279): the id is the secret of its command, so no part of it may reach the log."""
+    taken = "ab12cd34" * 4
+    monkeypatch.setattr(comexio_init.webhook, "async_register", MagicMock(side_effect=ValueError("taken")))
+    registered: set[str] = set()
+    refused: set[str] = set()
+
+    with caplog.at_level("WARNING"):
+        for _ in range(2):
+            comexio_init._register_webhooks(MagicMock(), MagicMock(), SERVER, registered, refused, {taken})
+
+    warnings = [record.getMessage() for record in caplog.records if "already registered" in record.getMessage()]
+    assert len(warnings) == 1
+    assert taken[:8] not in warnings[0]
+    assert refused == {taken}
+    assert not registered

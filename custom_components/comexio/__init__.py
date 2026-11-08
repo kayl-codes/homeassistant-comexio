@@ -227,7 +227,8 @@ def _register_webhooks(
             webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handler)
         except ValueError:
             if webhook_id not in refused:
-                _LOGGER.warning("[%s] Webhook id %s... is already registered, skipped", server_id, webhook_id[:8])
+                # No part of the id in the log: it is the secret of its command.
+                _LOGGER.warning("[%s] A webhook id is already registered by another registration, skipped", server_id)
                 refused.add(webhook_id)
             continue
         refused.discard(webhook_id)
