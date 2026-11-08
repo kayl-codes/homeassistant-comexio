@@ -122,8 +122,11 @@ def test_generated_class_json_carries_the_ids_too(comexio_api: ComexioAPI, monke
     assert len(template["commands"]) == 2
     assert len({c["Parameter"] for c in template["commands"]}) == 2
     for command in template["commands"]:
+        payload = _payload(command["Data"])
+        # Review (Sourcery, #279): accepts() lets a payload without a server pass, so the field is asserted itself
+        assert payload["server"] == SERVER
         # every path is the id of the command whose payload it carries, so the handler accepts the push
-        assert comexio_api.webhook_security.accepts(_own_id(command), _payload(command["Data"]))
+        assert comexio_api.webhook_security.accepts(_own_id(command), payload)
 
 
 @pytest.mark.parametrize(
@@ -273,11 +276,20 @@ def test_an_unknown_boot_time_does_not_switch_the_old_id_off(monkeypatch: pytest
 
 def test_the_old_id_goes_off_after_a_restart_following_the_last_write(monkeypatch: pytest.MonkeyPatch) -> None:
     coordinator = _coordinator(monkeypatch, boot=NOW + timedelta(hours=1), written=NOW)
+    security = coordinator.api.webhook_security
+    saved: list[bool] = []
+
+    async def record_save() -> None:
+        saved.append(security.legacy_enabled)
+
+    security.async_save.side_effect = record_save
 
     assert _run(coordinator._async_finish_webhook_migration()) == "done"
 
-    assert not coordinator.api.webhook_security.legacy_enabled
-    coordinator.api.webhook_security.async_save.assert_awaited()
+    assert not security.legacy_enabled
+    # Review (Sourcery, #279): what is saved is the switched-off state; a save before the flip would reload as on
+    assert saved
+    assert saved[-1] is False
     coordinator.sync_webhooks.assert_called_once_with()
 
 

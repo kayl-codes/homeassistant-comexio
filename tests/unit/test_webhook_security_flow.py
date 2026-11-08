@@ -11,6 +11,7 @@ from custom_components import comexio as comexio_init
 from custom_components.comexio import _setup_webhooks, webhook as ha_webhook, webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.services import misc as services_misc
 from tests.unit.test_api_helpers import PARSED
 from tests.unit.test_webhook_security import (
     NOW,
@@ -837,3 +838,62 @@ def test_the_handler_logs_each_kind_of_refusal_once_per_interval_as_a_warning(
     non_json = [record for record in caplog.records if "non-JSON payload" in record.getMessage()]
     assert [record.levelname for record in non_json] == ["WARNING"]
     assert "not a JSON object" in caplog.text
+
+
+def _preview_message(comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> str:
+    """The text the generate_web_io preview puts into its persistent notification."""
+    coordinator = SimpleNamespace(
+        api=comexio_api,
+        server_id=SERVER,
+        config_entry=SimpleNamespace(data={}, options={}),
+        required_webio_classes=("marker",),
+        webio_source_data=lambda: PARSED,
+        ignored_marker_ids=set(),
+        ignored_knx_ids=set(),
+    )
+    create = MagicMock()
+    monkeypatch.setattr(services_misc.persistent_notification, "async_create", create)
+    hass = SimpleNamespace(data={_DOMAIN: {"e1": coordinator}})
+
+    _run(services_misc.handle_generate_web_io(hass, SimpleNamespace(data={"config_entry": "e1", "upload": False})))
+
+    return create.call_args.args[1]
+
+
+def test_the_preview_notification_shows_no_command_id(comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Review (Sourcery, #279): every HA user reads the notification, and a command's id is its secret."""
+    comexio_api.webhook_security = _security(monkeypatch)
+    ids = {
+        command["Parameter"].rsplit("/", 1)[-1]
+        for command in comexio_api.build_webio_commands(SERVER, PARSED, webio_class=ws.WebioClass.MARKER)
+    }
+
+    message = _preview_message(comexio_api, monkeypatch)
+
+    assert len(ids) == 2
+    assert not any(webhook_id in message for webhook_id in ids)
+    assert ws.WEBHOOK_PATH_PREFIX + ws.WEBHOOK_ID_REDACTED in message
+    assert "hidden" in message
+
+
+def test_the_preview_of_a_server_without_own_ids_stays_as_generated(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    message = _preview_message(comexio_api, monkeypatch)
+
+    assert "/api/webhook/comexio_srv" in message
+    assert ws.WEBHOOK_ID_REDACTED not in message
+    assert "The webhook ids of the commands are hidden" not in message
+
+
+def test_redact_webhook_ids_hides_every_id_and_leaves_the_rest() -> None:
+    first, second = "a" * 32, "0123456789abcdef" * 2
+    text = f'x "/api/webhook/{first}" y "/api/webhook/{second}" z "/api/webhook/comexio_srv" {"b" * 31}'
+
+    shown = ws.redact_webhook_ids(text)
+
+    assert shown.count(ws.WEBHOOK_ID_REDACTED) == 2
+    assert first not in shown
+    assert second not in shown
+    assert "/api/webhook/comexio_srv" in shown
+    assert "b" * 31 in shown

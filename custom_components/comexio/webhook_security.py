@@ -89,6 +89,19 @@ def command_path(secret: str, webio_class: WebioClass, item: Mapping[str, Any]) 
     return f"{WEBHOOK_PATH_PREFIX}{derive_webhook_id(secret, command_key(webio_class, item))}"
 
 
+_ID_IN_PATH_RE = re.compile(rf"({re.escape(WEBHOOK_PATH_PREFIX)})[0-9a-f]{{{_ID_HEX_LENGTH}}}")
+WEBHOOK_ID_REDACTED = "<id of this command>"
+
+
+def redact_webhook_ids(text: str) -> str:
+    """The text with the id of every per-command webhook path replaced.
+
+    For output that other HA users can read (a persistent notification): the id is the secret of its command, and
+    whoever reads it can forge that command's value.
+    """
+    return _ID_IN_PATH_RE.sub(rf"\1{WEBHOOK_ID_REDACTED}", text)
+
+
 def webhook_security_store(hass: HomeAssistant, entry_id: str) -> Store:
     """The store of an entry's secret and migration ledger, keyed by the entry id like the saved config."""
     return Store(hass, 1, f"{DOMAIN}_webhook_security_{entry_id}")
