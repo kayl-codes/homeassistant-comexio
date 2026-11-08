@@ -117,7 +117,7 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 ### Two authentication paths
 
 - **Admin session (RSA):** `api.login()` — uses RSA PKCS1v15 to encrypt credentials, stores the cookie. Required for config scraping and Web-IO management.
-- **API (Basic Auth):** `api.set_value()` — used for writing values to markers and IOs. Configured separately via `CONF_API_USERNAME` / `CONF_API_PASSWORD`. Exception: the analog outputs `AO*` — `/api/` answers `Forbidden` for them, so `set_value` writes them over the admin session (`aiocomexio.io_written_over_admin_session`, #259).
+- **API (Basic Auth):** `api.set_value()` — used for writing values to markers and IOs. Configured separately via `CONF_API_USERNAME` / `CONF_API_PASSWORD`. Exception: since aiocomexio 0.9.0 only the digital outputs `Q*` and `DG*` go over `/api/`; every other IO (the analog outputs `AO*`, which `/api/` answers with `Forbidden`, but also `AI*`, `QI*`, …) is written over the admin session — `set_value` asks `aiocomexio.io_written_over_admin_session` (#259).
 
 ### Sync strategy (button.py)
 
