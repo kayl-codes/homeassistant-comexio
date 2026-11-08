@@ -52,7 +52,10 @@ def test_the_ledger_survives_a_reload(monkeypatch: pytest.MonkeyPatch) -> None:
 
     _run(again.async_load())
 
-    assert (again.secret, again.legacy_enabled, again.migrated, again.last_write) == ("s3cret", False, {"HA M5"}, NOW)
+    assert again.secret == "s3cret"
+    assert again.legacy_enabled is False
+    assert again.migrated == {"HA M5"}
+    assert again.last_write == NOW
 
 
 def test_a_naive_stored_stamp_becomes_aware_so_the_boot_time_comparison_cannot_raise(
@@ -102,13 +105,19 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
         "webio_commands": {"HA m": {"cmdId": cmd_id, "webioClass": "marker"}},
         "webio_devices": {"marker": {"device_id": "7", "base_id": "8"}},
     }
-    coordinator._webio_range_targets = lambda: {"HA m": {"Name": "HA m", "Parameter": "/api/webhook/x"}}
+    target = {"Name": "HA m", "Parameter": "/api/webhook/x", "Data": 'local d = {server="srv", value=1}'}
+    coordinator._webio_range_targets = lambda: {"HA m": target}
+    held = {"Parameter": "/api/webhook/comexio_srv", "Data": "local d = {value=1}"}  # the command as Comexio holds it
+
+    async def _save(_base: Any, _device: Any, payload: dict[str, Any], **_k: Any) -> bool:
+        held.update(Parameter=payload["Parameter"], Data=payload["Data"])  # what the tick really sent
+        coordinator.api.webhook_security.migrated.add("HA m")
+        return True
+
     coordinator.api.get_webio_command_form = AsyncMock(
-        return_value=SimpleNamespace(parameter="/api/webhook/x", data="")
+        side_effect=lambda *_a, **_k: SimpleNamespace(parameter=held["Parameter"], data=held["Data"])
     )
-    coordinator.api.save_single_command = AsyncMock(
-        side_effect=lambda *_a, **_k: coordinator.api.webhook_security.migrated.add("HA m") or True
-    )
+    coordinator.api.save_single_command = AsyncMock(side_effect=_save)
     return coordinator
 
 
@@ -129,6 +138,23 @@ def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
     assert "HA m" in security.migrated
     assert not security.legacy_enabled
     coordinator.sync_webhooks.assert_called_once_with()
+
+
+def test_the_tick_keeps_the_old_id_on_when_comexio_holds_another_command_than_written(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _tick_coordinator(monkeypatch, cmd_id="9", boot=NOW + timedelta(hours=1))
+    security = coordinator.api.webhook_security
+
+    async def _save_without_effect(*_a: Any, **_k: Any) -> bool:
+        security.migrated.add("HA m")  # reported as written, but Comexio still holds the old command
+        return True
+
+    coordinator.api.save_single_command = AsyncMock(side_effect=_save_without_effect)
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "pending"
+    assert security.legacy_enabled
+    assert "differ from their target" in caplog.text
 
 
 def test_a_naive_boot_time_is_compared_without_raising(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -409,7 +435,11 @@ def _form(parameter: str | None = _TARGET["Parameter"], data: str | None = _TARG
 def test_a_command_matches_its_target_by_path_and_server_field(parameter: str, data: str, why: str | None) -> None:
     deviation = ws.command_deviation(_TARGET, parameter, data)
 
-    assert (deviation is None) if why is None else (deviation is not None and why in deviation)
+    if why is None:
+        assert deviation is None
+    else:
+        assert deviation is not None
+        assert why in deviation
 
 
 def test_a_path_deviation_never_names_a_webhook_id() -> None:
@@ -674,7 +704,8 @@ def test_a_changed_host_switches_the_old_id_on_again_and_keeps_the_ledger_for_th
     assert security.migrated == {"HA M5"}  # read back from the new host by the check, not rewritten blindly
     assert security.last_write == later
     stored = security._store.stored  # persisted too: a restart must not forget the switch
-    assert (stored["host"], stored["legacy"]) == ("new.local", True)
+    assert stored["host"] == "new.local"
+    assert stored["legacy"] is True
     assert stored["last_write"] != NOW.isoformat()
     assert "host changed" in caplog.text
 

@@ -188,7 +188,8 @@ def test_a_second_load_keeps_secret_ledger_and_switch(monkeypatch: pytest.Monkey
 
     _run(security.async_load())
 
-    assert (security.secret, security.legacy_enabled) == ("abc", False)
+    assert security.secret == "abc"
+    assert security.legacy_enabled is False
     assert security.migrated == {"HA M5"}
     assert security.last_write == NOW
 
