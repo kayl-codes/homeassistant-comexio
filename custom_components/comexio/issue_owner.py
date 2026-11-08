@@ -14,7 +14,8 @@ from homeassistant.helpers import issue_registry as ir
 
 _LOGGER = logging.getLogger(__name__)
 
-OWNER_KEYWORD_SUPPORTED = "config_entry_id" in inspect.signature(ir.async_create_issue).parameters
+OWNER_KEYWORD = "config_entry_id"
+OWNER_KEYWORD_SUPPORTED = OWNER_KEYWORD in inspect.signature(ir.async_create_issue).parameters
 
 
 def issue_owner(hass: HomeAssistant, entry_id: str) -> dict[str, str]:
@@ -28,4 +29,4 @@ def issue_owner(hass: HomeAssistant, entry_id: str) -> dict[str, str]:
     if hass.config_entries.async_get_entry(entry_id) is None:
         _LOGGER.debug("Repair for removed config entry %s is created unlinked", entry_id)
         return {}
-    return {"config_entry_id": entry_id}
+    return {OWNER_KEYWORD: entry_id}
