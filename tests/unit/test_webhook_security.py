@@ -121,6 +121,9 @@ def test_generated_class_json_carries_the_ids_too(comexio_api: ComexioAPI, monke
 
     assert len(template["commands"]) == 2
     assert len({c["Parameter"] for c in template["commands"]}) == 2
+    for command in template["commands"]:
+        # every path is the id of the command whose payload it carries, so the handler accepts the push
+        assert comexio_api.webhook_security.accepts(_own_id(command), _payload(command["Data"]))
 
 
 @pytest.mark.parametrize(
@@ -167,10 +170,11 @@ def test_a_forged_id_a_foreign_server_and_a_non_ascii_id_are_refused(monkeypatch
 def test_the_first_load_creates_and_saves_a_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     security = _security(monkeypatch)
     security.secret = ""
+    monkeypatch.setattr(ws.webhook, "async_generate_id", lambda: "f1" * 32)
 
     _run(security.async_load())
 
-    assert re.fullmatch(r"[0-9a-f]{64}", security.secret)
+    assert security.secret == "f1" * 32
     assert security.legacy_enabled
     assert security._store.stored["secret"] == security.secret
 
@@ -188,10 +192,12 @@ def test_a_second_load_keeps_secret_ledger_and_switch(monkeypatch: pytest.Monkey
 
 def test_a_damaged_store_gets_a_fresh_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     security = _security(monkeypatch, {"secret": 5, "legacy": False})
+    monkeypatch.setattr(ws.webhook, "async_generate_id", lambda: "e2" * 32)
 
     _run(security.async_load())
 
-    assert len(security.secret) == 64
+    assert security.secret == "e2" * 32
+    assert security._store.stored["secret"] == "e2" * 32
 
 
 def test_a_saved_command_with_its_own_path_enters_the_ledger(

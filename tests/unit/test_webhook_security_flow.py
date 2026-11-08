@@ -235,6 +235,48 @@ def test_the_registered_ids_follow_the_items_and_the_legacy_switch(monkeypatch: 
     security._store.async_save.assert_awaited()
 
 
+@pytest.mark.parametrize("legacy_enabled", [True, False])
+def test_the_setup_without_data_registers_only_the_old_id_and_unregisters_nothing(
+    monkeypatch: pytest.MonkeyPatch, legacy_enabled: bool
+) -> None:
+    registered: list[str] = []
+    unregister = MagicMock()
+    monkeypatch.setattr(ha_webhook, "async_register", lambda _h, _d, _n, wid, _handler: registered.append(wid))
+    monkeypatch.setattr(ha_webhook, "async_unregister", unregister)
+    security = _security(monkeypatch)
+    security.legacy_enabled = legacy_enabled
+    coordinator = SimpleNamespace(
+        server_id=SERVER,
+        data={},
+        webhook_command_ids=lambda: {"a" * 32},
+        async_add_listener=MagicMock(),
+        sync_webhooks=None,
+    )
+    _setup_webhooks(MagicMock(data={_DOMAIN: {}}), MagicMock(entry_id="e1"), coordinator, security)  # type: ignore[arg-type]
+    coordinator.sync_webhooks()  # idempotent: the old id is not registered twice
+
+    assert registered == ([ws.legacy_webhook_id(SERVER)] if legacy_enabled else [])
+    unregister.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("boot", "written", "pending"),
+    [
+        (None, None, False),  # nothing written: nothing to wait for
+        (None, NOW, True),  # a write, but no boot time known
+        (NOW - timedelta(hours=1), NOW, True),
+        (NOW + timedelta(hours=1), NOW, False),
+        (NOW.replace(tzinfo=None) + timedelta(hours=1), NOW, False),  # a naive boot time is read as UTC
+    ],
+)
+def test_a_restart_is_pending_until_comexio_booted_after_the_last_write(
+    monkeypatch: pytest.MonkeyPatch, boot: Any, written: Any, pending: bool
+) -> None:
+    coordinator = _coordinator(monkeypatch, boot=boot, written=written)
+
+    assert coordinator._restart_pending(coordinator.api.webhook_security) is pending
+
+
 def test_an_id_another_registration_holds_is_skipped_warned_once_and_retried(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -383,6 +425,24 @@ def test_the_old_id_goes_off_only_when_every_command_reads_back_as_its_target(mo
 
     coordinator.api.get_webio_command_form.assert_awaited_once_with("9", "7")
     assert not coordinator.api.webhook_security.legacy_enabled
+
+
+def test_a_write_during_the_check_keeps_the_old_id_on_until_comexio_restarted_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    security = coordinator.api.webhook_security
+
+    async def _read_while_a_sync_writes(*_args: Any) -> Any:
+        security.last_write = NOW + timedelta(hours=2)  # after the Comexio boot of the check's start
+        return _form()
+
+    coordinator.api.get_webio_command_form = AsyncMock(side_effect=_read_while_a_sync_writes)
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "needs_restart"
+
+    assert security.legacy_enabled
+    security.async_save.assert_not_awaited()
 
 
 def test_a_command_that_differs_in_comexio_keeps_the_old_id_on_and_leaves_the_ledger(

@@ -248,7 +248,12 @@ def _setup_webhooks(
     def sync_webhooks() -> None:
         """Register the webhook ids the commands use now, drop the ones no command can use any more."""
         if not coordinator.data:
-            # No data yet (or lost): the ids derived from it would be empty and every registered one dropped.
+            # No data yet (or lost): the ids derived from it would be empty and every registered one dropped. The
+            # old id does not depend on data, so commands that still post to it are heard from the start (the first
+            # poll runs after this setup); the registered ids stay as they are.
+            if security.legacy_enabled:
+                keep = registered | refused  # `refused` ids keep their one-time warning
+                _register_webhooks(hass, handler, server_id, registered, refused, keep | {legacy_webhook_id(server_id)})
             return
         wanted = coordinator.webhook_command_ids()
         if security.legacy_enabled:

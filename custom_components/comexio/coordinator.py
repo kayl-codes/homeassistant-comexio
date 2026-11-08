@@ -5832,19 +5832,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
     async def _async_finish_webhook_migration(self) -> str:
         """Switch the old webhook id off once Comexio has restarted after the last command was rewritten."""
         security = self.api.webhook_security
-        boot_time = self.system_info.boot_time
         if security is None:
             return WEBHOOK_MIGRATION_SKIPPED
-        if security.last_write is not None and (boot_time is None or dt_util.as_utc(boot_time) <= security.last_write):
-            persistent_notification.async_create(
-                self.hass,
-                f"All Web-IO commands of {self.server_id} now use a webhook id of their own, but Comexio only sends "
-                "a changed command after a restart. Restart the Comexio server; the old webhook id is switched off "
-                "at the next nightly run after that.",
-                title="Comexio: restart needed",
-                notification_id=f"{DOMAIN}_{self.server_id}_webhook_restart",
-            )
+        if self._restart_pending(security):
+            self._notify_webhook_restart()
             return WEBHOOK_MIGRATION_NEEDS_RESTART
+        # Comexio restarted since the last write: an earlier "restart needed" notice is out of date.
+        persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.server_id}_webhook_restart")
         if self._webio_range_targets() and not self.data.get("webio_commands"):
             # No stored command at all although targets exist: an incomplete scrape, nothing was verified.
             _LOGGER.warning("[%s] The old webhook id stays on: no Web-IO command is known to verify", self.server_id)
@@ -5858,10 +5852,14 @@ class ComexioCoordinator(DataUpdateCoordinator):
             if deviating:
                 await self._async_save_webhook_security(security)
             return WEBHOOK_MIGRATION_PENDING
+        if self._restart_pending(security):
+            # A sync wrote a command while the verification ran (it lasts minutes): that write is not restarted yet.
+            self._notify_webhook_restart()
+            return WEBHOOK_MIGRATION_NEEDS_RESTART
         _LOGGER.debug(
             "[%s] Switching the old webhook id off (Comexio boot %s, last write %s)",
             self.server_id,
-            boot_time,
+            self.system_info.boot_time,
             security.last_write,
         )
         security.legacy_enabled = False
@@ -5873,6 +5871,24 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.sync_webhooks()
         _LOGGER.info("[%s] Old webhook id switched off: every Web-IO command uses its own", self.server_id)
         return WEBHOOK_MIGRATION_DONE
+
+    def _restart_pending(self, security: WebhookSecurity) -> bool:
+        """True while Comexio has not restarted since the last command write (it sends a changed command only then)."""
+        boot_time = self.system_info.boot_time
+        if security.last_write is None:
+            return False
+        return boot_time is None or dt_util.as_utc(boot_time) <= security.last_write
+
+    def _notify_webhook_restart(self) -> None:
+        """Ask the user to restart Comexio so it sends the rewritten commands."""
+        persistent_notification.async_create(
+            self.hass,
+            f"All Web-IO commands of {self.server_id} now use a webhook id of their own, but Comexio only sends "
+            "a changed command after a restart. Restart the Comexio server; the old webhook id is switched off "
+            "at the next nightly run after that.",
+            title="Comexio: restart needed",
+            notification_id=f"{DOMAIN}_{self.server_id}_webhook_restart",
+        )
 
     async def async_force_webio_range_check(self) -> dict[str, int]:
         """Force-run the Web-IO analog range check outside its nightly window (manual trigger)."""
