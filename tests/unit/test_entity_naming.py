@@ -99,6 +99,7 @@ def test_entity_without_unique_id_leaves_entity_id_to_ha() -> None:
 
     asyncio.run(entity.async_prepare_to_add_to_hass())
 
+    assert entity.prepared
     assert entity.entity_id is None
 
 
@@ -335,8 +336,14 @@ OWN_ID_HOOK_CLASSES = frozenset({"update.ComexioExtensionFirmwareUpdate"})
 
 
 def _requests_its_entity_id(cls: type) -> bool:
-    """The mixin's async_prepare_to_add_to_hass runs only if it precedes Entity in the MRO."""
+    """The mixin's async_prepare_to_add_to_hass runs only if it precedes Entity in the MRO.
+
+    A class that overrides the hook itself does not count through the mixin: the override may skip the id
+    (a no-op passed before). Such classes must be listed in OWN_ID_HOOK_CLASSES instead.
+    """
     mro = cls.__mro__
+    if "async_prepare_to_add_to_hass" in vars(cls):
+        return False
     return any(
         mixin in mro and mro.index(mixin) < mro.index(Entity)
         for mixin in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
