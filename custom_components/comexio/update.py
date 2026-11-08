@@ -1,5 +1,4 @@
 # Version: 0.1.2
-import asyncio
 from typing import Any
 
 from homeassistant.components.update import UpdateDeviceClass, UpdateEntity
@@ -8,7 +7,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers.entity_platform import AddEntitiesCallback, EntityPlatform
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     BASE_EXTENSION_NAME,
@@ -127,12 +126,10 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
         self._ext_name = ext_name
         self._attr_unique_id = extension_firmware_update_unique_id(server_id, ext_name)
 
-    def add_to_platform_start(
-        self, hass: HomeAssistant, platform: EntityPlatform, parallel_updates: asyncio.Semaphore | None
-    ) -> None:
+    async def async_prepare_to_add_to_hass(self) -> None:
         # The device name carries an "EXT - " tag now; a new install keeps the id HA derived before it.
-        super().add_to_platform_start(hass, platform, parallel_updates)
-        self.entity_id = f"{platform.domain}.{extension_firmware_object_id(self.server_id, self._ext_name)}"
+        await super().async_prepare_to_add_to_hass()
+        self.entity_id = f"{self.platform.domain}.{extension_firmware_object_id(self.server_id, self._ext_name)}"
 
     @property
     def device_info(self) -> DeviceInfo:

@@ -4,6 +4,8 @@ The rule behind all of these: ids carry only the technical address (server, exte
 marker / KNX id), only the display name carries the Comexio description.
 """
 
+import asyncio
+import inspect
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -70,31 +72,32 @@ def test_function_plan_entities_without_hub_era_request_a_stable_entity_id(cls: 
 class _FakeEntity:
     """Stands in for homeassistant Entity: records that the base hook ran."""
 
-    started = False
+    prepared = False
 
-    def add_to_platform_start(self, hass: Any, platform: Any, parallel_updates: Any) -> None:
-        self.started = True
+    async def async_prepare_to_add_to_hass(self) -> None:
+        self.prepared = True
 
 
 class _Entity(ComexioStableEntityIdMixin, _FakeEntity):
-    def __init__(self, unique_id: str | None) -> None:
+    def __init__(self, unique_id: str | None, domain: str = "binary_sensor") -> None:
         self.unique_id = unique_id
         self.entity_id = None  # type: ignore[assignment]
+        self.platform = MagicMock(domain=domain)  # type: ignore[assignment]
 
 
 def test_entity_requests_stable_entity_id_for_its_platform_domain() -> None:
     entity = _Entity("comexio_iosrv1_iox1_ai7")
 
-    entity.add_to_platform_start(MagicMock(), MagicMock(domain="binary_sensor"), None)
+    asyncio.run(entity.async_prepare_to_add_to_hass())
 
-    assert entity.started
+    assert entity.prepared
     assert entity.entity_id == "binary_sensor.iosrv1_iox1_ai7"
 
 
 def test_entity_without_unique_id_leaves_entity_id_to_ha() -> None:
-    entity = _Entity(None)
+    entity = _Entity(None, domain="switch")
 
-    entity.add_to_platform_start(MagicMock(), MagicMock(domain="switch"), None)
+    asyncio.run(entity.async_prepare_to_add_to_hass())
 
     assert entity.entity_id is None
 
@@ -241,6 +244,7 @@ class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
     def __init__(self, server_id: str) -> None:
         self.coordinator = MagicMock(server_id=server_id)
         self.entity_id = None  # type: ignore[assignment]
+        self.platform = MagicMock(domain="image")  # type: ignore[assignment]
 
 
 @pytest.mark.parametrize(
@@ -250,10 +254,28 @@ class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
 def test_function_plan_mixin_requests_the_hub_era_entity_id(server_id: str, expected: str) -> None:
     entity = _PlanEntity(server_id)
 
-    entity.add_to_platform_start(MagicMock(), MagicMock(domain="image"), None)
+    asyncio.run(entity.async_prepare_to_add_to_hass())
 
-    assert entity.started
+    assert entity.prepared
     assert entity.entity_id == expected
+
+
+def test_hook_name_exists_on_home_assistant_entity() -> None:
+    """Pins the hook name against the real Entity: a renamed or removed hook would otherwise pass the fakes above."""
+    assert inspect.iscoroutinefunction(Entity.async_prepare_to_add_to_hass)
+
+
+def test_extension_firmware_entity_requests_its_pre_tag_entity_id() -> None:
+    from custom_components.comexio.update import ComexioExtensionFirmwareUpdate
+
+    entity = object.__new__(ComexioExtensionFirmwareUpdate)
+    entity.server_id = "iosrv1"  # type: ignore[attr-defined]
+    entity._ext_name = "UD 1"
+    entity.platform = MagicMock(domain="update")  # type: ignore[assignment]
+
+    asyncio.run(entity.async_prepare_to_add_to_hass())
+
+    assert entity.entity_id == "update.iosrv1_ud_1_firmware"
 
 
 # Entity classes whose entity_id HA derives from the device name + translated entity name (see the
@@ -308,12 +330,12 @@ def _integration_entity_classes() -> dict[str, type]:
 
 
 def _requests_its_entity_id(cls: type) -> bool:
-    """The mixin's add_to_platform_start runs only if it precedes Entity in the MRO (Entity's hook calls no super).
+    """The mixin's async_prepare_to_add_to_hass runs only if it precedes Entity in the MRO.
 
-    A class may also request its id in its own add_to_platform_start (the extension firmware entity).
+    A class may also request its id in its own async_prepare_to_add_to_hass (the extension firmware entity).
     """
     mro = cls.__mro__
-    if "add_to_platform_start" in vars(cls):
+    if "async_prepare_to_add_to_hass" in vars(cls):
         return True
     return any(
         mixin in mro and mro.index(mixin) < mro.index(Entity)
