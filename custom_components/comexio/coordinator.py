@@ -188,6 +188,7 @@ from .const import (
     WEBHOOK_UNKNOWN_IO_WARNED_MAX,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
+    WEBHOOK_VERIFY_BUDGET_SEC,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
@@ -283,7 +284,7 @@ from .plan_watchdog import (
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
 from .unsupported_ios import IoTypeTableSnapshot, UnsupportedIoMonitor, io_has_entity
-from .webhook_security import WebhookSecurity, command_key, derive_webhook_id
+from .webhook_security import WebhookSecurity, command_deviation, command_key, derive_webhook_id
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -5696,8 +5697,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _warn_unrewritable_webhooks(self, unmigrated: list[str]) -> None:
         """Name the commands the run cannot rewrite (no command id or device id): they keep the old id switched on."""
         pending = {name for name, *_ in self._pending_webhook_migrations()}
-        stuck = [name for name in unmigrated if name not in pending]
-        if stuck:
+        if stuck := [name for name in unmigrated if name not in pending]:
             _LOGGER.warning(
                 "[%s] %d Web-IO commands cannot be moved to their own webhook id (no command or device id found, a "
                 "sync may fix it), so the old id stays on: %s",
@@ -5758,6 +5758,35 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 await security.async_save()
         return written, failed
 
+    async def _async_verify_webhook_commands(self, security: WebhookSecurity) -> tuple[dict[str, str], list[str], bool]:
+        """Read every migrated command back from Comexio: (name -> why it deviates, unreadable names, complete).
+
+        A command counts as right when its path is the target's own and its body carries the target's server field
+        (webhook_security.command_deviation). Unreadable: Comexio gave no form, path or body. Not complete: the run
+        stopped at its budget, an unload or a function plan restore before every command was read.
+        """
+        deadline = time.monotonic() + WEBHOOK_VERIFY_BUDGET_SEC
+        targets = self._webio_range_targets()
+        devices = self.data.get("webio_devices", {})
+        deviating: dict[str, str] = {}
+        unreadable: list[str] = []
+        for name, cmd in self.data.get("webio_commands", {}).items():
+            target = targets.get(name)
+            device_id = devices.get(cmd.get("webioClass"), {}).get("device_id")
+            if target is None or name not in security.migrated:
+                continue
+            if time.monotonic() > deadline or self.unloading or self._restore_lock.locked():
+                return deviating, unreadable, False
+            form = None
+            if device_id and cmd.get("cmdId"):
+                async with self._sync_lock:
+                    form = await self.api.get_webio_command_form(cmd["cmdId"], device_id)
+            if form is None or form.parameter is None or form.data is None:
+                unreadable.append(name)
+            elif why := command_deviation(target, form.parameter, form.data):
+                deviating[name] = why
+        return deviating, unreadable, True
+
     async def _async_finish_webhook_migration(self) -> str:
         """Switch the old webhook id off once Comexio has restarted after the last command was rewritten."""
         security = self.api.webhook_security
@@ -5774,6 +5803,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 notification_id=f"{DOMAIN}_{self.server_id}_webhook_restart",
             )
             return WEBHOOK_MIGRATION_NEEDS_RESTART
+        deviating, unreadable, complete = await self._async_verify_webhook_commands(security)
+        if deviating:
+            # Out of the ledger: the next run rewrites them, and Comexio has to restart after that again.
+            security.migrated.difference_update(deviating)
+            await security.async_save()
+        if deviating or unreadable or not complete:
+            _LOGGER.warning(
+                "[%s] The old webhook id stays on: %d Web-IO commands differ from their target in Comexio (%s), %d "
+                "could not be read (%s)%s",
+                self.server_id,
+                len(deviating),
+                "; ".join(f"{one_line(name)}: {why}" for name, why in deviating.items()) or "-",
+                len(unreadable),
+                ", ".join(one_line(name) for name in unreadable[:10]) or "-",
+                "" if complete else ", the check ran out of time",
+            )
+            return WEBHOOK_MIGRATION_PENDING
         _LOGGER.debug(
             "[%s] Switching the old webhook id off (Comexio boot %s, last write %s)",
             self.server_id,

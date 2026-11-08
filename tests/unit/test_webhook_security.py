@@ -236,9 +236,15 @@ def _coordinator(monkeypatch: pytest.MonkeyPatch, *, boot: datetime | None, writ
     security = _security(monkeypatch)
     security.last_write = written
     security.async_save = AsyncMock()  # type: ignore[method-assign]
-    coordinator.api = SimpleNamespace(webhook_security=security)
+    coordinator.api = SimpleNamespace(webhook_security=security, get_webio_command_form=AsyncMock(return_value=None))
     coordinator.system_info = SimpleNamespace(boot_time=boot)
     coordinator.sync_webhooks = MagicMock()
+    # nothing stored to verify: the finish step reads no form
+    coordinator.data = {"webio_commands": {}, "webio_devices": {}}
+    coordinator.unloading = False
+    coordinator._restore_lock = SimpleNamespace(locked=lambda: False)
+    coordinator._sync_lock = _NoLock()
+    coordinator._webio_range_targets = dict
     return coordinator
 
 

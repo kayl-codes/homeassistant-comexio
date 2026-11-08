@@ -734,6 +734,9 @@ WEBHOOK_MIGRATION_HOUR = 1
 WEBHOOK_MIGRATION_MINUTE = 30
 WEBHOOK_MIGRATION_BUDGET_SEC = 3.5 * 3600
 WEBHOOK_MIGRATION_SAVE_EVERY = 20  # commands between two saves of the ledger
+# Before the old id goes off, every command is read back from Comexio (path and body). The reads start at the same
+# nightly time as the rewrites, after them; a run that cannot finish them in its budget switches nothing off.
+WEBHOOK_VERIFY_BUDGET_SEC = 1.5 * 3600
 WEBHOOK_MIGRATION_PENDING = "pending"
 WEBHOOK_MIGRATION_DONE = "done"
 WEBHOOK_MIGRATION_FAILED = "failed"

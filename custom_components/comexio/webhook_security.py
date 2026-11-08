@@ -22,6 +22,7 @@ from datetime import datetime
 from hashlib import sha256
 import hmac
 import logging
+import re
 from typing import Any
 
 from aiocomexio.const import WebioClass
@@ -166,6 +167,24 @@ class WebhookSecurity:
             return True
         key = payload_key(data)
         return key is not None and _same(webhook_id, derive_webhook_id(self.secret, key))
+
+
+_SERVER_FIELD_RE = re.compile(r'server="(?:[^"\\]|\\.)*"')
+
+
+def command_deviation(target: Mapping[str, Any], parameter: str, data: str) -> str | None:
+    """Why a command as Comexio holds it (its path and Lua body) is not the target, or None when it is.
+
+    The path must be the target's own, and the body must carry the target's ``server="..."`` field: only then does
+    the command push to the id the handler expects, with a payload the handler accepts. The text is compared the
+    way aiocomexio hands it over (surrounding blanks and the form's line-break handling aside).
+    """
+    if parameter.strip() != target.get("Parameter"):
+        return f"path {parameter.strip()!r} instead of {target.get('Parameter')!r}"
+    wanted = _SERVER_FIELD_RE.search(str(target.get("Data", "")))
+    if wanted and wanted.group(0) not in data:
+        return f"body without {wanted.group(0)}"
+    return None
 
 
 def _same(received: str, expected: str) -> bool:

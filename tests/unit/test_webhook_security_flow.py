@@ -100,7 +100,10 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
         "webio_commands": {"HA m": {"cmdId": cmd_id, "webioClass": "marker"}},
         "webio_devices": {"marker": {"device_id": "7", "base_id": "8"}},
     }
-    coordinator._webio_range_targets = lambda: {"HA m": {"Name": "HA m"}}
+    coordinator._webio_range_targets = lambda: {"HA m": {"Name": "HA m", "Parameter": "/api/webhook/x"}}
+    coordinator.api.get_webio_command_form = AsyncMock(
+        return_value=SimpleNamespace(parameter="/api/webhook/x", data="")
+    )
     coordinator.api.save_single_command = AsyncMock(
         side_effect=lambda *_a, **_k: coordinator.api.webhook_security.migrated.add("HA m") or True
     )
@@ -178,6 +181,7 @@ def test_the_migration_targets_carry_their_own_path(comexio_api: ComexioAPI, mon
     coordinator = _coordinator(monkeypatch, boot=None, written=None)
     comexio_api.webhook_security = coordinator.api.webhook_security
     coordinator.api = comexio_api
+    del coordinator._webio_range_targets  # the helper's stand-in; this test wants the real method
     monkeypatch.setattr(ComexioCoordinator, "ignored_marker_ids", set())
     monkeypatch.setattr(ComexioCoordinator, "ignored_knx_ids", set())
     coordinator.webio_source_data = lambda include_held=False: PARSED
@@ -314,3 +318,127 @@ def test_the_handler_routes_every_kind_of_push_to_its_coordinator_method(
     _run(handler(None, ws.legacy_webhook_id(SERVER), _Request(payload)))
 
     getattr(coordinator, method).assert_called_once_with(*args)
+
+
+_TARGET = {
+    "Name": "HA m",
+    "Parameter": "/api/webhook/" + "a" * 32,
+    "Data": f'return {{id="5", value=a, type="marker", server="{SERVER}"}}',
+}
+
+
+def _verify_coordinator(monkeypatch: pytest.MonkeyPatch, form: Any) -> Any:
+    """A coordinator past the restart check whose one migrated command reads back as `form`."""
+    coordinator = _coordinator(monkeypatch, boot=NOW + timedelta(hours=1), written=NOW)
+    coordinator.api.webhook_security.migrated = {"HA m"}
+    coordinator.data = {
+        "webio_commands": {"HA m": {"cmdId": "9", "webioClass": "marker"}},
+        "webio_devices": {"marker": {"device_id": "7", "base_id": "8"}},
+    }
+    coordinator._webio_range_targets = lambda: {"HA m": _TARGET}
+    coordinator.api.get_webio_command_form = AsyncMock(return_value=form)
+    return coordinator
+
+
+def _form(parameter: str | None = _TARGET["Parameter"], data: str | None = _TARGET["Data"]) -> Any:
+    return SimpleNamespace(parameter=parameter, data=data)
+
+
+@pytest.mark.parametrize(
+    ("parameter", "data", "why"),
+    [
+        (_TARGET["Parameter"], _TARGET["Data"], None),
+        (f" {_TARGET['Parameter']}\n", _TARGET["Data"], None),  # blanks the form leaves around the path
+        ("/api/webhook/comexio_srv", _TARGET["Data"], "path"),
+        (_TARGET["Parameter"], 'return {id="5", value=a, type="marker"}', "body without"),
+        (_TARGET["Parameter"], _TARGET["Data"].replace(SERVER, "other"), "body without"),
+    ],
+)
+def test_a_command_matches_its_target_by_path_and_server_field(parameter: str, data: str, why: str | None) -> None:
+    deviation = ws.command_deviation(_TARGET, parameter, data)
+
+    assert (deviation is None) if why is None else (deviation is not None and why in deviation)
+
+
+def test_the_old_id_goes_off_only_when_every_command_reads_back_as_its_target(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "done"
+
+    coordinator.api.get_webio_command_form.assert_awaited_once_with("9", "7")
+    assert not coordinator.api.webhook_security.legacy_enabled
+
+
+def test_a_command_that_differs_in_comexio_keeps_the_old_id_on_and_leaves_the_ledger(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form(parameter="/api/webhook/comexio_srv"))
+    security = coordinator.api.webhook_security
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    assert security.legacy_enabled
+    assert "HA m" not in security.migrated  # the next run rewrites it
+    assert "HA m: path" in caplog.text
+    coordinator.sync_webhooks.assert_not_called()
+
+
+@pytest.mark.parametrize("form", [None, _form(parameter=None), _form(data=None)], ids=["no form", "no path", "no body"])
+def test_a_command_that_cannot_be_read_keeps_the_old_id_on_and_stays_in_the_ledger(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, form: Any
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, form)
+    security = coordinator.api.webhook_security
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    assert security.legacy_enabled
+    assert "HA m" in security.migrated
+    assert "1 could not be read (HA m)" in caplog.text
+
+
+def test_a_command_without_command_id_is_unreadable_without_a_request(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.data["webio_commands"]["HA m"]["cmdId"] = ""
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    coordinator.api.get_webio_command_form.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stop", ["budget", "unloading", "restore"])
+def test_an_unfinished_check_switches_nothing_off(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, stop: str
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.unloading = stop == "unloading"
+    coordinator._restore_lock = SimpleNamespace(locked=lambda: stop == "restore")
+    if stop == "budget":
+        monkeypatch.setattr("custom_components.comexio.coordinator.WEBHOOK_VERIFY_BUDGET_SEC", -1)
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    assert coordinator.api.webhook_security.legacy_enabled
+    assert "ran out of time" in caplog.text
+    coordinator.api.get_webio_command_form.assert_not_awaited()
+
+
+def test_commands_outside_the_ledger_or_the_targets_are_not_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.api.webhook_security.migrated = set()
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "done"
+
+    coordinator.api.get_webio_command_form.assert_not_awaited()
+
+
+def test_a_command_built_by_the_lib_passes_its_own_check(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real builder's path and server field, not a hand-written target: the check must accept what it creates."""
+    coordinator = _coordinator(monkeypatch, boot=None, written=None)
+    comexio_api.webhook_security = coordinator.api.webhook_security
+    target = comexio_api.build_webio_commands(SERVER, PARSED)[0]
+
+    assert 'server="' in target["Data"]
+    assert ws.command_deviation(target, target["Parameter"], target["Data"].lstrip("\n")) is None
