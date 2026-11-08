@@ -58,6 +58,8 @@ The commands live in Comexio, so they have to be rewritten there. The integratio
    continues the next night. Commands that a sync creates from now on are born with their own ID.
 3. **When all commands are rewritten**, the notification **"Comexio: restart needed"** appears (see
    [section 4](#4-why-comexio-has-to-be-restarted)).
+
+<p align="center"><img src="assets/ui/webhook_restart_needed_notification.png" width="480" alt="Notification: Comexio: restart needed"></p>
 4. **You restart the Comexio server.** It reads its Web-IO commands again and from then on pushes to the new IDs.
 5. **At the next nightly run after the restart** the integration reads **every command back from Comexio** and checks
    that it holds its own path and the `server=` field. Only if all of them do, the **old ID is switched off for
@@ -180,6 +182,8 @@ Die Commands liegen in Comexio, also müssen sie dort umgeschrieben werden. Das 
    setzt also einfach in der nächsten Nacht fort. Commands, die ein Sync ab jetzt anlegt, bekommen gleich ihre eigene ID.
 3. **Sind alle Commands umgeschrieben**, erscheint die Benachrichtigung **„Comexio: restart needed“** (siehe
    [Abschnitt 4](#4-warum-comexio-neu-gestartet-werden-muss)).
+
+<p align="center"><img src="assets/ui/webhook_restart_needed_notification.png" width="480" alt="Benachrichtigung: Comexio: restart needed"></p>
 4. **Du startest den Comexio-Server neu.** Er liest seine Web-IO-Commands neu ein und pusht von da an an die neuen IDs.
 5. **Beim nächsten Nachtlauf nach dem Neustart** liest die Integration **jedes Command aus Comexio zurück** und prüft,
    dass es seinen eigenen Pfad und das Feld `server=` trägt. Nur wenn alle das tun, wird die **alte ID endgültig
