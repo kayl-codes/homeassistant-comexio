@@ -38,7 +38,7 @@ from homeassistant.loader import IntegrationNotFound, async_get_integration
 
 from .api import ComexioAPI
 from .const import DOMAIN, FUB_BASE_KEY_FLANKE, ISSUE_TRACKER_URL, REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE
-from .issue_owner import issue_owner
+from .issue_owner import async_create_entry_issue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -195,11 +195,10 @@ class ReferenceCatalogMonitor:
             issue_url = self._issue_url()
             # Re-created on every poll while blocked: async_create_issue updates the existing
             # issue in place, so the pre-filled report always reflects the latest check.
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self._hass,
-                DOMAIN,
+                self._entry_id,
                 self._issue_id,
-                **issue_owner(self._hass, self._entry_id),
                 is_fixable=False,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=ISSUE_TRANSLATION_KEY_UNCHECKED if check_not_run else ISSUE_TRANSLATION_KEY,

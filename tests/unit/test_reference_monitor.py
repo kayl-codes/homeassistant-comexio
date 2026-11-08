@@ -26,7 +26,7 @@ from aiocomexio.reference_catalog import (
 )
 import pytest
 
-from custom_components.comexio import reference_monitor
+from custom_components.comexio import issue_owner, reference_monitor
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import FUB_BASE_KEY_FLANKE, REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE
 from custom_components.comexio.reference_monitor import (
@@ -114,6 +114,7 @@ def issue_registry(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     registry = MagicMock()
     registry.IssueSeverity = reference_monitor.ir.IssueSeverity
     monkeypatch.setattr(reference_monitor, "ir", registry)
+    monkeypatch.setattr(issue_owner, "ir", registry)  # the create goes through async_create_entry_issue
     return registry
 
 

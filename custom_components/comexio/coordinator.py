@@ -257,7 +257,7 @@ from .ha_address import (
     is_loopback_address,
     webio_device_hints,
 )
-from .issue_owner import issue_owner
+from .issue_owner import async_create_entry_issue
 from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
@@ -1977,11 +1977,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         mismatches = self.detect_entity_id_mismatches()
         if mismatches and not conf.get(CONF_ENTITY_ID_MIGRATION_IGNORED, False):
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self.hass,
-                DOMAIN,
+                self.config_entry.entry_id,
                 f"entity_id_mismatch_{self.server_id}",
-                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="entity_id_mismatch",
@@ -2295,11 +2294,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.debug(
                 "[%s] %s import is switched off, but the server still has %s", self.server_id, cls.value, counts
             )
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self.hass,
-                DOMAIN,
+                self.config_entry.entry_id,
                 issue_id,
-                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key=ISSUE_IMPORT_DISABLED,
@@ -2384,11 +2382,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         self.last_audit_results = {}
         if not conf.get("audit_ignored", False) and not self.in_sync:
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self.hass,
-                DOMAIN,
+                self.config_entry.entry_id,
                 f"sync_mismatch_{self.server_id}",
-                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key="missing_webio_class",
@@ -2764,11 +2761,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if open_counts:
             issue_data_counts |= open_counts
             missing_detail = open_detail
-        ir.async_create_issue(
+        async_create_entry_issue(
             self.hass,
-            DOMAIN,
+            self.config_entry.entry_id,
             f"sync_mismatch_{self.server_id}",
-            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key="sync_mismatch",
@@ -3931,11 +3927,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         }
         if default_scope is not None:
             data["default_scope"] = default_scope
-        ir.async_create_issue(
+        async_create_entry_issue(
             self.hass,
-            DOMAIN,
+            self.config_entry.entry_id,
             f"{translation_key}_{self.server_id}",
-            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=True,
             is_persistent=persistent,
             severity=ir.IssueSeverity.WARNING,
@@ -7445,11 +7440,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             _LOGGER.info("[%s] Extensions came back online: %s", self.server_id, came_online)
         if self._extension_offline_issue_active:
             if new_offline:
-                ir.async_create_issue(
+                async_create_entry_issue(
                     self.hass,
-                    DOMAIN,
+                    self.config_entry.entry_id,
                     f"extension_offline_{self.server_id}",
-                    **issue_owner(self.hass, self.config_entry.entry_id),
                     is_fixable=False,
                     severity=ir.IssueSeverity.WARNING,
                     translation_key="extension_offline",
@@ -7502,11 +7496,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         orphans = await self.async_detect_orphaned_statistics()
         issue_id = f"statistics_orphaned_{self.server_id}"
         if orphans and not conf.get(CONF_STATISTICS_CLEANUP_IGNORED, False):
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self.hass,
-                DOMAIN,
+                self.config_entry.entry_id,
                 issue_id,
-                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="statistics_orphaned",
@@ -8948,11 +8941,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             f"'{one_line(name)}' (fub {', '.join(str(fid) for fid in sorted(ids))})"
             for name, ids in sorted(duplicates.items())
         )
-        ir.async_create_issue(
+        async_create_entry_issue(
             self.hass,
-            DOMAIN,
+            self.config_entry.entry_id,
             issue_id,
-            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
             translation_key="duplicate_plan_names",
@@ -9997,11 +9989,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         if not items:
             ir.async_delete_issue(self.hass, DOMAIN, issue_id)
             return
-        ir.async_create_issue(
+        async_create_entry_issue(
             self.hass,
-            DOMAIN,
+            self.config_entry.entry_id,
             issue_id,
-            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key="knx_dpt_ambiguous",

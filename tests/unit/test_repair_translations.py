@@ -41,7 +41,9 @@ ENTRY_STEP_BY_ISSUE = {
 # flow re-raising the issue it fixes), so they cannot add a new key: (file, calling function, argument).
 PASS_THROUGH_KEYS = {("repairs.py", "_reraise_cleanup_issue", "translation_key")}
 
-ISSUE_CREATORS = {"async_create_issue", "create_issue"}
+ISSUE_CREATORS = {"async_create_entry_issue", "async_create_issue", "create_issue"}
+# The one ir.async_create_issue of the integration: async_create_entry_issue forwarding its callers' keywords.
+WRAPPER_FILE = "issue_owner.py"
 ISSUE_ID = "self.issue_id"
 
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
@@ -242,6 +244,8 @@ def _fix_flow_aborts(file_name: str) -> dict[str, set[str]]:
 def _create_issue_calls() -> Iterator[tuple[str, FunctionNode, ast.Call]]:
     """(file, enclosing function, call) of every call that raises a repair issue."""
     for file_name, tree in _trees().items():
+        if file_name == WRAPPER_FILE:
+            continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
@@ -349,18 +353,12 @@ def _issue_id_prefix(file_name: str, function: FunctionNode, node: ast.expr, bin
     return "", False
 
 
-def _is_owner_splat(keyword: ast.keyword) -> bool:
-    """`**issue_owner(...)`: the config entry link of the issue, which is no part of the keys read here."""
-    return keyword.arg is None and isinstance(keyword.value, ast.Call) and _call_name(keyword.value) == "issue_owner"
-
-
 def _fixable_issue_prefixes() -> dict[str, set[str]]:
     """translation_key of every `is_fixable=True` issue the integration raises → its issue_id prefixes."""
     prefixes: dict[str, set[str]] = {}
     for file_name, function, call in _create_issue_calls():
         where = f"{file_name}:{call.lineno}"
-        # **issue_owner(...) only carries the config entry link (issue_owner.py), never a key this test reads.
-        keywords = {keyword.arg: keyword.value for keyword in call.keywords if not _is_owner_splat(keyword)}
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         assert None not in keywords, f"{where}: **kwargs hide is_fixable/translation_key from the test"
         fixable = keywords.get("is_fixable")
         not_literal = f"{where}: is_fixable must be a literal True/False for the test to know whether a flow fixes it"

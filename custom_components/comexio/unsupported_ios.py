@@ -32,7 +32,7 @@ from .const import (
     offline_io_skipped,
     one_line,
 )
-from .issue_owner import issue_owner
+from .issue_owner import async_create_entry_issue
 from .reference_monitor import async_integration_version, github_issue_url
 
 if TYPE_CHECKING:
@@ -338,11 +338,10 @@ class UnsupportedIoMonitor:
         )
         issue_url = github_issue_url(ISSUE_TRACKER_URL, title, body)
         # Re-created on every poll: async_create_issue updates the existing issue in place.
-        ir.async_create_issue(
+        async_create_entry_issue(
             self._hass,
-            DOMAIN,
+            self._entry_id,
             self.issue_id,
-            **issue_owner(self._hass, self._entry_id),
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_UNSUPPORTED_IO_TYPES,
