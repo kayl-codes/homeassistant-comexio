@@ -373,6 +373,7 @@ def _render_coordinator() -> ComexioCoordinator:
     coordinator._build_preview_title_and_canvas = MagicMock(return_value=("", None))  # type: ignore[method-assign]
     coordinator._resolve_preview_connection_values = AsyncMock(return_value=({}, {}))  # type: ignore[method-assign]
     coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
+    coordinator.function_plan_onewire_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
     coordinator._async_publish_plan_preview = AsyncMock()  # type: ignore[method-assign]
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]
     return coordinator
@@ -892,6 +893,7 @@ def _orphan_render_coordinator(snapshot: dict[str, Any] | None) -> ComexioCoordi
     coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
     coordinator._resolve_preview_label_maps = MagicMock(return_value=({}, {}, {}))  # type: ignore[method-assign]
     coordinator.function_plan_knx_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
+    coordinator.function_plan_onewire_label_map = MagicMock(return_value={})  # type: ignore[method-assign]
     coordinator._async_publish_plan_preview = AsyncMock()  # type: ignore[method-assign]
     return coordinator
 

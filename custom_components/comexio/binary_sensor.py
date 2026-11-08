@@ -7,19 +7,23 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EntityCategory
+from homeassistant.const import STATE_OFF, STATE_ON, EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
+    ONEWIRE_DATA_KEY,
     MarkerKind,
     bus_load_signal,
     offline_io_skipped,
+    onewire_problem_unique_id,
+    onewire_problems,
     plan_watch_signal,
     system_info_signal,
 )
@@ -28,14 +32,20 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioOneWireEntity,
     ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
     hub_device_info,
+    onewire_device_info,
+    onewire_sensors_for_platform,
     quickbus_ios_for_platform,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# The last state of a digital 1-Wire sensor as the reading it seeds after a restart; "unknown"/"unavailable" seed none.
+_RESTORED_READINGS = {STATE_ON: 1.0, STATE_OFF: 0.0}
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -83,6 +93,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             and knx.get("knx_composite") is None
         )
 
+    entities.extend(_onewire_entities(coordinator))
     entities.extend(
         (
             ComexioSdCardSensor(coordinator, coordinator.server_id),
@@ -92,6 +103,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     )
 
     async_add_entities(entities)
+
+
+def _onewire_entities(coordinator: ComexioCoordinator) -> list[BinarySensorEntity]:
+    """The digital 1-Wire sensors' entities and, with the first 1-Wire sensor, the 1-Wire problem sensor.
+
+    The data carries only the imported sensors (import_onewire); same rule as the cleanup's _onewire_entity_uids.
+    """
+    if not coordinator.data.get(ONEWIRE_DATA_KEY):
+        return []
+    entities: list[BinarySensorEntity] = [
+        ComexioOneWireBinarySensor(coordinator, s) for s in onewire_sensors_for_platform(coordinator, "binary_sensor")
+    ]
+    entities.append(ComexioOneWireProblemSensor(coordinator))
+    return entities
 
 
 class ComexioBinarySensor(ComexioIOEntity, BinarySensorEntity):
@@ -165,6 +190,58 @@ class ComexioKnxBinarySensor(ComexioKnxEntity, ComexioMarkerBinarySensor):
                     self._marker_id,
                     dpt_device_class,
                 )
+
+
+class ComexioOneWireBinarySensor(ComexioOneWireEntity, BinarySensorEntity, RestoreEntity):
+    """A digital 1-Wire sensor, read-only, its reading pushed by Web-IO.
+
+    Comexio pushes on change only, so after a restart the last state seeds the reading (restore_onewire_value).
+    """
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and (value := _RESTORED_READINGS.get(last.state)) is not None:
+            self.coordinator.restore_onewire_value(self._address, value)
+
+    @property
+    def is_on(self) -> bool | None:
+        value = self._reading
+        return None if value is None else value != 0
+
+
+class ComexioOneWireProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):
+    """On while a configured 1-Wire sensor has a read error, is not found or is missing from the 1-Wire monitor.
+
+    The status comes with the config poll; unknown while it could not be fetched.
+    """
+
+    _attr_has_entity_name = True
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_translation_key = "onewire_problem"
+
+    def __init__(self, coordinator: ComexioCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = onewire_problem_unique_id(coordinator.server_id)
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return onewire_device_info(self.coordinator)
+
+    def _problems(self) -> dict[str, list[str]] | None:
+        if (statuses := self.coordinator.onewire_status) is None:
+            return None
+        return onewire_problems(statuses, (s["address"] for s in self.coordinator.data.get(ONEWIRE_DATA_KEY, [])))
+
+    @property
+    def is_on(self) -> bool | None:
+        problems = self._problems()
+        return None if problems is None else any(problems.values())
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._problems() or {}
 
 
 class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):

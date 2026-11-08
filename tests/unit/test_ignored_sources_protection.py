@@ -562,6 +562,7 @@ def test_the_poll_hands_both_audits_the_options_it_built_conf_from() -> None:
         "_prune_deleted_plans_from_snapshot",
         "_merge_polled_states",
         "_merge_polled_knx_states",
+        "_merge_onewire_values",
         "_track_offline_extensions",
         "_update_entity_id_mismatch_issue",
     ):

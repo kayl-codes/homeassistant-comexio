@@ -40,6 +40,7 @@ from .const import (
     QUICKBUS_IO_DATA_KEY,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
+    SOURCE_CATEGORIES,
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_ADDRESS_CUSTOM,
     WEBHOOK_ADDRESS_EXTERNAL,
@@ -253,6 +254,13 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             ] = bool
         schema_dict[vol.Required("import_ios", default=conf.get("import_ios", True))] = bool
         schema_dict[vol.Required("import_quickbus", default=conf.get("import_quickbus", True))] = bool
+        onewire_cat = SOURCE_CATEGORIES[WebioClass.ONEWIRE]
+        schema_dict[
+            vol.Required(
+                onewire_cat.import_conf_key,
+                default=conf.get(onewire_cat.import_conf_key, onewire_cat.import_default),
+            )
+        ] = bool
         schema_dict[
             vol.Required(
                 "scan_interval",

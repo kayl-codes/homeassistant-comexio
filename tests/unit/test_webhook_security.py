@@ -9,11 +9,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import ComexioConnectionError
+from aiocomexio.onewire import OneWireSensor
 import pytest
 
 from custom_components.comexio import webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import WebioClass
+from custom_components.comexio.const import ONEWIRE_DATA_KEY, WebioClass
 from custom_components.comexio.coordinator import ComexioCoordinator
 from tests.unit.test_api_helpers import PARSED
 
@@ -144,6 +145,43 @@ def test_a_payload_names_the_key_its_command_was_derived_from(payload: dict[str,
 
     item = {"id": "5", "ext_name": "BASE", "identifier": "Q1"}
     assert key == ws.command_key(WebioClass(payload.get("type", "marker")), item)
+
+
+def test_a_onewire_command_is_keyed_by_its_address_as_item_and_as_sensor() -> None:
+    # The audit/sync pass the data item, aiocomexio's builders the OneWireSensor: both must give the same key,
+    # and it is the address the push carries as its id, never the config id.
+    item = {"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog"}
+    sensor = OneWireSensor(address="OT1", config_id=4, prefix="OT", name="", hw_id="", kind="analog")
+
+    assert ws.command_key(WebioClass.ONEWIRE, item) == "onewire:OT1"
+    assert ws.command_key(WebioClass.ONEWIRE, sensor) == "onewire:OT1"
+    assert ws.payload_key({"type": "onewire", "id": "OT1"}) == "onewire:OT1"
+
+
+def test_every_built_onewire_command_gets_its_own_id_that_only_its_payload_fits(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    security = _security(monkeypatch)
+    comexio_api.webhook_security = security
+    source = {
+        **PARSED,
+        ONEWIRE_DATA_KEY: [
+            {"id": 1, "address": "OT1", "name": "1Wire OT1", "type": "analog", "prefix": "OT"},
+            {"id": 2, "address": "OH2", "name": "1Wire OH2", "type": "analog", "prefix": "OH"},
+        ],
+    }
+
+    commands = comexio_api.build_webio_commands(SERVER, source, WebioClass.ONEWIRE)
+
+    assert [_payload(c["Data"])["id"] for c in commands] == ["OT1", "OH2"]
+    assert len({_own_id(c) for c in commands}) == 2
+    for command in commands:
+        payload = _payload(command["Data"])
+        assert payload["type"] == "onewire"
+        assert security.accepts(_own_id(command), payload)
+        assert not any(
+            security.accepts(_own_id(command), _payload(other["Data"])) for other in commands if other is not command
+        )
 
 
 @pytest.mark.parametrize("payload", [{}, {"type": "io", "ext": "BASE"}, {"type": "knx"}, {"value": 1}])

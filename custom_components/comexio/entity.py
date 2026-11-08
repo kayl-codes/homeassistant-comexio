@@ -13,6 +13,7 @@ from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
+    ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
     WebioClass,
@@ -21,6 +22,11 @@ from .const import (
     io_unique_id,
     marker_device_name,
     one_line,
+    onewire_device_name,
+    onewire_entity_name,
+    onewire_platform,
+    onewire_reading_ok,
+    onewire_unique_id,
     quickbus_device_name,
     quickbus_io_platform,
     quickbus_io_unique_id,
@@ -297,6 +303,52 @@ def quickbus_ios_for_platform(
         for io in coordinator.data.get(QUICKBUS_IO_DATA_KEY, [])
         if quickbus_io_platform(io) == platform and (not io.get("offline") or include_offline)
     ]
+
+
+def onewire_device_info(coordinator: ComexioCoordinator) -> DeviceInfo:
+    """Sub-device of the 1-Wire bus, carrying every 1-Wire sensor and the 1-Wire problem sensor."""
+    return build_device_info(
+        coordinator,
+        identifiers={(DOMAIN, f"{coordinator.server_id}_onewire")},
+        name=onewire_device_name(coordinator.server_id),
+        model="1-Wire Bus",
+    )
+
+
+def onewire_sensors_for_platform(coordinator: ComexioCoordinator, platform: str) -> list[dict[str, Any]]:
+    """The imported 1-Wire sensors whose entity lives on platform (same rule as the cleanup's _onewire_entity_uids)."""
+    return [s for s in coordinator.data.get(ONEWIRE_DATA_KEY, []) if onewire_platform(s) == platform]
+
+
+class ComexioOneWireEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
+    """Shared base of the 1-Wire sensor entities: read-only, the reading only comes by push (Web-IO).
+
+    Unavailable once the 1-Wire status (fetched with the config poll) reports the sensor not found, with a read
+    error or not at all — a read error can still carry a value, which must not show as a reading. While the status
+    is unknown the last pushed reading stays.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(self, coordinator: ComexioCoordinator, sensor: dict[str, Any]) -> None:
+        super().__init__(coordinator)
+        self._address: str = sensor["address"]
+        self._attr_unique_id = onewire_unique_id(coordinator.server_id, self._address)
+        self._attr_name = onewire_entity_name(sensor)
+        self._attr_extra_state_attributes = {"address": self._address, "hw_id": sensor.get("hw_id", "")}
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return onewire_device_info(self.coordinator)
+
+    @property
+    def available(self) -> bool:
+        return super().available and onewire_reading_ok(self.coordinator.onewire_status, self._address)
+
+    @property
+    def _reading(self) -> float | None:
+        sensor = self.coordinator.onewire_sensor(self._address)
+        return None if sensor is None else sensor.get("value")
 
 
 class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):

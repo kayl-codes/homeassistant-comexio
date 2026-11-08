@@ -476,13 +476,15 @@ async def _search_plan_labels(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
-    knx_by_id: dict,
+    source_maps: dict[str, dict],
     matches_element: Any,
     login_state: dict[str, bool | None],
 ) -> tuple[list[str] | None, str | None]:
     """Search one plan's element labels for function_plan_search (extracted to stay under
     the complexity budget — mutable login_state carries the lazy, at-most-once login
     across the caller's loop). Returns (hits, None) or (None, failure_description).
+
+    source_maps: the KNX and 1-Wire maps as resolve_element_label's keyword arguments (knx_by_id, onewire_by_id).
     """
     # Prefer the bulk snapshot the backup cycle already loads in the background
     # (see coordinator._async_function_plan_backup_cycle) — a live reload of all plans
@@ -500,9 +502,9 @@ async def _search_plan_labels(
     for elem in plan_data.get("elements", {}).values():
         # Comments carry multi-line text — flatten like the text visualization does.
         label = " ".join(
-            resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, knx_by_id=knx_by_id).split()
+            resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id, **source_maps).split()
         )
-        if matches_element(label, element_search_id(elem, ios_by_id)):
+        if matches_element(label, element_search_id(elem, ios_by_id, source_maps["onewire_by_id"])):
             hits.add(label)
     return sorted(hits), None
 
@@ -523,8 +525,8 @@ def _build_search_notification_lines(
         lines.append(f"No element matching '{query}' found in any of the {plan_count} plans.")
         if not _is_text_query(query):
             lines.append(
-                'Plain queries match object IDs only (M…/K…/T…/C…/EXT#IO) — wrap the query in double quotes ("…") '
-                "to search the label text."
+                "Plain queries match object IDs only (M…/K…/T…/C…/EXT#IO/1-Wire address) — "
+                'wrap the query in double quotes ("…") to search the label text.'
             )
     if failed:
         lines.append(f"\n**{len(failed)} plan(s) could not be loaded:** {', '.join(failed)}")
@@ -559,7 +561,10 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
 
     matches_element = _build_element_matcher(query)
     markers_by_id, webio_by_id, ios_by_id = coordinator.function_plan_label_maps()
-    knx_by_id = coordinator.function_plan_knx_label_map()
+    source_maps = {
+        "knx_by_id": coordinator.function_plan_knx_label_map(),
+        "onewire_by_id": coordinator.function_plan_onewire_label_map(),
+    }
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
     plans = sorted(function_plans(api.fub_data), key=lambda kv: kv[0])
@@ -578,7 +583,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
             markers_by_id,
             webio_by_id,
             ios_by_id,
-            knx_by_id,
+            source_maps,
             matches_element,
             login_state,
         )

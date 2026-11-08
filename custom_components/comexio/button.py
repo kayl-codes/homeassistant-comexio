@@ -1,6 +1,6 @@
 # Version: 0.7.6
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 import contextlib
 from dataclasses import dataclass, field
 import datetime
@@ -274,6 +274,21 @@ def _class_action_eta(
 
 # (column-plan kind label, member, identifier) of one IO / Quickbus pair to wire.
 _IoRef = tuple[str, str, str]
+
+
+def _known_source_names(
+    data: Mapping[str, Any], clustered_cats: list[SourceCategory]
+) -> dict[str, tuple[WebioClass, int]]:
+    """Web-IO command name -> (class, source id) of every item of the range-clustered categories.
+
+    Matched by exact name: a 1-Wire command name ends in the sensor's address, not in its config id.
+    """
+    names: dict[str, tuple[WebioClass, int]] = {}
+    for cat in clustered_cats:
+        for item in data.get(cat.data_key, []):
+            expected_cmd_name = f"HA {item['name']}"
+            names[expected_cmd_name] = (cat.key, int(item["id"]))
+    return names
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
@@ -2121,11 +2136,19 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         created_names: list[str],
         clustered_cats: list[SourceCategory],
         known_io_names: dict[str, _IoRef],
+        known_source_names: Mapping[str, tuple[WebioClass, int]],
     ) -> tuple[dict[WebioClass, list[int]], list[_IoRef]]:
-        """Split freshly-created Web-IO command names into per-category source ids and IO refs."""
+        """Split freshly-created Web-IO command names into per-category source ids and IO refs.
+
+        known_source_names: the current command name of every id-range source, looked up first: a 1-Wire
+        command is named by the sensor's address ("HA 1Wire OT1"), not by the id its plan element carries.
+        """
         source_ids_by_cat: dict[WebioClass, list[int]] = {}
         created_io_refs: list[_IoRef] = []
         for name in created_names:
+            if known := known_source_names.get(name):
+                source_ids_by_cat.setdefault(known[0], []).append(known[1])
+                continue
             for cat in clustered_cats:
                 if (sid := _parse_source_id_from_webio_name(name, cat.audit_key_prefix)) is not None:
                     source_ids_by_cat.setdefault(cat.key, []).append(sid)
@@ -2171,12 +2194,15 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             for kind in IO_PLAN_KINDS
             for io in self.coordinator.data.get(kind.data_key, [])
         }
-        # Range-clustered categories (Marker + KNX): one pipeline, only the id prefix / plan
+        # Range-clustered categories (Marker, KNX, 1-Wire): one pipeline, only the id prefix / plan
         # label differ. IO stays a separate branch (per-extension plans, composite key).
         clustered_cats = [cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered]
         gap_keys = {f"{cat.key.value}_id": cat for cat in clustered_cats}
+        known_source_names = _known_source_names(self.coordinator.data, clustered_cats)
 
-        source_ids_by_cat, created_io_refs = self._classify_created_names(created_names, clustered_cats, known_io_names)
+        source_ids_by_cat, created_io_refs = self._classify_created_names(
+            created_names, clustered_cats, known_io_names, known_source_names
+        )
 
         if ctx.action in {"full_sync", "function_plan_add_missing"}:
             gap_io_items = self._merge_gap_source_ids(source_ids_by_cat, gap_items, gap_keys)
@@ -2543,7 +2569,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
             return []
 
         clustered_cats = [cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered]
-        source_ids_by_cat, _created_io_refs = self._classify_created_names(created_names, clustered_cats, {})
+        source_ids_by_cat, _created_io_refs = self._classify_created_names(created_names, clustered_cats, {}, {})
         gap_keys = {f"{cat.key.value}_id": cat for cat in clustered_cats}
         self._merge_gap_source_ids(source_ids_by_cat, gap_items, gap_keys)
         read_path_ids = set(source_ids_by_cat.get(WebioClass.KNX, []))

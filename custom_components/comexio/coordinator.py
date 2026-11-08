@@ -24,6 +24,7 @@ from aiocomexio import (
     ComexioError,
 )
 from aiocomexio.function_plan import build_source_id_translation, plan_hash, render_plan_svg, snapshot_label_maps
+from aiocomexio.onewire import OneWireStatus
 from aiocomexio.webio import quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
@@ -150,6 +151,7 @@ from .const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
+    ONEWIRE_DATA_KEY,
     PLAN_FAILURE_AFTER_GONE_MEMBER,
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
@@ -186,12 +188,12 @@ from .const import (
     WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_WARNED_MAX,
+    WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
     WEBHOOK_VERIFY_BUDGET_SEC,
     WEBIO_CLASS_IO,
     WEBIO_CLASS_KNX,
-    WEBIO_CLASS_MARKER,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_CLASS_QUICKBUS,
     WEBIO_CLASSES,
@@ -230,6 +232,7 @@ from .const import (
     io_plan_overflow,
     io_plan_shifted,
     one_line,
+    onewire_entity_name,
     parse_ignored_ids,
     parse_keyword_list,
     parse_watchdog_user_plan_pick,
@@ -486,27 +489,26 @@ def _parse_snapshot_source(source: str) -> tuple[str, int]:
     return kind, int(slot)
 
 
-def _plan_ref_ids(elements: dict[str, Any]) -> tuple[set[str], set[str], set[str]]:
-    """marker_ids/io_ids/knx_ids (type-2/type-1/type-11 element refs) referenced by a plan's elements.
+# The preview cache key of each element reference type _fire_plan_event gates on: "<kind>_ids" of its kind.
+# KNX "11" is a blind guess at its $FubModules key; a 1-Wire element (12) refers to the sensor's config id.
+_PLAN_EVENT_REF_KEYS = {"2": "marker_ids", "1": "io_ids", "11": "knx_ids", "12": "onewire_ids"}
+
+
+def _plan_ref_ids(elements: dict[str, Any]) -> dict[str, set[str]]:
+    """The ref_ids a plan's elements refer to, by preview cache key (marker_ids, io_ids, knx_ids, onewire_ids).
 
     Drives _fire_plan_event's gating of the comexio_plan_event bus events (the plan card's
     debug box) — only a value push belonging to the currently-displayed plan is published.
     """
-    marker_ids: set[str] = set()
-    io_ids: set[str] = set()
-    knx_ids: set[str] = set()
+    ref_ids: dict[str, set[str]] = {key: set() for key in _PLAN_EVENT_REF_KEYS.values()}
     for elem in elements.values():
         ref = elem.get("reference") or {}
         # Comexio encodes reference.type as int or string depending on the response shape —
         # normalize like every other ref.type check in this codebase (_function_plan_existing_refs
         # et al.); a bare int compare would silently drop string-typed refs.
-        if str(ref.get("type")) == "2":
-            marker_ids.add(str(ref.get("ref_id")))
-        elif str(ref.get("type")) == "1":
-            io_ids.add(str(ref.get("ref_id")))
-        elif str(ref.get("type")) == "11":  # blind guess: KNX objects use $FubModules key "11"
-            knx_ids.add(str(ref.get("ref_id")))
-    return marker_ids, io_ids, knx_ids
+        if key := _PLAN_EVENT_REF_KEYS.get(str(ref.get("type"))):
+            ref_ids[key].add(str(ref.get("ref_id")))
+    return ref_ids
 
 
 def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str]:
@@ -658,6 +660,8 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
     import_ios = conf.get(_IMPORT_IOS_KEY, True)
     import_knx = conf.get("import_knx", False)
     import_quickbus = conf.get(_IMPORT_QUICKBUS_KEY, True)
+    onewire_cat = SOURCE_CATEGORIES[WebioClass.ONEWIRE]
+    import_onewire = conf.get(onewire_cat.import_conf_key, onewire_cat.import_default)
     io_all = parsed_data.get("io_all", [])
     if not import_ios:
         # io_all labels plan elements: imported Quickbus IOs keep theirs without the physical IOs.
@@ -668,6 +672,7 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
         "io_all": io_all,
         "knx": parsed_data.get("knx", []) if import_knx else [],
         QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
+        ONEWIRE_DATA_KEY: parsed_data.get(ONEWIRE_DATA_KEY, []) if import_onewire else [],
         "webio_commands": parsed_data.get("webio_commands", {}),
         WEBIO_COMMAND_DUPLICATES_KEY: parsed_data.get(WEBIO_COMMAND_DUPLICATES_KEY, []),
         "webio_names": parsed_data.get("webio_names", {}),
@@ -687,8 +692,11 @@ _SAVED_CONFIG_ITEM_KEYS: dict[str, frozenset[str]] = {
     "knx": _SAVED_SOURCE_ITEM_KEYS,
     QUICKBUS_IO_DATA_KEY: _SAVED_IO_ITEM_KEYS | {"quickbus"},
     WEBIO_COMMAND_DUPLICATES_KEY: frozenset({"name"}),
+    ONEWIRE_DATA_KEY: frozenset({"id", "address", "name", "type"}),
 }
 _SAVED_CONFIG_LIST_KEYS = tuple(_SAVED_CONFIG_ITEM_KEYS)
+# Lists a store saved before they existed lacks: such a store still sets up, without these items.
+_SAVED_CONFIG_OPTIONAL_LIST_KEYS = frozenset({ONEWIRE_DATA_KEY})
 _SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "extensions")
 _SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
 
@@ -734,6 +742,7 @@ def is_saved_config(stored: Any) -> bool:
         and all(
             isinstance(stored.get(key), list) and all(_is_saved_item(key, item) for item in stored[key])
             for key in _SAVED_CONFIG_LIST_KEYS
+            if key in stored or key not in _SAVED_CONFIG_OPTIONAL_LIST_KEYS
         )
         and all(isinstance(stored.get(key), dict) for key in _SAVED_CONFIG_DICT_KEYS)
     )
@@ -742,6 +751,19 @@ def is_saved_config(stored: Any) -> bool:
 def _ignore_list_prefix_chars(category: SourceCategory) -> str:
     """The letter prefixes an ID in the category's ignore-list may carry, e.g. "Mm"."""
     return category.audit_key_prefix + category.audit_key_prefix.lower()
+
+
+# Plan element types of the wired sources the audit checks: the IOs' column plans and the id-range cluster plans.
+_REF_TYPE_IO = SOURCE_CATEGORIES[WebioClass.IO].fub_module_type
+_RANGE_CATEGORIES = tuple(cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered)
+_RANGE_REF_TYPES = tuple(cat.fub_module_type for cat in _RANGE_CATEGORIES)
+# One element type's (wired (ref_id, webIoId) pairs, ref_ids with any connection), see _audit_wired_pairs.
+type WiredSources = tuple[set[tuple[str, str]] | None, set[str] | None]
+
+
+def _range_category_of_key(key: str) -> SourceCategory | None:
+    """The id-range category an audit key belongs to ("M5", "K12", "1W3"), None for an IO or Quickbus key."""
+    return next((cat for cat in _RANGE_CATEGORIES if key.startswith(cat.audit_key_prefix)), None)
 
 
 def _fallback_audit_key(full_name: str) -> str:
@@ -1224,6 +1246,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
         # Quickbus IOs repeat their identifier per device, so the webhook addresses them by IO Id
         self._quickbus_index: dict[str, dict[str, Any]] = {}
+        # Pushed 1-Wire readings by sensor address: the config poll parses the sensors without a value.
+        self._onewire_values: dict[str, float] = {}
+        # 1-Wire read status by address, fetched with the config poll (never a value source); None while unknown.
+        self.onewire_status: dict[str, OneWireStatus] | None = None
+        self._onewire_status_warned = False
         self.audit_ignored: bool = False
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
@@ -1513,6 +1540,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # the same way. Accepted: one dashboard request per config poll.
             if not self.in_sync:
                 await self._async_refresh_system_info_storage()
+                await self._async_refresh_onewire_status(data.get(ONEWIRE_DATA_KEY, []))
         except _PollMetAnotherCertificate as err:
             return self._keep_data_through_certificate_change(err)
         except UNREACHABLE_ERRORS as err:
@@ -1552,6 +1580,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.plan_scrape_generation += 1
         self._track_plan_list_read()
         self._schedule_full_setup()
+        # The 1-Wire readings come by push only: merged last, with no await before the return (HA publishes data
+        # right after it), so a push during any of the awaits above is not lost on the fresh items.
+        self._merge_onewire_values(data.get(ONEWIRE_DATA_KEY, []))
         return data
 
     def _track_plan_list_read(self) -> None:
@@ -2059,11 +2090,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._lp_missing_recheck_pending = False
         try:
             wired = self._audit_wired_pairs(has_active_plan, managed_io_groups)
-            wired_knx_webio_pairs = wired[2]
+            wired_knx_webio_pairs = wired[SOURCE_CATEGORIES[WebioClass.KNX].fub_module_type][0]
 
             mismatches: set[str] = {"ip_address"} if ip_mismatch else set()
             found = self._compare_audit_maps(
-                ha_map, com_map, payload_map, wired[:3], io_meta_by_key, managed_io_groups, mismatches
+                ha_map, com_map, payload_map, wired, io_meta_by_key, managed_io_groups, mismatches
             )
             dangling_items = self._function_plan_dangling_items(
                 final_data, wired, has_active_plan, managed_io_groups, mismatches
@@ -2439,7 +2470,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ha_map: dict[str, dict[str, Any]],
         com_map: dict[str, list[dict[str, Any]]],
         payload_map: dict[str, Any],
-        wired_pairs: tuple[Any, ...],
+        wired_pairs: Mapping[str, WiredSources],
         io_meta_by_key: dict[str, dict[str, Any]],
         managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
@@ -2484,7 +2515,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         ha: dict[str, Any],
         com_list: list[dict[str, Any]],
         payload_map: dict[str, Any],
-        wired_pairs: tuple[Any, ...],
+        wired_pairs: Mapping[str, WiredSources],
         io_meta: dict[str, Any] | None,
         managed_io_groups: set[tuple[str, str]],
         found: dict[str, list[dict[str, Any]]],
@@ -2522,32 +2553,30 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def _function_plan_dangling_items(
         self,
         final_data: dict[str, Any],
-        wired: tuple[Any, ...],
+        wired: Mapping[str, WiredSources],
         has_active_plan: bool,
         managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
     ) -> list[dict[str, Any]]:
         """Function Plan debris: source elements left in a managed plan without their Web-IO counterpart.
 
-        Marker/IO elements stay behind after their WebIO counterpart was removed (e.g. directly
-        in Comexio Studio) without also removing the wired source element — invisible to every
-        Web-IO check since those all pivot on webio_commands/ha_map, never the raw plan
+        Marker/KNX/1-Wire/IO elements stay behind after their WebIO counterpart was removed (e.g.
+        directly in Comexio Studio) without also removing the wired source element — invisible to
+        every Web-IO check since those all pivot on webio_commands/ha_map, never the raw plan
         elements themselves.
         """
-        wired_marker, wired_io, wired_knx, connected_marker, connected_io, connected_knx = wired
         items: list[dict[str, Any]] = []
         if has_active_plan:
-            markers_by_id = {str(m["id"]): m["name"] for m in final_data["markers"]}
-            for rid in self._dangling_source_ids("2", wired_marker, connected_marker):
-                items.append(
-                    {"name": markers_by_id.get(rid, f"M{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_MARKER}
-                )
-                mismatches.add(f"function_plan_dangling_M{rid}")
-            knx_by_id = {str(k["id"]): k["name"] for k in final_data["knx"]}
-            for rid in self._dangling_source_ids("11", wired_knx, connected_knx):
-                items.append({"name": knx_by_id.get(rid, f"K{rid}"), "ref_id": rid, "webio_class": WEBIO_CLASS_KNX})
-                mismatches.add(f"function_plan_dangling_K{rid}")
+            for cat in _RANGE_CATEGORIES:
+                names_by_id = {str(item["id"]): item["name"] for item in final_data.get(cat.data_key, [])}
+                prefix = cat.audit_key_prefix
+                for rid in self._dangling_source_ids(cat.fub_module_type, *wired[cat.fub_module_type]):
+                    items.append(
+                        {"name": names_by_id.get(rid, f"{prefix}{rid}"), "ref_id": rid, "webio_class": cat.key}
+                    )
+                    mismatches.add(f"function_plan_dangling_{prefix}{rid}")
         if managed_io_groups:
+            wired_io, connected_io = wired[_REF_TYPE_IO]
             items.extend(self._dangling_io_items(final_data, wired_io, connected_io, managed_io_groups, mismatches))
         return items
 
@@ -3709,6 +3738,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """
         return {str(k["id"]): k for k in (self.data or {}).get("knx", [])}
 
+    def function_plan_onewire_label_map(self) -> dict[str, Any]:
+        """1-Wire config id -> sensor item for the plan-preview pills of the sensor elements (type 12).
+
+        Named like its entity ("OT1 Kitchen"): the pill shows the address, then the rest of the name. A config id
+        that several sensors share (aiocomexio warns about it) labels the first of them. Empty while import_onewire
+        is off.
+        """
+        by_id: dict[str, Any] = {}
+        for sensor in (self.data or {}).get(ONEWIRE_DATA_KEY, []):
+            by_id.setdefault(str(sensor["id"]), {**sensor, "name": onewire_entity_name(sensor)})
+        return by_id
+
     async def async_repoint_function_plan_fub_id(
         self, plan_name: str, old_fub_id: int, new_fub_id: int, *, old_id_still_live: bool = False
     ) -> list[str]:
@@ -4263,6 +4304,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             canvas=canvas,
             connection_values=connection_values,
             knx_by_id=self.function_plan_knx_label_map(),
+            onewire_by_id=self.function_plan_onewire_label_map(),
             plan_id=str(fub_id),
             # A snapshot shows its own stored settings, never today's: they match its frozen elements.
             block_values=block_settings,
@@ -4545,6 +4587,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             canvas=canvas,
             connection_values=None,
             knx_by_id=self.function_plan_knx_label_map(),
+            onewire_by_id=self.function_plan_onewire_label_map(),
             plan_id=str(fub_id),
             block_values=block_settings,
         )
@@ -4649,15 +4692,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         plan_switched: bool,
     ) -> None:
         """Arm the preview cache for the live plan and restart the connection poll on plan switch."""
-        marker_ids, io_ids, knx_ids = _plan_ref_ids(elements)
         self._preview_plan_cache = {
             "fub_id": fub_id,
             "plan_name": plan_name,
             "elements": elements,
             "connections": connections,
-            "marker_ids": marker_ids,
-            "io_ids": io_ids,
-            "knx_ids": knx_ids,
+            **_plan_ref_ids(elements),
             "snapshot_source": None,
             "label_metadata": None,
             "block_settings": None,
@@ -4694,15 +4734,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
         source = f"snapshot:{kind}:{slot}"
         cache = self._preview_plan_cache
         already_armed = cache is not None and cache.get("snapshot_source") == source and cache["fub_id"] == fub_id
-        marker_ids, io_ids, knx_ids = _plan_ref_ids(elements)
         self._preview_plan_cache = {
             "fub_id": fub_id,
             "plan_name": plan_name,
             "elements": elements,
             "connections": connections,
-            "marker_ids": marker_ids,
-            "io_ids": io_ids,
-            "knx_ids": knx_ids,
+            **_plan_ref_ids(elements),
             "snapshot_source": source,
             "label_metadata": label_metadata,
             "block_settings": block_settings,
@@ -5259,6 +5296,86 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
+
+    def _merge_onewire_values(self, sensors: list[dict[str, Any]]) -> None:
+        """Give the freshly parsed 1-Wire sensors their last pushed reading (the config carries none).
+
+        A push during the config fetch already sits in _onewire_values, so it survives the new parse. A sensor
+        gone from the config (or the import switched off) drops its reading.
+        """
+        addresses = {sensor["address"] for sensor in sensors}
+        self._onewire_values = {address: v for address, v in self._onewire_values.items() if address in addresses}
+        for sensor in sensors:
+            sensor["value"] = self._onewire_values.get(sensor["address"])
+
+    def onewire_sensor(self, address: str) -> dict[str, Any] | None:
+        """The data item of the 1-Wire sensor at address (exact match), None if the config has none."""
+        return next((s for s in (self.data or {}).get(ONEWIRE_DATA_KEY, []) if s["address"] == address), None)
+
+    def update_onewire(self, address: str, value: float | int | str) -> None:
+        """Store a 1-Wire sensor's pushed reading; its command pushes the sensor address as the id.
+
+        Only a finite number counts as a reading, anything else as unknown (like an IO's push).
+        """
+        address = str(address)
+        if (sensor := self.onewire_sensor(address)) is None:
+            self._log_unknown_webhook_io(
+                _webhook_warn_key("onewire", address), WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG, one_line(address), value
+            )
+        else:
+            previous = sensor.get("value")
+            self._set_onewire_value(sensor, _live_io_number(value))
+            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "onewire", one_line(sensor.get("name") or address), value, previous)
+            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("onewire", address))
+            # The plan element refers to the config id; labelled like its plan pill (function_plan_onewire_label_map).
+            self._fire_plan_event("onewire", str(sensor["id"]), onewire_entity_name(sensor), value)
+        self._async_publish_pushed_value()
+        self.schedule_plan_preview_refresh()
+
+    def restore_onewire_value(self, address: str, value: float) -> None:
+        """Seed a 1-Wire sensor's reading from its entity's last state after a restart, unless one was pushed since.
+
+        Comexio pushes on change only, so a steady sensor would otherwise read unknown until its value moves.
+        """
+        if (sensor := self.onewire_sensor(address)) is not None and address not in self._onewire_values:
+            self._set_onewire_value(sensor, value)
+
+    def _set_onewire_value(self, sensor: dict[str, Any], value: float | None) -> None:
+        sensor["value"] = value
+        if value is None:
+            self._onewire_values.pop(sensor["address"], None)
+        else:
+            self._onewire_values[sensor["address"]] = value
+
+    async def _async_refresh_onewire_status(self, sensors: list[dict[str, Any]]) -> None:
+        """Fetch the 1-Wire read status with the config poll; the readings themselves only come by push.
+
+        Skipped without configured sensors (no request then). A failed fetch leaves the status unknown and warns
+        once until a fetch works again. Never raises into the config poll, ConfigEntryAuthFailed aside.
+        """
+        if not sensors:
+            self.onewire_status = None
+            return
+        try:
+            statuses, error = await self.api.get_onewire_status()
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception as err:
+            # A bug, not a lapsed connection: logged with its traceback every time, like the free storage fetch.
+            _LOGGER.exception("[%s] 1-Wire status fetch failed unexpectedly", self.server_id)
+            statuses, error = None, f"unexpected error ({type(err).__name__})"
+        self.onewire_status = statuses
+        if statuses is not None:
+            if self._onewire_status_warned:
+                self._onewire_status_warned = False
+                _LOGGER.info("[%s] 1-Wire status fetched again", self.server_id)
+            return
+        # The certificate repair is already raised; the status still turns unknown, without a warning.
+        if error != SYSTEM_INFO_CERTIFICATE_CHANGED and not self._onewire_status_warned:
+            self._onewire_status_warned = True
+            _LOGGER.warning(
+                "[%s] 1-Wire status not fetched, read errors of 1-Wire sensors unknown: %s", self.server_id, error
+            )
 
     def _log_unknown_webhook_io(self, warn_key: tuple[str, ...], msg: str, *args: Any) -> None:
         """Warn about the first push of an unknown IO, log every later push of it at DEBUG only.
@@ -8724,6 +8841,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             (WebioClass.IO, source.get("io", [])),
             (WebioClass.QUICKBUS, source.get(QUICKBUS_IO_DATA_KEY, [])),
             (WebioClass.KNX, source.get("knx", [])),
+            (WebioClass.ONEWIRE, source.get(ONEWIRE_DATA_KEY, [])),
         )
         return {
             derive_webhook_id(security.secret, command_key(webio_class, item))
@@ -10533,50 +10651,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _audit_wired_pairs(
         self, has_active_plan: bool, managed_io_groups: set[tuple[str, str]]
-    ) -> tuple[
-        set[tuple[str, str]] | None,
-        set[tuple[str, str]] | None,
-        set[tuple[str, str]] | None,
-        set[str] | None,
-        set[str] | None,
-        set[str] | None,
-    ]:
-        """Wired (ref_id, webIoId) pair sets for the audit: (markers, IOs, KNX objects), plus the
-        any-connection-at-all ref_id sets _dangling_source_ids needs alongside them (see there).
+    ) -> dict[str, WiredSources]:
+        """Per plan element type (_REF_TYPE_IO and _RANGE_REF_TYPES): the wired (ref_id, webIoId) pairs for the
+        audit, plus the any-connection-at-all ref_id set _dangling_source_ids needs alongside them (see there).
 
-        Each set is None when its check is disabled (no active plan / no managed IO
-        extensions) or the bulk plan snapshot is not loaded yet (recheck scheduled).
+        Every type is present; its sets are None when its check is disabled (no active plan / no managed IO
+        member) or the bulk plan snapshot is not loaded yet (recheck scheduled).
         """
-        wired_marker_pairs: set[tuple[str, str]] | None = None
-        connected_marker_ids: set[str] | None = None
-        wired_knx_pairs: set[tuple[str, str]] | None = None
-        connected_knx_ids: set[str] | None = None
-        if has_active_plan:
-            wired_marker_pairs = self._wired_source_webio_pairs("2")
-            connected_marker_ids = self._connected_source_ids("2")
-            if wired_marker_pairs is None:
+        # The id-range cluster plans (markers, KNX, 1-Wire) mirror each other structurally, so they share the
+        # has_active_plan gate rather than a dedicated extension-scoped flag.
+        checked = [*(_RANGE_REF_TYPES if has_active_plan else ()), *((_REF_TYPE_IO,) if managed_io_groups else ())]
+        wired: dict[str, WiredSources] = dict.fromkeys((*_RANGE_REF_TYPES, _REF_TYPE_IO), (None, None))
+        for ref_type in checked:
+            pairs = self._wired_source_webio_pairs(ref_type)
+            wired[ref_type] = (pairs, self._connected_source_ids(ref_type))
+            if pairs is None:
                 self._lp_missing_recheck_pending = True
-            # KNX cluster plans mirror marker cluster plans structurally, so they share the
-            # same has_active_plan gate rather than a dedicated extension-scoped flag.
-            wired_knx_pairs = self._wired_source_webio_pairs("11")
-            connected_knx_ids = self._connected_source_ids("11")
-            if wired_knx_pairs is None:
-                self._lp_missing_recheck_pending = True
-        wired_io_pairs: set[tuple[str, str]] | None = None
-        connected_io_ids: set[str] | None = None
-        if managed_io_groups:
-            wired_io_pairs = self._wired_source_webio_pairs("1")
-            connected_io_ids = self._connected_source_ids("1")
-            if wired_io_pairs is None:
-                self._lp_missing_recheck_pending = True
-        return (
-            wired_marker_pairs,
-            wired_io_pairs,
-            wired_knx_pairs,
-            connected_marker_ids,
-            connected_io_ids,
-            connected_knx_ids,
-        )
+        return wired
 
     def _dangling_source_ids(
         self,
@@ -10667,27 +10758,25 @@ class ComexioCoordinator(DataUpdateCoordinator):
         key: str,
         ha_name: str,
         best_match: dict,
-        wired_pairs: tuple[set[tuple[str, str]] | None, set[tuple[str, str]] | None, set[tuple[str, str]] | None],
+        wired: Mapping[str, WiredSources],
         io_meta: dict | None,
         managed_io_groups: set[tuple[str, str]],
     ) -> dict[str, Any] | None:
         """Missing-wiring item for one audit key, or None when the pair is wired or unchecked.
 
-        wired_pairs = (marker pairs, IO pairs, KNX pairs); a set of None means that check is
-        disabled or not yet loadable this run. Marker keys ("M<id>") are checked against the
-        marker set, KNX keys ("K<id>") against the KNX set; IO and Quickbus keys only when their
-        extension / Quickbus device is a managed column-plan member (managed_io_groups).
+        wired: _audit_wired_pairs' result; a pair set of None means that check is disabled or not
+        yet loadable this run. Keys of an id-range category ("M<id>", "K<id>", "1W<id>") are
+        checked against that category's pairs; IO and Quickbus keys only when their extension /
+        Quickbus device is a managed column-plan member (managed_io_groups).
         """
-        wired_marker_pairs, wired_io_pairs, wired_knx_pairs = wired_pairs
         web_id = str(best_match.get("webIoId"))
-        if key.startswith("M"):
-            if wired_marker_pairs is not None and (key[1:], web_id) not in wired_marker_pairs:
-                return {"name": ha_name, "marker_id": int(key[1:])}
+        if (cat := _range_category_of_key(key)) is not None:
+            source_id = key[len(cat.audit_key_prefix) :]
+            pairs = wired[cat.fub_module_type][0]
+            if pairs is not None and (source_id, web_id) not in pairs:
+                return {"name": ha_name, f"{cat.key.value}_id": int(source_id)}
             return None
-        if key.startswith("K"):
-            if wired_knx_pairs is not None and (key[1:], web_id) not in wired_knx_pairs:
-                return {"name": ha_name, "knx_id": int(key[1:])}
-            return None
+        wired_io_pairs = wired[_REF_TYPE_IO][0]
         if io_meta is None or wired_io_pairs is None:
             return None
         kind = io_plan_kind_of(io_meta)

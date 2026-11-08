@@ -301,6 +301,7 @@ def test_the_search_reports_the_plan_list_entries_it_could_not_read() -> None:
     coordinator = SimpleNamespace(
         function_plan_label_maps=lambda: ({}, {}, {}),
         function_plan_knx_label_map=dict,
+        function_plan_onewire_label_map=dict,
         function_plan_catalog=SimpleNamespace(async_get_catalog=AsyncMock(return_value={})),
         function_plan_plans={7: {"elements": {}, "connections": {}}},
     )
@@ -616,7 +617,7 @@ def _audit_coordinator(fub_data: dict) -> ComexioCoordinator:
     coordinator._report_missing_webio_classes = MagicMock(return_value=False)
     coordinator._async_audit_webio_devices = AsyncMock(return_value={})
     coordinator._has_active_function_plan = MagicMock(return_value=True)
-    coordinator._audit_wired_pairs = MagicMock(return_value=(set(), set(), set(), set()))
+    coordinator._audit_wired_pairs = MagicMock(return_value={t: (set(), set()) for t in ("2", "11", "12", "1")})
     found = dict.fromkeys(("type", "missing", "rename", "orphan", "function_plan_missing"), {})
     coordinator._compare_audit_maps = MagicMock(return_value=found)
     coordinator._function_plan_dangling_items = MagicMock(return_value={})

@@ -38,6 +38,7 @@ from custom_components.comexio.const import (
     FUNCTION_PLAN_RUN_STATE_PREVIEW_INTERVAL_SEC,
     FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
     FUNCTION_PLAN_WATCHDOG_EXISTENCE_CHECK_MAX_SEC,
+    ONEWIRE_DATA_KEY,
     PLAN_TRANSITION_STARTING,
     PLAN_TRANSITION_STOPPING,
     function_plan_ids,
@@ -238,6 +239,8 @@ class _FakeCoordinator(SimpleNamespace):
     note_comexio_unreachable = ComexioCoordinator.note_comexio_unreachable
     _note_comexio_reachable = ComexioCoordinator._note_comexio_reachable
     _async_refresh_system_info_storage = AsyncMock()
+    _async_refresh_onewire_status = AsyncMock()
+    _merge_onewire_values = ComexioCoordinator._merge_onewire_values
     # The failed-poll bookkeeping of _async_update_data (free storage counts a failed config poll too).
     _note_system_info_dropped = MagicMock()
     system_info = SimpleNamespace(apply_storage=lambda _info: [])
@@ -313,6 +316,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         _plan_run_state_stale_count=0,
         _plan_run_state_missed={},
         _plan_list_unread_polls=0,
+        _onewire_values={},
         _reported_unreadable_plan_keys=[],
         _plan_run_state_last_fetch=0.0,
         _plan_run_state_fetching=False,
@@ -3817,6 +3821,7 @@ def test_a_poll_that_scraped_nothing_still_refreshes_the_system_info_storage(
     # Free storage and time server ride every successful config poll, scraped or not (#274 review).
     coordinator = _certificate_coordinator(api)
     coordinator._async_refresh_system_info_storage = AsyncMock()
+    coordinator._async_refresh_onewire_status = AsyncMock()
 
     async def not_scraped() -> dict:
         coordinator._last_poll_scraped = False
@@ -3826,6 +3831,7 @@ def test_a_poll_that_scraped_nothing_still_refreshes_the_system_info_storage(
     coordinator._async_fetch_and_audit = not_scraped
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     coordinator._async_refresh_system_info_storage.assert_awaited_once()
+    coordinator._async_refresh_onewire_status.assert_awaited_once()
 
 
 def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
@@ -3834,6 +3840,7 @@ def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
     # The skipped poll fetched nothing: an extra admin request during the sync would only load the IO-Server.
     coordinator = _certificate_coordinator(api)
     coordinator._async_refresh_system_info_storage = AsyncMock()
+    coordinator._async_refresh_onewire_status = AsyncMock()
 
     async def skipped_for_sync() -> dict:
         coordinator.in_sync = True
@@ -3844,6 +3851,7 @@ def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
     coordinator._async_fetch_and_audit = skipped_for_sync
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     coordinator._async_refresh_system_info_storage.assert_not_awaited()
+    coordinator._async_refresh_onewire_status.assert_not_awaited()
 
 
 # #250: a setup that meets another certificate starts read only from the config the last scraped poll saved.
@@ -3866,6 +3874,9 @@ def _parsed_config(marker_title: str = "Licht") -> dict[str, Any]:
         "io": [io],
         "io_all": [dict(io)],
         "knx": [{"id": 3, "type": "digital", "name": "K3 KNX", "ha_name": "K3 KNX", "value": 1}],
+        coordinator_module.ONEWIRE_DATA_KEY: [
+            {"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog", "prefix": "OT", "value": 21.5}
+        ],
         coordinator_module.QUICKBUS_IO_DATA_KEY: [
             {**io, "id": 501, "identifier": "G1", "quickbus": {"device_id": 3, "name": "QB3"}, "value": 0}
         ],
@@ -3886,7 +3897,7 @@ def test_the_saved_config_keeps_the_layout_without_the_values() -> None:
     assert "live_only" not in saved
     assert saved["markers"] == [{**parsed["markers"][0], "value": None}]
     assert saved["io"][0] == {**parsed["io"][0], "value": None}
-    for key in ("io_all", "knx", coordinator_module.QUICKBUS_IO_DATA_KEY):
+    for key in ("io_all", "knx", coordinator_module.ONEWIRE_DATA_KEY, coordinator_module.QUICKBUS_IO_DATA_KEY):
         assert [item["value"] for item in saved[key]] == [None], key
     assert saved["webio_devices"] == {"HA": {"ip": "192.0.2.1"}}
     assert coordinator_module.is_saved_config(saved)
@@ -3919,6 +3930,19 @@ _SAVED_ITEM_KEYS = [
     for list_key, item_keys in coordinator_module._SAVED_CONFIG_ITEM_KEYS.items()
     for item_key in sorted(item_keys)
 ]
+
+
+def test_a_config_saved_before_the_onewire_list_existed_is_taken() -> None:
+    saved = coordinator_module.saved_config(_parsed_config())
+    del saved[coordinator_module.ONEWIRE_DATA_KEY]
+
+    assert coordinator_module.is_saved_config(saved) is True
+
+
+def test_a_saved_onewire_list_that_is_no_list_is_not_taken() -> None:
+    saved = {**coordinator_module.saved_config(_parsed_config()), coordinator_module.ONEWIRE_DATA_KEY: None}
+
+    assert coordinator_module.is_saved_config(saved) is False
 
 
 @pytest.mark.parametrize(("list_key", "item_key"), _SAVED_ITEM_KEYS, ids=[f"{k} {i}" for k, i in _SAVED_ITEM_KEYS])
@@ -3972,6 +3996,29 @@ def _scraping_poll(coordinator: _FakeCoordinator, parsed: dict[str, Any]) -> Asy
         return {"markers": []}
 
     return AsyncMock(side_effect=fetch_and_audit)
+
+
+def test_a_onewire_push_during_the_polls_last_awaits_reaches_the_fresh_items(api: ComexioAPI) -> None:
+    # The readings come by push only: one that lands after the fetch (here during the status fetch) must still be on
+    # the items the poll returns, or the sensor reads the stale value until it next changes.
+    coordinator = _certificate_coordinator(api)
+    coordinator._onewire_values = {"OT1": 19.0}
+
+    async def fetch_and_audit() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = None
+        coordinator._scraped_config = None
+        return {ONEWIRE_DATA_KEY: [{"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog", "value": None}]}
+
+    async def push_during_status_fetch(_sensors: list) -> None:
+        coordinator._onewire_values["OT1"] = 23.5
+
+    coordinator._async_fetch_and_audit = AsyncMock(side_effect=fetch_and_audit)
+    coordinator._async_refresh_onewire_status = AsyncMock(side_effect=push_during_status_fetch)
+
+    data = asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    assert data[ONEWIRE_DATA_KEY][0]["value"] == pytest.approx(23.5)
 
 
 def test_a_scraped_poll_saves_its_config_only_when_it_changed(api: ComexioAPI) -> None:

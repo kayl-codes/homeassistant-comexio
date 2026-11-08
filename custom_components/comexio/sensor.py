@@ -5,6 +5,7 @@ from typing import Any
 
 from aiocomexio import format_fingerprint
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorStateClass,
@@ -38,6 +39,8 @@ from .const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
+    ONEWIRE_PREFIX_HUMIDITY,
+    ONEWIRE_PREFIX_TEMPERATURE,
     PLAN_RUN_STATE_RUNNING,
     PLAN_RUN_STATE_STOPPED,
     PLAN_RUN_STATES,
@@ -63,10 +66,12 @@ from .entity import (
     ComexioIOEntity,
     ComexioKnxEntity,
     ComexioMarkerEntity,
+    ComexioOneWireEntity,
     ComexioQuickbusIOEntity,
     ComexioStableEntityIdMixin,
     function_plan_device_info,
     hub_device_info,
+    onewire_sensors_for_platform,
     quickbus_ios_for_platform,
 )
 from .function_plan_backup import summarize_orphaned_backups
@@ -100,6 +105,11 @@ DEVICE_CLASS_TO_STATE_CLASS = {SensorDeviceClass.ENERGY: SensorStateClass.TOTAL}
 # "%" alone says nothing: it is also a dimmer's current input (QI), a volume or an RGB channel.
 # Only the identifier tells humidity apart (HUM on the Quickbus devices).
 HUMIDITY_IDENTIFIER_PREFIX = "hum"
+# Device class and unit of a 1-Wire sensor by its address prefix; any other prefix shows the bare number.
+ONEWIRE_PREFIX_DEVICE_CLASS = {
+    ONEWIRE_PREFIX_TEMPERATURE: (SensorDeviceClass.TEMPERATURE, UnitOfTemperature.CELSIUS),
+    ONEWIRE_PREFIX_HUMIDITY: (SensorDeviceClass.HUMIDITY, PERCENTAGE),
+}
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
@@ -121,6 +131,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
         ComexioQuickbusSensor(coordinator, coordinator.server_id, io)
         for io in quickbus_ios_for_platform(coordinator, conf, "sensor")
     )
+    entities.extend(_onewire_sensors(coordinator))
 
     if conf.get("import_markers", True):
         ignored_ids = coordinator.ignored_marker_ids
@@ -172,6 +183,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     sync_plan_sensors = _PlanRunStateSensorSync(hass, coordinator, async_add_entities)
     sync_plan_sensors()
     entry.async_on_unload(coordinator.async_add_listener(sync_plan_sensors))
+
+
+def _onewire_sensors(coordinator: ComexioCoordinator) -> list["ComexioOneWireSensor"]:
+    """The analog 1-Wire sensors' entities; the data carries only the imported sensors (import_onewire)."""
+    return [ComexioOneWireSensor(coordinator, s) for s in onewire_sensors_for_platform(coordinator, "sensor")]
 
 
 class _PlanRunStateSensorSync:
@@ -252,6 +268,37 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
 
 class ComexioQuickbusSensor(ComexioQuickbusIOEntity, ComexioIOSensor):
     """An analog IO of a Quickbus device (brightness, temperature, ...), read-only."""
+
+
+class ComexioOneWireSensor(ComexioOneWireEntity, RestoreSensor):
+    """An analog 1-Wire sensor (temperature OT, humidity OH, ...), read-only, its reading pushed by Web-IO.
+
+    Comexio pushes on change only, so after a restart the last state seeds the reading (restore_onewire_value):
+    a steady sensor would otherwise read unknown until its value moves.
+    """
+
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(self, coordinator: ComexioCoordinator, sensor: dict[str, Any]) -> None:
+        super().__init__(coordinator, sensor)
+        if device_class := ONEWIRE_PREFIX_DEVICE_CLASS.get(sensor.get("prefix", "")):
+            self._attr_device_class, self._attr_native_unit_of_measurement = device_class
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if last is None or last.native_value is None:
+            return
+        try:
+            value = float(last.native_value)
+        except (TypeError, ValueError):
+            _LOGGER.debug("%s: last state %r is no reading, not restored", self.entity_id, last.native_value)
+            return
+        self.coordinator.restore_onewire_value(self._address, value)
+
+    @property
+    def native_value(self) -> float | None:
+        return self._reading
 
 
 class ComexioMarkerSensor(ComexioMarkerEntity, SensorEntity):

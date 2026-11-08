@@ -27,6 +27,7 @@ from time import monotonic
 from typing import Any
 
 from aiocomexio.const import WebioClass
+from aiocomexio.onewire import OneWireSensor
 from homeassistant.components import webhook
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
@@ -57,14 +58,24 @@ def _part(value: Any) -> str:
     return str(value).replace("%", "%25").replace(":", "%3A")
 
 
-def command_key(webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+def command_key(webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
     """The key of the Web-IO command of a parsed item: its class plus the address Comexio pushes it under.
 
-    Must agree with payload_key for the payload that command sends (aiocomexio.webio).
+    Must agree with payload_key for the payload that command sends (aiocomexio.webio). A 1-Wire sensor's command
+    pushes the sensor's address as ``id``, not its config id; the sensor comes as aiocomexio's OneWireSensor (the
+    Web-IO builders) or as its data item (``address`` key, see api.onewire_item).
     """
+    if isinstance(item, OneWireSensor):
+        return f"{WebioClass.ONEWIRE}:{_part(item.address)}"
+    if webio_class == WebioClass.ONEWIRE:
+        return f"{WebioClass.ONEWIRE}:{_part(item['address'])}"
     if webio_class == WebioClass.IO:
         return f"io:{_part(item['ext_name'])}:{_part(item['identifier'])}"
     return f"{webio_class}:{_part(item['id'])}"
+
+
+# Payload types whose command key is "<type>:<id>"; any other type with an id is a marker's.
+_ID_KEYED_PAYLOAD_TYPES = frozenset({WebioClass.QUICKBUS, WebioClass.KNX, WebioClass.ONEWIRE})
 
 
 def payload_key(data: Mapping[str, Any]) -> str | None:
@@ -76,7 +87,7 @@ def payload_key(data: Mapping[str, Any]) -> str | None:
     item_id = data.get("id")
     if item_id is None:
         return None
-    return f"{kind if kind in (WebioClass.QUICKBUS, WebioClass.KNX) else WebioClass.MARKER}:{_part(item_id)}"
+    return f"{kind if kind in _ID_KEYED_PAYLOAD_TYPES else WebioClass.MARKER}:{_part(item_id)}"
 
 
 def derive_webhook_id(secret: str, key: str) -> str:
@@ -84,7 +95,7 @@ def derive_webhook_id(secret: str, key: str) -> str:
     return hmac.new(secret.encode(), key.encode(), sha256).hexdigest()[:_ID_HEX_LENGTH]
 
 
-def command_path(secret: str, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+def command_path(secret: str, webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
     """The URL path a command POSTs to; the callable aiocomexio's builders take as their webhook path."""
     return f"{WEBHOOK_PATH_PREFIX}{derive_webhook_id(secret, command_key(webio_class, item))}"
 
@@ -217,7 +228,7 @@ class WebhookSecurity:
         id off before Comexio has restarted)."""
         self._store.async_delay_save(self._data, _SAVE_DELAY_SEC)
 
-    def path_for(self, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+    def path_for(self, webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
         return command_path(self.secret, webio_class, item)
 
     def mark_written(self, name: str, now: datetime) -> None:

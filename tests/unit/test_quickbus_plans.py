@@ -237,7 +237,12 @@ def test_gap_item_of_a_quickbus_io(
     quickbus_result: dict[str, Any], groups: set, wired: set, expected_member: str | None
 ) -> None:
     item = ComexioCoordinator._function_plan_gap_item(
-        "QB301", "HA QB3 BM Diele PIR1", {"webIoId": 55}, (None, wired, None), _qb_io(quickbus_result, "301"), groups
+        "QB301",
+        "HA QB3 BM Diele PIR1",
+        {"webIoId": 55},
+        {"1": (wired, None)},
+        _qb_io(quickbus_result, "301"),
+        groups,
     )
 
     assert (item or {}).get("quickbus_device") == expected_member
@@ -260,7 +265,8 @@ def test_missing_detail_counts_quickbus_devices_apart_from_extensions(quickbus_r
     assert detail["ios_by_ext"] == {"BASE": [1, 1]}
 
 
-_NO_WIRING = (set(), set(), set(), set(), set(), set())
+# Every plan element type checked, nothing wired (markers "2", KNX "11", 1-Wire "12", IOs "1").
+_NO_WIRING = {ref_type: (set(), set()) for ref_type in ("2", "11", "12", "1")}
 _QB_PLAN, _IO_PLAN = 70, 80
 
 

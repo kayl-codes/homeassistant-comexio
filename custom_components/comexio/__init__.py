@@ -38,6 +38,7 @@ from .const import (
     ISSUE_KNX_PRERELEASE_CLEANUP,
     LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
+    ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
     SOURCE_CATEGORIES,
@@ -57,6 +58,10 @@ from .const import (
     known_extension_names,
     migrate_entry_options,
     offline_io_skipped,
+    onewire_platform,
+    onewire_problem_unique_id,
+    onewire_unique_id,
+    onewire_unique_id_prefix,
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
@@ -143,7 +148,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
     return True
 
 
-_WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX"}
+_WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX", "onewire": "1-Wire"}
 
 
 def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:
@@ -169,6 +174,9 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
         security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
     elif webhook_type == "quickbus":
         coordinator.update_quickbus_io(item_id, val)
+    elif webhook_type == "onewire":
+        # The id of a 1-Wire push is the sensor's address (OT1), not its config id (aiocomexio.webio).
+        coordinator.update_onewire(str(item_id), val)
     elif webhook_type == "knx":
         # Blind guess: KNX webhook payload shape assumed identical to markers
         # (no real KNX hardware/sample payload available — see project_knx_objects memory).
@@ -448,8 +456,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     ent_reg = er.async_get(hass)
 
     # Get all IDs of objects currently recognized by the coordinator. Markers and KNX objects
-    # (registry-driven via SOURCE_CATEGORIES.range_clustered) share the "M{id}"/"K{id}" unique_id
-    # shape; IO uses its own ext_name+identifier shape and is handled separately below.
+    # (registry-driven via SOURCE_CATEGORIES.id_keyed_entities) share the "M{id}"/"K{id}" unique_id
+    # shape; IO, Quickbus IOs and 1-Wire sensors use their own shapes and are handled separately below.
     active_unique_ids = set()
     # Bridge Markers (kind == KNX_BRIDGE, see MARKER_KNX_BRIDGE_SUFFIX_RE) get no HA entity on
     # any platform — their uid is excluded from active_unique_ids below so the cleanup loop
@@ -468,7 +476,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # entity. Tracked separately for the same reason as bridge_reclassified_uids: a specific
     # log line beats the generic "orphaned entity" one for a deliberate reclassification.
     composite_reclassified_uids: set[str] = set()
-    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered):
+    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.id_keyed_entities):
         for src in coordinator.data.get(category.data_key, []):
             uid = f"comexio_{server_id}_{category.unique_id_infix}{src['id']}".lower()
             if src.get("kind") == MarkerKind.KNX_BRIDGE:
@@ -499,6 +507,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             active_unique_ids.add(io_unique_id(server_id, io))
     quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
     active_unique_ids |= quickbus_platforms.keys()
+    onewire_platforms = _onewire_entity_uids(
+        server_id,
+        coordinator.data,
+        coordinator.api.onewire_known,
+        er.async_entries_for_config_entry(ent_reg, entry.entry_id),
+    )
+    active_unique_ids |= onewire_platforms.keys()
 
     # Server-level buttons and sensors (these are always active)
     active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
@@ -543,7 +558,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.
     # Markers and KNX objects share the same kind/type → platform rules.
     expected_platform: dict[str, str] = {}
-    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered):
+    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.id_keyed_entities):
         for src in coordinator.data.get(category.data_key, []):
             kind = src.get("kind")
             if kind == MarkerKind.KNX_BRIDGE:
@@ -560,9 +575,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for io in coordinator.data.get("io", []):
         if io_has_entity(io, include_offline) and (platform := io_platform(io)):
             expected_platform[io_unique_id(server_id, io)] = platform
-    expected_platform.update(quickbus_platforms)
+    expected_platform |= quickbus_platforms | onewire_platforms
     # The run-state sensors were binary sensors before they became enum sensors.
-    expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
+    expected_platform |= dict.fromkeys(plan_uids, "sensor")
 
     # Before removing offline IO entities from the registry, snapshot their entity_ids.
     # async_detect_orphaned_statistics uses this set to exclude "temporarily orphaned"
@@ -732,6 +747,31 @@ def _quickbus_entity_uids(
         else:
             active[uid] = quickbus_io_platform(io)
     return active, offline
+
+
+def _onewire_entity_uids(
+    server_id: str, data: dict[str, Any], onewire_known: bool, registry_entries: Iterable[er.RegistryEntry]
+) -> dict[str, str]:
+    """unique_id → platform of each 1-Wire entity to keep: the sensors of data and their problem sensor.
+
+    While no config has told the 1-Wire sensors yet (api.onewire_known), the registered 1-Wire entities stay as they
+    are: an unparsed group is no installation without sensors, and their history would go with the entities.
+    """
+    active = {
+        onewire_unique_id(server_id, sensor["address"]): onewire_platform(sensor)
+        for sensor in data.get(ONEWIRE_DATA_KEY, [])
+    }
+    problem_uid = onewire_problem_unique_id(server_id)
+    if active:
+        active[problem_uid] = "binary_sensor"
+    if not onewire_known:
+        prefix = onewire_unique_id_prefix(server_id)
+        active |= {
+            e.unique_id: e.domain
+            for e in registry_entries
+            if e.unique_id == problem_uid or e.unique_id.startswith(prefix)
+        }
+    return active
 
 
 def _setup_unreachable_entries(hass: HomeAssistant) -> set[str]:
