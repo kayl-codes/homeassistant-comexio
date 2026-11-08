@@ -19,7 +19,7 @@
 
 Navigate to **Settings → Devices & Services → Add Integration** and search for **Comexio**.
 
-<img src="docs/assets/ui/0_setup_dialog-1_en.png" width="320">
+<img src="assets/ui/0_setup_dialog-1_en.png" width="320">
 
 | Field | Description |
 |-------|-------------|
@@ -38,7 +38,7 @@ After a successful login test, a second step asks for the **ignore lists** of ev
 
 HA then confirms the new device:
 
-<img src="docs/assets/ui/0_setup_dialog-2_en.png" width="320">
+<img src="assets/ui/0_setup_dialog-2_en.png" width="320">
 
 ---
 
@@ -46,7 +46,7 @@ HA then confirms the new device:
 
 After setup the integration appears under **Settings → Devices & Services → Comexio**.
 
-<img src="docs/assets/ui/1_integration_device-1_en.png" width="560">
+<img src="assets/ui/1_integration_device-1_en.png" width="560">
 
 The entry shows the instance name, IP address, device count, and entity count. The ⚙️ icon opens [Settings](#3-settings); the ⋮ menu contains **Reconfigure** and **Reload**.
 
@@ -56,7 +56,7 @@ The entry shows the instance name, IP address, device count, and entity count. T
 
 Open via the **⚙️ icon** on the integration entry. Contains non-credential options only — connection details are managed separately via [Reconfigure](#4-reconfigure-connection).
 
-<img src="docs/assets/ui/2_integration_conf-1_en.png" width="320">
+<img src="assets/ui/2_integration_conf-1_en.png" width="320">
 
 | Field | Description |
 |-------|-------------|
@@ -80,7 +80,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | **Marker IDs / KNX object IDs to exclude** | IDs and ranges (`123, 456`, `M123`, `8-12`) that get no entity and no function plan wiring. Only described objects can be ignored. An ignored `[TRIG]` source also loses its trigger pair. A range stays as written and covers IDs created later; a single ID whose source is gone is removed, and so is a KNX bridge marker — those cannot be ignored. A category with no objects on the server and its import off hides its list; the saved list is kept. |
 | **Orphaned backup retention** | Months after which a repair asks whether to keep or delete the backups of a plan deleted in Comexio. Nothing is deleted without your confirmation. See the [Backup guide](BACKUPS.md). |
 | **Enable Bus-Load Watchdog** / **Allow automatic Comexio reboot** | On a sustained bus-load rise, restart the HA-managed cluster plans. The reboot option (off by default) reboots Comexio without asking when the load averages above 90 % for 5 minutes. |
-| **Function plan watchdog: push to** | Notify services that get a push when a watched plan stops or is deleted, and an urgent push when Comexio presents another TLS certificate. See [Function plan watchdog](README.md#function-plan-watchdog). |
+| **Function plan watchdog: push to** | Notify services that get a push when a watched plan stops or is deleted, and an urgent push when Comexio presents another TLS certificate. See [Function plan watchdog](../README.md#function-plan-watchdog). |
 | **Function plan watchdog: also watch user plans** | User plans that should always run; they get the same repair, problem sensor and push as the HA plans. |
 
 ---
@@ -89,7 +89,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 
 Open via **⋮ → Reconfigure** on the integration entry. Allows updating host, username, and passwords without re-adding the integration. A new host that another entry already uses is refused.
 
-<img src="docs/assets/ui/2_integration_reconf-1_en.png" width="320">
+<img src="assets/ui/2_integration_reconf-1_en.png" width="320">
 
 > **Tip:** Leave password fields blank to keep the existing password. The integration runs a connection test before saving and reloads automatically on success.
 
@@ -103,11 +103,11 @@ The integration creates and manages a *Web-IO* device class in Comexio automatic
 
 **Idle state — ready to sync:**
 
-<img src="docs/assets/ui/2_integration_diagnostic-1_en.png" width="300">
+<img src="assets/ui/2_integration_diagnostic-1_en.png" width="300">
 
 **Active state — sync in progress:**
 
-<img src="docs/assets/ui/2_integration_diagnostic-2_en.png" width="300">
+<img src="assets/ui/2_integration_diagnostic-2_en.png" width="300">
 
 | Entity | Description |
 |--------|-------------|
@@ -117,9 +117,9 @@ The integration creates and manages a *Web-IO* device class in Comexio automatic
 
 **Entity state details (developer tools):**
 
-<img src="docs/assets/ui/2_integration_webiosync-1_en.png" width="640">
+<img src="assets/ui/2_integration_webiosync-1_en.png" width="640">
 
-<img src="docs/assets/ui/2_integration_webiosync-2_en.png" width="640">
+<img src="assets/ui/2_integration_webiosync-2_en.png" width="640">
 
 ---
 
@@ -127,19 +127,19 @@ The integration creates and manages a *Web-IO* device class in Comexio automatic
 
 When the integration starts for the first time — or the Web-IO class is missing in Comexio — a **Repair issue** appears automatically:
 
-<img src="docs/assets/ui/3_initialrepair_dialog-1_en.png" width="360">
+<img src="assets/ui/3_initialrepair_dialog-1_en.png" width="360">
 
 Confirming the repair creates the Web-IO device class and all webhook commands in Comexio. A notification tracks progress:
 
-<img src="docs/assets/ui/3_initialrepair_notification-1_en.png" width="300">
+<img src="assets/ui/3_initialrepair_notification-1_en.png" width="300">
 
 A final notification confirms success with the elapsed time:
 
-<img src="docs/assets/ui/3_initialrepair_notification-2_en.png" width="300">
+<img src="assets/ui/3_initialrepair_notification-2_en.png" width="300">
 
 ---
 
-*[← Back to README](README.md)*
+*[← Back to README](../README.md)*
 
 ---
 
@@ -164,7 +164,7 @@ A final notification confirms success with the elapsed time:
 
 Navigiere zu **Einstellungen → Geräte & Dienste → Integration hinzufügen** und suche nach **Comexio**.
 
-<img src="docs/assets/ui/0_setup_dialog-1_de.png" width="320">
+<img src="assets/ui/0_setup_dialog-1_de.png" width="320">
 
 | Feld | Beschreibung |
 |------|--------------|
@@ -183,7 +183,7 @@ Nach erfolgreichem Login-Test fragt ein zweiter Schritt nach den **Ignorier-List
 
 Danach bestätigt HA die Anlage des neuen Geräts:
 
-<img src="docs/assets/ui/0_setup_dialog-2_de.png" width="320">
+<img src="assets/ui/0_setup_dialog-2_de.png" width="320">
 
 ---
 
@@ -191,7 +191,7 @@ Danach bestätigt HA die Anlage des neuen Geräts:
 
 Nach dem Setup erscheint die Integration unter **Einstellungen → Geräte & Dienste → Comexio**.
 
-<img src="docs/assets/ui/1_integration_device-1_de.png" width="560">
+<img src="assets/ui/1_integration_device-1_de.png" width="560">
 
 Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. Das ⚙️-Icon öffnet die [Einstellungen](#3-einstellungen); das ⋮-Menü enthält **Neu konfigurieren** und **Neu laden**.
 
@@ -201,7 +201,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 
 Öffnen über das **⚙️-Icon** am Integrationseintrag. Enthält ausschließlich nicht-sicherheitskritische Optionen — Verbindungsdaten werden separat über [Neu konfigurieren](#4-verbindung-neu-konfigurieren) verwaltet.
 
-<img src="docs/assets/ui/2_integration_conf-1_de.png" width="320">
+<img src="assets/ui/2_integration_conf-1_de.png" width="320">
 
 | Feld | Beschreibung |
 |------|--------------|
@@ -225,7 +225,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | **Merker-IDs / KNX-Objekt-IDs ausschließen** | IDs und Bereiche (`123, 456`, `M123`, `8-12`), die keine Entität und keine Logikplan-Verdrahtung erhalten. Nur Objekte mit Beschreibung lassen sich ignorieren. Eine ignorierte `[TRIG]`-Quelle verliert auch ihr Trigger-Paar. Ein Bereich bleibt wie eingegeben und erfasst auch später angelegte IDs; eine einzelne ID, deren Quelle verschwunden ist, wird entfernt, ebenso ein KNX-Brückenmerker — diese lassen sich nicht ignorieren. Eine Kategorie ohne Objekte auf dem Server und mit abgeschaltetem Import blendet ihre Liste aus; die gespeicherte Liste bleibt erhalten. |
 | **Aufbewahrung verwaister Backups** | Monate, nach denen eine Reparatur fragt, ob die Backups eines in Comexio gelöschten Plans behalten oder gelöscht werden. Ohne deine Bestätigung wird nichts gelöscht. Siehe [Backup-Leitfaden](BACKUPS.md). |
 | **Bus-Auslastungs-Watchdog aktivieren** / **Automatischen Comexio-Neustart erlauben** | Bei anhaltend steigender Busauslastung die von HA verwalteten Cluster-Pläne neu starten. Die Neustart-Option (Standard aus) startet Comexio ohne Rückfrage neu, wenn die Auslastung 5 Minuten lang im Mittel über 90 % liegt. |
-| **Logikplan-Watchdog: Push an** | Benachrichtigungsdienste, die einen Push erhalten, wenn ein überwachter Plan stoppt oder gelöscht wird, und einen dringenden Push, wenn Comexio ein anderes TLS-Zertifikat vorlegt. Siehe [Logikplan-Watchdog](README.md#logikplan-watchdog). |
+| **Logikplan-Watchdog: Push an** | Benachrichtigungsdienste, die einen Push erhalten, wenn ein überwachter Plan stoppt oder gelöscht wird, und einen dringenden Push, wenn Comexio ein anderes TLS-Zertifikat vorlegt. Siehe [Logikplan-Watchdog](../README.md#logikplan-watchdog). |
 | **Logikplan-Watchdog: zusätzlich überwachte Pläne** | Benutzerpläne, die immer laufen sollen; sie erhalten dieselbe Reparatur, denselben Problem-Sensor und denselben Push wie die HA-Pläne. |
 
 ---
@@ -234,7 +234,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 
 Öffnen über **⋮ → Neu konfigurieren** am Integrationseintrag. Erlaubt das Ändern von Host, Benutzername und Passwörtern ohne Neueinrichtung der Integration. Ein neuer Host, den bereits ein anderer Eintrag nutzt, wird abgewiesen.
 
-<img src="docs/assets/ui/2_integration_reconf-1_de.png" width="320">
+<img src="assets/ui/2_integration_reconf-1_de.png" width="320">
 
 > **Tipp:** Passwortfelder leer lassen bedeutet "bestehendes Passwort beibehalten". Die Integration führt vor dem Speichern einen Verbindungstest durch und lädt sich bei Erfolg automatisch neu.
 
@@ -248,11 +248,11 @@ Die Integration erstellt und verwaltet eine *Web-IO*-Geräteklasse in Comexio vo
 
 **Ruhezustand — bereit:**
 
-<img src="docs/assets/ui/2_integration_diagnostic-1_de.png" width="300">
+<img src="assets/ui/2_integration_diagnostic-1_de.png" width="300">
 
 **Aktiver Sync:**
 
-<img src="docs/assets/ui/2_integration_diagnostic-2_de.png" width="300">
+<img src="assets/ui/2_integration_diagnostic-2_de.png" width="300">
 
 | Entität | Beschreibung |
 |---------|--------------|
@@ -262,9 +262,9 @@ Die Integration erstellt und verwaltet eine *Web-IO*-Geräteklasse in Comexio vo
 
 **Entitätszustände (Entwickler-Werkzeuge):**
 
-<img src="docs/assets/ui/2_integration_webiosync-1_de.png" width="640">
+<img src="assets/ui/2_integration_webiosync-1_de.png" width="640">
 
-<img src="docs/assets/ui/2_integration_webiosync-2_de.png" width="640">
+<img src="assets/ui/2_integration_webiosync-2_de.png" width="640">
 
 ---
 
@@ -272,16 +272,16 @@ Die Integration erstellt und verwaltet eine *Web-IO*-Geräteklasse in Comexio vo
 
 Wenn die Integration zum ersten Mal startet — oder die Web-IO-Klasse in Comexio fehlt — wird automatisch ein **Reparatur-Issue** erstellt:
 
-<img src="docs/assets/ui/3_initialrepair_dialog-1_de.png" width="360">
+<img src="assets/ui/3_initialrepair_dialog-1_de.png" width="360">
 
 Nach Bestätigung wird die Web-IO-Geräteklasse samt aller Webhook-Befehle in Comexio angelegt. Eine Benachrichtigung zeigt den Fortschritt:
 
-<img src="docs/assets/ui/3_initialrepair_notification-1_de.png" width="300">
+<img src="assets/ui/3_initialrepair_notification-1_de.png" width="300">
 
 Eine abschließende Meldung bestätigt den Erfolg mit der benötigten Zeit:
 
-<img src="docs/assets/ui/3_initialrepair_notification-2_de.png" width="300">
+<img src="assets/ui/3_initialrepair_notification-2_de.png" width="300">
 
 ---
 
-*[← Zurück zur README](README.md)*
+*[← Zurück zur README](../README.md)*

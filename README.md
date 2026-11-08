@@ -47,7 +47,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `number` | Analog Markers | Sets setpoints with automatic range checking (e.g., target temperature). |
 | `sensor` / `binary_sensor` | Read-Only Markers (`[RO]`) | Analog/digital markers tagged `[RO]` are exposed as read-only sensors instead of writable `number`/`switch` entities. |
 | `sensor` / `binary_sensor` | Quickbus devices (multitouch, motion detectors, ...) | Every IO of a Quickbus device (gestures, buttons, brightness, LED channels, ...) as a read-only entity on its own HA device (`<instance> QB - <device>`, connected via its host extension). The devices picked under **Quickbus devices managed as QB cluster plans** (options; all devices until you change it) get their Web-IO commands in the class `<name> [QB]`, wired into managed function plans `<prefix> - QB [<device id>,...]` — devices stack in a column (one blank row apart) while they fit, a plan has as many columns as the pairs-per-plan setting allows (50/100/150 → 1/2/3), audited and repaired like the IO cluster plans. A device not picked gets no Web-IO command and reports no value; with no device picked there is no `[QB]` class either. On by default (**Create entities for Quickbus devices**); read-only: the Comexio API refuses writes to Quickbus IOs — to drive a Quickbus input from HA, wire a marker to it in Comexio. |
-| `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX Objects (opt-in) | See the **[KNX Objects guide](KNX.md)** — automatic unit/device-class detection, dimmer/blind (`cover`/`light`) support, and DPT-based classification. |
+| `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX Objects (opt-in) | See the **[KNX Objects guide](docs/KNX.md)** — automatic unit/device-class detection, dimmer/blind (`cover`/`light`) support, and DPT-based classification. |
 | `button` | Trigger Markers (`[TRIG]` / `[TP]`) | One-shot "virtual button" entity for trigger-tagged markers; the marker resets itself via a dedicated, auto-managed `HA - TRIGGER` function plan. |
 | `button` | System Functions | Manual "Smart-Sync" trigger and cancel button directly from the HA device view. |
 | `select` | Function Plans | Lists all Comexio function plans; used as the default target for the function-plan services. |
@@ -68,7 +68,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 | `button` (configuration) | Integration | `Fix Entity IDs` — moves existing entities to the stable, address-based entity IDs. History and statistics move along; automations, scripts and dashboards are not rewritten. |
 | `button` (configuration, disabled by default) | Integration | `Uninstall Cleanup` — raises a Repair issue that removes what the integration created in Comexio: everything, or only the Markers / IOs / KNX / Quickbus part (managed Function Plans, Web-IO devices and classes). KNX also resets the titles of the KNX bridge markers so they become free markers again; the shared `HA - TRIGGER` plan is only removed as a whole if it holds no other category's trigger pairs. Nothing is deleted until the Repair dialog is confirmed; progress and a result summary are shown as notifications. |
 
-📖 **[Supported hardware →](SUPPORTED_HARDWARE.md)** — which extensions and Quickbus devices are tested, and what does not work yet.
+📖 **[Supported hardware →](docs/SUPPORTED_HARDWARE.md)** — which extensions and Quickbus devices are tested, and what does not work yet.
 
 ## 🚀 Installation
 
@@ -106,7 +106,7 @@ Since this integration is not (yet) in the standard HACS store, you can add it a
 > [!NOTE]
 > **Settings (⚙️)** — The gear icon opens non-security options: entity naming schemas, import flags, polling interval, webhook address, notifications, cover detection keywords, managed function plans (prefix, size, IO extensions, Quickbus devices), ignore lists, backup retention, and the bus-load and function plan watchdogs.
 
-📖 **[Full configuration guide with screenshots →](CONFIGURATION.md)**
+📖 **[Full configuration guide with screenshots →](docs/CONFIGURATION.md)**
 
 ## 🧠 Smart Lifecycle Management (How it works)
 
@@ -202,7 +202,7 @@ A picked user plan Comexio no longer has under its ID and name raises a repair a
 
 For a deleted plan, repair and push offer **Restore**: it rebuilds the plan from its newest backup as a new plan and starts it, and the pick follows it to its new ID. Before that, Comexio's plan list is read afresh. If the ID meanwhile holds a plan with the deleted plan's content — most likely the plan renamed — the Restore is refused, so no copy is built beside it; take the rename over in the repair instead. If the plan list cannot be read, the Restore fails and its notification names the cause.
 
-📖 **[Function Plan Preview guide →](FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
+📖 **[Function Plan Preview guide →](docs/FUNCTION_PLAN_PREVIEW.md)** — live SVG diagram, dashboard card, search, and debug box.
 
 ### 🗂️ Automatic Backups & Restore
 
@@ -213,19 +213,19 @@ Function plans are backed up automatically — no configuration needed:
 - **Restore** (`function_plan_restore`) brings back structure, positions and canvas settings, or rebuilds a deleted plan as a new one.
 - **Deleted plans:** their backups are never deleted automatically. Once the **Orphaned backup retention** has passed, a repair asks whether to **keep** or **delete** them.
 
-📖 **[Backup guide →](BACKUPS.md)** — backup types, viewing and restoring a snapshot, backups of deleted plans.
+📖 **[Backup guide →](docs/BACKUPS.md)** — backup types, viewing and restoring a snapshot, backups of deleted plans.
 
 ### 🧱 Managed Cluster Plans
 
 For large installations, marker/Web-IO pairs can be distributed across auto-managed plans named like `HA - Marker [1-100]`. The plan name prefix and the maximum number of marker pairs per plan are configurable in the integration options. Managed plans are labelled with a comment element inside Comexio so they are easy to recognise.
 
-The same applies to IOs and Quickbus devices: each extension picked under **Extensions managed as IO cluster plans** gets a column in a plan `HA - IO [<ext>,...]`, and the devices picked under **Quickbus devices managed as QB cluster plans** stack in the columns of a plan `HA - QB [<device id>,...]`. The pairs-per-plan setting gives the column count (50 / 100 / 150 → 1 / 2 / 3). KNX objects get plans of their own (`HA - KNX [...]`, always 50 pairs). Marker and KNX object IDs listed in the options' ignore lists get no entity and no wiring, see [CONFIGURATION.md](CONFIGURATION.md#3-settings).
+The same applies to IOs and Quickbus devices: each extension picked under **Extensions managed as IO cluster plans** gets a column in a plan `HA - IO [<ext>,...]`, and the devices picked under **Quickbus devices managed as QB cluster plans** stack in the columns of a plan `HA - QB [<device id>,...]`. The pairs-per-plan setting gives the column count (50 / 100 / 150 → 1 / 2 / 3). KNX objects get plans of their own (`HA - KNX [...]`, always 50 pairs). Marker and KNX object IDs listed in the options' ignore lists get no entity and no wiring, see [CONFIGURATION.md](docs/CONFIGURATION.md#3-settings).
 
 ## 🔌 KNX Objects
 
 Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities like Markers and IOs — opt in via **Create entities for KNX objects** in the integration options (off by default). Digital objects are automatically classified by their KNX datapoint type, with a Repair-issue-driven flow for genuinely ambiguous DPTs.
 
-📖 **[KNX Objects guide →](KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
+📖 **[KNX Objects guide →](docs/KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
 
 ## 🔒 Encrypted Connection (HTTPS)
 
@@ -271,9 +271,9 @@ actions:
 ## 🐛 Troubleshooting
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
-- **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu. To push over HTTPS (e.g. to a reverse proxy), pick *External HA URL* or *Custom address* under **Webhook address** in the settings, see [CONFIGURATION.md](CONFIGURATION.md#3-settings).
+- **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu. To push over HTTPS (e.g. to a reverse proxy), pick *External HA URL* or *Custom address* under **Webhook address** in the settings, see [CONFIGURATION.md](docs/CONFIGURATION.md#3-settings).
 - **Extension entities don't reappear after coming back online:** Reload the integration via *Settings → Devices & Services → Comexio → ⋮ → Reload*. The coordinator will re-detect the extension as online and restore all its entities.
-- **KNX analog values above ~1,000,000 get rounded/corrupted:** See the [KNX Objects guide](KNX.md#9-known-limitations) — this is a Comexio firmware bug, not an integration issue.
+- **KNX analog values above ~1,000,000 get rounded/corrupted:** See the [KNX Objects guide](docs/KNX.md#9-known-limitations) — this is a Comexio firmware bug, not an integration issue.
 - **"Entity IDs not following the Comexio scheme" after updating:** Entities created before v0.11.0 keep their old, name-based entity IDs. The Repair issue (or the **Fix Entity IDs** button) renames them to the stable scheme; history and statistics move along. Automations, scripts and dashboards are **not** rewritten — the Repair issue shows how many automations/scripts still use the old IDs, so update those afterwards. You can also ignore the issue and keep the old IDs.
 - **Updating from a KNX pre-release (v0.10.0-rc1 … rc3):** Those versions built the KNX Function Plans, Web-IO device/class and bridge markers in a layout the final release no longer uses. After the update, a one-time **Clean up KNX pre-release leftovers** Repair issue appears (with "KNX only" preselected) if such leftovers exist — confirm it, then run a sync to rebuild the KNX part cleanly. Marker and IO plans are not touched.
 
@@ -336,7 +336,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `number` | Analoge Merker | Setzt Sollwerte (Setpoints) mit automatischer Bereichsprüfung (z. B. Temp-Soll). |
 | `sensor` / `binary_sensor` | Nur-Lese-Merker (`[RO]`) | Analoge/digitale Merker mit `[RO]`-Tag werden als reine Nur-Lese-Sensoren statt als beschreibbare `number`/`switch`-Entitäten bereitgestellt. |
 | `sensor` / `binary_sensor` | Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) | Jeder IO eines Quickbus-Geräts (Gesten, Taster, Helligkeit, LED-Kanäle, ...) als Nur-Lese-Entität an einem eigenen HA-Gerät (`<Instanz> QB - <Gerät>`, verbunden über seine Host-Extension). Die unter **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** (Optionen; bis zur ersten Änderung alle Geräte) gewählten Geräte erhalten ihre Web-IO-Befehle in der Klasse `<Name> [QB]`, verdrahtet in verwaltete Logikpläne `<Präfix> - QB [<Geräte-ID>,...]` — Geräte stapeln sich in einer Spalte (mit einer Leerzeile Abstand), solange sie hineinpassen; ein Plan hat so viele Spalten, wie die Einstellung Paare pro Plan erlaubt (50/100/150 → 1/2/3), mit Audit und Reparatur wie bei den IO-Cluster-Plänen. Ein nicht gewähltes Gerät erhält keinen Web-IO-Befehl und meldet keine Werte; ist kein Gerät gewählt, entfällt auch die Klasse `[QB]`. Standardmäßig an (**Quickbus-Geräte (Multitouch, Bewegungsmelder, ...) als Entitäten anlegen**); nur lesend: die Comexio-API lehnt Schreibzugriffe auf Quickbus-IOs ab — um einen Quickbus-Eingang aus HA zu steuern, in Comexio einen Merker daran verdrahten. |
-| `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX-Objekte (Opt-in) | Siehe die **[Anleitung KNX-Objekte](KNX.md#-deutsch)** — automatische Einheiten-/Device-Class-Erkennung, Dimmer-/Jalousie-Unterstützung (`cover`/`light`) und DPT-basierte Klassifizierung. |
+| `switch`/`number`/`sensor`/`binary_sensor`/`cover`/`light` | KNX-Objekte (Opt-in) | Siehe die **[Anleitung KNX-Objekte](docs/KNX.md#-deutsch)** — automatische Einheiten-/Device-Class-Erkennung, Dimmer-/Jalousie-Unterstützung (`cover`/`light`) und DPT-basierte Klassifizierung. |
 | `button` | Trigger-Merker (`[TRIG]` / `[TP]`) | Einmalig auslösende „virtuelle Taster"-Entität für Trigger-markierte Merker; der Merker setzt sich selbst über einen dediziert automatisch verwalteten `HA - TRIGGER`-Funktionsplan zurück. |
 | `button` | System-Funktionen | Manueller "Smart-Sync" Abgleich und Abbruch direkt aus der HA-Geräteansicht. |
 | `select` | Funktionspläne | Listet alle Comexio-Funktionspläne; dient als Standard-Ziel für die Funktionsplan-Actions. |
@@ -357,7 +357,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 | `button` (Konfiguration) | Integration | `Entity-IDs korrigieren` — stellt bestehende Entitäten auf die stabilen, adressbasierten Entity-IDs um. Verlauf und Statistiken ziehen mit um; Automationen, Skripte und Dashboards werden nicht umgeschrieben. |
 | `button` (Konfiguration, standardmäßig deaktiviert) | Integration | `Deinstallations-Bereinigung` — legt ein Reparatur-Issue an, das entfernt, was die Integration in Comexio angelegt hat: alles oder nur den Merker-/IO-/KNX-/Quickbus-Teil (verwaltete Logikpläne, Web-IO-Geräte und -Klassen). KNX setzt zusätzlich die Titel der KNX-Brücken-Merker zurück, sodass sie wieder frei sind; der gemeinsame `HA - TRIGGER`-Plan wird nur komplett entfernt, wenn er keine Trigger-Paare einer anderen Kategorie enthält. Gelöscht wird erst nach Bestätigung im Reparatur-Dialog; Fortschritt und Zusammenfassung erscheinen als Benachrichtigungen. |
 
-📖 **[Unterstützte Hardware →](SUPPORTED_HARDWARE.md#-deutsch)** — welche Erweiterungen und Quickbus-Geräte getestet sind und was noch nicht funktioniert.
+📖 **[Unterstützte Hardware →](docs/SUPPORTED_HARDWARE.md#-deutsch)** — welche Erweiterungen und Quickbus-Geräte getestet sind und was noch nicht funktioniert.
 
 ## 🚀 Installation
 
@@ -392,7 +392,7 @@ Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als 
 > [!NOTE]
 > **Einstellungen (⚙️)** — Über das Zahnrad-Icon der Integration erreichst du nicht-sicherheitskritische Optionen: Namensschemas für Entities, Import-Flags, Poll-Intervall, Webhook-Adresse, Benachrichtigungen, Rollladen-Schlüsselwörter, verwaltete Logikpläne (Präfix, Größe, IO-Erweiterungen, Quickbus-Geräte), Ignorier-Listen, Aufbewahrung verwaister Backups sowie Busauslastungs- und Logikplan-Watchdog.
 
-📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](CONFIGURATION.md)**
+📖 **[Vollständige Konfigurationsanleitung mit Screenshots →](docs/CONFIGURATION.md)**
 
 > [!TIP]
 > **Initial Setup:** Wenn die Integration das erste Mal startet, wird sie im Home Assistant Reparatur-Menü ("Repairs") vorschlagen, die Web-IO Geräteklasse in Comexio automatisch anzulegen. Bestätige dies, um die volle Webhook-Funktionalität zu aktivieren!
@@ -491,7 +491,7 @@ Findet Comexio einen gewählten User-Plan unter seiner ID und seinem Namen nicht
 
 Für einen gelöschten Plan bieten Reparaturmeldung und Push **Restore** an: Der Plan wird aus seinem neuesten Backup als neuer Plan aufgebaut und gestartet, die Watchdog-Auswahl folgt ihm auf seine neue ID. Vorher wird die Planliste frisch aus Comexio gelesen. Trägt die ID inzwischen einen Plan mit dem Inhalt des gelöschten — höchstwahrscheinlich der umbenannte Plan —, wird der Restore verweigert, damit keine Kopie daneben entsteht; übernimm dann stattdessen die Umbenennung in der Reparaturmeldung. Lässt sich die Planliste nicht lesen, schlägt der Restore fehl, und seine Benachrichtigung nennt die Ursache.
 
-📖 **[Logikplan-Vorschau — Anleitung →](FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
+📖 **[Logikplan-Vorschau — Anleitung →](docs/FUNCTION_PLAN_PREVIEW.md)** — Live-SVG-Diagramm, Dashboard-Karte, Suche und Debug-Box.
 
 ### 🗂️ Automatische Backups & Restore
 
@@ -502,19 +502,19 @@ Funktionspläne werden automatisch gesichert — ganz ohne Konfiguration:
 - Der **Restore** (`function_plan_restore`) stellt Struktur, Positionen und Zeichenflächen-Einstellungen wieder her oder baut einen gelöschten Plan als neuen Plan auf.
 - **Gelöschte Pläne:** Ihre Backups werden nie automatisch gelöscht. Nach Ablauf der **Aufbewahrung verwaister Backups** fragt eine Reparaturmeldung, ob sie **behalten** oder **gelöscht** werden.
 
-📖 **[Backup-Anleitung →](BACKUPS.md#-deutsch)** — Backup-Typen, Snapshot ansehen und wiederherstellen, Backups gelöschter Pläne.
+📖 **[Backup-Anleitung →](docs/BACKUPS.md#-deutsch)** — Backup-Typen, Snapshot ansehen und wiederherstellen, Backups gelöschter Pläne.
 
 ### 🧱 Verwaltete Cluster-Pläne
 
 Für große Installationen können Merker/Web-IO-Paare auf automatisch verwaltete Pläne mit Namen wie `HA - Marker [1-100]` verteilt werden. Präfix und maximale Paar-Anzahl je Plan sind in den Integrations-Optionen einstellbar. Verwaltete Pläne werden in Comexio mit einem Kommentar-Element gekennzeichnet und sind so leicht erkennbar.
 
-Dasselbe gilt für IOs und Quickbus-Geräte: Jede unter **Als IO-Cluster-Pläne verwaltete Erweiterungen** gewählte Erweiterung erhält eine Spalte in einem Plan `HA - IO [<Ext>,...]`, und die unter **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** gewählten Geräte stapeln sich in den Spalten eines Plans `HA - QB [<Geräte-ID>,...]`. Die Einstellung Paare pro Plan bestimmt die Spaltenzahl (50 / 100 / 150 → 1 / 2 / 3). KNX-Objekte erhalten eigene Pläne (`HA - KNX [...]`, immer 50 Paare). In den Ignorier-Listen der Optionen eingetragene Merker- und KNX-Objekt-IDs erhalten keine Entität und keine Verdrahtung, siehe [CONFIGURATION.md](CONFIGURATION.md#3-einstellungen).
+Dasselbe gilt für IOs und Quickbus-Geräte: Jede unter **Als IO-Cluster-Pläne verwaltete Erweiterungen** gewählte Erweiterung erhält eine Spalte in einem Plan `HA - IO [<Ext>,...]`, und die unter **Als QB-Cluster-Pläne verwaltete Quickbus-Geräte** gewählten Geräte stapeln sich in den Spalten eines Plans `HA - QB [<Geräte-ID>,...]`. Die Einstellung Paare pro Plan bestimmt die Spaltenzahl (50 / 100 / 150 → 1 / 2 / 3). KNX-Objekte erhalten eigene Pläne (`HA - KNX [...]`, immer 50 Paare). In den Ignorier-Listen der Optionen eingetragene Merker- und KNX-Objekt-IDs erhalten keine Entität und keine Verdrahtung, siehe [CONFIGURATION.md](docs/CONFIGURATION.md#3-einstellungen).
 
 ## 🔌 KNX-Objekte
 
 Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs als HA-Entitäten importieren — Opt-in über **KNX-Objekte als Entitäten anlegen** in den Integrations-Optionen (standardmäßig aus). Digitale Objekte werden automatisch anhand ihres KNX-Datenpunkttyps klassifiziert, für echte mehrdeutige DPTs gibt es einen Repair-Issue-gestützten Flow.
 
-📖 **[Anleitung KNX-Objekte →](KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
+📖 **[Anleitung KNX-Objekte →](docs/KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
 
 ## 🔒 Verschlüsselte Verbindung (HTTPS)
 
@@ -560,9 +560,9 @@ actions:
 ## 🐛 Fehlerbehebung (Troubleshooting)
 
 - **"Web-IO Gerät ist blockiert (in use)":** Du versuchst, einen *Full Sync* zu machen, aber das Web-IO Gerät ist in Comexio bereits in einem Logikplan verbunden. Die Integration erkennt das und fällt automatisch und sicher auf den *Delta-Sync* zurück, um nur die Einzelbefehle zu patchen.
-- **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten. Für einen Push über HTTPS (z. B. an einen Reverse-Proxy) wähle in den Einstellungen unter **Webhook-Adresse** *Externe HA-URL* oder *Eigene Adresse*, siehe [CONFIGURATION.md](CONFIGURATION.md#3-einstellungen).
+- **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten. Für einen Push über HTTPS (z. B. an einen Reverse-Proxy) wähle in den Einstellungen unter **Webhook-Adresse** *Externe HA-URL* oder *Eigene Adresse*, siehe [CONFIGURATION.md](docs/CONFIGURATION.md#3-einstellungen).
 - **Extension-Entitäten erscheinen nach Wiederherstellung nicht:** Lade die Integration über *Einstellungen → Geräte & Dienste → Comexio → ⋮ → Neu laden* neu. Der Coordinator erkennt das Modul als online und legt alle Entitäten neu an.
-- **KNX-Analogwerte oberhalb von ca. 1.000.000 werden gerundet/verfälscht:** Siehe die [Anleitung KNX-Objekte](KNX.md#9-bekannte-einschränkungen) — das ist ein Comexio-Firmware-Bug, kein Integrations-Problem.
+- **KNX-Analogwerte oberhalb von ca. 1.000.000 werden gerundet/verfälscht:** Siehe die [Anleitung KNX-Objekte](docs/KNX.md#9-bekannte-einschränkungen) — das ist ein Comexio-Firmware-Bug, kein Integrations-Problem.
 - **„Entity-IDs entsprechen nicht dem Comexio-Schema" nach dem Update:** Vor v0.11.0 angelegte Entitäten behalten ihre alten, namensbasierten Entity-IDs. Das Reparatur-Issue (oder der Button **Entity-IDs korrigieren**) benennt sie auf das stabile Schema um; Verlauf und Statistiken ziehen mit um. Automationen, Skripte und Dashboards werden **nicht** umgeschrieben — das Reparatur-Issue zeigt, wie viele Automationen/Skripte noch die alten IDs verwenden, diese danach anpassen. Das Issue kann auch ignoriert werden, dann bleiben die alten IDs.
 - **Update von einer KNX-Vorabversion (v0.10.0-rc1 … rc3):** Diese Versionen haben KNX-Logikpläne, Web-IO-Gerät/-Klasse und Brücken-Merker in einem Layout angelegt, das die finale Version nicht mehr verwendet. Nach dem Update erscheint einmalig ein Reparatur-Issue **Überreste der KNX-Vorabversionen bereinigen** (mit vorausgewähltem „Nur KNX“), falls solche Reste existieren — bestätigen und danach synchronisieren, um den KNX-Teil sauber neu aufzubauen. Merker- und IO-Pläne bleiben unberührt.
 

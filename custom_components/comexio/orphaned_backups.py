@@ -20,7 +20,7 @@ from .function_plan_backup import FunctionPlanBackupManager
 from .issue_owner import async_create_entry_issue
 
 ISSUE_ORPHANED_PLAN_BACKUPS = "orphaned_plan_backups"
-BACKUPS_DOC_URL = "https://github.com/kayl-codes/homeassistant-comexio/blob/master/BACKUPS.md"
+BACKUPS_DOC_URL = "https://github.com/kayl-codes/homeassistant-comexio/blob/master/docs/BACKUPS.md"
 NO_CURRENT_PLAN = "—"
 
 

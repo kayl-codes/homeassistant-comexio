@@ -220,7 +220,7 @@ def _function_plan_entity_classes() -> list[type]:
 @pytest.mark.parametrize(
     ("class_name", "expected"),
     [
-        # Object ids of the entity_ids the plan card docs (FUNCTION_PLAN_PREVIEW.md) and existing installs use.
+        # Object ids of the entity_ids the plan card docs (docs/FUNCTION_PLAN_PREVIEW.md) and existing installs use.
         ("ComexioPlanSelectEntity", "iosrv1_function_plans"),
         ("ComexioPlanBackupSelectEntity", "iosrv1_function_plan_backup"),
         ("ComexioPlanPreviewImage", "iosrv1_plan_preview"),
