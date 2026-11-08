@@ -88,7 +88,8 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
     │  update_marker() / update_io_by_name()  ← called by webhook handler
     │
     ├── Entities: sensor / switch / number / button / binary_sensor
-    └── Webhook: POST /api/webhook/comexio_{server_id}  ← push from Comexio
+    └── Webhook: POST /api/webhook/<id of the command>  ← push from Comexio (one HMAC-derived id per Web-IO command;
+                the old comexio_{server_id} stays registered only until the migration is verified, see below)
 ```
 
 ### Module roles
@@ -97,7 +98,8 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 |------|------|
 | `__init__.py` | Entry setup, webhook registration, orphan entity cleanup, `update_listener` |
 | `api.py` | `ComexioAPI`: RSA login, config fetch, full Web-IO lifecycle; parsing, scraping and Web-IO command building come from `aiocomexio` (`config`, `scrape`, `webio`) |
-| `coordinator.py` | `ComexioCoordinator`: polling, audit logic, webhook state merging, sync lock |
+| `coordinator.py` | `ComexioCoordinator`: polling, audit logic, webhook state merging, sync lock, nightly webhook-id migration |
+| `webhook_security.py` | `WebhookSecurity`: entry secret, HMAC webhook id per command, migration ledger, legacy-id switch |
 | `button.py` | Sync button (delta vs. recreate strategy), cancel button, `press_action` service |
 | `repairs.py` | HA Repairs flow — lets user pick audit fix action from the UI |
 | `config_flow.py` | Config entry setup wizard with auto-discovery (DNS `comexio.*`) |
@@ -165,6 +167,18 @@ Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templat
 - IO: `"{IoId} {IoTitle}"` — no `{ExtName}`: IO entities sit on one device per extension and use `has_entity_name`, so the friendly name is already "`<server> EXT - <ext>` + entity name" (`<server> BASE` for the onboard IOs). The old default `"{ExtName} {IoId} {IoTitle}"` (`LEGACY_DEFAULT_SCHEMA_IO`) is pinned into config entries that never saved a schema (entry migration 1.2 → 1.3), so existing installs keep their names.
 - Available placeholders: `ServerAlias`, `MarkerId`, `MarkerTitle`, `ExtName`, `IoId`, `IoTitle`
 - An unnamed marker, and an IO whose description is empty or merely repeats its identifier, gets the title `#nn` — the title is never empty, so no schema renders an empty name or a dangling separator. Accepted limit: a schema of only `{IoTitle}` names all unnamed IOs of an extension `#nn`.
+
+### Webhook ids (dg)
+
+Every Web-IO command pushes to an id of its own: `derive_webhook_id(secret, command_key)` (HMAC-SHA256, 32 hex chars). The secret and the migration ledger live in a `Store` keyed by the entry id (`webhook_security_store`), never in the config entry. The handler accepts a request only if `WebhookSecurity.accepts(id, payload)` holds (the id belongs to the payload's command, `server=` matches the entry); the old id `comexio_{server_id}` is accepted only while `legacy_enabled`.
+
+- **Migration:** the nightly tick (01:30, `_async_webhook_migration_tick`) rewrites each command's path and `server=` field (protocol and address stay as they are). The old id is switched off only when every command is in the ledger, Comexio has restarted after the last write (`_restart_pending`: Comexio sends a changed command only after a restart) **and** a read-back of every command confirms path and body (`command_deviation`). Do not shorten that chain.
+- **Never log or notify a per-command id or a payload from the endpoint** (it takes no authentication): refused requests go through `WebhookSecurity.warn_refused` (throttled, no payload), notifications through `redact_webhook_ids`.
+- User docs: `docs/WEBHOOK_SECURITY.md` (EN + DE). Keep it in step with the flow above.
+
+### Documentation layout
+
+The guides (`BACKUPS`, `CONFIGURATION`, `FUNCTION_PLAN_PREVIEW`, `KNX`, `SUPPORTED_HARDWARE`, `WEBHOOK_SECURITY`) and their screenshots (`docs/assets/ui/`) live in `docs/`. `README.md`, `CHANGELOG.md`, `CLAUDE.md` and `info.md` stay in the root (HACS and GitHub read them there). `custom_components/comexio/orphaned_backups.py` links `docs/BACKUPS.md` by URL: move a guide only together with that link.
 
 ### Race-condition guards (see inline comments)
 

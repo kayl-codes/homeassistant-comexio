@@ -268,7 +268,15 @@ actions:
       message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
 ```
 
+## 🔐 Webhook Security
+
+Comexio pushes live values to Home Assistant through webhooks, and that endpoint takes no login. Every Web-IO command therefore pushes to a **webhook ID of its own**, derived from a secret that stays in Home Assistant, and a request is only accepted if its ID and its content belong together. The commands are rewritten automatically at night; **afterwards the Comexio server has to be restarted once** (a notification tells you when). Nothing is lost in the meantime: the old and the new IDs work side by side until the switch-over is verified.
+
+📖 **[Webhook security guide →](docs/WEBHOOK_SECURITY.md)** — why this was necessary, how the switch-over runs and why the restart matters.
+
 ## 🐛 Troubleshooting
+
+- **Notification "Comexio: restart needed":** All Web-IO commands now have their own webhook ID, but Comexio only sends a changed command after a restart. Restart the Comexio server; the old ID is switched off at the next nightly run after that. See the [Webhook security guide](docs/WEBHOOK_SECURITY.md).
 
 - **"Web-IO device is blocked (in use)":** You are trying to do a *Full Sync*, but the Web-IO device is already connected in a function plan in Comexio. The integration detects this and falls back automatically and safely to the *Delta-Sync* to patch only individual commands.
 - **No updates in HA (Webhooks don't arrive):** Make sure that the IP address stored in Comexio matches HA. If the HA IP has changed, you will be offered the "Update IP" option in the repair menu. To push over HTTPS (e.g. to a reverse proxy), pick *External HA URL* or *Custom address* under **Webhook address** in the settings, see [CONFIGURATION.md](docs/CONFIGURATION.md#3-settings).
@@ -557,7 +565,15 @@ actions:
       message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
 ```
 
+## 🔐 Webhook-Absicherung
+
+Comexio schickt Live-Werte über Webhooks an Home Assistant, und dieser Endpunkt verlangt keinen Login. Deshalb pusht jedes Web-IO-Command an eine **eigene Webhook-ID**, die aus einem in Home Assistant verbleibenden Geheimnis abgeleitet wird, und eine Anfrage wird nur angenommen, wenn ID und Inhalt zusammenpassen. Die Commands werden nachts automatisch umgeschrieben; **danach muss der Comexio-Server einmal neu gestartet werden** (eine Benachrichtigung sagt, wann). Dazwischen geht nichts verloren: Alte und neue IDs funktionieren nebeneinander, bis die Umstellung geprüft ist.
+
+📖 **[Anleitung Webhook-Absicherung →](docs/WEBHOOK_SECURITY.md#-deutsch)** — warum das nötig war, wie die Umstellung abläuft und warum der Neustart wichtig ist.
+
 ## 🐛 Fehlerbehebung (Troubleshooting)
+
+- **Benachrichtigung „Comexio: restart needed“:** Alle Web-IO-Commands haben jetzt eine eigene Webhook-ID, aber Comexio sendet ein geändertes Command erst nach einem Neustart. Starte den Comexio-Server neu; die alte ID wird beim nächsten Nachtlauf danach abgeschaltet. Siehe die [Anleitung Webhook-Absicherung](docs/WEBHOOK_SECURITY.md#-deutsch).
 
 - **"Web-IO Gerät ist blockiert (in use)":** Du versuchst, einen *Full Sync* zu machen, aber das Web-IO Gerät ist in Comexio bereits in einem Logikplan verbunden. Die Integration erkennt das und fällt automatisch und sicher auf den *Delta-Sync* zurück, um nur die Einzelbefehle zu patchen.
 - **Keine Updates in HA (Webhooks kommen nicht an):** Stelle sicher, dass die in Comexio hinterlegte IP-Adresse mit HA übereinstimmt. Falls sich die HA-IP geändert hat, wird dir im Reparatur-Menü die Option "Update IP" angeboten. Für einen Push über HTTPS (z. B. an einen Reverse-Proxy) wähle in den Einstellungen unter **Webhook-Adresse** *Externe HA-URL* oder *Eigene Adresse*, siehe [CONFIGURATION.md](docs/CONFIGURATION.md#3-einstellungen).

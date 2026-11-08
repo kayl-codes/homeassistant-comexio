@@ -184,6 +184,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
 - **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
   credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
   info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
+- **Webhook ids stay secret:** the endpoint takes no authentication, so a per-command webhook id (32 hex chars in
+  `/api/webhook/<id>`) and anything a request body carries never go into a log line, a persistent notification, a
+  repair placeholder or a diagnostics dump. Refused requests are logged through `WebhookSecurity.warn_refused`
+  (throttled, no payload), notification text through `redact_webhook_ids`. The old id switches off only after the
+  restart of Comexio and the read-back of every command (`docs/WEBHOOK_SECURITY.md`).
 - **New storage keys are built from the entry id:** HA uses a `Store` key as a file path under `.storage/`. A new
   per-entry store takes `entry.entry_id` into its key — HA makes it unique and free of path separators — never a
   value the user types (e.g. the server ID): an entry created before the flow refused empty IDs and path separators
