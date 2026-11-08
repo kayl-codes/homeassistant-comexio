@@ -81,8 +81,26 @@ _ID_KEYED_PAYLOAD_TYPES = frozenset({WebioClass.QUICKBUS, WebioClass.KNX, WebioC
 _OWN_ID_ONLY_PAYLOAD_TYPES = frozenset({WebioClass.ONEWIRE})
 
 
+_IO_ADDRESS_FIELDS = ("ext", "io")
+
+
+def _has_malformed_field(data: Mapping[str, Any]) -> bool:
+    """True for a "type", or an IO's "ext"/"io", that is neither absent (or null) nor a string.
+
+    A JSON array or object as type would not even hash, and the IO update lowercases ext and io.
+    """
+    kind = data.get("type")
+    if kind is None:
+        return False
+    if not isinstance(kind, str):
+        return True
+    return kind == WebioClass.IO and not all(isinstance(data.get(field), str | None) for field in _IO_ADDRESS_FIELDS)
+
+
 def payload_key(data: Mapping[str, Any]) -> str | None:
-    """The command key a webhook payload names, or None if it names none (a missing address field)."""
+    """The command key a webhook payload names, or None if it names none (a missing address, a malformed field)."""
+    if _has_malformed_field(data):
+        return None
     kind = data.get("type")
     if kind == WebioClass.IO:
         ext, io_id = data.get("ext"), data.get("io")
@@ -243,8 +261,11 @@ class WebhookSecurity:
         """Whether a request on webhook_id may deliver this payload.
 
         The id of a command only carries that command's value; the old id carries any while it is enabled, except
-        the kinds whose commands never posted to it. A payload that names another server is refused either way.
+        the kinds whose commands never posted to it. A payload that names another server, or whose type (or IO
+        address) is no string, is refused either way.
         """
+        if _has_malformed_field(data):
+            return False
         server = data.get("server")
         if server is not None and server != self.server_id:
             # Only a cut of the server name, never the payload: the sender is anybody who can reach the endpoint.

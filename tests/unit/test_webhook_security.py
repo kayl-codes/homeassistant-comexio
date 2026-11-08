@@ -226,6 +226,41 @@ def test_the_old_id_never_carries_a_onewire_value(monkeypatch: pytest.MonkeyPatc
     assert not security.accepts(old, payload)
 
 
+@pytest.mark.parametrize("kind", [["onewire"], {"a": 1}, 5], ids=["array", "object", "number"])
+def test_a_type_that_is_no_string_is_refused_on_every_id(monkeypatch: pytest.MonkeyPatch, kind: object) -> None:
+    # A JSON array or object would not even hash: the set lookups raised instead of refusing (#284).
+    security = _security(monkeypatch)
+    payload = {"type": kind, "id": "5", "value": 1}
+
+    assert ws.payload_key(payload) is None
+    assert not security.accepts(ws.legacy_webhook_id(SERVER), payload)
+    assert not security.accepts(ws.derive_webhook_id(security.secret, "marker:5"), payload)
+
+
+@pytest.mark.parametrize(
+    ("ext", "io_id"), [(["BASE"], "Q1"), ("BASE", 1), ({"a": 1}, "Q1")], ids=["ext-array", "io-number", "ext-object"]
+)
+def test_an_io_address_that_is_no_string_is_refused_on_every_id(
+    monkeypatch: pytest.MonkeyPatch, ext: object, io_id: object
+) -> None:
+    # The IO update lowercases ext and io: on the old id such a payload raised in the handler instead (#284).
+    security = _security(monkeypatch)
+    payload = {"type": "io", "ext": ext, "io": io_id, "value": 1}
+
+    assert ws.payload_key(payload) is None
+    assert not security.accepts(ws.legacy_webhook_id(SERVER), payload)
+    assert not security.accepts(ws.derive_webhook_id(security.secret, f"io:{ext}:{io_id}"), payload)
+
+
+@pytest.mark.parametrize("payload", [{"id": "5", "value": 1}, {"type": None, "id": "5", "value": 1}])
+def test_a_payload_without_a_type_names_a_marker(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> None:
+    security = _security(monkeypatch)
+
+    assert ws.payload_key(payload) == "marker:5"
+    assert security.accepts(ws.derive_webhook_id(security.secret, "marker:5"), payload)
+    assert security.accepts(ws.legacy_webhook_id(SERVER), payload)
+
+
 def test_a_forged_id_a_foreign_server_and_a_non_ascii_id_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     security = _security(monkeypatch)
     own = ws.derive_webhook_id(security.secret, "marker:5")
