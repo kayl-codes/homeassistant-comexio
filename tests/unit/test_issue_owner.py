@@ -3,8 +3,9 @@
 Home Assistant 2026.11 added config_entry_id to ir.async_create_issue; before that the keyword does not exist.
 async_create_entry_issue passes it only when the running version accepts it, and skips the issue once the entry
 is gone (HA refuses a link to an unknown entry). The guard below keeps it the only way the integration raises a
-repair: it fails on any other reference to ir.async_create_issue, on a wrapper call that does not hand over the
-code path's own entry id, and on a ** or * that would hide what the call passes.
+repair: it fails on any other reference to ir.async_create_issue, on the issue registry used other than as
+ir.<attribute> (getattr with a built name), on a wrapper call that does not hand over the code path's own entry
+id, and on a ** or * that would hide what the call passes.
 """
 
 import ast
@@ -16,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
 from homeassistant.const import MAJOR_VERSION, MINOR_VERSION
+from homeassistant.helpers import issue_registry as ir
 import pytest
 
 from custom_components.comexio import issue_owner as owner_module
@@ -26,7 +28,13 @@ INTEGRATION = Path(__file__).parents[2] / "custom_components" / "comexio"
 WRAPPER_FILE = "issue_owner.py"
 WRAPPER = "async_create_entry_issue"
 CREATE_NAMES = {"async_create_issue", "create_issue"}
-# The ways the integration's code paths reach their own entry id. A new form is added here on purpose.
+REGISTRY = "ir"
+REGISTRY_MODULE = "issue_registry"
+# Strings that reach the create function, the wrapper or the issue registry module around the scan (getattr,
+# importlib, sys.modules).
+HIDDEN_ACCESS = CREATE_NAMES | {WRAPPER, "homeassistant.helpers.issue_registry"}
+# The names the scan follows: the wrapper and the issue registry module are imported under these only.
+IMPORTED_AS = {WRAPPER: WRAPPER, REGISTRY_MODULE: REGISTRY}
 # Per file, the one expression its code paths reach their own entry id by: the coordinator its config entry, the
 # monitors the id the coordinator built them with, the free functions the entry (id) handed in. A new file that
 # raises repairs is added here on purpose; another variable that happens to be called entry_id fails.
@@ -62,11 +70,30 @@ def registry(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     return registry
 
 
-@pytest.mark.skipif((MAJOR_VERSION, MINOR_VERSION) < (2026, 11), reason="config_entry_id arrived in HA 2026.11")
-def test_home_assistant_accepts_the_owner_keyword() -> None:
-    # The tests below patch the flag; this one fails if Home Assistant renames the keyword, which would
-    # otherwise turn the link off for good without any test noticing.
-    assert owner_module.OWNER_KEYWORD_SUPPORTED
+def _create_before_the_link(hass, domain, issue_id, *, is_fixable, severity, translation_key) -> None:
+    """The signature of ir.async_create_issue up to HA 2026.10, reduced to the keywords that matter here."""
+
+
+def _create_with_the_link(
+    hass, domain, issue_id, *, is_fixable, severity, translation_key, config_entry_id=None
+) -> None:
+    """The signature from HA 2026.11 on."""
+
+
+@pytest.mark.parametrize(
+    ("create_issue", "supported"), [(_create_before_the_link, False), (_create_with_the_link, True)]
+)
+def test_detects_the_owner_keyword_from_the_signature(create_issue, supported: bool) -> None:
+    assert owner_module.accepts_owner_keyword(create_issue) is supported
+
+
+def test_the_owner_keyword_is_used_exactly_from_home_assistant_2026_11() -> None:
+    # The tests below patch the flag; this one checks it against the Home Assistant installed. On 2026.8–2026.10
+    # a wrongly set flag would make every repair raise TypeError; from 2026.11 on a renamed keyword would turn
+    # the link off without any test noticing.
+    expected = (MAJOR_VERSION, MINOR_VERSION) >= (2026, 11)
+    assert owner_module.accepts_owner_keyword(ir.async_create_issue) is expected
+    assert owner_module.OWNER_KEYWORD_SUPPORTED is expected
 
 
 def test_forwards_every_keyword_and_no_link_before_home_assistant_knows_it(
@@ -124,31 +151,52 @@ def _links_own_entry(wrapper_call: ast.Call, own_entry_id: str | None) -> bool:
 
 
 def _bad_import(node: ast.Import | ast.ImportFrom) -> bool:
-    """Imports ir.async_create_issue itself, or the wrapper under another name the scan would not see."""
+    """Imports ir.async_create_issue itself, or the wrapper or the issue registry under a name the scan misses."""
     for alias in node.names:
         name = alias.name.rsplit(".", 1)[-1]
-        if name in CREATE_NAMES or (name == WRAPPER and alias.asname not in {None, WRAPPER}):
+        bound = alias.asname or alias.name
+        if name in CREATE_NAMES or bound != IMPORTED_AS.get(name, bound):
             return True
     return False
 
 
-def _violates(node: ast.AST, callees: set[int], own_entry_id: str | None) -> bool:
+def _is_registry(node: ast.AST) -> bool:
+    return isinstance(node, ast.Name) and node.id == REGISTRY
+
+
+def _followed_uses(tree: ast.AST) -> set[int]:
+    """The wrapper as a callee and ir as the base of ir.<attribute>: the only uses the checks see through."""
+    followed: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and _name_of(node.func) == WRAPPER:
+            followed.add(id(node.func))
+        elif isinstance(node, ast.Attribute) and _is_registry(node.value) and not node.attr.startswith("__"):
+            # ir.__dict__ / ir.__getattribute__ reach any function by a built name, like getattr(ir, ...).
+            followed.add(id(node.value))
+    return followed
+
+
+def _violates(node: ast.AST, followed: set[int], own_entry_id: str | None) -> bool:
     if isinstance(node, ast.Import | ast.ImportFrom):
         return _bad_import(node)
     if isinstance(node, ast.Constant):
-        # getattr(ir, "async_create_issue") names the function as a string.
-        return node.value in CREATE_NAMES
+        return node.value in HIDDEN_ACCESS
     if isinstance(node, ast.Call) and _name_of(node.func) == WRAPPER:
         return not _links_own_entry(node, own_entry_id)
-    name = _name_of(node)
-    # The wrapper is only called: passed around or rebound, its calls escape the entry id check.
-    return name in CREATE_NAMES or (name == WRAPPER and id(node) not in callees)
+    # Passed around, rebound or handed to getattr, the wrapper or the registry escapes the checks here: its
+    # calls skip the entry id check, its create function is reached by a name built at runtime.
+    if _is_registry(node) or _name_of(node) == WRAPPER:
+        return id(node) not in followed
+    if isinstance(node, ast.Attribute) and node.attr == REGISTRY_MODULE:
+        # helpers.issue_registry: the module under a handle other than ir (self.issue_registry is not it).
+        return _name_of(node.value) == "helpers"
+    return _name_of(node) in CREATE_NAMES
 
 
 def _violations(source: str | ast.AST, own_entry_id: str | None = OWN_ENTRY_ID) -> list[int]:
     tree = ast.parse(source) if isinstance(source, str) else source
-    callees = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    return sorted({node.lineno for node in ast.walk(tree) if _violates(node, callees, own_entry_id)})
+    followed = _followed_uses(tree)
+    return sorted({node.lineno for node in ast.walk(tree) if _violates(node, followed, own_entry_id)})
 
 
 @pytest.mark.parametrize(
@@ -158,10 +206,14 @@ def _violations(source: str | ast.AST, own_entry_id: str | None = OWN_ENTRY_ID) 
         "issue_owner.async_create_entry_issue(hass, self._entry_id, 'x', is_fixable=True)\n",
         "from .issue_owner import async_create_entry_issue\n",
         "ir.async_delete_issue(hass, D, 'x')\n",
+        "severity = ir.IssueSeverity.WARNING\n",
+        "issue_registry = ir.async_get(hass)\n",
+        "self.issue_registry.async_get_issue(D, 'x')\n",
+        "from homeassistant.helpers import entity_registry as er, issue_registry as ir\n",
         "other(hass, *arguments, **options)\n",
     ],
 )
-def test_detector_accepts_the_wrapper_with_the_own_entry(source: str) -> None:
+def test_detector_accepts_the_wrapper_with_the_own_entry_and_plain_registry_use(source: str) -> None:
     assert not _violations(source)
 
 
@@ -186,6 +238,16 @@ def test_detector_flags_a_wrapper_call_in_a_file_without_an_own_entry_form() -> 
         "create_issue(hass, D, 'x')\n",
         "raise_it = ir.async_create_issue\n",
         "getattr(ir, 'async_create_issue')(hass, D, 'x')\n",
+        "getattr(ir, 'async_create' + '_issue')(hass, D, 'x')\n",
+        "ir.__getattribute__('async_create' + '_issue')(hass, D, 'x')\n",
+        "ir.__dict__['async_create' + '_issue'](hass, D, 'x')\n",
+        "getattr(helpers.issue_registry, 'async_create' + '_issue')(hass, D, 'x')\n",
+        "getattr(issue_owner, 'async_create_entry_issue')(hass, other, 'x')\n",
+        "registry = ir\n",
+        "from homeassistant.helpers import issue_registry\n",
+        "from homeassistant.helpers import issue_registry as registry\n",
+        "import homeassistant.helpers.issue_registry\n",
+        "importlib.import_module('homeassistant.helpers.issue_registry')\n",
         "from homeassistant.helpers.issue_registry import async_create_issue\n",
         "from .issue_owner import async_create_entry_issue as raise_repair\n",
         "raise_repair = async_create_entry_issue\n",
@@ -199,7 +261,8 @@ def test_detector_flags_a_wrapper_call_in_a_file_without_an_own_entry_form() -> 
         "async_create_entry_issue(hass, self._entry_id, issue_id='x')\n",
         "async_create_entry_issue(hass, entry_id=self._entry_id, issue_id='x')\n",
         "async_create_entry_issue(hass, self._entry_id, 'x', **options)\n",
-        "async_create_entry_issue(hass, *arguments)\n",
+        "async_create_entry_issue(hass, *arguments, 'x')\n",
+        "getattr(homeassistant.helpers.issue_registry, 'async_create' + '_issue')(hass, D, 'x')\n",
     ],
 )
 def test_detector_flags_other_ways_to_raise_a_repair(source: str) -> None:

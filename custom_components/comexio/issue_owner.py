@@ -8,8 +8,10 @@ async_create_entry_issue (tests/unit/test_issue_owner.py fails on a direct ir.as
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import inspect
 import logging
+from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
@@ -19,7 +21,14 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 OWNER_KEYWORD = "config_entry_id"
-OWNER_KEYWORD_SUPPORTED = OWNER_KEYWORD in inspect.signature(ir.async_create_issue).parameters
+
+
+def accepts_owner_keyword(create_issue: Callable[..., object]) -> bool:
+    """Whether create_issue, Home Assistant's ir.async_create_issue, takes the entry link keyword."""
+    return OWNER_KEYWORD in inspect.signature(create_issue).parameters
+
+
+OWNER_KEYWORD_SUPPORTED = accepts_owner_keyword(ir.async_create_issue)
 
 
 def async_create_entry_issue(
@@ -31,7 +40,9 @@ def async_create_entry_issue(
     severity: ir.IssueSeverity,
     translation_key: str,
     translation_placeholders: dict[str, str] | None = None,
-    data: dict[str, str | int | float | None] | None = None,
+    # Home Assistant annotates scalar values only, but stores the data as JSON; several repairs hand their
+    # flow nested counts and item lists.
+    data: dict[str, Any] | None = None,
     is_persistent: bool = False,
     learn_more_url: str | None = None,
 ) -> None:
