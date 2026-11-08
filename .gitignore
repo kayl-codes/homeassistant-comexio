@@ -41,3 +41,6 @@ hs_err_pid*.log
 
 coverage.xml
 diff-cover.md
+
+# Lokale Dev-Skripte (Probes, Messungen), nicht fürs Repo
+dev-tools/

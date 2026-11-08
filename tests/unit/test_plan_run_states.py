@@ -21,7 +21,12 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 import pytest
 
-from custom_components.comexio import coordinator as coordinator_module, plan_watchdog, sensor as sensor_module
+from custom_components.comexio import (
+    coordinator as coordinator_module,
+    issue_owner,
+    plan_watchdog,
+    sensor as sensor_module,
+)
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -232,6 +237,10 @@ class _FakeCoordinator(SimpleNamespace):
     _dismiss_stale_push = ComexioCoordinator._dismiss_stale_push
     note_comexio_unreachable = ComexioCoordinator.note_comexio_unreachable
     _note_comexio_reachable = ComexioCoordinator._note_comexio_reachable
+    _async_refresh_system_info_storage = AsyncMock()
+    # The failed-poll bookkeeping of _async_update_data (free storage counts a failed config poll too).
+    _note_system_info_dropped = MagicMock()
+    system_info = SimpleNamespace(apply_storage=lambda _info: [])
     _in_plan_watch_boot_grace = ComexioCoordinator._in_plan_watch_boot_grace
     _plan_watch_held = ComexioCoordinator._plan_watch_held
     _watchdog_grace_run_state = ComexioCoordinator._watchdog_grace_run_state
@@ -1476,6 +1485,7 @@ def test_an_outage_during_an_auto_start_defers_the_queued_ones(
 ) -> None:
     """A real watchdog check: once the first start notes an outage, the later plans are not started."""
     monkeypatch.setattr(plan_watchdog, "ir", MagicMock())
+    monkeypatch.setattr(issue_owner, "ir", MagicMock())
     monkeypatch.setattr(plan_watchdog, "persistent_notification", MagicMock())
     coordinator = _coordinator(api)
     sent: list[int] = []
@@ -3799,6 +3809,41 @@ def test_a_poll_that_scraped_nothing_keeps_the_repair(api: ComexioAPI, certifica
     coordinator._async_fetch_and_audit = not_scraped
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     certificate_repair.clear.assert_not_called()
+
+
+def test_a_poll_that_scraped_nothing_still_refreshes_the_system_info_storage(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # Free storage and time server ride every successful config poll, scraped or not (#274 review).
+    coordinator = _certificate_coordinator(api)
+    coordinator._async_refresh_system_info_storage = AsyncMock()
+
+    async def not_scraped() -> dict:
+        coordinator._last_poll_scraped = False
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = not_scraped
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    coordinator._async_refresh_system_info_storage.assert_awaited_once()
+
+
+def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    # The skipped poll fetched nothing: an extra admin request during the sync would only load the IO-Server.
+    coordinator = _certificate_coordinator(api)
+    coordinator._async_refresh_system_info_storage = AsyncMock()
+
+    async def skipped_for_sync() -> dict:
+        coordinator.in_sync = True
+        coordinator._last_poll_scraped = False
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = skipped_for_sync
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    coordinator._async_refresh_system_info_storage.assert_not_awaited()
 
 
 # #250: a setup that meets another certificate starts read only from the config the last scraped poll saved.

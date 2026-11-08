@@ -32,6 +32,7 @@ from .const import (
     offline_io_skipped,
     one_line,
 )
+from .issue_owner import async_create_entry_issue
 from .reference_monitor import async_integration_version, github_issue_url
 
 if TYPE_CHECKING:
@@ -257,10 +258,11 @@ def _repair_io_list(ios: list[Mapping[str, Any]]) -> str:
 class UnsupportedIoMonitor:
     """Per-entry state: the extensions of the last readable poll and the Repair for IOs without an entity."""
 
-    def __init__(self, hass: HomeAssistant, api: ComexioAPI, server_id: str) -> None:
+    def __init__(self, hass: HomeAssistant, api: ComexioAPI, server_id: str, entry_id: str) -> None:
         self._hass = hass
         self._api = api
         self._server_id = server_id
+        self._entry_id = entry_id
         self._integration_version: str | None = None
         self._reported: tuple[str, ...] = ()
         self._last_error: str | None = None
@@ -336,9 +338,9 @@ class UnsupportedIoMonitor:
         )
         issue_url = github_issue_url(ISSUE_TRACKER_URL, title, body)
         # Re-created on every poll: async_create_issue updates the existing issue in place.
-        ir.async_create_issue(
+        async_create_entry_issue(
             self._hass,
-            DOMAIN,
+            self._entry_id,
             self.issue_id,
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,

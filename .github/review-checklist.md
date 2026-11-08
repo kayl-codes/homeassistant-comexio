@@ -3,7 +3,7 @@
 The local review agents check every diff against these rules before a push.
 
 HACS custom integration (`custom_components/comexio/`, domain `comexio`) for the Comexio IO-Server, a local
-building-automation controller. Python ≥ 3.12, minimum Home Assistant 2026.8.0. Parsing, scraping and Web-IO
+building-automation controller. Python ≥ 3.12, minimum Home Assistant 2026.10.0. Parsing, scraping and Web-IO
 command building live in the separate PyPI library `aiocomexio`; this repo wires them into Home Assistant.
 `CLAUDE.md` in the repo root describes the architecture in detail and is the reference for these rules.
 

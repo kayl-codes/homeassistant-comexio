@@ -1498,7 +1498,7 @@ def test_set_value_analog_output_names_the_certificate_only_when_the_re_login_me
     assert (comexio_api.certificate_mismatch is MISMATCH) is names_certificate  # the repair has it
 
 
-@pytest.mark.parametrize("identifier", ["Q3", "AI1", "QI1"])
+@pytest.mark.parametrize("identifier", ["Q3", "DG1"])
 def test_set_value_api_written_io_does_not_log_in_again(
     comexio_api: ComexioAPI, client: MagicMock, identifier: str
 ) -> None:
@@ -2181,3 +2181,33 @@ def test_unsupported_paper_falls_back_to_a4(comexio_api: ComexioAPI, client: Mag
     kwargs = client.update_function_plan.await_args.kwargs
     assert (kwargs["paper_format"], kwargs["orientation"]) == ("A4", "landscape")
     assert comexio_api.fub_data["7"]["Paper"] == "3"
+
+
+def test_system_info_storage_only_leaves_the_uptime_alone(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """The config poll reads free storage and time server only: no uptime request, no uptime cause."""
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+
+    assert asyncio.run(comexio_api.get_system_info(uptime=False)) == (SYSTEM_INFO, None, None, None)
+    client.get_uptime.assert_not_awaited()
+
+
+def test_system_info_uptime_only_leaves_the_storage_alone(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """The uptime tick reads the uptime only: no dashboard page request, no storage cause."""
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+
+    assert asyncio.run(comexio_api.get_system_info(storage=False)) == (None, timedelta(days=3), None, None)
+    client.get_system_info.assert_not_awaited()
+
+
+def test_system_info_without_any_part_is_refused(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """Asking for neither part is a caller bug: it must not read as two unrequested, successful parts."""
+    client.get_system_info = AsyncMock(return_value=SYSTEM_INFO)
+    client.get_uptime = AsyncMock(return_value=timedelta(days=3))
+
+    reading = comexio_api.get_system_info(storage=False, uptime=False)
+    with pytest.raises(ValueError, match=api_module.SYSTEM_INFO_NO_PART_ERROR):
+        asyncio.run(reading)
+    client.get_system_info.assert_not_awaited()
+    client.get_uptime.assert_not_awaited()

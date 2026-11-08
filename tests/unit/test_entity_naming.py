@@ -4,6 +4,8 @@ The rule behind all of these: ids carry only the technical address (server, exte
 marker / KNX id), only the display name carries the Comexio description.
 """
 
+import asyncio
+import inspect
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -70,32 +72,34 @@ def test_function_plan_entities_without_hub_era_request_a_stable_entity_id(cls: 
 class _FakeEntity:
     """Stands in for homeassistant Entity: records that the base hook ran."""
 
-    started = False
+    prepared = False
 
-    def add_to_platform_start(self, hass: Any, platform: Any, parallel_updates: Any) -> None:
-        self.started = True
+    async def async_prepare_to_add_to_hass(self) -> None:
+        self.prepared = True
 
 
 class _Entity(ComexioStableEntityIdMixin, _FakeEntity):
-    def __init__(self, unique_id: str | None) -> None:
+    def __init__(self, unique_id: str | None, domain: str = "binary_sensor") -> None:
         self.unique_id = unique_id
         self.entity_id = None  # type: ignore[assignment]
+        self.platform = MagicMock(domain=domain)  # type: ignore[assignment]
 
 
 def test_entity_requests_stable_entity_id_for_its_platform_domain() -> None:
     entity = _Entity("comexio_iosrv1_iox1_ai7")
 
-    entity.add_to_platform_start(MagicMock(), MagicMock(domain="binary_sensor"), None)
+    asyncio.run(entity.async_prepare_to_add_to_hass())
 
-    assert entity.started
+    assert entity.prepared
     assert entity.entity_id == "binary_sensor.iosrv1_iox1_ai7"
 
 
 def test_entity_without_unique_id_leaves_entity_id_to_ha() -> None:
-    entity = _Entity(None)
+    entity = _Entity(None, domain="switch")
 
-    entity.add_to_platform_start(MagicMock(), MagicMock(domain="switch"), None)
+    asyncio.run(entity.async_prepare_to_add_to_hass())
 
+    assert entity.prepared
     assert entity.entity_id is None
 
 
@@ -241,6 +245,7 @@ class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
     def __init__(self, server_id: str) -> None:
         self.coordinator = MagicMock(server_id=server_id)
         self.entity_id = None  # type: ignore[assignment]
+        self.platform = MagicMock(domain="image")  # type: ignore[assignment]
 
 
 @pytest.mark.parametrize(
@@ -250,10 +255,28 @@ class _PlanEntity(ComexioFunctionPlanEntityMixin, _FakeEntity):
 def test_function_plan_mixin_requests_the_hub_era_entity_id(server_id: str, expected: str) -> None:
     entity = _PlanEntity(server_id)
 
-    entity.add_to_platform_start(MagicMock(), MagicMock(domain="image"), None)
+    asyncio.run(entity.async_prepare_to_add_to_hass())
 
-    assert entity.started
+    assert entity.prepared
     assert entity.entity_id == expected
+
+
+def test_hook_name_exists_on_home_assistant_entity() -> None:
+    """Pins the hook name against the real Entity: a renamed or removed hook would otherwise pass the fakes above."""
+    assert inspect.iscoroutinefunction(Entity.async_prepare_to_add_to_hass)
+
+
+def test_extension_firmware_entity_requests_its_pre_tag_entity_id() -> None:
+    from custom_components.comexio.update import ComexioExtensionFirmwareUpdate
+
+    entity = object.__new__(ComexioExtensionFirmwareUpdate)
+    entity.server_id = "iosrv1"  # type: ignore[attr-defined]
+    entity._ext_name = "UD 1"
+    entity.platform = MagicMock(domain="update")  # type: ignore[assignment]
+
+    asyncio.run(entity.async_prepare_to_add_to_hass())
+
+    assert entity.entity_id == "update.iosrv1_ud_1_firmware"
 
 
 # Entity classes whose entity_id HA derives from the device name + translated entity name (see the
@@ -307,18 +330,20 @@ def _integration_entity_classes() -> dict[str, type]:
     return classes
 
 
-def _requests_its_entity_id(cls: type) -> bool:
-    """The mixin's add_to_platform_start runs only if it precedes Entity in the MRO (Entity's hook calls no super).
+# Classes that set their entity_id in their own async_prepare_to_add_to_hass instead of a mixin. A method
+# being present proves nothing (a no-op hook passes), so each one is listed here and pinned by its own unit test.
+OWN_ID_HOOK_CLASSES = frozenset({"update.ComexioExtensionFirmwareUpdate"})
 
-    A class may also request its id in its own add_to_platform_start (the extension firmware entity).
+
+def _requests_its_entity_id(cls: type) -> bool:
+    """True when the first class in the MRO that defines the hook is an id mixin.
+
+    Only that class's hook runs: a no-op inherited from a base listed before the mixin shadows the mixin.
+    A class that overrides the hook itself does not count either (its override may skip the id); such
+    classes must be listed in OWN_ID_HOOK_CLASSES instead.
     """
-    mro = cls.__mro__
-    if "add_to_platform_start" in vars(cls):
-        return True
-    return any(
-        mixin in mro and mro.index(mixin) < mro.index(Entity)
-        for mixin in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
-    )
+    owner = next((base for base in cls.__mro__ if "async_prepare_to_add_to_hass" in vars(base)), None)
+    return owner in (ComexioStableEntityIdMixin, ComexioFunctionPlanEntityMixin)
 
 
 def test_every_entity_class_requests_a_stable_entity_id() -> None:
@@ -326,16 +351,38 @@ def test_every_entity_class_requests_a_stable_entity_id() -> None:
     classes = _integration_entity_classes()
     # Guards against a discovery that silently finds nothing: one class per id mixin and platform kind.
     assert {"sensor.ComexioMarkerSensor", "select.ComexioPlanSelectEntity", "light.ComexioKnxLight"} <= classes.keys()
+    assert classes.keys() >= OWN_ID_HOOK_CLASSES, "OWN_ID_HOOK_CLASSES names a class that discovery no longer finds"
+    assert all("async_prepare_to_add_to_hass" in vars(classes[key]) for key in OWN_ID_HOOK_CLASSES)
     unstable = sorted(
         key
         for key, cls in classes.items()
-        if not _requests_its_entity_id(cls) and key not in HA_DERIVED_ENTITY_ID_CLASSES
+        if not _requests_its_entity_id(cls)
+        and key not in HA_DERIVED_ENTITY_ID_CLASSES
+        and key not in OWN_ID_HOOK_CLASSES
     )
 
     assert not unstable, (
         "Entity classes without ComexioStableEntityIdMixin / ComexioFunctionPlanEntityMixin "
         f"(add the mixin, or list them in HA_DERIVED_ENTITY_ID_CLASSES if that is deliberate): {unstable}"
     )
+
+
+class _NoOpHookBase:
+    async def async_prepare_to_add_to_hass(self) -> None:
+        """Overrides the hook without requesting any entity_id."""
+
+
+class _ShadowedByNoOpBase(_NoOpHookBase, ComexioStableEntityIdMixin, Entity):
+    """The no-op base comes before the mixin in the MRO, so the mixin's hook never runs."""
+
+
+class _PlainIdMixinEntity(ComexioStableEntityIdMixin, Entity):
+    """Nothing shadows the mixin's hook."""
+
+
+def test_inherited_no_op_hook_before_the_mixin_does_not_count_as_an_id_request() -> None:
+    assert not _requests_its_entity_id(_ShadowedByNoOpBase)
+    assert _requests_its_entity_id(_PlainIdMixinEntity)
 
 
 def test_ha_derived_entity_id_allowlist_has_no_stale_entries() -> None:

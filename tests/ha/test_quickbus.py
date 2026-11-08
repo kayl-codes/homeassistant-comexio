@@ -15,7 +15,7 @@ from custom_components.comexio.const import DOMAIN, extension_firmware_update_un
 from custom_components.comexio.entity import extension_device_identifier, update_quickbus_devices
 from tests.common import load_json_fixture
 
-from .conftest import SERVER_ID
+from .conftest import SERVER_ID, device_by_identifier
 
 WEBHOOK_URL = f"/api/webhook/comexio_{SERVER_ID}"
 
@@ -74,7 +74,7 @@ async def test_quickbus_ios_become_read_only_entities_on_their_own_device(
     device = dr.async_get(hass).async_get(gesture.device_id)
     assert device.name == f"{SERVER_ID} QB - MT Flur"
     assert (DOMAIN, f"{SERVER_ID}_qb1") in device.identifiers
-    host = dr.async_get(hass).async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
+    host = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_base")})
     assert host.name == f"{SERVER_ID} BASE"
     # Same identifier G1 on two devices: two entities, two devices.
     other = ent_reg.async_get("binary_sensor.iosrv1_qb211")
@@ -183,13 +183,14 @@ async def test_quickbus_devices_are_connected_via_their_host_extension(
     """Already after the first setup a Quickbus device links to its host extension's device."""
     await _setup(hass, mock_config_entry)
 
-    dev_reg = dr.async_get(hass)
-    flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
-    diele = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb3")})
-    assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
+    flur = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb1")})
+    diele = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb3")})
+    assert (
+        flur.via_device_id == device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_base")}).id
+    )
     # Multibridge A6 carries only Quickbus IOs: its firmware entity still gives it a device to hang under.
-    multibridge = dev_reg.async_get_device(
-        identifiers={(DOMAIN, extension_device_identifier(SERVER_ID, "Multibridge A6"))}
+    multibridge = device_by_identifier(
+        hass, mock_config_entry.entry_id, {(DOMAIN, extension_device_identifier(SERVER_ID, "Multibridge A6"))}
     )
     assert diele.via_device_id == multibridge.id
 
@@ -201,18 +202,18 @@ async def test_update_moves_a_quickbus_device_from_the_hub_to_its_host(
     """A Quickbus device registered before its host (parallel platform setup) is moved under the host."""
     await _setup(hass, mock_config_entry)
     dev_reg = dr.async_get(hass)
-    flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
-    hub = dev_reg.async_get_device(identifiers={(DOMAIN, SERVER_ID)})
-    diele = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb3")})
+    flur = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb1")})
+    hub = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, SERVER_ID)})
+    diele = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb3")})
     dev_reg.async_update_device(flur.id, via_device_id=hub.id)
     dev_reg.async_update_device(diele.id, via_device_id=hub.id)
 
     update_quickbus_devices(hass.data[DOMAIN][mock_config_entry.entry_id])
 
-    base = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")})
+    base = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_base")})
     assert dev_reg.async_get(flur.id).via_device_id == base.id
-    multibridge = dev_reg.async_get_device(
-        identifiers={(DOMAIN, extension_device_identifier(SERVER_ID, "Multibridge A6"))}
+    multibridge = device_by_identifier(
+        hass, mock_config_entry.entry_id, {(DOMAIN, extension_device_identifier(SERVER_ID, "Multibridge A6"))}
     )
     assert dev_reg.async_get(diele.id).via_device_id == multibridge.id
 
@@ -227,19 +228,21 @@ async def test_update_moves_a_quickbus_device_from_the_hub_to_its_host(
 async def test_setup_updates_the_quickbus_devices_once_their_hosts_are_registered(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
-    dev_reg = dr.async_get(hass)
     real_update = entity.update_quickbus_devices
 
     def update_after_all_platforms(coordinator: Any) -> None:
-        assert dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")}) is not None
-        assert dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}) is not None
+        assert device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb1")}) is not None
+        assert device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_base")}) is not None
         real_update(coordinator)
 
     with patch.object(entity, "update_quickbus_devices", side_effect=update_after_all_platforms) as update:
         await _setup(hass, mock_config_entry)
         update.assert_called_once_with(hass.data[DOMAIN][mock_config_entry.entry_id])
-        flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
-        assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
+        flur = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb1")})
+        assert (
+            flur.via_device_id
+            == device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_base")}).id
+        )
 
         coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
         coordinator.async_update_listeners()  # a webhook push: same data, no new poll
@@ -258,7 +261,7 @@ async def test_a_quickbus_device_renamed_in_comexio_is_renamed_on_the_next_poll(
     """HA applies device_info only when an entity is added: the poll renames the registered device."""
     await _setup(hass, mock_config_entry)
     dev_reg = dr.async_get(hass)
-    flur = dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_qb1")})
+    flur = device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_qb1")})
     assert flur.name == f"{SERVER_ID} QB - MT Flur"
     dev_reg.async_update_device(flur.id, name_by_user="Mein Flur")
 
@@ -273,7 +276,9 @@ async def test_a_quickbus_device_renamed_in_comexio_is_renamed_on_the_next_poll(
     flur = dev_reg.async_get(flur.id)
     assert flur.name == f"{SERVER_ID} QB - MT Eingang"
     assert flur.name_by_user == "Mein Flur"  # the name set in HA stays
-    assert flur.via_device_id == dev_reg.async_get_device(identifiers={(DOMAIN, f"{SERVER_ID}_base")}).id
+    assert (
+        flur.via_device_id == device_by_identifier(hass, mock_config_entry.entry_id, {(DOMAIN, f"{SERVER_ID}_base")}).id
+    )
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

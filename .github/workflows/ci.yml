@@ -80,7 +80,8 @@ jobs:
           # "resolution-too-deep". We only need the .pyi stub files, never the runtime
           # package itself, so install it with --no-deps to skip that tree entirely.
           pip install --only-binary :all: mypy==2.3.1
-          pip install --only-binary :all: --no-deps homeassistant-stubs==2026.8.3
+          # Newest 2026.10 stubs on PyPI; they lag the 2026.10.4 runtime pinned in tests/requirements.txt.
+          pip install --only-binary :all: --no-deps homeassistant-stubs==2026.10.0
           # The integration's own library ships py.typed. Installed from requirements.txt, which
           # generate_requirements.py keeps equal to manifest.json, so this job never pins a version itself.
           pip install --only-binary :all: --no-deps -r requirements.txt
@@ -115,7 +116,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          # Same interpreter as HA 2026.8's own runtime; homeassistant is pinned in tests/requirements.txt.
+          # Same interpreter as HA 2026.10's own runtime; homeassistant is pinned in tests/requirements.txt.
           python-version: '3.14'
           cache: 'pip'
           cache-dependency-path: tests/requirements.txt

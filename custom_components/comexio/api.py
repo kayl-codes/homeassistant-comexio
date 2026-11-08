@@ -6,6 +6,7 @@ from contextlib import suppress
 from contextvars import ContextVar
 from datetime import timedelta
 import hashlib
+import json
 import logging
 import math
 import re
@@ -40,6 +41,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.util import dt as dt_util
 
 # Mandatory DOMAIN import for Audit logic
 from .const import (
@@ -93,6 +95,7 @@ from .const import (
 from .function_plan_block_settings import BlockSettings, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
 from .function_plan_module_restore import ModuleConfigRestore, is_module_block, place_module_block
+from .webhook_security import WEBHOOK_PATH_PREFIX, WebhookSecurity, legacy_webhook_id
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -113,9 +116,11 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 )
 
 
-def _webhook_path(server_id: str) -> str:
-    """Path of HA's webhook that the Web-IO commands of this server POST to."""
-    return f"/api/webhook/comexio_{server_id}"
+def _webhook_path(
+    server_id: str, security: WebhookSecurity | None
+) -> str | Callable[[WebioClass, Mapping[str, Any]], str]:
+    """Path of HA's webhook the Web-IO commands of this server POST to: one per command, or the one of the old id."""
+    return security.path_for if security else f"{WEBHOOK_PATH_PREFIX}{legacy_webhook_id(server_id)}"
 
 
 def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
@@ -534,10 +539,13 @@ class KnxBridgeReset(NamedTuple):
 
 # The failure cause of both system info parts when Comexio presents a certificate other than the pinned one.
 SYSTEM_INFO_CERTIFICATE_CHANGED = "certificate changed"
+# Raised by get_system_info when called without any part; the test pins the same text.
+SYSTEM_INFO_NO_PART_ERROR = "get_system_info needs storage, uptime or both"
 
 
 class SystemInfoReading(NamedTuple):
-    """One system info poll (see ComexioAPI.get_system_info): a part is None if its fetch failed, with the cause."""
+    """One system info poll (see ComexioAPI.get_system_info): a part is None if it was not asked for or its
+    fetch failed; a failed fetch carries the cause."""
 
     info: SystemInfo | None
     uptime: timedelta | None
@@ -714,6 +722,9 @@ class ComexioAPI:
 
         # This context is vital for the Audit logic to find the configured webio_name
         self.config_entry: ConfigEntry | None = None
+        # Set by the entry setup: with it every Web-IO command is built with a webhook id of its own (dg), without
+        # it (a bare API in a test or a config flow check) with the one path of the old id.
+        self.webhook_security: WebhookSecurity | None = None
 
         # Dedicated cookie management for Comexio session persistence.
         # unsafe=True is only enabled if the target host is a local address.
@@ -1937,7 +1948,22 @@ class ComexioAPI:
             # ValueError: a command id that is no number, rejected before anything is sent.
             _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
+        self._note_command_written(cmd_payload)
         return True
+
+    def _note_command_written(self, cmd_payload: Mapping[str, Any]) -> None:
+        """Record that a command now carries a webhook id of its own, so the migration skips it."""
+        security = self.webhook_security
+        path = cmd_payload.get("Parameter")
+        name = cmd_payload.get("Name")
+        if (
+            security
+            and isinstance(name, str)
+            and isinstance(path, str)
+            and not path.endswith(legacy_webhook_id(security.server_id))
+        ):
+            security.mark_written(name, dt_util.utcnow())
+            security.schedule_save()
 
     async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
@@ -1975,11 +2001,12 @@ class ComexioAPI:
         picks HTTP or HTTPS from the device address itself, so an address change never rewrites commands.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id),
+            _webhook_path(server_id, self.webhook_security),
             _with_quickbus_ios(parsed_data),
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
+            server=server_id if self.webhook_security else None,
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -2014,12 +2041,13 @@ class ComexioAPI:
         build_webio_commands.
         """
         return comexio_webio.generate_webio_json(
-            _webhook_path(server_id),
+            _webhook_path(server_id, self.webhook_security),
             webio_name,
             _with_quickbus_ios(parsed_data),
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
+            server=server_id if self.webhook_security else None,
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
@@ -2037,7 +2065,21 @@ class ComexioAPI:
         if not base_id:
             # aiocomexio already raises on a missing id; kept so no caller ever creates a device on None.
             return False, "Comexio returned no base_id for the uploaded class"
+        self._note_upload_written(web_io_json)
         return True, base_id
+
+    def _note_upload_written(self, web_io_json: str) -> None:
+        """Record the commands of an uploaded class template (see _note_command_written)."""
+        if not self.webhook_security:
+            return
+        try:
+            commands = json.loads(web_io_json).get("commands", [])
+        except (ValueError, AttributeError):
+            _LOGGER.warning("The uploaded Web-IO class template is unreadable; its commands are not in the ledger")
+            return
+        for cmd in commands:
+            if isinstance(cmd, dict):
+                self._note_command_written(cmd)
 
     async def create_webio_device(
         self,
@@ -5686,34 +5728,47 @@ class ComexioAPI:
             _LOGGER.debug("Bus workload fetch failed: %s", err)
             return {}
 
-    async def get_system_info(self) -> SystemInfoReading:
+    async def get_system_info(self, *, storage: bool = True, uptime: bool = True) -> SystemInfoReading:
         """System info (free storage, time server settings) and uptime, each with the cause if its fetch failed.
 
-        Called on its own slow cadence (see coordinator._async_system_info_tick), which counts the
-        failures and warns with the cause — so they are logged at debug level here. A lapsed admin
-        session is logged in again once per call, like the config poll does: this poll runs more
-        often, and its readings would otherwise go unknown until the next config poll.
+        storage / uptime pick the parts to fetch; a part not asked for is None without a cause. The
+        storage part rides the config poll, the uptime part its own 5-minute tick (see
+        coordinator._async_system_info_tick). Failures are counted and warned there, so they are logged
+        at debug level here. A lapsed admin session is logged in again once per call, like the config
+        poll does, so the readings do not go unknown until the next config poll.
         """
+        if not (storage or uptime):
+            raise ValueError(SYSTEM_INFO_NO_PART_ERROR)
         # This call's one re-login, shared by both fetches: None when it worked, else the failure cause.
         relogin: list[str | None] = []
+        # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
+        storage_fetch = (lambda: self.client.get_system_info()) if storage else None  # noqa: PLW0108
+        uptime_fetch = (lambda: self.client.get_uptime()) if uptime else None  # noqa: PLW0108
         try:
-            # Lambdas, not bound methods: self.client is read at the call, after a re-login rebuilt it.
-            info, info_error = await self._system_info_part(lambda: self.client.get_system_info(), relogin)  # noqa: PLW0108
-            uptime, uptime_error = await self._system_info_part(lambda: self.client.get_uptime(), relogin)  # noqa: PLW0108
+            info, info_error = await self._system_info_part(storage_fetch, relogin)
+            uptime_value, uptime_error = await self._system_info_part(uptime_fetch, relogin)
         except ComexioCertificateMismatchError as err:
             # Raises the repair; the other fetch would only meet the same certificate.
             self._note_certificate_mismatch(err, "System info not fetched")
-            return SystemInfoReading(None, None, SYSTEM_INFO_CERTIFICATE_CHANGED, SYSTEM_INFO_CERTIFICATE_CHANGED)
-        return SystemInfoReading(info, uptime, info_error, uptime_error)
+            # Only the parts this call asked for report the certificate change; the other one stays unrequested.
+            return SystemInfoReading(
+                None,
+                None,
+                SYSTEM_INFO_CERTIFICATE_CHANGED if storage else None,
+                SYSTEM_INFO_CERTIFICATE_CHANGED if uptime else None,
+            )
+        return SystemInfoReading(info, uptime_value, info_error, uptime_error)
 
     async def _system_info_part[T](
-        self, fetch: Callable[[], Awaitable[T]], relogin: list[str | None]
+        self, fetch: Callable[[], Awaitable[T]] | None, relogin: list[str | None]
     ) -> tuple[T | None, str | None]:
-        """fetch()'s result, or None and the failure cause.
+        """fetch()'s result, or None and the failure cause; None without a fetch (part not asked for).
 
         A lapsed session is logged in again once per relogin — not with credentials Comexio refused
         (see _login): then the cause is "re-login failed (rejected)" without a request.
         """
+        if fetch is None:
+            return None, None
         generation = self._login_generation
         try:
             try:

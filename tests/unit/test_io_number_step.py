@@ -110,6 +110,13 @@ def test_analog_output_takes_a_fraction_of_a_percent() -> None:
     update.assert_called_once_with("LD1", "AO1", 30.6, pushed=False)
 
 
+def test_an_io_written_over_the_admin_session_but_no_ao_keeps_the_whole_percent_step() -> None:
+    """Route is not class: aiocomexio 0.9.0 sends AI*/QI* over the admin session too, they are no analog outputs."""
+    number = _io_number(identifier="AI1", unit="%", min=0, max=100)
+
+    assert number.native_step == pytest.approx(1.0)
+
+
 @pytest.mark.parametrize(
     ("identifier", "unit", "raw", "shown"),
     [
@@ -118,6 +125,8 @@ def test_analog_output_takes_a_fraction_of_a_percent() -> None:
         ("AO3", "V", 6.43137, 6.4),
         ("Q1", "%", 30.1961, 30.1961),
         ("Q1", "V", 3.91304, 3.91304),
+        ("AI1", "%", 30.1961, 30.1961),  # written over the admin session since aiocomexio 0.9.0, but no AO
+        ("QI1", "V", 3.91304, 3.91304),
         ("AO3", "V", 1.25, 1.3),  # half up like Comexio, not round()'s half to even
         ("AO3", "V", 3.65, 3.7),
         ("AO3", "V", 123456789.25, 123456789.3),  # a large finite value still rounds

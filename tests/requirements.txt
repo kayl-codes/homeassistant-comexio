@@ -1,12 +1,13 @@
 # Test dependencies for the unit test suite (tests/unit/).
-# homeassistant is pinned to the same version as homeassistant-stubs in .github/workflows/ci.yml:
-# the tested modules import it at module level even though the unit tests never start an HA instance.
-homeassistant==2026.8.3
+# homeassistant is the runtime pin (2026.10.4): the tested modules import it at module level even though the
+# unit tests never start an HA instance. The mypy job in .github/workflows/ci.yml checks against
+# homeassistant-stubs 2026.10.0, the newest 2026.10 stubs on PyPI, so the two versions differ on purpose.
+homeassistant==2026.10.4
 # certifi: homeassistant only sets a floor (>=2021.5.30); this one keeps out the emSign roots with
 # compromised intermediates (PYSEC-2026-4320), so OSV-Scanner resolves a fixed version too.
 certifi>=2026.10.19
 # The integration's own runtime library (manifest.json requirements), kept at the same pin.
-aiocomexio==0.8.3
+aiocomexio==0.9.1
 # Cognitive complexity before the push (tests/unit/test_cognitive_complexity.py, SonarCloud S3776).
 complexipy==8.1.0
 pytest==9.1.1

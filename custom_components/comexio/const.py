@@ -575,6 +575,9 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
+# A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
+# reaches HA); the refusals in between are counted and named in the next line.
+WEBHOOK_REFUSAL_LOG_INTERVAL_SEC = 60
 # Outer safety net around the whole Function Plan backup cycle (bulk load + auto-backup +
 # paper backfill + purge): guarantees the cycle's lock is released even if some step hangs
 # in a way COMEXIO_HTTP_TIMEOUT_SEC doesn't cover, so a stuck cycle can't permanently block
@@ -617,6 +620,18 @@ MARKER_TEMPERATURE_MIN_VALUE = -273.0
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
 # Decimals HA shows of a 0-10 V analog output, the same as Comexio's own display (#259).
 ANALOG_OUTPUT_DISPLAY_DECIMALS = 1
+_ANALOG_OUTPUT_IDENTIFIER_RE = re.compile(r"AO\d+")
+
+
+def is_analog_output(identifier: str) -> bool:
+    """Whether an IO is one of the 0-10 V analog outputs (AO1, AO2, ...).
+
+    Not ``aiocomexio.io_written_over_admin_session``: since aiocomexio 0.9.0 that is true for every IO except
+    Q*/DG*, which only picks the write route, while the AO value handling (one decimal, no whole-percent
+    rounding) belongs to the AOs alone (#259).
+    """
+    return bool(_ANALOG_OUTPUT_IDENTIFIER_RE.fullmatch(identifier))
+
 
 # A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
 # word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not
@@ -714,6 +729,22 @@ def fw_update_signal(server_id: str) -> str:
 # simultaneously.
 WEBIO_RANGE_CHECK_HOUR = 4
 WEBIO_RANGE_CHECK_MINUTE = 20
+
+
+# Nightly migration of the Web-IO commands to webhook ids of their own (dg): a command takes ~35 s to rewrite, so a
+# run stops after its budget and the next night carries on.
+WEBHOOK_MIGRATION_HOUR = 1
+WEBHOOK_MIGRATION_MINUTE = 30
+WEBHOOK_MIGRATION_BUDGET_SEC = 3.5 * 3600
+WEBHOOK_MIGRATION_SAVE_EVERY = 20  # commands between two saves of the ledger
+# Before the old id goes off, every command is read back from Comexio (path and body). The reads start at the same
+# nightly time as the rewrites, after them; a run that cannot finish them in its budget switches nothing off.
+WEBHOOK_VERIFY_BUDGET_SEC = 1.5 * 3600
+WEBHOOK_MIGRATION_PENDING = "pending"
+WEBHOOK_MIGRATION_DONE = "done"
+WEBHOOK_MIGRATION_FAILED = "failed"
+WEBHOOK_MIGRATION_SKIPPED = "skipped"
+WEBHOOK_MIGRATION_NEEDS_RESTART = "needs_restart"
 
 
 def webio_range_check_entity_id(server_id: str) -> str:
@@ -851,10 +882,12 @@ BUS_LOAD_POLL_INTERVAL_SEC = 10
 # silently keeping the last successful reading forever.
 BUS_LOAD_FAIL_STREAK_THRESHOLD = 3
 
-# System info (free storage, time server settings, uptime): own slow poll, independent of the
-# config audit (skipped during a sync) — the values change slowly, a reboot shows within one interval.
-SYSTEM_INFO_POLL_INTERVAL_SEC = 300
+# System info: the uptime has its own 5-minute poll, so a reboot shows within one interval. Free storage
+# and time server settings ride the config poll (their interval is the user's scan interval): the dashboard
+# page they come from is the slow request of the system info, and Comexio answers it in seconds.
+UPTIME_POLL_INTERVAL_SEC = 300
 # Consecutive failed polls before the readings fall back to "unknown" (one hiccup keeps the last values).
+# Counted per source: 2 failed uptime ticks, or 2 failed config polls for the storage and time server part.
 SYSTEM_INFO_FAIL_STREAK_THRESHOLD = 2
 # The boot time is now - uptime, which moves by the request latency on every poll: an estimate
 # within this many seconds of the known boot time keeps it (no state change, no recorder row).
