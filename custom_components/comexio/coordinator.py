@@ -257,6 +257,7 @@ from .ha_address import (
     is_loopback_address,
     webio_device_hints,
 )
+from .issue_owner import issue_owner
 from .orphaned_backups import async_audit_orphaned_backups
 from .orphaned_statistics import (
     find_orphaned_statistic_ids,
@@ -1100,8 +1101,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self.api.on_certificate_mismatch = self._report_certificate_changed
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
-        self.reference_monitor = ReferenceCatalogMonitor(hass, api, self.server_id, listed_plans=self.live_plan_list)
-        self.unsupported_ios = UnsupportedIoMonitor(hass, api, self.server_id)
+        self.reference_monitor = ReferenceCatalogMonitor(
+            hass, api, self.server_id, entry.entry_id, listed_plans=self.live_plan_list
+        )
+        self.unsupported_ios = UnsupportedIoMonitor(hass, api, self.server_id, entry.entry_id)
         self.function_plan_backup = FunctionPlanBackupManager(hass, self.server_id, self.function_plan_catalog)
         # Webhook target address of this HA instance; caches the slow homeassistant.<domain> search
         # so the audit on every poll and the sync button don't repeat it.
@@ -1978,6 +1981,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.hass,
                 DOMAIN,
                 f"entity_id_mismatch_{self.server_id}",
+                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="entity_id_mismatch",
@@ -2295,6 +2299,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.hass,
                 DOMAIN,
                 issue_id,
+                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key=ISSUE_IMPORT_DISABLED,
@@ -2383,6 +2388,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.hass,
                 DOMAIN,
                 f"sync_mismatch_{self.server_id}",
+                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key="missing_webio_class",
@@ -2762,6 +2768,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass,
             DOMAIN,
             f"sync_mismatch_{self.server_id}",
+            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key="sync_mismatch",
@@ -3928,6 +3935,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass,
             DOMAIN,
             f"{translation_key}_{self.server_id}",
+            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=True,
             is_persistent=persistent,
             severity=ir.IssueSeverity.WARNING,
@@ -7441,6 +7449,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                     self.hass,
                     DOMAIN,
                     f"extension_offline_{self.server_id}",
+                    **issue_owner(self.hass, self.config_entry.entry_id),
                     is_fixable=False,
                     severity=ir.IssueSeverity.WARNING,
                     translation_key="extension_offline",
@@ -7497,6 +7506,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
                 self.hass,
                 DOMAIN,
                 issue_id,
+                **issue_owner(self.hass, self.config_entry.entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.WARNING,
                 translation_key="statistics_orphaned",
@@ -8942,6 +8952,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass,
             DOMAIN,
             issue_id,
+            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
             translation_key="duplicate_plan_names",
@@ -9990,6 +10001,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self.hass,
             DOMAIN,
             issue_id,
+            **issue_owner(self.hass, self.config_entry.entry_id),
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key="knx_dpt_ambiguous",

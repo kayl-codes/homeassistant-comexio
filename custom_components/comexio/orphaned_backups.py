@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT, function_plan_info, one_line_values
 from .function_plan_backup import FunctionPlanBackupManager
+from .issue_owner import issue_owner
 
 ISSUE_ORPHANED_PLAN_BACKUPS = "orphaned_plan_backups"
 BACKUPS_DOC_URL = "https://github.com/kayl-codes/homeassistant-comexio/blob/master/BACKUPS.md"
@@ -111,6 +112,7 @@ async def async_audit_orphaned_backups(
             hass,
             DOMAIN,
             issue_id,
+            **issue_owner(hass, entry_id),
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_ORPHANED_PLAN_BACKUPS,

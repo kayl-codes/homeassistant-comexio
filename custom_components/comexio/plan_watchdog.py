@@ -44,6 +44,7 @@ from .const import (
     one_line,
     one_line_values,
 )
+from .issue_owner import issue_owner
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -808,6 +809,7 @@ class ManagedPlanWatchdog:
                 self._hass,
                 DOMAIN,
                 issue_id,
+                **issue_owner(self._hass, self._entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=self._issue_translation_key(fub_id),
@@ -1092,6 +1094,7 @@ class ManagedPlanWatchdog:
                 self._hass,
                 DOMAIN,
                 vanished_plan_issue_id(self._server_id, fub_id, name),
+                **issue_owner(self._hass, self._entry_id),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=ISSUE_FUNCTION_PLAN_VANISHED if holder is None else ISSUE_FUNCTION_PLAN_REPLACED,

@@ -349,12 +349,18 @@ def _issue_id_prefix(file_name: str, function: FunctionNode, node: ast.expr, bin
     return "", False
 
 
+def _is_owner_splat(keyword: ast.keyword) -> bool:
+    """`**issue_owner(...)`: the config entry link of the issue, which is no part of the keys read here."""
+    return keyword.arg is None and isinstance(keyword.value, ast.Call) and _call_name(keyword.value) == "issue_owner"
+
+
 def _fixable_issue_prefixes() -> dict[str, set[str]]:
     """translation_key of every `is_fixable=True` issue the integration raises → its issue_id prefixes."""
     prefixes: dict[str, set[str]] = {}
     for file_name, function, call in _create_issue_calls():
         where = f"{file_name}:{call.lineno}"
-        keywords = {keyword.arg: keyword.value for keyword in call.keywords}
+        # **issue_owner(...) only carries the config entry link (issue_owner.py), never a key this test reads.
+        keywords = {keyword.arg: keyword.value for keyword in call.keywords if not _is_owner_splat(keyword)}
         assert None not in keywords, f"{where}: **kwargs hide is_fixable/translation_key from the test"
         fixable = keywords.get("is_fixable")
         not_literal = f"{where}: is_fixable must be a literal True/False for the test to know whether a flow fixes it"

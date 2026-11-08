@@ -125,7 +125,7 @@ def _monitor(
     hass = MagicMock()
     hass.async_add_executor_job = AsyncMock(return_value=references)
     api = SimpleNamespace(comexio_version="11.1.4", reference_check=None)
-    monitor = ReferenceCatalogMonitor(hass, api, "srv", listed_plans=lambda: listed)
+    monitor = ReferenceCatalogMonitor(hass, api, "srv", "entry", listed_plans=lambda: listed)
     monitor._async_integration_version = AsyncMock(return_value=version)
     return monitor
 

@@ -275,7 +275,7 @@ def issue_registry(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 @pytest.fixture
 def monitor(monkeypatch: pytest.MonkeyPatch) -> UnsupportedIoMonitor:
     monkeypatch.setattr(unsupported_ios, "async_integration_version", AsyncMock(return_value="0.30.0"))
-    return UnsupportedIoMonitor(MagicMock(), _api(), "srv")  # type: ignore[arg-type]
+    return UnsupportedIoMonitor(MagicMock(), _api(), "srv", "entry")  # type: ignore[arg-type]
 
 
 async def _update(monitor: UnsupportedIoMonitor, raw_config: dict[str, Any], ios: list[dict[str, Any]]) -> None:

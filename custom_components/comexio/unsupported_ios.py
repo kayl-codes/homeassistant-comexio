@@ -32,6 +32,7 @@ from .const import (
     offline_io_skipped,
     one_line,
 )
+from .issue_owner import issue_owner
 from .reference_monitor import async_integration_version, github_issue_url
 
 if TYPE_CHECKING:
@@ -257,10 +258,11 @@ def _repair_io_list(ios: list[Mapping[str, Any]]) -> str:
 class UnsupportedIoMonitor:
     """Per-entry state: the extensions of the last readable poll and the Repair for IOs without an entity."""
 
-    def __init__(self, hass: HomeAssistant, api: ComexioAPI, server_id: str) -> None:
+    def __init__(self, hass: HomeAssistant, api: ComexioAPI, server_id: str, entry_id: str) -> None:
         self._hass = hass
         self._api = api
         self._server_id = server_id
+        self._entry_id = entry_id
         self._integration_version: str | None = None
         self._reported: tuple[str, ...] = ()
         self._last_error: str | None = None
@@ -340,6 +342,7 @@ class UnsupportedIoMonitor:
             self._hass,
             DOMAIN,
             self.issue_id,
+            **issue_owner(self._hass, self._entry_id),
             is_fixable=False,
             severity=ir.IssueSeverity.WARNING,
             translation_key=ISSUE_UNSUPPORTED_IO_TYPES,

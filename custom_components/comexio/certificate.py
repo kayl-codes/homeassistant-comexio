@@ -40,6 +40,7 @@ from .const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
 )
+from .issue_owner import issue_owner
 from .plan_watchdog import MOBILE_APP_SERVICE_PREFIX, NOTIFY_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -175,6 +176,7 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
         hass,
         DOMAIN,
         certificate_issue_id(entry.entry_id),
+        **issue_owner(hass, entry.entry_id),
         is_fixable=True,
         severity=ir.IssueSeverity.ERROR,
         translation_key=ISSUE_CERTIFICATE_CHANGED,

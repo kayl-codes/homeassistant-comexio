@@ -38,6 +38,7 @@ from homeassistant.loader import IntegrationNotFound, async_get_integration
 
 from .api import ComexioAPI
 from .const import DOMAIN, FUB_BASE_KEY_FLANKE, ISSUE_TRACKER_URL, REFERENCE_MISSING_CATALOG_POLLS_BEFORE_ISSUE
+from .issue_owner import issue_owner
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,12 +66,14 @@ class ReferenceCatalogMonitor:
         hass: HomeAssistant,
         api: ComexioAPI,
         server_id: str,
+        entry_id: str,
         listed_plans: Callable[[], Mapping[Any, Any] | None] | None = None,
     ) -> None:
         """listed_plans returns the plans the latest poll lists (None until a full poll read them)."""
         self._hass = hass
         self._api = api
         self._server_id = server_id
+        self._entry_id = entry_id
         self._listed_plans = listed_plans
         self._references: dict[str, ReferenceCatalog] | None = None
         self._fingerprint: tuple | None = None
@@ -196,6 +199,7 @@ class ReferenceCatalogMonitor:
                 self._hass,
                 DOMAIN,
                 self._issue_id,
+                **issue_owner(self._hass, self._entry_id),
                 is_fixable=False,
                 severity=ir.IssueSeverity.ERROR,
                 translation_key=ISSUE_TRANSLATION_KEY_UNCHECKED if check_not_run else ISSUE_TRANSLATION_KEY,
