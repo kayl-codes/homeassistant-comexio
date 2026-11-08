@@ -271,6 +271,19 @@ def _setup_webhooks(
     entry.async_on_unload(security.async_save)
 
 
+async def _async_load_webhook_security(
+    hass: HomeAssistant, entry: ConfigEntry, api: ComexioAPI, server_id: str
+) -> WebhookSecurity:
+    """The webhook ledger of the entry; a store that refuses closes the session first (a retry would leak it)."""
+    security = WebhookSecurity(hass, entry.entry_id, server_id, str(entry.data.get(CONF_HOST, "")))
+    try:
+        await security.async_load()
+    except Exception:
+        api.close()
+        raise
+    return security
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -295,8 +308,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         raise
 
     # Every Web-IO command gets a webhook id of its own (dg); the builders need the secret before the first poll.
-    security = WebhookSecurity(hass, entry.entry_id, server_id, str(entry.data.get(CONF_HOST, "")))
-    await security.async_load()
+    security = await _async_load_webhook_security(hass, entry, api, server_id)
     api.webhook_security = security
 
     # Initialize Coordinator (passes config_entry to base class, sets api.config_entry and server_id)

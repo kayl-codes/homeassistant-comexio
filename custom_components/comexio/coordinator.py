@@ -5867,6 +5867,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # Not persisted: after a restart the old id would be on again, so do not run on a state that is lost.
             security.legacy_enabled = True
             return WEBHOOK_MIGRATION_PENDING
+        if self._restart_pending(security):
+            # A sync wrote a command while the switch was being saved: it still posts to its old path.
+            security.legacy_enabled = True
+            if not await self._async_save_webhook_security(security):
+                _LOGGER.error(
+                    "[%s] The old webhook id is on again in memory, but the store still holds it switched off; a "
+                    "delayed save retries",
+                    self.server_id,
+                )
+                security.schedule_save()
+            self._notify_webhook_restart()
+            return WEBHOOK_MIGRATION_NEEDS_RESTART
         persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.server_id}_webhook_restart")
         self.sync_webhooks()
         _LOGGER.info("[%s] Old webhook id switched off: every Web-IO command uses its own", self.server_id)

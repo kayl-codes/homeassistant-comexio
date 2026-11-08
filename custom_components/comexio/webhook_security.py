@@ -149,14 +149,16 @@ class WebhookSecurity:
             return
         if stored_host == self.host:
             return
-        if stored_host is not None and self.migrated:
+        if stored_host is not None:
+            # Also with an empty ledger: the new host may hold commands that still POST to the old id.
             _LOGGER.warning(
-                "[%s] The Comexio host changed since the webhook ids were migrated: the old webhook id is switched "
-                "on again until every command has been read back from the new host",
+                "[%s] The Comexio host changed since the webhook ids were recorded: the old webhook id is switched "
+                "on again until every command of the new host has its own",
                 self.server_id,
             )
             self.legacy_enabled = True
-            self.last_write = dt_util.utcnow()
+            if self.migrated:
+                self.last_write = dt_util.utcnow()
         await self._async_save()
 
     def _data(self) -> dict[str, Any]:

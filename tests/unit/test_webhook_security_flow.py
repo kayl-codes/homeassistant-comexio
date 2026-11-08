@@ -554,6 +554,48 @@ def test_a_failing_save_does_not_switch_the_old_id_off(
     assert "could not be saved" in caplog.text
 
 
+def test_a_write_while_the_switch_is_saved_puts_the_old_id_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    security = coordinator.api.webhook_security
+
+    saved: list[bool] = []
+
+    async def _save_while_a_sync_writes() -> None:
+        saved.append(security.legacy_enabled)
+        security.last_write = NOW + timedelta(hours=2)  # after the Comexio boot
+
+    security.async_save = AsyncMock(side_effect=_save_while_a_sync_writes)
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "needs_restart"
+
+    assert security.legacy_enabled
+    coordinator.sync_webhooks.assert_not_called()
+    assert saved == [False, True]  # the switch, then the switch back
+
+
+def test_a_failing_switch_back_is_retried_by_a_delayed_save(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    security = coordinator.api.webhook_security
+    calls: list[int] = []
+
+    async def _second_save_fails() -> None:
+        calls.append(1)
+        if len(calls) == 1:
+            security.last_write = NOW + timedelta(hours=2)
+            return
+        raise OSError("disk full")
+
+    security.async_save = AsyncMock(side_effect=_second_save_fails)
+    security.schedule_save = MagicMock()  # type: ignore[method-assign]
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "needs_restart"
+
+    security.schedule_save.assert_called_once_with()
+    assert "delayed save retries" in caplog.text
+
+
 def test_targets_without_any_stored_command_verify_nothing_and_keep_the_old_id(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -618,28 +660,32 @@ def test_a_changed_host_switches_the_old_id_on_again_and_keeps_the_ledger_for_th
 ) -> None:
     """(Sourcery, dg #279) The commands of another server may still POST to the old id."""
     security = _hosted(monkeypatch, _switched_off_ledger("old.local"), "new.local")
+    later = NOW + timedelta(days=1)
+    monkeypatch.setattr(ws.dt_util, "utcnow", lambda: later)
 
     _run(security.async_load())
 
     assert security.legacy_enabled is True
     assert security.migrated == {"HA M5"}  # read back from the new host by the check, not rewritten blindly
-    assert security.last_write > NOW
+    assert security.last_write == later
     stored = security._store.stored  # persisted too: a restart must not forget the switch
     assert (stored["host"], stored["legacy"]) == ("new.local", True)
     assert stored["last_write"] != NOW.isoformat()
     assert "host changed" in caplog.text
 
 
-def test_a_changed_host_without_migrated_commands_only_records_the_host(
+def test_a_changed_host_without_migrated_commands_still_switches_the_old_id_on(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """(Sourcery, dg #279) The new host may hold commands on the old id although nothing was migrated here."""
     security = _hosted(monkeypatch, {**_switched_off_ledger("old.local"), "migrated": []}, "new.local")
 
     _run(security.async_load())
 
-    assert security.legacy_enabled is False
+    assert security.legacy_enabled is True
+    assert security.last_write == NOW  # nothing was written, so no restart is waited for
     assert security._store.stored["host"] == "new.local"
-    assert "host changed" not in caplog.text
+    assert "host changed" in caplog.text
 
 
 def test_an_entry_without_a_host_keeps_the_stored_host_and_saves_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
