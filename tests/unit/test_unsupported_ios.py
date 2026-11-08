@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
-from custom_components.comexio import number, unsupported_ios
+from custom_components.comexio import issue_owner, number, unsupported_ios
 from custom_components.comexio.const import (
     DOMAIN,
     ISSUE_UNSUPPORTED_IO_TYPES,
@@ -269,13 +269,14 @@ def issue_registry(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     registry = MagicMock()
     registry.IssueSeverity = unsupported_ios.ir.IssueSeverity
     monkeypatch.setattr(unsupported_ios, "ir", registry)
+    monkeypatch.setattr(issue_owner, "ir", registry)  # the create goes through async_create_entry_issue
     return registry
 
 
 @pytest.fixture
 def monitor(monkeypatch: pytest.MonkeyPatch) -> UnsupportedIoMonitor:
     monkeypatch.setattr(unsupported_ios, "async_integration_version", AsyncMock(return_value="0.30.0"))
-    return UnsupportedIoMonitor(MagicMock(), _api(), "srv")  # type: ignore[arg-type]
+    return UnsupportedIoMonitor(MagicMock(), _api(), "srv", "entry")  # type: ignore[arg-type]
 
 
 async def _update(monitor: UnsupportedIoMonitor, raw_config: dict[str, Any], ios: list[dict[str, Any]]) -> None:

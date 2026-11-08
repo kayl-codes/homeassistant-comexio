@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 from homeassistant.exceptions import HomeAssistantError
 import pytest
 
-from custom_components.comexio import api as api_module, plan_watchdog
+from custom_components.comexio import api as api_module, issue_owner, plan_watchdog
 from custom_components.comexio.const import (
     DOMAIN,
     FUNCTION_PLAN_WATCHDOG_MAX_FAILED_STARTS,
@@ -91,6 +91,7 @@ def ir(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     registry.async_ignore_issue.side_effect = ignore
     registry.async_delete_issue.side_effect = lambda _hass, domain, issue_id: issues.pop((domain, issue_id), None)
     monkeypatch.setattr(plan_watchdog, "ir", registry)
+    monkeypatch.setattr(issue_owner, "ir", registry)  # the create goes through async_create_entry_issue
     monkeypatch.setattr(plan_watchdog, "persistent_notification", MagicMock())
     return registry
 

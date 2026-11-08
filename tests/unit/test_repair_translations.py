@@ -41,7 +41,9 @@ ENTRY_STEP_BY_ISSUE = {
 # flow re-raising the issue it fixes), so they cannot add a new key: (file, calling function, argument).
 PASS_THROUGH_KEYS = {("repairs.py", "_reraise_cleanup_issue", "translation_key")}
 
-ISSUE_CREATORS = {"async_create_issue", "create_issue"}
+ISSUE_CREATORS = {"async_create_entry_issue", "async_create_issue", "create_issue"}
+# The one ir.async_create_issue of the integration: async_create_entry_issue forwarding its callers' keywords.
+WRAPPER_FILE = "issue_owner.py"
 ISSUE_ID = "self.issue_id"
 
 FunctionNode = ast.FunctionDef | ast.AsyncFunctionDef
@@ -242,6 +244,8 @@ def _fix_flow_aborts(file_name: str) -> dict[str, set[str]]:
 def _create_issue_calls() -> Iterator[tuple[str, FunctionNode, ast.Call]]:
     """(file, enclosing function, call) of every call that raises a repair issue."""
     for file_name, tree in _trees().items():
+        if file_name == WRAPPER_FILE:
+            continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue

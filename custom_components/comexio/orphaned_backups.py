@@ -17,6 +17,7 @@ from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, TIMESTAMP_DISPLAY_FORMAT, function_plan_info, one_line_values
 from .function_plan_backup import FunctionPlanBackupManager
+from .issue_owner import async_create_entry_issue
 
 ISSUE_ORPHANED_PLAN_BACKUPS = "orphaned_plan_backups"
 BACKUPS_DOC_URL = "https://github.com/kayl-codes/homeassistant-comexio/blob/master/BACKUPS.md"
@@ -107,9 +108,9 @@ async def async_audit_orphaned_backups(
             # naming the plan that holds the ID now lets the user tell the two apart.
             "current_plan": str(function_plan_info(fub_data, fub_id).get("Name") or NO_CURRENT_PLAN),
         }
-        ir.async_create_issue(
+        async_create_entry_issue(
             hass,
-            DOMAIN,
+            entry_id,
             issue_id,
             is_fixable=True,
             severity=ir.IssueSeverity.WARNING,
