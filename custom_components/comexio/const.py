@@ -575,6 +575,9 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
+# A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
+# reaches HA); the refusals in between are counted and named in the next line.
+WEBHOOK_REFUSAL_LOG_INTERVAL_SEC = 60
 # Outer safety net around the whole Function Plan backup cycle (bulk load + auto-backup +
 # paper backfill + purge): guarantees the cycle's lock is released even if some step hangs
 # in a way COMEXIO_HTTP_TIMEOUT_SEC doesn't cover, so a stuck cycle can't permanently block
@@ -726,6 +729,22 @@ def fw_update_signal(server_id: str) -> str:
 # simultaneously.
 WEBIO_RANGE_CHECK_HOUR = 4
 WEBIO_RANGE_CHECK_MINUTE = 20
+
+
+# Nightly migration of the Web-IO commands to webhook ids of their own (dg): a command takes ~35 s to rewrite, so a
+# run stops after its budget and the next night carries on.
+WEBHOOK_MIGRATION_HOUR = 1
+WEBHOOK_MIGRATION_MINUTE = 30
+WEBHOOK_MIGRATION_BUDGET_SEC = 3.5 * 3600
+WEBHOOK_MIGRATION_SAVE_EVERY = 20  # commands between two saves of the ledger
+# Before the old id goes off, every command is read back from Comexio (path and body). The reads start at the same
+# nightly time as the rewrites, after them; a run that cannot finish them in its budget switches nothing off.
+WEBHOOK_VERIFY_BUDGET_SEC = 1.5 * 3600
+WEBHOOK_MIGRATION_PENDING = "pending"
+WEBHOOK_MIGRATION_DONE = "done"
+WEBHOOK_MIGRATION_FAILED = "failed"
+WEBHOOK_MIGRATION_SKIPPED = "skipped"
+WEBHOOK_MIGRATION_NEEDS_RESTART = "needs_restart"
 
 
 def webio_range_check_entity_id(server_id: str) -> str:

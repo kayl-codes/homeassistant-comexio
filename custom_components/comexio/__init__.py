@@ -1,6 +1,5 @@
 # Version: 0.8.1
 from collections.abc import Callable, Iterable
-import contextlib
 from datetime import timedelta
 import logging
 from typing import Any
@@ -9,7 +8,7 @@ from aiocomexio import __version__ as AIOCOMEXIO_VERSION
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as HA_VERSION
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import (
     config_validation as cv,
@@ -74,6 +73,7 @@ from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
 from .services import async_setup_services
 from .unsupported_ios import io_has_entity, io_platform, unsupported_io_issue_id
+from .webhook_security import WebhookSecurity, legacy_webhook_id, webhook_security_store
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,6 +143,159 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
     return True
 
 
+_WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX"}
+
+
+def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:
+    """Hand the value of one webhook payload to the coordinator, by the kind of item it names.
+
+    A malformed push is logged throttled and without its payload: the old id is guessable while it is on, and
+    the sender is anybody who can reach the endpoint.
+    """
+    val = data.get("value")
+    webhook_type = data.get("type")
+    server_id = coordinator.server_id
+    if webhook_type == "io":
+        ext = data.get("ext")
+        io_id = data.get("io")
+        if not ext or not io_id:
+            security.warn_refused("missing-io", "[%s] Webhook IO event missing ext/io", server_id)
+            return
+        coordinator.update_io_by_name(ext, io_id, val)
+        return
+    item_id = data.get("id")
+    if item_id is None:
+        label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
+        security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
+    elif webhook_type == "quickbus":
+        coordinator.update_quickbus_io(item_id, val)
+    elif webhook_type == "knx":
+        # Blind guess: KNX webhook payload shape assumed identical to markers
+        # (no real KNX hardware/sample payload available — see project_knx_objects memory).
+        coordinator.update_knx(item_id, val)
+    else:
+        coordinator.update_marker(item_id, val)
+
+
+def _unregister_webhooks(hass: HomeAssistant, registered: set[str]) -> None:
+    """Unregister every id in registered and empty it, so a second call (unload, then its callback) is a no-op."""
+    for webhook_id in registered:
+        webhook.async_unregister(hass, webhook_id)
+    registered.clear()
+
+
+def _restore_webhooks(coordinator: ComexioCoordinator) -> None:
+    """Register the ids again after a failed unload; a failure here is logged, the unload's own error stays."""
+    try:
+        coordinator.sync_webhooks()
+    except Exception:
+        _LOGGER.exception(
+            "[%s] The webhook ids could not be registered again after the failed unload", coordinator.server_id
+        )
+
+
+def _webhook_handler(coordinator: ComexioCoordinator, security: WebhookSecurity):
+    """The handler every webhook id of the entry is registered with."""
+    server_id = coordinator.server_id
+
+    async def handle_webhook(hass, webhook_id, request):
+        try:
+            try:
+                data = await request.json()
+            except Exception:
+                security.warn_refused("non-json", "[%s] Received non-JSON payload on a Comexio webhook", server_id)
+                return
+            if not isinstance(data, dict):
+                security.warn_refused(
+                    "not-object", "[%s] Webhook request refused: its payload is not a JSON object", server_id
+                )
+                return
+            if not security.accepts(webhook_id, data):
+                security.warn_refused(
+                    "id-mismatch", "[%s] Webhook request refused: its id does not belong to its payload", server_id
+                )
+                return
+            _dispatch_push(coordinator, security, data)
+        except Exception as e:
+            _LOGGER.exception("Webhook Error: %s", e)
+
+    return handle_webhook
+
+
+def _register_webhooks(
+    hass: HomeAssistant, handler, server_id: str, registered: set[str], refused: set[str], wanted: set[str]
+) -> None:
+    """Bring the registered ids to wanted; an id another registration holds is skipped, never taken over.
+
+    refused remembers the skipped ids, so the warning comes once per id and not with every coordinator update.
+    """
+    for webhook_id in registered - wanted:
+        webhook.async_unregister(hass, webhook_id)
+    registered.difference_update(registered - wanted)
+    refused.intersection_update(wanted)
+    for webhook_id in wanted - registered:
+        try:
+            webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handler)
+        except ValueError:
+            if webhook_id not in refused:
+                # No part of the id in the log: it is the secret of its command.
+                _LOGGER.warning("[%s] A webhook id is already registered by another registration, skipped", server_id)
+                refused.add(webhook_id)
+            continue
+        refused.discard(webhook_id)
+        registered.add(webhook_id)
+
+
+def _setup_webhooks(
+    hass: HomeAssistant, entry: ConfigEntry, coordinator: ComexioCoordinator, security: WebhookSecurity
+) -> None:
+    """Register the webhook of every Web-IO command (dg), and keep the registrations in step with the items."""
+    server_id = coordinator.server_id
+    handler = _webhook_handler(coordinator, security)
+    registered: set[str] = set()
+    refused: set[str] = set()
+    hass.data[DOMAIN][f"{entry.entry_id}_webhooks"] = registered
+
+    @callback
+    def sync_webhooks() -> None:
+        """Register the webhook ids the commands use now, drop the ones no command can use any more."""
+        if not coordinator.data:
+            # No data yet (or lost): the ids derived from it would be empty and every registered one dropped. The
+            # old id does not depend on data, so commands that still post to it are heard from the start (the first
+            # poll runs after this setup); the registered ids stay as they are.
+            if security.legacy_enabled:
+                keep = registered | refused  # `refused` ids keep their one-time warning
+                _register_webhooks(hass, handler, server_id, registered, refused, keep | {legacy_webhook_id(server_id)})
+            return
+        wanted = coordinator.webhook_command_ids()
+        if security.legacy_enabled:
+            wanted.add(legacy_webhook_id(server_id))
+        _register_webhooks(hass, handler, server_id, registered, refused, wanted)
+
+    coordinator.sync_webhooks = sync_webhooks
+    sync_webhooks()
+    entry.async_on_unload(coordinator.async_add_listener(sync_webhooks))
+    # HA runs these callbacks also when the setup fails after this point (a retry would otherwise meet the ids of
+    # the failed attempt, registered with its stale handler).
+    entry.async_on_unload(lambda: _unregister_webhooks(hass, registered))
+    # A sync ends with a reload, which builds a new WebhookSecurity from the store: write what a delayed save still
+    # holds (a lost last_write could switch the old id off before Comexio has restarted).
+    entry.async_on_unload(security.async_save)
+
+
+async def _async_load_webhook_security(
+    hass: HomeAssistant, entry: ConfigEntry, api: ComexioAPI, server_id: str
+) -> WebhookSecurity:
+    """The webhook ledger of the entry; a store that refuses closes the session first (a retry would leak it)."""
+    security = WebhookSecurity(hass, entry.entry_id, server_id, str(entry.data.get(CONF_HOST, "")))
+    try:
+        await security.async_load()
+    except Exception:
+        api.close()
+        raise
+    return security
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     """Set up Comexio from a config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -165,6 +318,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         # Raised only once Comexio answered the HTTPS login (see async_create_api).
         _track_setup_outage(hass, entry.entry_id, False)
         raise
+
+    # Every Web-IO command gets a webhook id of its own (dg); the builders need the secret before the first poll.
+    security = await _async_load_webhook_security(hass, entry, api, server_id)
+    api.webhook_security = security
 
     # Initialize Coordinator (passes config_entry to base class, sets api.config_entry and server_id)
     coordinator = ComexioCoordinator(hass, api, entry)
@@ -267,49 +424,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # ---------------------------
     # Webhook Setup
     # ---------------------------
-    webhook_id = f"comexio_{server_id}"
-
-    async def handle_webhook(hass, webhook_id, request):
-        try:
-            try:
-                data = await request.json()
-            except Exception:
-                _LOGGER.error("Received non-JSON payload on webhook %s", webhook_id)
-                return
-            val = data.get("value")
-            webhook_type = data.get("type")
-            if webhook_type == "io":
-                ext = data.get("ext")
-                io_id = data.get("io")
-                if not ext or not io_id:
-                    _LOGGER.warning("Webhook IO event missing ext/io: %s", data)
-                    return
-                coordinator.update_io_by_name(ext, io_id, val)
-            elif webhook_type == "quickbus":
-                qb_io_id = data.get("id")
-                if qb_io_id is None:
-                    _LOGGER.warning("Webhook Quickbus event missing id: %s", data)
-                    return
-                coordinator.update_quickbus_io(qb_io_id, val)
-            elif webhook_type == "knx":
-                # Blind guess: KNX webhook payload shape assumed identical to markers
-                # (no real KNX hardware/sample payload available — see project_knx_objects memory).
-                knx_id = data.get("id")
-                if knx_id is None:
-                    _LOGGER.warning("Webhook KNX event missing id: %s", data)
-                    return
-                coordinator.update_knx(knx_id, val)
-            else:
-                marker_id = data.get("id")
-                if marker_id is None:
-                    _LOGGER.warning("Webhook marker event missing id: %s", data)
-                    return
-                coordinator.update_marker(marker_id, val)
-        except Exception as e:
-            _LOGGER.exception("Webhook Error: %s", e)
-
-    with contextlib.suppress(ValueError):
-        webhook.async_register(hass, DOMAIN, f"Comexio {server_id}", webhook_id, handle_webhook)
+    _setup_webhooks(hass, entry, coordinator, security)
 
     # One-shot check after an update from a KNX pre-release (flag set by async_migrate_entry).
     # Deliberately BEFORE the update listener is registered: clearing the flag writes the
@@ -321,7 +436,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # reload of the first unrelated listener run whose options happen to match.
     coordinator.take_pending_reload_skip_options()
     entry.async_on_unload(entry.add_update_listener(update_listener))
-    hass.data[DOMAIN][f"{entry.entry_id}_webhook"] = webhook_id
 
     if from_saved_config:
         # Nothing new is known about Comexio: no entity counts as gone. The full setup after the pinned
@@ -582,6 +696,7 @@ def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: 
     # Web-IO analog Min/Max range check: nightly window (see
     # coordinator.async_start_webio_range_check). Cancelled automatically on unload/reload.
     entry.async_on_unload(coordinator.async_start_webio_range_check())
+    entry.async_on_unload(coordinator.async_start_webhook_migration())
 
     # Bus workload monitoring: independent fast poll (see const.BUS_LOAD_POLL_INTERVAL_SEC),
     # cancelled automatically on unload/reload.
@@ -938,9 +1053,12 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
         # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).
         await async_remove_legacy_plan_preview(hass, server_id)
     # Nothing else reads them once the entry is gone: a new entry gets a new entry id (#250).
-    # finally: a failed delete of one must not keep the other, the preview names the user's wiring.
+    # finally: a failed delete of one must not keep the others, the preview names the user's wiring.
     try:
-        await saved_config_store(hass, entry.entry_id).async_remove()
+        try:
+            await saved_config_store(hass, entry.entry_id).async_remove()
+        finally:
+            await webhook_security_store(hass, entry.entry_id).async_remove()
     finally:
         await plan_preview_store(hass, entry.entry_id).async_remove()
 
@@ -952,12 +1070,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     try:
         if running is not None and hasattr(running, "api"):
             await running.async_wait_before_unload()
-        if webhook_id := hass.data[DOMAIN].get(f"{entry.entry_id}_webhook"):
-            webhook.async_unregister(hass, webhook_id)
+        _unregister_webhooks(hass, hass.data[DOMAIN].get(f"{entry.entry_id}_webhooks", set()))
         unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     finally:
         if not unload_ok and running is not None and hasattr(running, "api"):
             running.unloading = False  # the entry stays loaded: restores and plan edits may start again
+            _restore_webhooks(running)  # its pushes must arrive again: the ids were unregistered above
     if unload_ok:
         # A default like the get() above: the config flow's fallback reload also reaches an entry whose coordinator
         # is missing, and a KeyError here would leave that entry failed to unload.
@@ -976,7 +1094,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
                 await coordinator.async_shutdown()
             finally:
                 coordinator.api.close()
-        hass.data[DOMAIN].pop(f"{entry.entry_id}_webhook", None)
+        hass.data[DOMAIN].pop(f"{entry.entry_id}_webhooks", None)
 
         # Remove global services when the last entry is unloaded
         if not hass.config_entries.async_entries(DOMAIN):

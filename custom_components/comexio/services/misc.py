@@ -30,6 +30,7 @@ from ..const import (
 )
 from ..coordinator import ComexioCoordinator
 from ..plan_preview import PreviewStoppedError, async_render_opened_preview, preview_selection_available
+from ..webhook_security import redact_webhook_ids
 from ._context import _INSTANCE_NOT_FOUND_LOG, _async_get_service_context, _resolve_coordinator, service_flag
 
 _LOGGER = logging.getLogger(__name__)
@@ -193,6 +194,17 @@ def _resolve_set_value_target(target: str, value: float, data: dict) -> tuple[di
     return None, f"Invalid target '{target}' — expected 'M<id>' or '<Extension>#<IO>' (e.g. M107 or IOX2#Q3)."
 
 
+def _preview_part(class_name: str, web_io_json: str) -> str:
+    """One class of the preview notification, which every HA user can read: no command's own webhook id in it."""
+    shown = redact_webhook_ids(web_io_json)
+    note = (
+        "\n_The webhook ids of the commands are hidden; each one is the secret of its command._"
+        if shown != web_io_json
+        else ""
+    )
+    return f"**{class_name}**\n```json\n{shown}\n```{note}"
+
+
 async def _upload_webio_class(api: Any, server_id: str, class_name: str, web_io_json: str) -> str:
     """Clean-reinstall one Web-IO class for handle_generate_web_io; returns its result line.
 
@@ -253,7 +265,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
                     ignored_marker_ids=coordinator.ignored_marker_ids,
                     ignored_knx_ids=coordinator.ignored_knx_ids,
                 )
-                preview_parts.append(f"**{class_name}**\n```json\n{web_io_json}\n```")
+                preview_parts.append(_preview_part(class_name, web_io_json))
             persistent_notification.async_create(
                 hass, "\n\n".join(preview_parts), title=f"Comexio Preview ({server_id})"
             )

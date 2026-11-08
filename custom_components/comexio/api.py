@@ -6,6 +6,7 @@ from contextlib import suppress
 from contextvars import ContextVar
 from datetime import timedelta
 import hashlib
+import json
 import logging
 import math
 import re
@@ -40,6 +41,7 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_create_clientsession
+from homeassistant.util import dt as dt_util
 
 # Mandatory DOMAIN import for Audit logic
 from .const import (
@@ -93,6 +95,7 @@ from .const import (
 from .function_plan_block_settings import BlockSettings, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
 from .function_plan_module_restore import ModuleConfigRestore, is_module_block, place_module_block
+from .webhook_security import WEBHOOK_PATH_PREFIX, WebhookSecurity, legacy_webhook_id
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
 FUNCTION_PLAN_COMMENT_TYPE = 14
@@ -113,9 +116,11 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 )
 
 
-def _webhook_path(server_id: str) -> str:
-    """Path of HA's webhook that the Web-IO commands of this server POST to."""
-    return f"/api/webhook/comexio_{server_id}"
+def _webhook_path(
+    server_id: str, security: WebhookSecurity | None
+) -> str | Callable[[WebioClass, Mapping[str, Any]], str]:
+    """Path of HA's webhook the Web-IO commands of this server POST to: one per command, or the one of the old id."""
+    return security.path_for if security else f"{WEBHOOK_PATH_PREFIX}{legacy_webhook_id(server_id)}"
 
 
 def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
@@ -717,6 +722,9 @@ class ComexioAPI:
 
         # This context is vital for the Audit logic to find the configured webio_name
         self.config_entry: ConfigEntry | None = None
+        # Set by the entry setup: with it every Web-IO command is built with a webhook id of its own (dg), without
+        # it (a bare API in a test or a config flow check) with the one path of the old id.
+        self.webhook_security: WebhookSecurity | None = None
 
         # Dedicated cookie management for Comexio session persistence.
         # unsafe=True is only enabled if the target host is a local address.
@@ -1940,7 +1948,22 @@ class ComexioAPI:
             # ValueError: a command id that is no number, rejected before anything is sent.
             _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
+        self._note_command_written(cmd_payload)
         return True
+
+    def _note_command_written(self, cmd_payload: Mapping[str, Any]) -> None:
+        """Record that a command now carries a webhook id of its own, so the migration skips it."""
+        security = self.webhook_security
+        path = cmd_payload.get("Parameter")
+        name = cmd_payload.get("Name")
+        if (
+            security
+            and isinstance(name, str)
+            and isinstance(path, str)
+            and not path.endswith(legacy_webhook_id(security.server_id))
+        ):
+            security.mark_written(name, dt_util.utcnow())
+            security.schedule_save()
 
     async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
@@ -1978,11 +2001,12 @@ class ComexioAPI:
         picks HTTP or HTTPS from the device address itself, so an address change never rewrites commands.
         """
         return comexio_webio.build_webio_commands(
-            _webhook_path(server_id),
+            _webhook_path(server_id, self.webhook_security),
             _with_quickbus_ios(parsed_data),
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
+            server=server_id if self.webhook_security else None,
         )
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
@@ -2017,12 +2041,13 @@ class ComexioAPI:
         build_webio_commands.
         """
         return comexio_webio.generate_webio_json(
-            _webhook_path(server_id),
+            _webhook_path(server_id, self.webhook_security),
             webio_name,
             _with_quickbus_ios(parsed_data),
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
+            server=server_id if self.webhook_security else None,
         )
 
     async def upload_web_io(self, server_id: str, webio_name: str, web_io_json: str) -> tuple[bool, str]:
@@ -2040,7 +2065,21 @@ class ComexioAPI:
         if not base_id:
             # aiocomexio already raises on a missing id; kept so no caller ever creates a device on None.
             return False, "Comexio returned no base_id for the uploaded class"
+        self._note_upload_written(web_io_json)
         return True, base_id
+
+    def _note_upload_written(self, web_io_json: str) -> None:
+        """Record the commands of an uploaded class template (see _note_command_written)."""
+        if not self.webhook_security:
+            return
+        try:
+            commands = json.loads(web_io_json).get("commands", [])
+        except (ValueError, AttributeError):
+            _LOGGER.warning("The uploaded Web-IO class template is unreadable; its commands are not in the ledger")
+            return
+        for cmd in commands:
+            if isinstance(cmd, dict):
+                self._note_command_written(cmd)
 
     async def create_webio_device(
         self,

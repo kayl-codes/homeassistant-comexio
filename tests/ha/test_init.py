@@ -88,7 +88,7 @@ async def test_unload_without_a_coordinator_still_unloads(
 
         assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
         assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
-        assert f"{mock_config_entry.entry_id}_webhook" not in hass.data[DOMAIN]  # the cleanup after the pop still ran
+        assert f"{mock_config_entry.entry_id}_webhooks" not in hass.data[DOMAIN]  # the cleanup after the pop still ran
     finally:
         # Nothing in hass.data pointed at it any more, so the unload could not stop it: the test does.
         coordinator.plan_watchdog.close()
@@ -347,6 +347,18 @@ async def test_setup_retry_when_first_refresh_fails(
     await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    mock_comexio_api[0].close.assert_called_once()
+
+
+@pytest.mark.logged_exception  # HA logs the unexpected error of the setup with its traceback
+async def test_setup_closes_the_session_when_the_webhook_store_refuses(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """(Sourcery, dg #279) A store that fails to load must not leave the login session open."""
+    with patch("custom_components.comexio.WebhookSecurity.async_load", AsyncMock(side_effect=OSError("disk"))):
+        await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
     mock_comexio_api[0].close.assert_called_once()
 
 

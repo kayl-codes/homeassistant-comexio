@@ -1,0 +1,266 @@
+"""Webhook ids of their own for every Web-IO command (dg).
+
+HA's webhook endpoint takes no authentication, so the id in its path is the only secret. One id for all
+commands would give away everything once it has been read from a single request. Instead every command POSTs
+to an id of its own, derived by HMAC from a secret of the entry and the command's key (its class and its
+Comexio address). A request that names an id and a payload that do not belong together is dropped, so an id
+read from one command lets nobody forge the value of another.
+
+The secret comes from ``webhook.async_generate_id()`` and lives in a store of the entry (never in the config
+entry, which diagnostics and backups show). The ids are derived, not stored: a command the sync creates later
+needs no bookkeeping, and the store stays small.
+
+The old id (``comexio_<server_id>``) stays registered while commands still use it. ``migrated`` lists the
+commands already rewritten to their own path; once all are, and Comexio has restarted since the last write
+(Comexio only sends a changed command after a restart), the old id is switched off for good.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import datetime
+from hashlib import sha256
+import hmac
+import logging
+import re
+from time import monotonic
+from typing import Any
+
+from aiocomexio.const import WebioClass
+from homeassistant.components import webhook
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
+
+from .const import DOMAIN, WEBHOOK_REFUSAL_LOG_INTERVAL_SEC
+
+_LOGGER = logging.getLogger(__name__)
+
+WEBHOOK_PATH_PREFIX = "/api/webhook/"
+# 128 bit of the HMAC: as strong as HA's own generated ids, and a path HA's router takes without fuss.
+_ID_HEX_LENGTH = 32
+_SAVE_DELAY_SEC = 2
+_KEY_SECRET = "secret"  # nosec B105 - a storage key, not a password
+_KEY_MIGRATED = "migrated"
+_KEY_LEGACY = "legacy"
+_KEY_WRITTEN = "last_write"
+_KEY_HOST = "host"
+
+
+def legacy_webhook_id(server_id: str) -> str:
+    """The one id every command used before they got their own."""
+    return f"comexio_{server_id}"
+
+
+def _part(value: Any) -> str:
+    """One component of a command key: its colons and percent signs escaped, so two addresses never share a key."""
+    return str(value).replace("%", "%25").replace(":", "%3A")
+
+
+def command_key(webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+    """The key of the Web-IO command of a parsed item: its class plus the address Comexio pushes it under.
+
+    Must agree with payload_key for the payload that command sends (aiocomexio.webio).
+    """
+    if webio_class == WebioClass.IO:
+        return f"io:{_part(item['ext_name'])}:{_part(item['identifier'])}"
+    return f"{webio_class}:{_part(item['id'])}"
+
+
+def payload_key(data: Mapping[str, Any]) -> str | None:
+    """The command key a webhook payload names, or None if it names none (a missing address field)."""
+    kind = data.get("type")
+    if kind == WebioClass.IO:
+        ext, io_id = data.get("ext"), data.get("io")
+        return f"io:{_part(ext)}:{_part(io_id)}" if ext and io_id else None
+    item_id = data.get("id")
+    if item_id is None:
+        return None
+    return f"{kind if kind in (WebioClass.QUICKBUS, WebioClass.KNX) else WebioClass.MARKER}:{_part(item_id)}"
+
+
+def derive_webhook_id(secret: str, key: str) -> str:
+    """The webhook id of the command with this key."""
+    return hmac.new(secret.encode(), key.encode(), sha256).hexdigest()[:_ID_HEX_LENGTH]
+
+
+def command_path(secret: str, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+    """The URL path a command POSTs to; the callable aiocomexio's builders take as their webhook path."""
+    return f"{WEBHOOK_PATH_PREFIX}{derive_webhook_id(secret, command_key(webio_class, item))}"
+
+
+_ID_IN_PATH_RE = re.compile(rf"({re.escape(WEBHOOK_PATH_PREFIX)})[0-9a-f]{{{_ID_HEX_LENGTH}}}")
+WEBHOOK_ID_REDACTED = "<id of this command>"
+
+
+def redact_webhook_ids(text: str) -> str:
+    """The text with the id of every per-command webhook path replaced.
+
+    For output that other HA users can read (a persistent notification): the id is the secret of its command, and
+    whoever reads it can forge that command's value.
+    """
+    return _ID_IN_PATH_RE.sub(rf"\1{WEBHOOK_ID_REDACTED}", text)
+
+
+def webhook_security_store(hass: HomeAssistant, entry_id: str) -> Store:
+    """The store of an entry's secret and migration ledger, keyed by the entry id like the saved config."""
+    return Store(hass, 1, f"{DOMAIN}_webhook_security_{entry_id}")
+
+
+class WebhookSecurity:
+    """The secret, the migration ledger and the legacy switch of one entry, persisted in a store."""
+
+    def __init__(self, hass: HomeAssistant, entry_id: str, server_id: str, host: str = "") -> None:
+        self._store: Store = webhook_security_store(hass, entry_id)
+        self.server_id = server_id
+        self.host = host
+        self.secret = ""  # nosec B105 - filled by async_load
+        self.legacy_enabled = True
+        self.migrated: set[str] = set()
+        self.last_write: datetime | None = None
+        # kind of refusal -> (time of its last log line, refusals since then that were not logged)
+        self._refusal_log: dict[str, tuple[float, int]] = {}
+
+    def warn_refused(self, kind: str, message: str, *args: Any) -> None:
+        """Log a refused request, one line per kind and WEBHOOK_REFUSAL_LOG_INTERVAL_SEC.
+
+        The endpoint takes no authentication and the old id is guessable, so anybody who reaches HA can send refused
+        requests as fast as they like; the rest is counted and named in the next line (a flood that ends inside the
+        interval is named by no line, the skipped ones stay readable at debug level). Never pass the payload.
+        """
+        now = monotonic()
+        last, skipped = self._refusal_log.get(kind, (None, 0))
+        if last is not None and now - last < WEBHOOK_REFUSAL_LOG_INTERVAL_SEC:
+            self._refusal_log[kind] = (last, skipped + 1)
+            _LOGGER.debug(message, *args)
+            return
+        self._refusal_log[kind] = (now, 0)
+        if skipped:
+            message += f" ({skipped} more of this kind since the last message were not logged)"
+        _LOGGER.warning(message, *args)
+
+    async def async_load(self) -> None:
+        """Read the store, creating the secret on first use."""
+        stored = await self._store.async_load()
+        if not isinstance(stored, dict) or not isinstance(stored.get(_KEY_SECRET), str) or not stored[_KEY_SECRET]:
+            if stored is not None:
+                # Every command already rewritten POSTs to an id of the lost secret and is refused until the
+                # migration (its ledger is reset with the secret) rewrites it again, so this must not pass quietly.
+                _LOGGER.error(
+                    "[%s] The webhook secret store is unreadable; a new secret was generated. Web-IO commands "
+                    "already moved to their own webhook id are refused until the nightly migration rewrites them",
+                    self.server_id,
+                )
+            self.secret = webhook.async_generate_id()
+            await self._async_save()
+            return
+        self.secret = stored[_KEY_SECRET]
+        self.legacy_enabled = bool(stored.get(_KEY_LEGACY, True))
+        migrated = stored.get(_KEY_MIGRATED)
+        self.migrated = {name for name in migrated if isinstance(name, str)} if isinstance(migrated, list) else set()
+        written = stored.get(_KEY_WRITTEN)
+        try:
+            # as_utc: a naive stamp (a hand-edited store) would make the comparison with the aware boot time raise.
+            self.last_write = dt_util.as_utc(datetime.fromisoformat(written)) if isinstance(written, str) else None
+        except ValueError:
+            self.last_write = None
+        if self.migrated and self.last_write is None:
+            # Commands were rewritten but their stamp is lost: count the write as now, so the old id is only
+            # switched off after a Comexio restart that happens from here on.
+            self.last_write = dt_util.utcnow()
+        await self._async_adopt_host(stored.get(_KEY_HOST))
+
+    async def _async_adopt_host(self, stored_host: Any) -> None:
+        """Bind the ledger to the host it was written for; another host may still hold commands on the old id.
+
+        Without a stored host (a ledger from before it was recorded) the current one is taken over unchanged. After a
+        change the old id is on again and counts the write as now: the check reads every migrated command back from
+        the new host, sends the deviating ones through the rewrite again and waits for a restart of that server.
+        """
+        if not self.host:
+            # No host to compare (the entry has none): keep what is stored, so the next save does not drop it.
+            self.host = stored_host if isinstance(stored_host, str) else ""
+            return
+        if stored_host == self.host:
+            return
+        if stored_host is not None:
+            # Also with an empty ledger: the new host may hold commands that still POST to the old id.
+            _LOGGER.warning(
+                "[%s] The Comexio host changed since the webhook ids were recorded: the old webhook id is switched "
+                "on again until every command of the new host has its own",
+                self.server_id,
+            )
+            self.legacy_enabled = True
+            if self.migrated:
+                self.last_write = dt_util.utcnow()
+        await self._async_save()
+
+    def _data(self) -> dict[str, Any]:
+        return {
+            _KEY_SECRET: self.secret,
+            _KEY_LEGACY: self.legacy_enabled,
+            _KEY_MIGRATED: sorted(self.migrated),
+            _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
+            _KEY_HOST: self.host or None,
+        }
+
+    async def _async_save(self) -> None:
+        await self._store.async_save(self._data())
+
+    async def async_save(self) -> None:
+        """Persist the ledger and the legacy switch."""
+        await self._async_save()
+
+    @callback
+    def schedule_save(self) -> None:
+        """Persist soon (a sync writes commands outside the nightly run, and a lost last_write could switch the old
+        id off before Comexio has restarted)."""
+        self._store.async_delay_save(self._data, _SAVE_DELAY_SEC)
+
+    def path_for(self, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+        return command_path(self.secret, webio_class, item)
+
+    def mark_written(self, name: str, now: datetime) -> None:
+        """A command of this name now carries its own path in Comexio's configuration."""
+        self.migrated.add(name)
+        self.last_write = now
+
+    def accepts(self, webhook_id: str, data: Mapping[str, Any]) -> bool:
+        """Whether a request on webhook_id may deliver this payload.
+
+        The id of a command only carries that command's value; the old id carries any while it is enabled.
+        A payload that names another server is refused either way.
+        """
+        server = data.get("server")
+        if server is not None and server != self.server_id:
+            # Only a cut of the server name, never the payload: the sender is anybody who can reach the endpoint.
+            self.warn_refused("foreign-server", "[%s] Webhook payload for server %.40r dropped", self.server_id, server)
+            return False
+        if self.legacy_enabled and _same(webhook_id, legacy_webhook_id(self.server_id)):
+            return True
+        key = payload_key(data)
+        return key is not None and _same(webhook_id, derive_webhook_id(self.secret, key))
+
+
+_SERVER_FIELD_RE = re.compile(r'server="(?:[^"\\]|\\.)*"')
+
+
+def command_deviation(target: Mapping[str, Any], parameter: str, data: str) -> str | None:
+    """Why a command as Comexio holds it (its path and Lua body) is not the target, or None when it is.
+
+    The path must be the target's own, and the body must carry the target's ``server="..."`` field: only then does
+    the command push to the id the handler expects, with a payload the handler accepts. The text is compared the
+    way aiocomexio hands it over (surrounding blanks and the form's line-break handling aside).
+    """
+    if parameter.strip() != target.get("Parameter"):
+        # No ids in the reason: it is logged, and a webhook id is the secret of its command.
+        return "path is not the command's own webhook path"
+    wanted = _SERVER_FIELD_RE.search(str(target.get("Data", "")))
+    if wanted and len(re.findall(rf"(?<=[\s,{{]){re.escape(wanted.group(0))}", data)) != 1:
+        return f"body without exactly one {wanted.group(0)}"
+    return None
+
+
+def _same(received: str, expected: str) -> bool:
+    """Constant-time comparison; bytes, because compare_digest refuses a str that is not ASCII."""
+    return hmac.compare_digest(received.encode(), expected.encode())
