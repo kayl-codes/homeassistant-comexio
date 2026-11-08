@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from custom_components.comexio import function_plan_backup as backup_module, orphaned_backups
+from custom_components.comexio import function_plan_backup as backup_module, issue_owner, orphaned_backups
 from custom_components.comexio.const import DOMAIN, distinct_one_line
 from custom_components.comexio.function_plan_backup import FunctionPlanBackupManager, is_orphaned_identity
 from custom_components.comexio.orphaned_backups import (
@@ -248,6 +248,7 @@ def _registry(monkeypatch: pytest.MonkeyPatch, issue_ids: list[tuple[str, str]])
     ir = MagicMock()
     ir.async_get.return_value.issues = dict.fromkeys(issue_ids)
     monkeypatch.setattr(orphaned_backups, "ir", ir)
+    monkeypatch.setattr(issue_owner, "ir", ir)  # the create goes through async_create_entry_issue
     return ir
 
 
@@ -321,6 +322,7 @@ def test_audit_without_live_plans_leaves_repairs_alone(
 ) -> None:
     ir = MagicMock()
     monkeypatch.setattr(orphaned_backups, "ir", ir)
+    monkeypatch.setattr(issue_owner, "ir", ir)
 
     asyncio.run(
         async_audit_orphaned_backups(

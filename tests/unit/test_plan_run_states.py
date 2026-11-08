@@ -21,7 +21,12 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import UpdateFailed
 import pytest
 
-from custom_components.comexio import coordinator as coordinator_module, plan_watchdog, sensor as sensor_module
+from custom_components.comexio import (
+    coordinator as coordinator_module,
+    issue_owner,
+    plan_watchdog,
+    sensor as sensor_module,
+)
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.const import (
     CONF_FUNCTION_PLAN_PLAN_MAP,
@@ -1480,6 +1485,7 @@ def test_an_outage_during_an_auto_start_defers_the_queued_ones(
 ) -> None:
     """A real watchdog check: once the first start notes an outage, the later plans are not started."""
     monkeypatch.setattr(plan_watchdog, "ir", MagicMock())
+    monkeypatch.setattr(issue_owner, "ir", MagicMock())
     monkeypatch.setattr(plan_watchdog, "persistent_notification", MagicMock())
     coordinator = _coordinator(api)
     sent: list[int] = []

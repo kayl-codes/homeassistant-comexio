@@ -44,6 +44,7 @@ from .const import (
     one_line,
     one_line_values,
 )
+from .issue_owner import async_create_entry_issue
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -804,9 +805,9 @@ class ManagedPlanWatchdog:
                 details["gave_up_at"] = self._gave_up_at[fub_id]
             if self._ignore_lapsed(fub_id, name):
                 ir.async_delete_issue(self._hass, DOMAIN, issue_id)
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self._hass,
-                DOMAIN,
+                self._entry_id,
                 issue_id,
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,
@@ -1088,9 +1089,9 @@ class ManagedPlanWatchdog:
             details = {"plan_name": name, "fub_id": str(fub_id)}
             if (holder := self.vanished_holders.get(fub_id)) is not None:
                 details["current_name"] = holder
-            ir.async_create_issue(
+            async_create_entry_issue(
                 self._hass,
-                DOMAIN,
+                self._entry_id,
                 vanished_plan_issue_id(self._server_id, fub_id, name),
                 is_fixable=True,
                 severity=ir.IssueSeverity.ERROR,

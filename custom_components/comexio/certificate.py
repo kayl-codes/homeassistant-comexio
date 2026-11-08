@@ -40,6 +40,7 @@ from .const import (
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
 )
+from .issue_owner import async_create_entry_issue
 from .plan_watchdog import MOBILE_APP_SERVICE_PREFIX, NOTIFY_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
@@ -171,9 +172,9 @@ def async_report_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, ac
         # Nothing pinned, a late report of a client still on the pin the user just replaced, or of an entry
         # removed meanwhile (its repair and push are gone with it).
         return
-    ir.async_create_issue(
+    async_create_entry_issue(
         hass,
-        DOMAIN,
+        entry.entry_id,
         certificate_issue_id(entry.entry_id),
         is_fixable=True,
         severity=ir.IssueSeverity.ERROR,

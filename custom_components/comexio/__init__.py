@@ -36,6 +36,7 @@ from .const import (
     CONF_SERVER_ID,
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
+    ISSUE_KNX_PRERELEASE_CLEANUP,
     LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
     QUICKBUS_IO_DATA_KEY,
@@ -931,6 +932,9 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     async_remove_certificate_pushes(hass, entry)
     if (server_id := entry.data.get(CONF_SERVER_ID)) is not None:
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
+        # The one persistent repair: raised once and kept across restarts, so one raised before the config entry
+        # link existed (issue_owner) never gets it, and its dialog has no coordinator left to run on.
+        ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_KNX_PRERELEASE_CLEANUP}_{server_id}")
         # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).
         await async_remove_legacy_plan_preview(hass, server_id)
     # Nothing else reads them once the entry is gone: a new entry gets a new entry id (#250).
