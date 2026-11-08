@@ -43,11 +43,17 @@ _KEY_SECRET = "secret"  # nosec B105 - a storage key, not a password
 _KEY_MIGRATED = "migrated"
 _KEY_LEGACY = "legacy"
 _KEY_WRITTEN = "last_write"
+_KEY_HOST = "host"
 
 
 def legacy_webhook_id(server_id: str) -> str:
     """The one id every command used before they got their own."""
     return f"comexio_{server_id}"
+
+
+def _part(value: Any) -> str:
+    """One component of a command key: its colons and percent signs escaped, so two addresses never share a key."""
+    return str(value).replace("%", "%25").replace(":", "%3A")
 
 
 def command_key(webio_class: WebioClass, item: Mapping[str, Any]) -> str:
@@ -56,8 +62,8 @@ def command_key(webio_class: WebioClass, item: Mapping[str, Any]) -> str:
     Must agree with payload_key for the payload that command sends (aiocomexio.webio).
     """
     if webio_class == WebioClass.IO:
-        return f"io:{item['ext_name']}:{item['identifier']}"
-    return f"{webio_class}:{item['id']}"
+        return f"io:{_part(item['ext_name'])}:{_part(item['identifier'])}"
+    return f"{webio_class}:{_part(item['id'])}"
 
 
 def payload_key(data: Mapping[str, Any]) -> str | None:
@@ -65,11 +71,11 @@ def payload_key(data: Mapping[str, Any]) -> str | None:
     kind = data.get("type")
     if kind == WebioClass.IO:
         ext, io_id = data.get("ext"), data.get("io")
-        return f"io:{ext}:{io_id}" if ext and io_id else None
+        return f"io:{_part(ext)}:{_part(io_id)}" if ext and io_id else None
     item_id = data.get("id")
     if item_id is None:
         return None
-    return f"{kind if kind in (WebioClass.QUICKBUS, WebioClass.KNX) else WebioClass.MARKER}:{item_id}"
+    return f"{kind if kind in (WebioClass.QUICKBUS, WebioClass.KNX) else WebioClass.MARKER}:{_part(item_id)}"
 
 
 def derive_webhook_id(secret: str, key: str) -> str:
@@ -90,9 +96,10 @@ def webhook_security_store(hass: HomeAssistant, entry_id: str) -> Store:
 class WebhookSecurity:
     """The secret, the migration ledger and the legacy switch of one entry, persisted in a store."""
 
-    def __init__(self, hass: HomeAssistant, entry_id: str, server_id: str) -> None:
+    def __init__(self, hass: HomeAssistant, entry_id: str, server_id: str, host: str = "") -> None:
         self._store: Store = webhook_security_store(hass, entry_id)
         self.server_id = server_id
+        self.host = host
         self.secret = ""  # nosec B105 - filled by async_load
         self.legacy_enabled = True
         self.migrated: set[str] = set()
@@ -127,6 +134,26 @@ class WebhookSecurity:
             # Commands were rewritten but their stamp is lost: count the write as now, so the old id is only
             # switched off after a Comexio restart that happens from here on.
             self.last_write = dt_util.utcnow()
+        await self._async_adopt_host(stored.get(_KEY_HOST))
+
+    async def _async_adopt_host(self, stored_host: Any) -> None:
+        """Bind the ledger to the host it was written for; another host may still hold commands on the old id.
+
+        Without a stored host (a ledger from before it was recorded) the current one is taken over unchanged. After a
+        change the old id is on again and counts the write as now: the check reads every migrated command back from
+        the new host, sends the deviating ones through the rewrite again and waits for a restart of that server.
+        """
+        if not self.host or stored_host == self.host:
+            return
+        if isinstance(stored_host, str) and self.migrated:
+            _LOGGER.warning(
+                "[%s] The Comexio host changed since the webhook ids were migrated: the old webhook id is switched "
+                "on again until every command has been read back from the new host",
+                self.server_id,
+            )
+            self.legacy_enabled = True
+            self.last_write = dt_util.utcnow()
+        await self._async_save()
 
     def _data(self) -> dict[str, Any]:
         return {
@@ -134,6 +161,7 @@ class WebhookSecurity:
             _KEY_LEGACY: self.legacy_enabled,
             _KEY_MIGRATED: sorted(self.migrated),
             _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
+            _KEY_HOST: self.host or None,
         }
 
     async def _async_save(self) -> None:

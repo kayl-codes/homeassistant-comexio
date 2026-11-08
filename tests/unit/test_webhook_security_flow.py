@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from custom_components import comexio as comexio_init
 from custom_components.comexio import _setup_webhooks, webhook as ha_webhook, webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.coordinator import ComexioCoordinator
@@ -532,3 +533,89 @@ def test_a_failing_rewrite_counts_as_failed_and_the_run_goes_on(
     assert _run(coordinator._async_rewrite_pending_webhooks(coordinator.api.webhook_security)) == (0, 1)
 
     assert "Moving Web-IO command 'HA m' failed" in caplog.text
+
+
+def _hosted(monkeypatch: pytest.MonkeyPatch, stored: Any, host: str) -> ws.WebhookSecurity:
+    security = _security(monkeypatch, stored)
+    security.host = host
+    return security
+
+
+def _switched_off_ledger(host: str | None) -> dict[str, Any]:
+    ledger: dict[str, Any] = {
+        "secret": "abc",
+        "legacy": False,
+        "migrated": ["HA M5"],
+        "last_write": NOW.isoformat(),
+    }
+    if host is not None:
+        ledger["host"] = host
+    return ledger
+
+
+def test_a_changed_host_switches_the_old_id_on_again_and_keeps_the_ledger_for_the_check(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery, dg #279) The commands of another server may still POST to the old id."""
+    security = _hosted(monkeypatch, _switched_off_ledger("old.local"), "new.local")
+
+    _run(security.async_load())
+
+    assert security.legacy_enabled is True
+    assert security.migrated == {"HA M5"}  # read back from the new host by the check, not rewritten blindly
+    assert security.last_write > NOW
+    assert security._store.stored["host"] == "new.local"
+    assert "host changed" in caplog.text
+
+
+@pytest.mark.parametrize("stored_host", [None, "same.local"])
+def test_an_unchanged_or_unrecorded_host_leaves_the_switch_alone_and_keeps_the_host(
+    monkeypatch: pytest.MonkeyPatch, stored_host: str | None
+) -> None:
+    security = _hosted(monkeypatch, _switched_off_ledger(stored_host), "same.local")
+
+    _run(security.async_load())
+
+    assert security.legacy_enabled is False
+    assert security.last_write == NOW
+    assert security._store.stored.get("host") == "same.local"
+
+
+def test_a_missing_quickbus_or_knx_id_is_logged_under_the_name_of_its_kind(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    handler = _handler(monkeypatch, _security(monkeypatch), MagicMock())
+    legacy = ws.legacy_webhook_id(SERVER)
+
+    for kind in ("quickbus", "knx", ["odd"], None):
+        _run(handler(None, legacy, _Request({"type": kind, "value": 1})))
+
+    assert "Webhook Quickbus event missing id" in caplog.text
+    assert "Webhook KNX event missing id" in caplog.text
+    assert caplog.text.count("Webhook marker event missing id") == 2
+
+
+def test_removing_the_entry_drops_the_webhook_store_even_when_the_saved_config_store_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(Sourcery, dg #279) The secret and the ledger must not stay on disk behind a failed delete."""
+    removed: list[str] = []
+
+    def store(name: str, fails: bool = False) -> MagicMock:
+        async def remove() -> None:
+            removed.append(name)
+            if fails:
+                raise OSError(name)
+
+        return MagicMock(async_remove=remove)
+
+    monkeypatch.setattr(comexio_init, "saved_config_store", lambda *_: store("saved", fails=True))
+    monkeypatch.setattr(comexio_init, "webhook_security_store", lambda *_: store("security"))
+    monkeypatch.setattr(comexio_init, "plan_preview_store", lambda *_: store("preview"))
+    monkeypatch.setattr(comexio_init, "async_remove_certificate_pushes", lambda *_: None)
+    removal = comexio_init.async_remove_entry(MagicMock(), MagicMock(entry_id="e1", data={}))
+
+    with pytest.raises(OSError, match="saved"):
+        _run(removal)
+
+    assert removed == ["saved", "security", "preview"]

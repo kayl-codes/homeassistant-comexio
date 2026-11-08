@@ -142,6 +142,9 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
     return True
 
 
+_WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX"}
+
+
 def _dispatch_push(coordinator: ComexioCoordinator, data: dict[str, Any]) -> None:
     """Hand the value of one webhook payload to the coordinator, by the kind of item it names."""
     val = data.get("value")
@@ -156,7 +159,7 @@ def _dispatch_push(coordinator: ComexioCoordinator, data: dict[str, Any]) -> Non
         return
     item_id = data.get("id")
     if item_id is None:
-        _LOGGER.warning("Webhook %s event missing id: %s", webhook_type or "marker", data)
+        _LOGGER.warning("Webhook %s event missing id: %s", _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker"), data)
     elif webhook_type == "quickbus":
         coordinator.update_quickbus_io(item_id, val)
     elif webhook_type == "knx":
@@ -277,7 +280,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         raise
 
     # Every Web-IO command gets a webhook id of its own (dg); the builders need the secret before the first poll.
-    security = WebhookSecurity(hass, entry.entry_id, server_id)
+    security = WebhookSecurity(hass, entry.entry_id, server_id, str(entry.data.get(CONF_HOST, "")))
     await security.async_load()
     api.webhook_security = security
 
@@ -1010,8 +1013,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     # Nothing else reads them once the entry is gone: a new entry gets a new entry id (#250).
     # finally: a failed delete of one must not keep the others, the preview names the user's wiring.
     try:
-        await saved_config_store(hass, entry.entry_id).async_remove()
-        await webhook_security_store(hass, entry.entry_id).async_remove()
+        try:
+            await saved_config_store(hass, entry.entry_id).async_remove()
+        finally:
+            await webhook_security_store(hass, entry.entry_id).async_remove()
     finally:
         await plan_preview_store(hass, entry.entry_id).async_remove()
 
@@ -1028,6 +1033,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     finally:
         if not unload_ok and running is not None and hasattr(running, "api"):
             running.unloading = False  # the entry stays loaded: restores and plan edits may start again
+            running.sync_webhooks()  # and its pushes must arrive again: the ids were unregistered above
     if unload_ok:
         # A default like the get() above: the config flow's fallback reload also reaches an entry whose coordinator
         # is missing, and a KeyError here would leave that entry failed to unload.

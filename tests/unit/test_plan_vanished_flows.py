@@ -206,7 +206,10 @@ def test_an_unload_gives_up_waiting_after_the_limit(
 def test_unload_entry_waits_before_it_unloads_anything() -> None:
     order: list[str] = []
     running = SimpleNamespace(
-        api=object(), unloading=True, async_wait_before_unload=AsyncMock(side_effect=lambda: order.append("wait"))
+        api=object(),
+        unloading=True,
+        async_wait_before_unload=AsyncMock(side_effect=lambda: order.append("wait")),
+        sync_webhooks=MagicMock(),
     )
     hass = MagicMock()
     hass.data = {DOMAIN: {"e1": running}}
@@ -219,7 +222,9 @@ def test_unload_entry_waits_before_it_unloads_anything() -> None:
 @pytest.mark.parametrize("raised_by", ["wait", "unload"])
 def test_an_unload_that_raises_lets_restores_and_plan_edits_start_again(raised_by: str) -> None:
     """(Review) The entry stays loaded: a stuck unloading flag would refuse every restore as "sync running"."""
-    running = SimpleNamespace(api=object(), unloading=True, async_wait_before_unload=AsyncMock())
+    running = SimpleNamespace(
+        api=object(), unloading=True, async_wait_before_unload=AsyncMock(), sync_webhooks=MagicMock()
+    )
     if raised_by == "wait":  # (Sourcery) e.g. the unload task cancelled while it waits
         running.async_wait_before_unload.side_effect = RuntimeError("boom")
     hass = MagicMock()
@@ -259,12 +264,15 @@ def test_an_unload_closes_the_watchdog_only_once_the_platforms_unloaded(unload_o
         async_wait_before_unload=AsyncMock(side_effect=lambda: order.append("wait")),
         async_shutdown=AsyncMock(),
         plan_watchdog=SimpleNamespace(close=lambda: order.append("close")),
+        sync_webhooks=MagicMock(),
     )
     hass = MagicMock()
     hass.data = {DOMAIN: {"e1": running}}
     hass.config_entries.async_unload_platforms = AsyncMock(side_effect=lambda *_: order.append("unload") or unload_ok)
     assert asyncio.run(async_unload_entry(hass, SimpleNamespace(entry_id="e1"))) is unload_ok
     assert order == (["wait", "unload", "close"] if unload_ok else ["wait", "unload"])
+    # (Sourcery, dg #279) a failed unload keeps the entry loaded: the ids unregistered before it come back
+    assert running.sync_webhooks.call_count == (0 if unload_ok else 1)
 
 
 def test_unload_entry_of_an_entry_that_never_set_up_does_not_wait() -> None:

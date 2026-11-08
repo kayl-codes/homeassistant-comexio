@@ -340,3 +340,18 @@ def test_no_stamp_and_no_ledger_stays_unstamped(monkeypatch: pytest.MonkeyPatch)
     _run(security.async_load())
 
     assert security.last_write is None
+
+
+def test_two_addresses_that_differ_only_in_where_a_colon_falls_get_different_ids() -> None:
+    """(Sourcery, dg #279) `(A:B, C)` and `(A, B:C)` must not share an HMAC input."""
+    first = {"ext_name": "A:B", "identifier": "C"}
+    second = {"ext_name": "A", "identifier": "B:C"}
+
+    assert ws.command_key(WebioClass.IO, first) != ws.command_key(WebioClass.IO, second)
+    assert ws.payload_key({"type": "io", "ext": "A:B", "io": "C"}) == ws.command_key(WebioClass.IO, first)
+    assert ws.payload_key({"type": "io", "ext": "A", "io": "B:C"}) == ws.command_key(WebioClass.IO, second)
+
+
+def test_the_key_of_an_address_without_colons_is_unchanged_so_migrated_ids_stay_valid() -> None:
+    assert ws.command_key(WebioClass.IO, {"ext_name": "BASE", "identifier": "Q1"}) == "io:BASE:Q1"
+    assert ws.command_key(WebioClass.MARKER, {"id": "5"}) == "marker:5"
