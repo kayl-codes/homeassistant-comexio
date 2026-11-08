@@ -32,13 +32,20 @@ counts as safe only as the part right after that literal in an f-string or `+` c
 format spec: those change the text), or inside a local that holds a whole webhook path
 (`hook = f"/api/webhook/{webhook_id}"`); the entry secret is never safe there, since it is no 32-hex id - not even
 in a local, attribute or parameter called like an id (`webhook_id = secret`) - and a local name is not trusted to hold
-an id either. A bare id, an id after other text, and its keyword arguments are still checked.
+an id either. A bare id, an id after other text, and its keyword arguments are still checked. Only the bare name
+`redact_webhook_ids`, imported from the integration's own `webhook_security`, is the redactor.
+The old id `comexio_<server_id>` is not replaced by it, and is no finding either: it is derived from the server id
+that every entity_id shows, so anyone who can read the log can build it, and it is switched off after the migration.
+An exception being handled counts like a named one: when the `try` body handled an id or the secret, a log call in
+its handler that prints the traceback (`.exception(...)`, `exc_info=...`, `traceback.print_exc()`) is a finding.
 
 Not followed: a value handed on through another module, `setattr`/`getattr` with a computed name, a mutating method
 outside MUTATORS, a class or function reached through another name than its own (an alias, a returned callable), a
 callback handed over by keyword or an argument placed before the callback, a constructor reached through an
 attribute (`self.Holder(...)`), a base class named through an attribute (`pkg.Base`), a stream reached through a
-local alias or a deeper attribute (`err = sys.stderr; err.write(...)`, `sys.stdout.buffer.write(...)`), a module-level
+local alias or a deeper attribute (`err = sys.stderr; err.write(...)`, `sys.stdout.buffer.write(...)`), a traceback
+printed by a function the handler calls or by an own wrapper (`self._log(msg, exc_info=True)`), a traceback printer
+reached through an import alias (`from traceback import format_exc as fe`), a module-level
 import or alias
 placed after the function that uses it, a module-level or enclosing-scope name assigned after the function's
 definition, a taint assigned later in a loop body than the use it reaches on the next pass, and the texts the
@@ -82,6 +89,7 @@ PRINTING_CALLS = frozenset(
         "async_create_entry_issue",
     }
 )
+TRACEBACK_CALLS = frozenset({"print_exc", "format_exc", "print_exception", "format_exception", "print_last"})
 STREAM_NAMES = frozenset({"stdout", "stderr"})  # `sys.stderr.write(...)` prints like `print`
 STREAM_WRITES = frozenset({"write", "writelines"})
 SINK_NAMES = LOG_METHODS | PRINTING_CALLS
@@ -92,6 +100,7 @@ RECEIVERS = frozenset({"self", "cls"})  # an instance is no container: its attri
 WEBHOOK_PATH = "/api/webhook/"
 HOST_KEYWORD = "host"
 HOST_SOURCE = "CONF_HOST"  # the entry's own host option
+PRODUCTION_MODULE = "custom_components.comexio.webhook_security"  # where redact_webhook_ids really lives
 SECURITY_CLASS = "WebhookSecurity"
 ENTRY_ID_KEYWORD = "entry_id"
 
@@ -125,6 +134,20 @@ def _is_printing(node: ast.Call, aliases: frozenset[str] = frozenset()) -> bool:
         receiver.attr if isinstance(receiver, ast.Attribute) else receiver.id if isinstance(receiver, ast.Name) else ""
     )
     return name in LOG_METHODS or (name in STREAM_WRITES and tail in STREAM_NAMES)
+
+
+def _prints_traceback(node: ast.Call, *, printing: bool) -> bool:
+    """A call that puts the exception being handled into a log or onto a stream without naming it:
+    `_LOGGER.exception(...)`, a log call with `exc_info=True` (or anything but a constant that is falsy), or one of the
+    traceback printers."""
+    if _call_name(node) in TRACEBACK_CALLS:
+        return True
+    wants_it = any(  # `**options` may hold exc_info: no way to tell, so it counts
+        keyword.arg is None
+        or (keyword.arg == "exc_info" and not (isinstance(keyword.value, ast.Constant) and not keyword.value.value))
+        for keyword in node.keywords
+    )
+    return printing and (_call_name(node) == "exception" or wants_it)
 
 
 @dataclass(frozen=True)
@@ -209,7 +232,9 @@ def _survives_redaction(node: ast.AST, taint: _Taint) -> bool:
 
 def _carries_id(node: ast.AST, taint: _Taint = _NO_TAINT) -> bool:
     """Whether an expression names the secret, reads a command's path field or a tainted name, outside redaction."""
-    if isinstance(node, ast.Call) and _call_name(node) in SAFE_WRAPPERS and not taint.shadowed:
+    # only the bare name the integration imports: `other.redact_webhook_ids(...)` is some other function
+    redaction = isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in SAFE_WRAPPERS
+    if isinstance(node, ast.Call) and redaction and not taint.shadowed:
         arguments = (*node.args, *(keyword.value for keyword in node.keywords))
         return any(_survives_redaction(arg, taint) for arg in arguments)
     if _is_bare_secret(node, taint):
@@ -425,6 +450,9 @@ class _Frame:
         self.aliases: set[str] = set(outer.aliases) if outer else set()
         self.paths: set[str] = set(outer.paths) if outer else set()
         self.depth = 0
+        self.handling = (
+            False  # inside an `except` whose `try` body handled an id or the secret: its traceback may quote it
+        )
 
     def taint(self) -> _Taint:
         flow = self.flow
@@ -519,9 +547,15 @@ class _Scan(ast.NodeVisitor):
                 frame.tainted.add(handler.name)
             if handler.name and secret:
                 frame.secrets.add(handler.name)
+            outside, frame.handling = frame.handling, frame.handling or ids or secret
             self.visit(handler)
-        for statement in (*node.orelse, *node.finalbody):
+            frame.handling = outside
+        for statement in node.orelse:
             self.visit(statement)
+        outside, frame.handling = frame.handling, frame.handling or ids or secret  # a propagating one reaches `finally`
+        for statement in node.finalbody:
+            self.visit(statement)
+        frame.handling = outside
         frame.depth -= 1
 
     visit_Try = visit_TryStar = _try
@@ -653,7 +687,8 @@ class _Scan(ast.NodeVisitor):
             _call_name(node) == "partial" and bool(node.args) and _binds_sink(node.args[0], frozenset(frame.aliases))
         )
         carrying = arguments[1:] if partial else arguments  # a partial's first argument is the sink itself
-        if (printing or partial) and any(frame.carries_id(arg) for arg in carrying):
+        leaking = (printing or partial) and any(frame.carries_id(arg) for arg in carrying)
+        if leaking or (frame.handling and _prints_traceback(node, printing=printing)):
             self._hit(node)
         if isinstance(node.func, ast.Attribute) and node.func.attr in MUTATORS:  # `box.append(webhook_id)`: it holds it
             if any(frame.carries_id(arg) for arg in arguments):
@@ -793,7 +828,16 @@ def _inline_path_field(tree: ast.AST) -> ast.AST:
     return _Inline().visit(tree)
 
 
-def _bound_names(node: ast.AST) -> list[str]:
+def _is_production_import(node: ast.ImportFrom, depth: int) -> bool:
+    """`from .webhook_security import ...` as the integration's own module writes it: `depth` dots reach the package
+    from the file (1 for a module of it, 2 for one in a subpackage), or the absolute path. A module of that name
+    anywhere else is another module, whose function of that name may do nothing."""
+    if node.level == 0:
+        return node.module == PRODUCTION_MODULE
+    return node.level == depth and node.module == "webhook_security"
+
+
+def _bound_names(node: ast.AST, depth: int = 1) -> list[str]:
     """The names a node binds: a def or class, a parameter, a store, `except ... as`, a `case` capture, an import."""
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
         return [node.name]
@@ -808,7 +852,7 @@ def _bound_names(node: ast.AST) -> list[str]:
     if isinstance(node, ast.Import):
         return [(alias.asname or alias.name).split(".")[0] for alias in node.names]
     if isinstance(node, ast.ImportFrom):
-        production = (node.module or "").split(".")[-1] == "webhook_security"  # its own redactor is the real one
+        production = _is_production_import(node, depth)  # its own redactor is the real one
         names = [
             alias.asname or alias.name for alias in node.names if not production or alias.name not in SAFE_WRAPPERS
         ]
@@ -817,18 +861,18 @@ def _bound_names(node: ast.AST) -> list[str]:
     return []
 
 
-def _redactor_is_rebound(tree: ast.AST) -> bool:
-    """Whether the module binds the redactor's name to anything but the production function (`from ..webhook_security
+def _redactor_is_rebound(tree: ast.AST, depth: int = 1) -> bool:
+    """Whether the module binds the redactor's name to anything but the production function (`from .webhook_security
     import redact_webhook_ids`). Then a call of that name is no proof that anything is redacted."""
-    return any(name in SAFE_WRAPPERS for node in ast.walk(tree) for name in _bound_names(node))
+    return any(name in SAFE_WRAPPERS for node in ast.walk(tree) for name in _bound_names(node, depth))
 
 
-def _scan(source: str) -> list[tuple[str, int]]:
+def _scan(source: str, depth: int = 1) -> list[tuple[str, int]]:
     """Passes over the module until the flow it learns (attributes, returns, arguments) stops growing; the hits of
-    the last pass, which saw all of it, count."""
+    the last pass, which saw all of it, count. `depth`: how many dots a relative import needs to reach the package."""
     tree = _inline_path_field(ast.parse(source))
     module = _module(tree)
-    flow = _Flow(shadowed=_redactor_is_rebound(tree))
+    flow = _Flow(shadowed=_redactor_is_rebound(tree, depth))
     while True:
         scan = _Scan(flow, module)
         scan.visit(tree)
@@ -836,12 +880,23 @@ def _scan(source: str) -> list[tuple[str, int]]:
             return scan.hits
 
 
+def _import_depth(rel: str) -> int:
+    """How many dots a relative import needs to reach the integration package from a file (given relative to it)."""
+    return len(rel.split("/"))
+
+
+def test_a_file_reaches_the_package_with_one_dot_per_path_part() -> None:
+    assert _import_depth("api.py") == 1
+    assert _import_depth("services/misc.py") == 2
+    assert _import_depth("a/b/c.py") == 3
+
+
 def test_no_log_line_notification_repair_or_exception_carries_a_webhook_id_or_the_secret() -> None:
     found: Counter[tuple[str, str]] = Counter()
     lines: dict[tuple[str, str], list[int]] = {}
     for path in sorted(INTEGRATION.rglob("*.py")):
         rel = path.relative_to(INTEGRATION).as_posix()
-        for scope, line in _scan(path.read_text(encoding="utf-8")):
+        for scope, line in _scan(path.read_text(encoding="utf-8"), depth=_import_depth(rel)):
             found[rel, scope] += 1
             lines.setdefault((rel, scope), []).append(line)
 
@@ -1294,6 +1349,72 @@ def caught_nothing(session, cmd):
         _LOGGER.warning("failed %s", err)
 
 
+def caught_without_a_name(session, webhook_id, secret):
+    try:
+        session.post(webhook_id)
+    except OSError:
+        _LOGGER.exception("failed")  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        _LOGGER.warning("failed", exc_info=True)  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        traceback.print_exc()  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        text = traceback.format_exc()  # leak
+    try:
+        session.post(webhook_id)
+    except OSError as err:
+        _LOGGER.error("failed", exc_info=err)  # leak
+    try:
+        session.get(secret)
+    except OSError:
+        _LOGGER.exception("failed")  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        try:
+            session.get("/api/state")
+        except ValueError:
+            _LOGGER.exception("nested")  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        _LOGGER.warning("failed", exc_info=False)
+        _LOGGER.warning("failed")
+    _LOGGER.exception("outside of any handler")
+    try:
+        session.post(webhook_id)
+    finally:
+        _LOGGER.exception("in finally")  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        options = {"exc_info": True}
+        _LOGGER.error("failed", **options)  # leak
+        session.get("/api/state", exc_info=True)
+        session.get("/api/state")
+    try:
+        session.post(webhook_id)
+    except OSError:
+        pass
+    else:
+        _LOGGER.exception("in else: no exception is being handled")
+
+
+def caught_no_id_without_a_name(session):
+    try:
+        session.get("/api/state")
+    except OSError:
+        _LOGGER.exception("failed")
+        _LOGGER.warning("failed", exc_info=True)
+        traceback.print_exc()
+
+
 def streams(webhook_id, other):
     sys.stderr.write(webhook_id)  # leak
     sys.stdout.writelines([webhook_id])  # leak
@@ -1318,17 +1439,31 @@ _SHOW = 'def show(webhook_id):\n    _LOGGER.info(redact_webhook_ids(f"/api/webho
 @pytest.mark.parametrize(
     ("source", "leaks"),
     [
-        (f"from ..webhook_security import redact_webhook_ids\n\n\n{_SHOW}", False),
-        (f"from ..webhook_security import redact_webhook_ids as _r\n\n\n{_SHOW}", False),
+        (f"from .webhook_security import redact_webhook_ids\n\n\n{_SHOW}", False),
+        (f"from .webhook_security import redact_webhook_ids as _r\n\n\n{_SHOW}", False),
+        (f"from custom_components.comexio.webhook_security import redact_webhook_ids\n\n\n{_SHOW}", False),
         (f"from .helpers import redact_webhook_ids\n\n\n{_SHOW}", True),
-        (f"from ..webhook_security import other as redact_webhook_ids\n\n\n{_SHOW}", True),
+        # a module of that name somewhere else is not the production one, whatever its function does
+        (f"from other.webhook_security import redact_webhook_ids\n\n\n{_SHOW}", True),
+        (f"from webhook_security import redact_webhook_ids\n\n\n{_SHOW}", True),
+        (f"from ..webhook_security import redact_webhook_ids\n\n\n{_SHOW}", True),  # one dot too many for this depth
+        (f"from custom_components.other.webhook_security import redact_webhook_ids\n\n\n{_SHOW}", True),
+        (f"from .webhook_security import other as redact_webhook_ids\n\n\n{_SHOW}", True),
         (f"import json as redact_webhook_ids\n\n\n{_SHOW}", True),
         (f"redact_webhook_ids = str\n\n\n{_SHOW}", True),
         (f"def redact_webhook_ids(text):\n    return text\n\n\n{_SHOW}", True),
         (f"class redact_webhook_ids:\n    pass\n\n\n{_SHOW}", True),
         (f"for redact_webhook_ids in (str,):\n    pass\n\n\n{_SHOW}", True),
         (f"from .helpers import *\n\n\n{_SHOW}", True),
-        (f"from ..webhook_security import *\n\n\n{_SHOW}", False),
+        (f"from .webhook_security import *\n\n\n{_SHOW}", False),
+        (f"from webhook_security import *\n\n\n{_SHOW}", True),
+        # not the redactor: the call of another module's function of that name is no redaction either
+        (_SHOW.replace("redact_webhook_ids(", "other.redact_webhook_ids("), True),
+        (
+            "import webhook_security\n\n\n"
+            + _SHOW.replace("redact_webhook_ids(", "webhook_security.redact_webhook_ids("),
+            True,
+        ),
         (
             _SHOW.replace(
                 "    _LOGGER", "    match {}:\n        case {**redact_webhook_ids}:\n            pass\n    _LOGGER"
@@ -1343,9 +1478,19 @@ def test_a_name_bound_to_something_else_than_the_production_redactor_is_not_trus
     assert bool(_scan(source)) is leaks
 
 
+def test_a_module_of_a_subpackage_reaches_the_production_redactor_with_one_dot_more() -> None:
+    source = f"from ..webhook_security import redact_webhook_ids\n\n\n{_SHOW}"
+
+    assert not _scan(source, depth=2)
+    assert _scan(source, depth=1)
+    assert _scan(f"from .webhook_security import redact_webhook_ids\n\n\n{_SHOW}", depth=2)
+
+
 def _plain_get(call: ast.Call) -> bool:
-    """`.get(key)` or `.get(key, <constant>)`: a fallback that names something else could be another entry's host."""
-    return 1 <= len(call.args) <= 2 and not call.keywords and all(isinstance(a, ast.Constant) for a in call.args[1:])
+    """`.get(key, "")`: the empty string is what WebhookSecurity takes as no host. Any other fallback (another
+    constant, a name, a missing one that makes it None) would bind the ledger to a host the entry does not have."""
+    fallback = call.args[1] if len(call.args) == 2 else None
+    return not call.keywords and isinstance(fallback, ast.Constant) and fallback.value == ""
 
 
 def _entry_host_read(host: ast.expr) -> str | None:
@@ -1392,6 +1537,10 @@ def _host_problem(node: ast.Call) -> str | None:
         ("WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, other_host))", False),
         ('WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, default=""))', False),
         ('WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, "", 1))', False),
+        ('WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, "other.example"))', False),
+        ("WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, None))", False),
+        ("WebhookSecurity(hass, entry.entry_id, sid, str(entry.data.get(CONF_HOST)))", False),
+        ("WebhookSecurity(hass, entry.entry_id, sid, str(entry.data.get(CONF_HOST, 0)))", False),
         ('WebhookSecurity(hass, entry.entry_id, sid, f"{entry.data[CONF_HOST]}x")', False),
         ("WebhookSecurity(hass, entry.entry_id, sid, CONF_HOST)", False),
         ("WebhookSecurity(hass, entry.entry_id, sid, entry.options[CONF_HOST])", False),
