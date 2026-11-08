@@ -124,7 +124,7 @@ def test_detects_the_owner_keyword_from_the_signature(create_issue, supported: b
 
 
 def test_the_owner_keyword_is_used_exactly_from_home_assistant_2026_11() -> None:
-    # The tests below patch the flag; this one checks it against the Home Assistant installed. On 2026.8–2026.10
+    # The tests below patch the flag; this one checks it against the Home Assistant installed. On 2026.10
     # a wrongly set flag would make every repair raise TypeError; from 2026.11 on a renamed keyword would turn
     # the link off without any test noticing.
     expected = (MAJOR_VERSION, MINOR_VERSION) >= (2026, 11)

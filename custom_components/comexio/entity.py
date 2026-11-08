@@ -1,10 +1,8 @@
 # Version: 0.7.8
-import asyncio
 from collections.abc import Callable
 import logging
 from typing import Any
 
-from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -136,41 +134,38 @@ class ComexioFunctionPlanEntityMixin:
 
     coordinator: ComexioCoordinator
     entity_id: str
+    platform: EntityPlatform
     _hub_era_name: str
 
     @property
     def device_info(self) -> DeviceInfo:
         return function_plan_device_info(self.coordinator)
 
-    def add_to_platform_start(
-        self, hass: HomeAssistant, platform: EntityPlatform, parallel_updates: asyncio.Semaphore | None
-    ) -> None:
-        super().add_to_platform_start(hass, platform, parallel_updates)  # type: ignore[misc]
-        self.entity_id = f"{platform.domain}.{hub_era_object_id(self.coordinator.server_id, self._hub_era_name)}"
+    async def async_prepare_to_add_to_hass(self) -> None:
+        await super().async_prepare_to_add_to_hass()  # type: ignore[misc]
+        self.entity_id = f"{self.platform.domain}.{hub_era_object_id(self.coordinator.server_id, self._hub_era_name)}"
 
 
 class ComexioStableEntityIdMixin:
     """Requests entity_id "<domain>.<stable_object_id(unique_id)>" instead of a name-derived one.
 
-    Hooked into add_to_platform_start because that is the first point the platform (and so
-    the domain) is known, and it runs before HA derives the entity_id. HA only uses the
-    requested id for a new registry entry — an existing entity keeps its entity_id, and one
-    restored from deleted_entities gets its old entity_id back — but stores it as
-    suggested_object_id either way, so HA's "recreate entity ID" and
-    async_regenerate_entity_id then yield the same stable id for existing entities too
-    (unless the user gave the entity a custom name, which takes precedence in HA).
+    Set in async_prepare_to_add_to_hass, which HA awaits after the platform is known and before
+    it derives the entity_id from the name. HA only uses the requested id for a new registry
+    entry — an existing entity keeps its entity_id, and one restored from deleted_entities gets
+    its old entity_id back — but stores it as suggested_object_id either way, so HA's "recreate
+    entity ID" and async_regenerate_entity_id then yield the same stable id for existing
+    entities too (unless the user gave the entity a custom name, which takes precedence in HA).
     If the id is already taken by another entity, HA silently appends "_2".
     """
 
     unique_id: str | None
     entity_id: str
+    platform: EntityPlatform
 
-    def add_to_platform_start(
-        self, hass: HomeAssistant, platform: EntityPlatform, parallel_updates: asyncio.Semaphore | None
-    ) -> None:
-        super().add_to_platform_start(hass, platform, parallel_updates)  # type: ignore[misc]
+    async def async_prepare_to_add_to_hass(self) -> None:
+        await super().async_prepare_to_add_to_hass()  # type: ignore[misc]
         if self.unique_id:
-            self.entity_id = f"{platform.domain}.{stable_object_id(self.unique_id)}"
+            self.entity_id = f"{self.platform.domain}.{stable_object_id(self.unique_id)}"
 
 
 class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):

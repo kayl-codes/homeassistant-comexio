@@ -1,7 +1,7 @@
 """Repair issues of a config entry: raised only while the entry exists, and linked to it where HA supports that.
 
 Home Assistant 2026.11 added config_entry_id to ir.async_create_issue; an issue created with it is removed
-together with its entry. The HACS minimum is still 2026.8, and an older Home Assistant does not know the keyword,
+together with its entry. The HACS minimum is 2026.10, and an older Home Assistant does not know the keyword,
 so it is passed only when the running version accepts it. Every repair of the integration is raised through
 async_create_entry_issue (tests/unit/test_issue_owner.py fails on a direct ir.async_create_issue).
 """
