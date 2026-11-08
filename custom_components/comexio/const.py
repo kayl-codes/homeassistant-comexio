@@ -575,6 +575,9 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
+# A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
+# reaches HA); the refusals in between are counted and named in the next line.
+WEBHOOK_REFUSAL_LOG_INTERVAL_SEC = 60
 # Outer safety net around the whole Function Plan backup cycle (bulk load + auto-backup +
 # paper backfill + purge): guarantees the cycle's lock is released even if some step hangs
 # in a way COMEXIO_HTTP_TIMEOUT_SEC doesn't cover, so a stuck cycle can't permanently block

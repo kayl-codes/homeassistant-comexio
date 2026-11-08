@@ -23,6 +23,7 @@ from hashlib import sha256
 import hmac
 import logging
 import re
+from time import monotonic
 from typing import Any
 
 from aiocomexio.const import WebioClass
@@ -31,7 +32,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import DOMAIN, WEBHOOK_REFUSAL_LOG_INTERVAL_SEC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -104,6 +105,26 @@ class WebhookSecurity:
         self.legacy_enabled = True
         self.migrated: set[str] = set()
         self.last_write: datetime | None = None
+        # kind of refusal -> (time of its last log line, refusals since then that were not logged)
+        self._refusal_log: dict[str, tuple[float, int]] = {}
+
+    def warn_refused(self, kind: str, message: str, *args: Any) -> None:
+        """Log a refused request, one line per kind and WEBHOOK_REFUSAL_LOG_INTERVAL_SEC.
+
+        The endpoint takes no authentication and the old id is guessable, so anybody who reaches HA can send refused
+        requests as fast as they like; the rest is counted and named in the next line (a flood that ends inside the
+        interval is named by no line, the skipped ones stay readable at debug level). Never pass the payload.
+        """
+        now = monotonic()
+        last, skipped = self._refusal_log.get(kind, (None, 0))
+        if last is not None and now - last < WEBHOOK_REFUSAL_LOG_INTERVAL_SEC:
+            self._refusal_log[kind] = (last, skipped + 1)
+            _LOGGER.debug(message, *args)
+            return
+        self._refusal_log[kind] = (now, 0)
+        if skipped:
+            message += f" ({skipped} more of this kind since the last message were not logged)"
+        _LOGGER.warning(message, *args)
 
     async def async_load(self) -> None:
         """Read the store, creating the secret on first use."""
@@ -199,7 +220,8 @@ class WebhookSecurity:
         """
         server = data.get("server")
         if server is not None and server != self.server_id:
-            _LOGGER.warning("[%s] Webhook payload for server %r dropped: %s", self.server_id, server, _excerpt(data))
+            # Only a cut of the server name, never the payload: the sender is anybody who can reach the endpoint.
+            self.warn_refused("foreign-server", "[%s] Webhook payload for server %.40r dropped", self.server_id, server)
             return False
         if self.legacy_enabled and _same(webhook_id, legacy_webhook_id(self.server_id)):
             return True
@@ -221,15 +243,11 @@ def command_deviation(target: Mapping[str, Any], parameter: str, data: str) -> s
         # No ids in the reason: it is logged, and a webhook id is the secret of its command.
         return "path is not the command's own webhook path"
     wanted = _SERVER_FIELD_RE.search(str(target.get("Data", "")))
-    if wanted and wanted.group(0) not in data:
-        return f"body without {wanted.group(0)}"
+    if wanted and len(re.findall(rf"(?<=[\s,{{]){re.escape(wanted.group(0))}", data)) != 1:
+        return f"body without exactly one {wanted.group(0)}"
     return None
 
 
 def _same(received: str, expected: str) -> bool:
     """Constant-time comparison; bytes, because compare_digest refuses a str that is not ASCII."""
     return hmac.compare_digest(received.encode(), expected.encode())
-
-
-def _excerpt(data: Mapping[str, Any]) -> str:
-    return str(dict(data))[:200]

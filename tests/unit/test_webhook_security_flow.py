@@ -399,6 +399,10 @@ def _form(parameter: str | None = _TARGET["Parameter"], data: str | None = _TARG
         ("/api/webhook/comexio_srv", _TARGET["Data"], "path"),
         (_TARGET["Parameter"], 'return {id="5", value=a, type="marker"}', "body without"),
         (_TARGET["Parameter"], _TARGET["Data"].replace(SERVER, "other"), "body without"),
+        # Review (Sourcery, #279): the field once, as a field of its own - not twice, not the tail of another name.
+        (_TARGET["Parameter"], _TARGET["Data"].replace("}", f', server="{SERVER}"}}'), "exactly one"),
+        (_TARGET["Parameter"], _TARGET["Data"].replace(" server=", " xserver="), "exactly one"),
+        (_TARGET["Parameter"], _TARGET["Data"].replace(" server=", ".server="), "exactly one"),
     ],
 )
 def test_a_command_matches_its_target_by_path_and_server_field(parameter: str, data: str, why: str | None) -> None:
@@ -771,3 +775,65 @@ def test_a_refused_webhook_id_is_warned_once_and_never_shown(
     assert taken[:8] not in warnings[0]
     assert refused == {taken}
     assert not registered
+
+
+def test_a_server_name_full_of_quotes_and_backslashes_still_passes_its_own_check(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lib escapes the name inside the field: a name that spells a field itself is not a second one."""
+    comexio_api.webhook_security = _security(monkeypatch)
+    weird = 'a"b server="x" \\ end'
+    target = comexio_api.build_webio_commands(weird, PARSED)[0]
+
+    assert ws.command_deviation(target, target["Parameter"], target["Data"].lstrip("\n")) is None
+
+
+def test_refused_requests_are_logged_once_per_kind_and_interval_without_their_payload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Review (Sourcery, #279): the endpoint is open to anybody, so a flood of refusals must not flood the log."""
+    security = _security(monkeypatch)
+    clock = [0.0]  # a freshly booted host: the first refusal must be logged although monotonic() is below the interval
+    monkeypatch.setattr(ws, "monotonic", lambda: clock[0])
+    server = "evil-" + "x" * 80
+    flood = {"type": "marker", "id": "5", "value": 1, "server": server, "token": "s3cr3t"}
+
+    with caplog.at_level("WARNING"):
+        for _ in range(5):
+            assert security.accepts("whatever", flood) is False
+        security.warn_refused("other-kind", "[%s] another kind", SERVER)
+        clock[0] += ws.WEBHOOK_REFUSAL_LOG_INTERVAL_SEC
+        assert security.accepts("whatever", flood) is False
+        for _ in range(2):
+            clock[0] += 1
+            assert security.accepts("whatever", flood) is False
+        clock[0] += ws.WEBHOOK_REFUSAL_LOG_INTERVAL_SEC
+        assert security.accepts("whatever", flood) is False
+
+    lines = [record.getMessage() for record in caplog.records]
+    foreign = [line for line in lines if "dropped" in line]
+    assert len(foreign) == 3
+    assert "more of this kind" not in foreign[0]
+    assert "4 more of this kind" in foreign[1]
+    assert "2 more of this kind" in foreign[2]  # the counter starts again after each line
+    assert repr(server)[:40] in foreign[0]
+    assert repr(server) not in caplog.text
+    assert "another kind" in " ".join(lines)
+    assert "s3cr3t" not in caplog.text
+
+
+def test_the_handler_logs_each_kind_of_refusal_once_per_interval_as_a_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    security = _security(monkeypatch)
+    monkeypatch.setattr(ws, "monotonic", lambda: 0.0)
+    handler = _handler(monkeypatch, security, MagicMock())
+
+    with caplog.at_level("WARNING"):
+        _run(handler(None, "d" * 32, _Request(ValueError("not json"))))
+        _run(handler(None, "d" * 32, _Request([1])))
+        _run(handler(None, "d" * 32, _Request(ValueError("not json again"))))
+
+    non_json = [record for record in caplog.records if "non-JSON payload" in record.getMessage()]
+    assert [record.levelname for record in non_json] == ["WARNING"]
+    assert "not a JSON object" in caplog.text

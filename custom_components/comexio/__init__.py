@@ -196,13 +196,17 @@ def _webhook_handler(coordinator: ComexioCoordinator, security: WebhookSecurity)
             try:
                 data = await request.json()
             except Exception:
-                _LOGGER.error("Received non-JSON payload on a Comexio webhook")
+                security.warn_refused("non-json", "[%s] Received non-JSON payload on a Comexio webhook", server_id)
                 return
             if not isinstance(data, dict):
-                _LOGGER.warning("[%s] Webhook request refused: its payload is not a JSON object", server_id)
+                security.warn_refused(
+                    "not-object", "[%s] Webhook request refused: its payload is not a JSON object", server_id
+                )
                 return
             if not security.accepts(webhook_id, data):
-                _LOGGER.warning("[%s] Webhook request refused: its id does not belong to its payload", server_id)
+                security.warn_refused(
+                    "id-mismatch", "[%s] Webhook request refused: its id does not belong to its payload", server_id
+                )
                 return
             _dispatch_push(coordinator, data)
         except Exception as e:
