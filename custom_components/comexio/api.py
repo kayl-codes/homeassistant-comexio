@@ -114,6 +114,11 @@ _LOGGER = logging.getLogger(__name__)
 
 # Why _parse_onewire kept the last 1-Wire sensors when the config carried no $FubModules (a failed fetch).
 ONEWIRE_NO_FUB_MODULES_CAUSE = "the config carries no $FubModules"
+# The 1-Wire sensors _parse_onewire leaves out, each warned about once per changed set.
+ONEWIRE_UNKNOWN_KIND_LOG_MSG = "1-Wire sensors of unknown kind get no Web-IO command and no entity: %s"
+ONEWIRE_SHARED_ID_LOG_MSG = (
+    "1-Wire sensors that share their Id with another one get no Web-IO command and no entity: %s"
+)
 
 # The API whose set_value last met another certificate, kept per asyncio task: two writes in flight at once (two
 # entities, a service call) run in tasks of their own, so neither reads the other's cause.
@@ -145,6 +150,30 @@ def onewire_item(sensor: OneWireSensor) -> dict[str, Any]:
         "hw_id": sensor.hw_id,
         "value": None,
     }
+
+
+def _one_sensor_per_config_id(sensors: Iterable[OneWireSensor]) -> tuple[list[OneWireSensor], tuple[str, ...]]:
+    """The sensors sorted by config id, the first by address of those that share one; and the others' addresses.
+
+    A function plan element names its sensor by the Id alone, so the audit, the sync and the plan wiring key a
+    1-Wire sensor by it: of sensors sharing an Id (aiocomexio warns about it) only one can be wired. Comexio keys
+    the group by that Id, so a shared one is not expected; if it comes, every part of HA keeps the same sensor.
+    """
+    kept: dict[int, OneWireSensor] = {}
+    left_out: list[str] = []
+    for sensor in sorted(sensors, key=lambda s: (s.config_id, s.address)):
+        if sensor.config_id in kept:
+            left_out.append(sensor.address)
+        else:
+            kept[sensor.config_id] = sensor
+    return list(kept.values()), tuple(sorted(left_out))
+
+
+def _warned_once_per_change(last: tuple[str, ...], current: tuple[str, ...], message: str) -> tuple[str, ...]:
+    """Warn about the addresses of current unless they are the ones last warned about; return current."""
+    if current and current != last:
+        _LOGGER.warning(message, ", ".join(current))
+    return current
 
 
 def _onewire_sensor(item: Mapping[str, Any]) -> OneWireSensor:
@@ -886,8 +915,9 @@ class ComexioAPI:
         self.onewire_known = False
         # The cause last warned about when the 1-Wire group did not parse; None while it parses.
         self._onewire_parse_error: str | None = None
-        # The addresses of unknown kind last warned about (see _parse_onewire).
+        # The addresses of unknown kind and of a shared config id last warned about (see _parse_onewire).
         self._onewire_unknown_kind: tuple[str, ...] = ()
+        self._onewire_shared_id: tuple[str, ...] = ()
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
@@ -1752,8 +1782,10 @@ class ComexioAPI:
         group (ComexioDataError) are warned about once per cause: either way the sensors stay as they were,
         so their commands are neither reported as orphans nor deleted by a sync over one bad page
         (onewire_known stays False until a group parsed, see the entity cleanup). A sensor of unknown kind
-        gets no command (aiocomexio would build none) and so no entity: no value would ever reach it. That is
-        warned about once per changed set of such sensors.
+        gets no command (aiocomexio would build none) and so no entity: no value would ever reach it. Nor does a
+        sensor whose config id an earlier one already has (_one_sensor_per_config_id). Either is warned about
+        once per changed set of such sensors: the sensor is in the config but HA never shows it, which a user
+        would otherwise only find in a debug log.
         """
         if not isinstance(fub_modules, Mapping) or not fub_modules:
             return self._kept_onewire_items(ONEWIRE_NO_FUB_MODULES_CAUSE)
@@ -1764,19 +1796,12 @@ class ComexioAPI:
         self._onewire_parse_error = None
         self.onewire_known = True
         unknown = tuple(sorted(s.address for s in sensors.values() if s.kind is None))
-        if unknown != self._onewire_unknown_kind:
-            # Once per changed set: the sensor is in the config but HA never shows it, which a user would
-            # otherwise only find in a debug log.
-            self._onewire_unknown_kind = unknown
-            if unknown:
-                _LOGGER.warning(
-                    "1-Wire sensors of unknown kind get no Web-IO command and no entity: %s", ", ".join(unknown)
-                )
-        self._onewire_items = [
-            onewire_item(sensor)
-            for sensor in sorted(sensors.values(), key=lambda s: (s.config_id, s.address))
-            if sensor.kind is not None
-        ]
+        self._onewire_unknown_kind = _warned_once_per_change(
+            self._onewire_unknown_kind, unknown, ONEWIRE_UNKNOWN_KIND_LOG_MSG
+        )
+        known, shared = _one_sensor_per_config_id(s for s in sensors.values() if s.kind is not None)
+        self._onewire_shared_id = _warned_once_per_change(self._onewire_shared_id, shared, ONEWIRE_SHARED_ID_LOG_MSG)
+        self._onewire_items = [onewire_item(sensor) for sensor in known]
         return copy.deepcopy(self._onewire_items)
 
     def _kept_onewire_items(self, cause: str) -> list[dict[str, Any]]:

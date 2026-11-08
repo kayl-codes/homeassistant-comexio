@@ -22,7 +22,7 @@ from custom_components.comexio import (
 )
 from custom_components.comexio.api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI
 from custom_components.comexio.binary_sensor import ComexioOneWireBinarySensor, ComexioOneWireProblemSensor
-from custom_components.comexio.button import _known_source_names
+from custom_components.comexio.button import ComexioSyncButton, _known_source_names
 from custom_components.comexio.const import (
     ONEWIRE_DATA_KEY,
     ONEWIRE_PROBLEM_MISSING,
@@ -192,6 +192,35 @@ def test_a_sensor_of_unknown_kind_warns_once_per_changed_set(
     assert len(warnings) == 2
     assert warnings[0].endswith("OH2")
     assert warnings[1].endswith("OH2, OX3")
+
+
+def test_of_sensors_sharing_a_config_id_only_the_first_by_address_gets_an_entity(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The audit, the sync and the plan wiring key a sensor by its config id: all of them must keep the same one.
+
+    A sensor of unknown kind gets no entity anyway, so it takes no config id from one of known kind.
+    """
+    shared = {
+        "2": {},
+        "12": {
+            "1": _entry(4, "OT"),
+            "2": _entry(4, "OH"),
+            "3": _entry(5),
+            "4": _entry(6, "OA", binary=7),
+            "5": _entry(6),
+        },
+    }
+    with caplog.at_level(logging.WARNING):
+        items = comexio_api._parse_onewire(shared)
+        comexio_api._parse_onewire(shared)
+        comexio_api._parse_onewire(_fub_modules(_entry(5)))
+        comexio_api._parse_onewire(shared)
+        comexio_api._parse_onewire({"2": {}, "12": {**shared["12"], "6": _entry(5, "OX")}})
+
+    assert [(i["id"], i["address"]) for i in items] == [(4, "OH4"), (5, "OT5"), (6, "OT6")]
+    warnings = [r.getMessage() for r in caplog.records if r.msg == api_module.ONEWIRE_SHARED_ID_LOG_MSG]
+    assert warnings == [api_module.ONEWIRE_SHARED_ID_LOG_MSG % s for s in ("OT4", "OT4", "OT4, OX5")]
 
 
 def test_the_status_fetch_reports_a_changed_certificate_without_raising(comexio_api: ComexioAPI) -> None:
@@ -504,10 +533,14 @@ def test_the_sync_finds_a_created_command_by_its_exact_name() -> None:
     data = {"markers": [{"id": 5, "name": "M5 Licht"}], ONEWIRE_DATA_KEY: [_item("OT1", config_id=4)]}
     cats = [SOURCE_CATEGORIES[WebioClass.MARKER], SOURCE_CATEGORIES[WebioClass.ONEWIRE]]
 
-    assert _known_source_names(data, cats) == {
-        "HA M5 Licht": (WebioClass.MARKER, 5),
-        "HA 1Wire OT1": (WebioClass.ONEWIRE, 4),
-    }
+    known = _known_source_names(data, cats)
+
+    assert known == {"HA M5 Licht": (WebioClass.MARKER, 5), "HA 1Wire OT1": (WebioClass.ONEWIRE, 4)}
+    # The created names go to the wiring by the id their plan element carries.
+    assert ComexioSyncButton._classify_created_names(["HA 1Wire OT1", "HA M5 Licht"], cats, {}, known) == (
+        {WebioClass.ONEWIRE: [4], WebioClass.MARKER: [5]},
+        [],
+    )
 
 
 def test_the_plan_preview_labels_a_sensor_element_like_its_entity() -> None:

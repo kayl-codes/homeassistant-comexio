@@ -148,7 +148,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
     return True
 
 
-_WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX", "onewire": "1-Wire"}
+_WEBHOOK_KIND_LABELS = {WebioClass.QUICKBUS: "Quickbus", WebioClass.KNX: "KNX", WebioClass.ONEWIRE: "1-Wire"}
 
 
 def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:
@@ -160,7 +160,7 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
     val = data.get("value")
     webhook_type = data.get("type")
     server_id = coordinator.server_id
-    if webhook_type == "io":
+    if webhook_type == WebioClass.IO:
         ext = data.get("ext")
         io_id = data.get("io")
         if not ext or not io_id:
@@ -172,12 +172,12 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
     if item_id is None:
         label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
         security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
-    elif webhook_type == "quickbus":
+    elif webhook_type == WebioClass.QUICKBUS:
         coordinator.update_quickbus_io(item_id, val)
-    elif webhook_type == "onewire":
+    elif webhook_type == WebioClass.ONEWIRE:
         # The id of a 1-Wire push is the sensor's address (OT1), not its config id (aiocomexio.webio).
         coordinator.update_onewire(str(item_id), val)
-    elif webhook_type == "knx":
+    elif webhook_type == WebioClass.KNX:
         # Blind guess: KNX webhook payload shape assumed identical to markers
         # (no real KNX hardware/sample payload available — see project_knx_objects memory).
         coordinator.update_knx(item_id, val)

@@ -3741,9 +3741,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def function_plan_onewire_label_map(self) -> dict[str, Any]:
         """1-Wire config id -> sensor item for the plan-preview pills of the sensor elements (type 12).
 
-        Named like its entity ("OT1 Kitchen"): the pill shows the address, then the rest of the name. A config id
-        that several sensors share (aiocomexio warns about it) labels the first of them. Empty while import_onewire
-        is off.
+        Named like its entity ("OT1 Kitchen"): the pill shows the address, then the rest of the name. The parse
+        keeps one sensor per config id (api._one_sensor_per_config_id); should two share one anyway, the first
+        labels it, as there. Empty while import_onewire is off.
         """
         by_id: dict[str, Any] = {}
         for sensor in (self.data or {}).get(ONEWIRE_DATA_KEY, []):
@@ -5318,17 +5318,17 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Only a finite number counts as a reading, anything else as unknown (like an IO's push).
         """
         address = str(address)
+        kind = WebioClass.ONEWIRE
+        warn_key = _webhook_warn_key(kind, address)
         if (sensor := self.onewire_sensor(address)) is None:
-            self._log_unknown_webhook_io(
-                _webhook_warn_key("onewire", address), WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG, one_line(address), value
-            )
+            self._log_unknown_webhook_io(warn_key, WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG, one_line(address), value)
         else:
             previous = sensor.get("value")
             self._set_onewire_value(sensor, _live_io_number(value))
-            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "onewire", one_line(sensor.get("name") or address), value, previous)
-            self._warned_unknown_webhook_ios.discard(_webhook_warn_key("onewire", address))
+            _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, kind, one_line(sensor.get("name") or address), value, previous)
+            self._warned_unknown_webhook_ios.discard(warn_key)
             # The plan element refers to the config id; labelled like its plan pill (function_plan_onewire_label_map).
-            self._fire_plan_event("onewire", str(sensor["id"]), onewire_entity_name(sensor), value)
+            self._fire_plan_event(kind, str(sensor["id"]), onewire_entity_name(sensor), value)
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
