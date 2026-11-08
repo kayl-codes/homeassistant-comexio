@@ -180,7 +180,8 @@ def command_deviation(target: Mapping[str, Any], parameter: str, data: str) -> s
     way aiocomexio hands it over (surrounding blanks and the form's line-break handling aside).
     """
     if parameter.strip() != target.get("Parameter"):
-        return f"path {parameter.strip()!r} instead of {target.get('Parameter')!r}"
+        # No ids in the reason: it is logged, and a webhook id is the secret of its command.
+        return "path is not the command's own webhook path"
     wanted = _SERVER_FIELD_RE.search(str(target.get("Data", "")))
     if wanted and wanted.group(0) not in data:
         return f"body without {wanted.group(0)}"

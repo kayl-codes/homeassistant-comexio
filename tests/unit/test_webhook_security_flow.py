@@ -360,6 +360,17 @@ def test_a_command_matches_its_target_by_path_and_server_field(parameter: str, d
     assert (deviation is None) if why is None else (deviation is not None and why in deviation)
 
 
+def test_a_path_deviation_never_names_a_webhook_id() -> None:
+    """The reason is logged, and the id in a path is the secret of its command."""
+    wrong = "/api/webhook/comexio_srv"
+
+    deviation = ws.command_deviation(_TARGET, wrong, _TARGET["Data"])
+
+    assert deviation is not None
+    assert wrong.rsplit("/", 1)[-1] not in deviation
+    assert _TARGET["Parameter"].rsplit("/", 1)[-1] not in deviation
+
+
 def test_the_old_id_goes_off_only_when_every_command_reads_back_as_its_target(monkeypatch: pytest.MonkeyPatch) -> None:
     coordinator = _verify_coordinator(monkeypatch, _form())
 
