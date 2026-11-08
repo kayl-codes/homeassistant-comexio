@@ -123,6 +123,10 @@ class WebhookSecurity:
             self.last_write = dt_util.as_utc(datetime.fromisoformat(written)) if isinstance(written, str) else None
         except ValueError:
             self.last_write = None
+        if self.migrated and self.last_write is None:
+            # Commands were rewritten but their stamp is lost: count the write as now, so the old id is only
+            # switched off after a Comexio restart that happens from here on.
+            self.last_write = dt_util.utcnow()
 
     def _data(self) -> dict[str, Any]:
         return {

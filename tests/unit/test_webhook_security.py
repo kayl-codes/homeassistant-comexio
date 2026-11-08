@@ -323,3 +323,20 @@ def test_a_run_stops_while_a_function_plan_restore_runs(monkeypatch: pytest.Monk
     assert _run(coordinator._async_rewrite_pending_webhooks(coordinator.api.webhook_security)) == (0, 0)
 
     coordinator.api.save_single_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stamp", ["garbage", None])
+def test_a_lost_write_stamp_with_a_ledger_counts_as_written_now(monkeypatch: pytest.MonkeyPatch, stamp: Any) -> None:
+    security = _security(monkeypatch, {"secret": "abc", "migrated": ["HA M5"], "last_write": stamp})
+
+    _run(security.async_load())
+
+    assert security.last_write is not None  # the old id waits for a Comexio restart from now on
+
+
+def test_no_stamp_and_no_ledger_stays_unstamped(monkeypatch: pytest.MonkeyPatch) -> None:
+    security = _security(monkeypatch, {"secret": "abc", "migrated": []})
+
+    _run(security.async_load())
+
+    assert security.last_write is None

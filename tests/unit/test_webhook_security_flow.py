@@ -194,7 +194,11 @@ def test_the_migration_targets_carry_their_own_path(comexio_api: ComexioAPI, mon
 
 def _setup(security: ws.WebhookSecurity, wanted: set[str]) -> tuple[Any, Any, Any]:
     coordinator = SimpleNamespace(
-        server_id=SERVER, webhook_command_ids=lambda: set(wanted), async_add_listener=MagicMock(), sync_webhooks=None
+        server_id=SERVER,
+        data={"io": []},
+        webhook_command_ids=lambda: set(wanted),
+        async_add_listener=MagicMock(),
+        sync_webhooks=None,
     )
     entry = MagicMock(entry_id="e1")
     hass = MagicMock(data={_DOMAIN: {}})
@@ -453,3 +457,78 @@ def test_a_command_built_by_the_lib_passes_its_own_check(
 
     assert 'server="' in target["Data"]
     assert ws.command_deviation(target, target["Parameter"], target["Data"].lstrip("\n")) is None
+
+
+def test_a_failing_read_makes_the_command_unreadable_and_the_check_goes_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.api.get_webio_command_form = AsyncMock(side_effect=TimeoutError("slow"))
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    assert coordinator.api.webhook_security.legacy_enabled
+    assert "1 could not be read (HA m)" in caplog.text
+
+
+def test_a_deviating_command_leaves_the_ledger_on_disk_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form(parameter="/api/webhook/comexio_srv"))
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    coordinator.api.webhook_security.async_save.assert_awaited()
+
+
+def test_a_failing_save_does_not_switch_the_old_id_off(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    security = coordinator.api.webhook_security
+    security.async_save = AsyncMock(side_effect=OSError("disk full"))
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    assert security.legacy_enabled  # a state that is not persisted is not run on
+    coordinator.sync_webhooks.assert_not_called()
+    assert "could not be saved" in caplog.text
+
+
+def test_targets_without_any_stored_command_verify_nothing_and_keep_the_old_id(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.data["webio_commands"] = {}
+
+    assert _run(coordinator._async_finish_webhook_migration()) == "pending"
+
+    assert coordinator.api.webhook_security.legacy_enabled
+    assert "no Web-IO command is known" in caplog.text
+
+
+def test_an_unload_during_the_rewrite_stops_it_before_the_next_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.api.webhook_security.migrated = set()
+
+    async def save(*_args: Any, **_kwargs: Any) -> bool:
+        coordinator.unloading = True
+        return True
+
+    coordinator.api.save_single_command = AsyncMock(side_effect=save)
+    coordinator.data["webio_commands"]["HA n"] = {"cmdId": "10", "webioClass": "marker"}
+    coordinator._webio_range_targets = lambda: {"HA m": _TARGET, "HA n": {**_TARGET, "Name": "HA n"}}
+
+    assert _run(coordinator._async_rewrite_pending_webhooks(coordinator.api.webhook_security)) == (1, 0)
+
+    assert coordinator.api.save_single_command.await_count == 1
+
+
+def test_a_failing_rewrite_counts_as_failed_and_the_run_goes_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _verify_coordinator(monkeypatch, _form())
+    coordinator.api.webhook_security.migrated = set()
+    coordinator.api.save_single_command = AsyncMock(side_effect=TimeoutError("slow"))
+
+    assert _run(coordinator._async_rewrite_pending_webhooks(coordinator.api.webhook_security)) == (0, 1)
+
+    assert "Moving Web-IO command 'HA m' failed" in caplog.text

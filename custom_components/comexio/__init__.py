@@ -234,6 +234,9 @@ def _setup_webhooks(
     @callback
     def sync_webhooks() -> None:
         """Register the webhook ids the commands use now, drop the ones no command can use any more."""
+        if not coordinator.data:
+            # No data yet (or lost): the ids derived from it would be empty and every registered one dropped.
+            return
         wanted = coordinator.webhook_command_ids()
         if security.legacy_enabled:
             wanted.add(legacy_webhook_id(server_id))
