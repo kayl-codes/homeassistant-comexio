@@ -76,6 +76,9 @@ def command_key(webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor
 
 # Payload types whose command key is "<type>:<id>"; any other type with an id is a marker's.
 _ID_KEYED_PAYLOAD_TYPES = frozenset({WebioClass.QUICKBUS, WebioClass.KNX, WebioClass.ONEWIRE})
+# Payload types whose commands carried their own id from the start: none of them ever posted to the old id, so a
+# push of theirs on it is forged even while the old id is on for the commands not migrated yet.
+_OWN_ID_ONLY_PAYLOAD_TYPES = frozenset({WebioClass.ONEWIRE})
 
 
 def payload_key(data: Mapping[str, Any]) -> str | None:
@@ -239,16 +242,16 @@ class WebhookSecurity:
     def accepts(self, webhook_id: str, data: Mapping[str, Any]) -> bool:
         """Whether a request on webhook_id may deliver this payload.
 
-        The id of a command only carries that command's value; the old id carries any while it is enabled.
-        A payload that names another server is refused either way.
+        The id of a command only carries that command's value; the old id carries any while it is enabled, except
+        the kinds whose commands never posted to it. A payload that names another server is refused either way.
         """
         server = data.get("server")
         if server is not None and server != self.server_id:
             # Only a cut of the server name, never the payload: the sender is anybody who can reach the endpoint.
             self.warn_refused("foreign-server", "[%s] Webhook payload for server %.40r dropped", self.server_id, server)
             return False
-        if self.legacy_enabled and _same(webhook_id, legacy_webhook_id(self.server_id)):
-            return True
+        if _same(webhook_id, legacy_webhook_id(self.server_id)):
+            return self.legacy_enabled and data.get("type") not in _OWN_ID_ONLY_PAYLOAD_TYPES
         key = payload_key(data)
         return key is not None and _same(webhook_id, derive_webhook_id(self.secret, key))
 

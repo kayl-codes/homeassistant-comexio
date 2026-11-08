@@ -198,6 +198,34 @@ def test_the_old_id_carries_any_value_only_while_it_is_enabled(monkeypatch: pyte
     assert not security.accepts(old, {"type": "marker", "id": "5"})
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "marker", "id": "5"},
+        {"type": "io", "ext": "BASE", "io": "Q1"},
+        {"type": "knx", "id": "3"},
+        {"type": "quickbus", "id": "501"},
+    ],
+)
+def test_the_old_id_still_carries_every_kind_whose_commands_posted_to_it(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, str]
+) -> None:
+    # Only the kinds whose commands never used the old id lose it; the others still post there until migrated.
+    assert _security(monkeypatch).accepts(ws.legacy_webhook_id(SERVER), payload)
+
+
+def test_the_old_id_never_carries_a_onewire_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1-Wire commands carry their own id from the start, so a 1-Wire push on the old id is forged (#284).
+    security = _security(monkeypatch)
+    old = ws.legacy_webhook_id(SERVER)
+    payload = {"type": "onewire", "id": "OT1", "value": 21.5}
+
+    assert not security.accepts(old, payload)
+    assert security.accepts(ws.derive_webhook_id(security.secret, "onewire:OT1"), payload)
+    security.legacy_enabled = False
+    assert not security.accepts(old, payload)
+
+
 def test_a_forged_id_a_foreign_server_and_a_non_ascii_id_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     security = _security(monkeypatch)
     own = ws.derive_webhook_id(security.secret, "marker:5")

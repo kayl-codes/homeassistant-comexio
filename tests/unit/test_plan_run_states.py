@@ -241,6 +241,10 @@ class _FakeCoordinator(SimpleNamespace):
     _async_refresh_system_info_storage = AsyncMock()
     _async_refresh_onewire_status = AsyncMock()
     _merge_onewire_values = ComexioCoordinator._merge_onewire_values
+    update_onewire = ComexioCoordinator.update_onewire
+    onewire_sensor = ComexioCoordinator.onewire_sensor
+    _set_onewire_value = ComexioCoordinator._set_onewire_value
+    _fire_plan_event = ComexioCoordinator._fire_plan_event
     # The failed-poll bookkeeping of _async_update_data (free storage counts a failed config poll too).
     _note_system_info_dropped = MagicMock()
     system_info = SimpleNamespace(apply_storage=lambda _info: [])
@@ -3875,7 +3879,15 @@ def _parsed_config(marker_title: str = "Licht") -> dict[str, Any]:
         "io_all": [dict(io)],
         "knx": [{"id": 3, "type": "digital", "name": "K3 KNX", "ha_name": "K3 KNX", "value": 1}],
         coordinator_module.ONEWIRE_DATA_KEY: [
-            {"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog", "prefix": "OT", "value": 21.5}
+            {
+                "id": 4,
+                "address": "OT1",
+                "name": "1Wire OT1",
+                "title": "Kitchen",
+                "type": "analog",
+                "prefix": "OT",
+                "value": 21.5,
+            }
         ],
         coordinator_module.QUICKBUS_IO_DATA_KEY: [
             {**io, "id": 501, "identifier": "G1", "quickbus": {"device_id": 3, "name": "QB3"}, "value": 0}
@@ -3899,6 +3911,9 @@ def test_the_saved_config_keeps_the_layout_without_the_values() -> None:
     assert saved["io"][0] == {**parsed["io"][0], "value": None}
     for key in ("io_all", "knx", coordinator_module.ONEWIRE_DATA_KEY, coordinator_module.QUICKBUS_IO_DATA_KEY):
         assert [item["value"] for item in saved[key]] == [None], key
+    # The whole 1-Wire item: a start from the saved config still names and classes the sensor (prefix, title).
+    onewire = coordinator_module.ONEWIRE_DATA_KEY
+    assert saved[onewire] == [{**parsed[onewire][0], "value": None}]
     assert saved["webio_devices"] == {"HA": {"ip": "192.0.2.1"}}
     assert coordinator_module.is_saved_config(saved)
     # A copy: what the poll and the pushes change afterwards does not reach the saved config.
@@ -4002,16 +4017,26 @@ def test_a_onewire_push_during_the_polls_last_awaits_reaches_the_fresh_items(api
     # The readings come by push only: one that lands after the fetch (here during the status fetch) must still be on
     # the items the poll returns, or the sensor reads the stale value until it next changes.
     coordinator = _certificate_coordinator(api)
+
+    def sensor(value: float | None) -> dict:
+        return {"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog", "value": value}
+
+    # The published data still holds the previous reading while the poll runs.
+    coordinator.data = {ONEWIRE_DATA_KEY: [sensor(19.0)]}
     coordinator._onewire_values = {"OT1": 19.0}
+    coordinator._warned_unknown_webhook_ios = set()
+    coordinator._async_publish_pushed_value = MagicMock()
+    coordinator.schedule_plan_preview_refresh = MagicMock()
 
     async def fetch_and_audit() -> dict:
         coordinator._last_poll_scraped = True
         coordinator._polled_plan_ids = None
         coordinator._scraped_config = None
-        return {ONEWIRE_DATA_KEY: [{"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog", "value": None}]}
+        return {ONEWIRE_DATA_KEY: [sensor(None)]}
 
     async def push_during_status_fetch(_sensors: list) -> None:
-        coordinator._onewire_values["OT1"] = 23.5
+        # Through the webhook's own path, so a push that stopped reaching _onewire_values would fail this test.
+        coordinator.update_onewire("OT1", 23.5)
 
     coordinator._async_fetch_and_audit = AsyncMock(side_effect=fetch_and_audit)
     coordinator._async_refresh_onewire_status = AsyncMock(side_effect=push_during_status_fetch)
