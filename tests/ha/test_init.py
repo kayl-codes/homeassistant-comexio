@@ -10,12 +10,17 @@ from homeassistant.components.webhook import DOMAIN as WEBHOOK_DOMAIN
 from homeassistant.config_entries import SOURCE_REAUTH, ConfigEntryState
 from homeassistant.const import CONF_PASSWORD, STATE_UNKNOWN
 from homeassistant.core import Event, HomeAssistant, callback
-from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers import entity_registry as er, issue_registry as ir
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import DOMAIN, FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC, SETUP_UNREACHABLE_ENTRIES
+from custom_components.comexio.const import (
+    DOMAIN,
+    FUNCTION_PLAN_WATCHDOG_BOOT_GRACE_SEC,
+    ISSUE_KNX_PRERELEASE_CLEANUP,
+    SETUP_UNREACHABLE_ENTRIES,
+)
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 from .conftest import SERVER_ID
@@ -490,3 +495,31 @@ async def test_a_rejected_login_after_an_unreachable_attempt_ends_the_carried_ou
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
     assert mock_config_entry.entry_id not in hass.data[SETUP_UNREACHABLE_ENTRIES]
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_removing_the_entry_drops_a_knx_cleanup_repair_raised_before_the_link(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    """The KNX cleanup repair is persistent: one raised before issue_owner existed has no entry link to go with."""
+    await _setup(hass, mock_config_entry)
+    issue_id = f"{ISSUE_KNX_PRERELEASE_CLEANUP}_{SERVER_ID}"
+    other_server_issue_id = f"{ISSUE_KNX_PRERELEASE_CLEANUP}_otherserver"
+    for raised in (issue_id, other_server_issue_id):
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            raised,
+            is_fixable=True,
+            is_persistent=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_KNX_PRERELEASE_CLEANUP,
+        )
+
+    await hass.config_entries.async_remove(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    issues = ir.async_get(hass)
+    assert issues.async_get_issue(DOMAIN, issue_id) is None
+    # Another Comexio server's repair belongs to its own entry.
+    assert issues.async_get_issue(DOMAIN, other_server_issue_id) is not None

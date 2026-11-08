@@ -23,8 +23,12 @@ CREATE_NAMES = {"async_create_issue", "create_issue"}
 OWN_ENTRY_IDS = {"entry_id", "entry.entry_id", "self._entry_id", "self.config_entry.entry_id"}
 
 
-def _hass(*, entry_exists: bool) -> SimpleNamespace:
-    entries = {ENTRY_ID: object()} if entry_exists else {}
+OTHER_ENTRY_ID = "entry-2"
+
+
+def _hass(*entry_ids: str) -> SimpleNamespace:
+    """A hass whose config entries are exactly entry_ids."""
+    entries = dict.fromkeys(entry_ids, object())
     return SimpleNamespace(config_entries=SimpleNamespace(async_get_entry=entries.get))
 
 
@@ -37,18 +41,26 @@ def test_home_assistant_accepts_the_owner_keyword() -> None:
 
 def test_links_the_issue_to_its_entry_when_supported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(owner_module, "OWNER_KEYWORD_SUPPORTED", True)
-    assert issue_owner(_hass(entry_exists=True), ENTRY_ID) == {"config_entry_id": ENTRY_ID}
+    hass = _hass(ENTRY_ID, OTHER_ENTRY_ID)
+    # Two entries side by side: each issue is linked to the entry it was raised for, not to a fixed one.
+    assert [issue_owner(hass, entry_id) for entry_id in (ENTRY_ID, OTHER_ENTRY_ID)] == [
+        {"config_entry_id": ENTRY_ID},
+        {"config_entry_id": OTHER_ENTRY_ID},
+    ]
 
 
 def test_passes_nothing_before_home_assistant_knows_the_keyword(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(owner_module, "OWNER_KEYWORD_SUPPORTED", False)
-    assert issue_owner(_hass(entry_exists=True), ENTRY_ID) == {}
+    assert issue_owner(_hass(ENTRY_ID), ENTRY_ID) == {}
 
 
 def test_leaves_the_issue_unlinked_once_the_entry_is_gone(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Linking to an unknown entry raises HomeAssistantError; the issue is created unlinked instead.
+    # Linking to an unknown entry raises HomeAssistantError; the issue is created unlinked instead. The other
+    # entry still exists, so the check has to look up the id it was handed, not any entry.
     monkeypatch.setattr(owner_module, "OWNER_KEYWORD_SUPPORTED", True)
-    assert issue_owner(_hass(entry_exists=False), ENTRY_ID) == {}
+    hass = _hass(OTHER_ENTRY_ID)
+    assert issue_owner(hass, ENTRY_ID) == {}
+    assert issue_owner(hass, OTHER_ENTRY_ID) == {"config_entry_id": OTHER_ENTRY_ID}
 
 
 def _name_of(node: ast.AST) -> str | None:
@@ -104,8 +116,25 @@ def test_detector_flags_missing_or_foreign_links(owner: str) -> None:
     assert _unlinked_creates(source) == [1]
 
 
+def _integration_trees() -> dict[Path, ast.AST]:
+    return {path: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(INTEGRATION.rglob("*.py"))}
+
+
+def test_the_knx_cleanup_is_the_only_persistent_repair() -> None:
+    # A persistent repair outlives restarts, so one raised before issue_owner existed never gets the entry link;
+    # async_remove_entry deletes the KNX cleanup repair by id for that reason. One entry per is_persistent
+    # keyword: a second persistent create, in any file, needs the same delete there before it is pinned here.
+    persistent = [
+        path.relative_to(INTEGRATION).as_posix()
+        for path, tree in _integration_trees().items()
+        for node in ast.walk(tree)
+        if isinstance(node, ast.keyword) and node.arg == "is_persistent"
+    ]
+    assert persistent == ["coordinator.py"]
+
+
 def test_every_repair_issue_is_linked_to_its_entry() -> None:
-    trees = {path: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(INTEGRATION.rglob("*.py"))}
+    trees = _integration_trees()
     # The guard must see the create calls it protects, or a moved directory or a broken detector turns it
     # vacuously green.
     assert any(_is_create_call(node) for tree in trees.values() for node in ast.walk(tree))
