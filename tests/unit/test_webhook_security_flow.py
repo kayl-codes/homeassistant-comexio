@@ -111,7 +111,9 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
 
     async def _save(_base: Any, _device: Any, payload: dict[str, Any], **_k: Any) -> bool:
         held.update(Parameter=payload["Parameter"], Data=payload["Data"])  # what the tick really sent
-        coordinator.api.webhook_security.migrated.add("HA m")
+        # the ledger entry comes from the production bookkeeping, not from the stub: without its mark_written call the
+        # tick tests below fail instead of passing on a ledger the stub filled in itself
+        ComexioAPI._note_command_written(coordinator.api, payload)
         return True
 
     coordinator.api.get_webio_command_form = AsyncMock(
@@ -134,8 +136,18 @@ def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
 
     coordinator.data["webio_commands"]["HA m"]["cmdId"] = "9"
 
-    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    # the tick that writes the last command cannot finish: Comexio sends the new command only after a restart
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
     assert "HA m" in security.migrated
+    assert security.legacy_enabled
+    coordinator.sync_webhooks.assert_not_called()
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+    assert security.legacy_enabled
+    coordinator.sync_webhooks.assert_not_called()
+
+    coordinator.system_info.boot_time = security.last_write + timedelta(minutes=5)
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
     assert not security.legacy_enabled
     coordinator.sync_webhooks.assert_called_once_with()
 
