@@ -348,6 +348,7 @@ def test_every_entity_class_requests_a_stable_entity_id() -> None:
     classes = _integration_entity_classes()
     # Guards against a discovery that silently finds nothing: one class per id mixin and platform kind.
     assert {"sensor.ComexioMarkerSensor", "select.ComexioPlanSelectEntity", "light.ComexioKnxLight"} <= classes.keys()
+    assert classes.keys() >= OWN_ID_HOOK_CLASSES, "OWN_ID_HOOK_CLASSES names a class that discovery no longer finds"
     assert all("async_prepare_to_add_to_hass" in vars(classes[key]) for key in OWN_ID_HOOK_CLASSES)
     unstable = sorted(
         key
