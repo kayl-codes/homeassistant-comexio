@@ -24,6 +24,9 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
+# Local probe and helper scripts against a live Comexio server (not part of the integration)
+dev-tools/
+
 # Local virtual environments
 .venv/
 venv/

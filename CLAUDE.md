@@ -173,6 +173,14 @@ Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templat
 - **R4** (`coordinator.py`): `_sync_lock` (asyncio.Lock) ensures only one sync run at a time.
 - **Guarded reload** (`coordinator.async_reload_entry`): every reload of the entry goes through it — it skips the reload while a sync runs (the sync's closing reload covers it) and otherwise waits for `_sync_lock`, running restores and plan edits. HA's own `config_entries.async_reload` / `async_schedule_reload` would tear the coordinator down mid-sync or mid-restore; a use is allowed only where the guard cannot apply, listed with its reason in `ALLOWED` of `tests/unit/test_guarded_reloads.py`, which fails on any unlisted use.
 
+### Registry scope
+
+The entity and device registries hold the entries of every integration, and a unique_id is unique per integration only — a scan of a whole registry that matches on it can pick another integration's entry (#270). The integration therefore reads the registries through `er.async_entries_for_config_entry` / `dr.async_entries_for_config_entry`. Accessing `entities`, `deleted_entities`, `devices`, `deleted_devices` or the helpers that return foreign entries (`async_entries_for_area` / `_category` / `_device` / `_label`) is allowed only where a scan has to see more, listed with its reason in `ALLOWED` of `tests/unit/test_registry_scans.py`, which fails on any unlisted use.
+
+### Repairs belong to their config entry
+
+Every repair is raised through `issue_owner.async_create_entry_issue(hass, entry_id, issue_id, ...)`, never through `ir.async_create_issue` directly. From Home Assistant 2026.11 on it passes `config_entry_id`, so a repair is removed together with its entry; an older Home Assistant does not know the keyword, so it is left out there (detected on the signature, the HACS minimum stays 2026.8.0). A repair whose entry is already gone is not raised, only logged at debug level. `tests/unit/test_issue_owner.py` fails on a direct `ir.async_create_issue`, on the issue registry reached any other way than `ir.<attribute>`, on a lookup by a name built at runtime, on a wrapper call with another entry id than the one form each file reaches its own entry by, and on a second persistent repair. The KNX pre-release cleanup is the only persistent one; one raised before the link existed is never re-created with it, so `async_remove_entry` deletes it by id.
+
 ### GitHub Actions — HACS-spezifische Ausnahme
 
 `home-assistant/actions/hassfest@master` und `hacs/action@main` **müssen** auf ihren Branch-Refs bleiben (kein SHA-Pinning) — weil Pinning die Validierung einfrieren würde. Die daraus resultierende SonarQube-Warnung S7637 ist als **"Safe"** in SonarCloud zu markieren.

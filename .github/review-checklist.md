@@ -65,6 +65,16 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   sync, restore or plan edit instead of cutting into it (#219). HA's own `config_entries.async_reload` /
   `async_schedule_reload` is allowed only where that guard cannot apply, with the reason in `ALLOWED` of
   `tests/unit/test_guarded_reloads.py`; flag an `ALLOWED` entry whose reason does not hold for the new code path.
+- **Registry scope:** the integration reads the entity and device registries through
+  `er/dr.async_entries_for_config_entry`; a scan of a whole registry that matches on a unique_id can pick another
+  integration's entry, and deleting or changing it damages that integration (#270). A scan of `entities`,
+  `deleted_entities`, `devices`, `deleted_devices` or a helper like `async_entries_for_area` is allowed only with
+  the reason in `ALLOWED` of `tests/unit/test_registry_scans.py`; flag an `ALLOWED` entry whose reason does not hold
+  for the new code path, and a listed scan whose result is now deleted or changed instead of only read.
+- **Repair owner:** a repair is raised through `issue_owner.async_create_entry_issue` with the entry id of the
+  config entry it belongs to, so Home Assistant 2026.11+ removes it with that entry (`tests/unit/test_issue_owner.py`
+  fails on a direct `ir.async_create_issue`). Flag a new persistent repair: it outlives an update that adds the link,
+  so `async_remove_entry` has to delete it by id, like the KNX pre-release cleanup.
 - **Poll timer:** `async_set_updated_data` cancels and reschedules the coordinator's periodic poll. Code that runs
   often — webhook pushes, plan preview refreshes, periodic ticks — must not call it, otherwise frequent calls keep
   postponing the poll indefinitely (#122). Notify only the listeners that need the update: webhook values through
