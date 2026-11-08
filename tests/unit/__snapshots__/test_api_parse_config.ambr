@@ -362,6 +362,11 @@
         'device_id': '30',
         'device_ip': '192.168.1.20:8123',
       }),
+      <WebioClass.ONEWIRE: 'onewire'>: dict({
+        'base_id': None,
+        'device_id': None,
+        'device_ip': None,
+      }),
       <WebioClass.QUICKBUS: 'quickbus'>: dict({
         'base_id': None,
         'device_id': None,
