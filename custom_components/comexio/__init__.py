@@ -177,6 +177,16 @@ def _unregister_webhooks(hass: HomeAssistant, registered: set[str]) -> None:
     registered.clear()
 
 
+def _restore_webhooks(coordinator: ComexioCoordinator) -> None:
+    """Register the ids again after a failed unload; a failure here is logged, the unload's own error stays."""
+    try:
+        coordinator.sync_webhooks()
+    except Exception:
+        _LOGGER.exception(
+            "[%s] The webhook ids could not be registered again after the failed unload", coordinator.server_id
+        )
+
+
 def _webhook_handler(coordinator: ComexioCoordinator, security: WebhookSecurity):
     """The handler every webhook id of the entry is registered with."""
     server_id = coordinator.server_id
@@ -1033,7 +1043,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
     finally:
         if not unload_ok and running is not None and hasattr(running, "api"):
             running.unloading = False  # the entry stays loaded: restores and plan edits may start again
-            running.sync_webhooks()  # and its pushes must arrive again: the ids were unregistered above
+            _restore_webhooks(running)  # its pushes must arrive again: the ids were unregistered above
     if unload_ok:
         # A default like the get() above: the config flow's fallback reload also reaches an entry whose coordinator
         # is missing, and a KeyError here would leave that entry failed to unload.

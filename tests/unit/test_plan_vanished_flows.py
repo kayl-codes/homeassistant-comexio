@@ -235,6 +235,7 @@ def test_an_unload_that_raises_lets_restores_and_plan_edits_start_again(raised_b
         asyncio.run(unload)
     assert running.unloading is False
     assert hass.config_entries.async_unload_platforms.await_count == int(raised_by == "unload")
+    running.sync_webhooks.assert_called_once_with()  # the ids unregistered before the failure come back
 
 
 @pytest.mark.parametrize("held_for_reload", [False, True])
@@ -709,3 +710,21 @@ def test_the_backup_store_names_the_plans_kept_under_an_id() -> None:
     assert manager.plan_names_for_fub_id_sync(47) == {"Test4", "Old"}
     assert manager.plan_names_for_fub_id_sync(12) == {"A"}
     assert manager.plan_names_for_fub_id_sync(99) == set()
+
+
+def test_a_failing_webhook_restore_does_not_replace_the_error_of_the_unload() -> None:
+    """(dg #279) The unload's own error is the one HA must see."""
+    running = SimpleNamespace(
+        api=object(),
+        unloading=True,
+        server_id="s",
+        async_wait_before_unload=AsyncMock(),
+        sync_webhooks=MagicMock(side_effect=ValueError("restore")),
+    )
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"e1": running}}
+    hass.config_entries.async_unload_platforms = AsyncMock(side_effect=RuntimeError("unload"))
+    unload = async_unload_entry(hass, SimpleNamespace(entry_id="e1"))
+
+    with pytest.raises(RuntimeError, match="unload"):
+        asyncio.run(unload)

@@ -564,8 +564,32 @@ def test_a_changed_host_switches_the_old_id_on_again_and_keeps_the_ledger_for_th
     assert security.legacy_enabled is True
     assert security.migrated == {"HA M5"}  # read back from the new host by the check, not rewritten blindly
     assert security.last_write > NOW
-    assert security._store.stored["host"] == "new.local"
+    stored = security._store.stored  # persisted too: a restart must not forget the switch
+    assert (stored["host"], stored["legacy"]) == ("new.local", True)
+    assert stored["last_write"] != NOW.isoformat()
     assert "host changed" in caplog.text
+
+
+def test_a_changed_host_without_migrated_commands_only_records_the_host(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    security = _hosted(monkeypatch, {**_switched_off_ledger("old.local"), "migrated": []}, "new.local")
+
+    _run(security.async_load())
+
+    assert security.legacy_enabled is False
+    assert security._store.stored["host"] == "new.local"
+    assert "host changed" not in caplog.text
+
+
+def test_an_entry_without_a_host_keeps_the_stored_host_and_saves_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    security = _hosted(monkeypatch, _switched_off_ledger("old.local"), "")
+
+    _run(security.async_load())
+
+    assert security.legacy_enabled is False
+    assert security.host == "old.local"  # the next save writes it back instead of dropping it
+    security._store.async_save.assert_not_awaited()
 
 
 @pytest.mark.parametrize("stored_host", [None, "same.local"])
@@ -578,7 +602,9 @@ def test_an_unchanged_or_unrecorded_host_leaves_the_switch_alone_and_keeps_the_h
 
     assert security.legacy_enabled is False
     assert security.last_write == NOW
-    assert security._store.stored.get("host") == "same.local"
+    # only a ledger that never recorded its host is written (once); an unchanged one is left alone
+    assert security._store.async_save.await_count == (1 if stored_host is None else 0)
+    assert security._store.stored.get("host", "same.local") == "same.local"
 
 
 def test_a_missing_quickbus_or_knx_id_is_logged_under_the_name_of_its_kind(

@@ -143,9 +143,13 @@ class WebhookSecurity:
         change the old id is on again and counts the write as now: the check reads every migrated command back from
         the new host, sends the deviating ones through the rewrite again and waits for a restart of that server.
         """
-        if not self.host or stored_host == self.host:
+        if not self.host:
+            # No host to compare (the entry has none): keep what is stored, so the next save does not drop it.
+            self.host = stored_host if isinstance(stored_host, str) else ""
             return
-        if isinstance(stored_host, str) and self.migrated:
+        if stored_host == self.host:
+            return
+        if stored_host is not None and self.migrated:
             _LOGGER.warning(
                 "[%s] The Comexio host changed since the webhook ids were migrated: the old webhook id is switched "
                 "on again until every command has been read back from the new host",

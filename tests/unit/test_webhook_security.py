@@ -355,3 +355,16 @@ def test_two_addresses_that_differ_only_in_where_a_colon_falls_get_different_ids
 def test_the_key_of_an_address_without_colons_is_unchanged_so_migrated_ids_stay_valid() -> None:
     assert ws.command_key(WebioClass.IO, {"ext_name": "BASE", "identifier": "Q1"}) == "io:BASE:Q1"
     assert ws.command_key(WebioClass.MARKER, {"id": "5"}) == "marker:5"
+
+
+def test_the_escape_keeps_a_literal_escape_sequence_apart_from_the_colon_it_stands_for() -> None:
+    literal = {"ext_name": "A%3AB", "identifier": "C"}
+    colon = {"ext_name": "A:B", "identifier": "C"}
+
+    assert ws.command_key(WebioClass.IO, literal) != ws.command_key(WebioClass.IO, colon)
+
+
+def test_the_item_id_of_marker_quickbus_and_knx_keys_is_escaped_the_same_way_on_both_sides() -> None:
+    assert ws.payload_key({"type": "knx", "id": "a:b"}) == "knx:a%3Ab"
+    assert ws.payload_key({"id": "a:b"}) == ws.command_key(WebioClass.MARKER, {"id": "a:b"})
+    assert ws.payload_key({"type": "quickbus", "id": "a:b"}) == ws.command_key(WebioClass.QUICKBUS, {"id": "a:b"})
