@@ -123,6 +123,17 @@ def test_webio_class_name_suffixes() -> None:
     ]
 
 
+def test_the_managed_web_io_classes_are_exactly_the_source_categories() -> None:
+    """A Web-IO class a newer aiocomexio adds must not join the sync/audit loops without its category.
+
+    WEBIO_CLASSES was tuple(WebioClass): aiocomexio 0.10.0 added ONEWIRE, and every loop over
+    WEBIO_CLASSES raised KeyError in SOURCE_CATEGORIES. Order matters too: Marker leads the sync.
+    """
+    assert set(const.WEBIO_CLASSES) == set(const.SOURCE_CATEGORIES)
+    assert len(const.WEBIO_CLASSES) == len(set(const.WEBIO_CLASSES))
+    assert const.WEBIO_CLASSES[0] == WEBIO_CLASS_MARKER
+
+
 def test_import_disabled_issue_id_names_the_class() -> None:
     assert import_disabled_issue_id(WEBIO_CLASS_KNX, "srv") == "import_disabled_knx_srv"
     assert import_disabled_issue_id("marker", "srv") == "import_disabled_marker_srv"
