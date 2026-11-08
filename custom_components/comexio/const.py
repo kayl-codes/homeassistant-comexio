@@ -617,6 +617,18 @@ MARKER_TEMPERATURE_MIN_VALUE = -273.0
 MARKER_TEMPERATURE_MAX_VALUE = 10_000.0
 # Decimals HA shows of a 0-10 V analog output, the same as Comexio's own display (#259).
 ANALOG_OUTPUT_DISPLAY_DECIMALS = 1
+_ANALOG_OUTPUT_IDENTIFIER_RE = re.compile(r"AO\d+")
+
+
+def is_analog_output(identifier: str) -> bool:
+    """Whether an IO is one of the 0-10 V analog outputs (AO1, AO2, ...).
+
+    Not ``aiocomexio.io_written_over_admin_session``: since aiocomexio 0.9.0 that is true for every IO except
+    Q*/DG*, which only picks the write route, while the AO value handling (one decimal, no whole-percent
+    rounding) belongs to the AOs alone (#259).
+    """
+    return bool(_ANALOG_OUTPUT_IDENTIFIER_RE.fullmatch(identifier))
+
 
 # A marker name that marks a temperature (user decision 2026-10-17, #179): "temp", "setpoint", "°C" or the
 # word "Grad". A bare "Soll" is no longer enough — it marks any setpoint ("Markise Position SOLL"), not

@@ -553,7 +553,8 @@ set_value:
   name: Set Value
   description: >
     Writes a raw value to a Comexio marker or IO via the Comexio API (Basic Auth with the API user);
-    an analog output AO1–AO4 goes over the admin session, since the API refuses it.
+    every IO except the digital outputs Q* and DG* (the analog outputs AO1–AO4 among them) goes over the
+    admin session, since the API refuses those.
     Same write path the switch/number entities use — this is the backend of the plan
     card's debug command input. Only targets known from the current Comexio
     configuration are accepted. Failures are reported as a notification.
