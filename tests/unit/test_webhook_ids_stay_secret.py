@@ -37,7 +37,9 @@ an id either. A bare id, an id after other text, and its keyword arguments are s
 Not followed: a value handed on through another module, `setattr`/`getattr` with a computed name, a mutating method
 outside MUTATORS, a class or function reached through another name than its own (an alias, a returned callable), a
 callback handed over by keyword or an argument placed before the callback, a constructor reached through an
-attribute (`self.Holder(...)`), a base class named through an attribute (`pkg.Base`), a module-level import or alias
+attribute (`self.Holder(...)`), a base class named through an attribute (`pkg.Base`), a stream reached through a
+local alias or a deeper attribute (`err = sys.stderr; err.write(...)`, `sys.stdout.buffer.write(...)`), a module-level
+import or alias
 placed after the function that uses it, a module-level or enclosing-scope name assigned after the function's
 definition, a taint assigned later in a loop body than the use it reaches on the next pass, and the texts the
 aiocomexio library puts into its own exceptions (they quote Comexio's answer, not our request). Those stay for the
@@ -67,7 +69,21 @@ SECRET_NAMES = frozenset({"webhook_id", "derive_webhook_id", "command_path", "pa
 ID_NAMES = SECRET_NAMES - {ENTRY_SECRET}  # what the redactor can know: a 32-hex id, never the entry secret
 FORM_PATH_FIELD = "Parameter"
 LOG_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical", "log", "fatal"})
-PRINTING_CALLS = frozenset({"print", "warn_refused", "async_create", "async_create_issue", "async_create_entry_issue"})
+PRINTING_CALLS = frozenset(
+    {
+        "print",
+        "pprint",
+        "warn_refused",
+        "warn_explicit",
+        "showwarning",
+        "add_note",  # an exception note ends up in the traceback
+        "async_create",
+        "async_create_issue",
+        "async_create_entry_issue",
+    }
+)
+STREAM_NAMES = frozenset({"stdout", "stderr"})  # `sys.stderr.write(...)` prints like `print`
+STREAM_WRITES = frozenset({"write", "writelines"})
 SINK_NAMES = LOG_METHODS | PRINTING_CALLS
 SAFE_WRAPPERS = frozenset({"redact_webhook_ids"})
 # methods that put their argument into the receiver: the container then holds the id
@@ -81,7 +97,14 @@ ENTRY_ID_KEYWORD = "entry_id"
 
 # (file relative to the integration, Class.method) -> (uses counted there, why the id is not shown there). Each use
 # counts, so a second one in a listed function fails too.
-ALLOWED: dict[tuple[str, str], tuple[int, str]] = {}
+ALLOWED: dict[tuple[str, str], tuple[int, str]] = {
+    ("__init__.py", "_webhook_handler.handle_webhook"): (
+        1,
+        "the `try` hands webhook_id to WebhookSecurity.accepts only, and HA dispatches only ids registered by "
+        "sync_webhooks (ASCII hex or comexio_<server>); `_same` and derive_webhook_id can raise only on a payload "
+        "character that is not encodable, and that error quotes the payload character, never the id",
+    ),
+}
 
 
 def _call_name(node: ast.Call) -> str:
@@ -95,7 +118,13 @@ def _is_printing(node: ast.Call, aliases: frozenset[str] = frozenset()) -> bool:
         return True
     if isinstance(node.func, ast.Name):
         return name in aliases
-    return isinstance(node.func, ast.Attribute) and name in LOG_METHODS
+    if not isinstance(node.func, ast.Attribute):
+        return False
+    receiver = node.func.value
+    tail = (
+        receiver.attr if isinstance(receiver, ast.Attribute) else receiver.id if isinstance(receiver, ast.Name) else ""
+    )
+    return name in LOG_METHODS or (name in STREAM_WRITES and tail in STREAM_NAMES)
 
 
 @dataclass(frozen=True)
@@ -110,6 +139,7 @@ class _Taint:
     secret_attrs: frozenset[str] = frozenset()
     calls: frozenset[str] = frozenset()
     secret_calls: frozenset[str] = frozenset()
+    shadowed: bool = False  # the module binds the redactor's name to something else: no call of it is trusted
 
 
 _NO_TAINT = _Taint()
@@ -122,7 +152,9 @@ def _is_bare_secret(node: ast.AST, taint: _Taint, *, ids_only: bool = False) -> 
             return node.id in ID_NAMES and node.id not in taint.secrets
         if isinstance(node, ast.Attribute):
             return node.attr in ID_NAMES and node.attr not in taint.secret_attrs
-        return isinstance(node, ast.Call) and _call_name(node) in ID_NAMES
+        return (
+            isinstance(node, ast.Call) and _call_name(node) in ID_NAMES and _call_name(node) not in taint.secret_calls
+        )
     if isinstance(node, ast.Name):
         return node.id in SECRET_NAMES or node.id in taint.names  # a local may hold the entry secret
     if isinstance(node, ast.Attribute):
@@ -132,10 +164,10 @@ def _is_bare_secret(node: ast.AST, taint: _Taint, *, ids_only: bool = False) -> 
 
 def _holds_secret(node: ast.AST, taint: _Taint) -> bool:
     """Whether a value may be the entry secret itself: it names the secret outside a call that derives an id from it."""
+    if isinstance(node, ast.Call) and _call_name(node) in taint.secret_calls:
+        return True  # the module's own function of that name returns the secret, whatever it is called
     if isinstance(node, ast.Call) and _call_name(node) in ID_NAMES:
         return False  # trusted by name, like a parameter called like an id
-    if isinstance(node, ast.Call) and _call_name(node) in taint.secret_calls:
-        return True
     if isinstance(node, ast.Name) and (node.id == ENTRY_SECRET or node.id in taint.secrets):
         return True
     if isinstance(node, ast.Attribute) and (node.attr == ENTRY_SECRET or node.attr in taint.secret_attrs):
@@ -177,7 +209,7 @@ def _survives_redaction(node: ast.AST, taint: _Taint) -> bool:
 
 def _carries_id(node: ast.AST, taint: _Taint = _NO_TAINT) -> bool:
     """Whether an expression names the secret, reads a command's path field or a tainted name, outside redaction."""
-    if isinstance(node, ast.Call) and _call_name(node) in SAFE_WRAPPERS:
+    if isinstance(node, ast.Call) and _call_name(node) in SAFE_WRAPPERS and not taint.shadowed:
         arguments = (*node.args, *(keyword.value for keyword in node.keywords))
         return any(_survives_redaction(arg, taint) for arg in arguments)
     if _is_bare_secret(node, taint):
@@ -201,17 +233,18 @@ def _binds_sink(value: ast.AST, aliases: frozenset[str] = frozenset()) -> bool:
     )
 
 
-def _tainted_defaults(node: ast.AST, outer: "_Frame") -> set[str]:
-    """The parameters of a function whose default value carries an id or a command's path."""
+def _tainted_defaults(node: ast.AST, outer: "_Frame", *, secret: bool = False) -> set[str]:
+    """The parameters whose default value carries an id or a command's path (`secret`: may be the secret itself)."""
     if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
         return set()
+    check = outer.holds_secret if secret else outer.carries_id
     args = node.args
     positional = [*args.posonlyargs, *args.args]
     pairs = [
         *zip(positional[len(positional) - len(args.defaults) :], args.defaults, strict=True),
         *zip(args.kwonlyargs, args.kw_defaults, strict=True),
     ]
-    return {arg.arg for arg, default in pairs if default is not None and outer.carries_id(default)}
+    return {arg.arg for arg, default in pairs if default is not None and check(default)}
 
 
 def _mapping_captures(case: ast.match_case) -> set[str]:
@@ -240,6 +273,7 @@ class _Flow:
     secret_calls: set[str] = field(default_factory=set)
     params: set[tuple[str, str]] = field(default_factory=set)
     secret_params: set[tuple[str, str]] = field(default_factory=set)
+    shadowed: bool = False  # set once for the module, not learned: the redactor's name is bound to something else
 
     def absorb(self, other: "_Flow") -> bool:
         """Adds what `other` learned; whether that was anything new."""
@@ -402,6 +436,7 @@ class _Frame:
             frozenset(flow.secret_attrs),
             frozenset(flow.calls),
             frozenset(flow.secret_calls),
+            flow.shadowed,
         )
 
     def carries_id(self, node: ast.AST) -> bool:
@@ -441,6 +476,7 @@ class _Scan(ast.NodeVisitor):
             for names in (frame.tainted, frame.secrets, frame.paths, frame.aliases):
                 names.difference_update(own)  # a parameter hides the outer name it shares
             frame.tainted |= _tainted_defaults(node, outer)  # defaults are read where the def stands
+            frame.secrets |= _tainted_defaults(node, outer, secret=True)
             owners = {name, ".".join(self.scope[-2:])}  # `Holder.__init__` holds what `Holder(...)` passes
             frame.tainted |= {param for owner, param in frame.flow.params if owner in owners}
             frame.secrets |= {param for owner, param in frame.flow.secret_params if owner in owners}
@@ -467,7 +503,28 @@ class _Scan(ast.NodeVisitor):
         self.generic_visit(node)
         self.frames[-1].depth -= 1
 
-    visit_If = visit_While = visit_Try = visit_TryStar = visit_IfExp = visit_BoolOp = _branch
+    visit_If = visit_While = visit_IfExp = visit_BoolOp = _branch
+
+    def _try(self, node: ast.Try | ast.TryStar) -> None:
+        """What a `try` body handles may quote it in the exception (a failed request names its URL): the handler's
+        `except ... as err` then holds the id or the secret, whatever the body made of it."""
+        frame = self.frames[-1]
+        frame.depth += 1
+        for statement in node.body:
+            self.visit(statement)
+        ids = any(frame.carries_id(statement) for statement in node.body)
+        secret = any(frame.holds_secret(statement) for statement in node.body)
+        for handler in node.handlers:
+            if handler.name and ids:
+                frame.tainted.add(handler.name)
+            if handler.name and secret:
+                frame.secrets.add(handler.name)
+            self.visit(handler)
+        for statement in (*node.orelse, *node.finalbody):
+            self.visit(statement)
+        frame.depth -= 1
+
+    visit_Try = visit_TryStar = _try
 
     def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
         self._store_from(node.target, node.iter)
@@ -598,9 +655,11 @@ class _Scan(ast.NodeVisitor):
         carrying = arguments[1:] if partial else arguments  # a partial's first argument is the sink itself
         if (printing or partial) and any(frame.carries_id(arg) for arg in carrying):
             self._hit(node)
-        mutates = isinstance(node.func, ast.Attribute) and node.func.attr in MUTATORS
-        if mutates and any(frame.carries_id(arg) for arg in arguments):
-            self._store(node.func.value, secret=False)  # `box.append(webhook_id)`: the box holds it
+        if isinstance(node.func, ast.Attribute) and node.func.attr in MUTATORS:  # `box.append(webhook_id)`: it holds it
+            if any(frame.carries_id(arg) for arg in arguments):
+                self._store(node.func.value, secret=False)
+            if any(frame.holds_secret(arg) for arg in arguments):
+                self._store(node.func.value, secret=True)
         self._learn_arguments(node)
         self.generic_visit(node)
 
@@ -632,8 +691,11 @@ class _Scan(ast.NodeVisitor):
         kept = self.module.fields[name] if name in self.module.fields and name not in self.module.inits else set()
         if _is_super_init(node):  # `super().__init__(webhook_id)` into a base without one, such as a dataclass
             kept = {item for base in self._ancestors_around() for item in self.module.fields.get(base, ())}
-        if kept and any(frame.carries_id(value) for value in (*node.args, *(k.value for k in node.keywords))):
+        values = (*node.args, *(k.value for k in node.keywords))
+        if kept and any(frame.carries_id(value) for value in values):
             self.learned.attrs |= kept
+        if kept and any(frame.holds_secret(value) for value in values):
+            self.learned.secret_attrs |= kept
         self._learn_callbacks(node)
 
     def _ancestors_around(self) -> set[str]:
@@ -731,12 +793,42 @@ def _inline_path_field(tree: ast.AST) -> ast.AST:
     return _Inline().visit(tree)
 
 
+def _bound_names(node: ast.AST) -> list[str]:
+    """The names a node binds: a def or class, a parameter, a store, `except ... as`, a `case` capture, an import."""
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return [node.name]
+    if isinstance(node, ast.arg):
+        return [node.arg]
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return [node.id]
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)):
+        return [node.name or ""]
+    if isinstance(node, ast.MatchMapping):
+        return [node.rest or ""]  # `case {**name}`
+    if isinstance(node, ast.Import):
+        return [(alias.asname or alias.name).split(".")[0] for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        production = (node.module or "").split(".")[-1] == "webhook_security"  # its own redactor is the real one
+        names = [
+            alias.asname or alias.name for alias in node.names if not production or alias.name not in SAFE_WRAPPERS
+        ]
+        # `from other import *` may bind the redactor's name to anything
+        return [*SAFE_WRAPPERS, *names] if "*" in names and not production else names
+    return []
+
+
+def _redactor_is_rebound(tree: ast.AST) -> bool:
+    """Whether the module binds the redactor's name to anything but the production function (`from ..webhook_security
+    import redact_webhook_ids`). Then a call of that name is no proof that anything is redacted."""
+    return any(name in SAFE_WRAPPERS for node in ast.walk(tree) for name in _bound_names(node))
+
+
 def _scan(source: str) -> list[tuple[str, int]]:
     """Passes over the module until the flow it learns (attributes, returns, arguments) stops growing; the hits of
     the last pass, which saw all of it, count."""
     tree = _inline_path_field(ast.parse(source))
     module = _module(tree)
-    flow = _Flow()
+    flow = _Flow(shadowed=_redactor_is_rebound(tree))
     while True:
         scan = _Scan(flow, module)
         scan.visit(tree)
@@ -1129,13 +1221,142 @@ def _argument(node: ast.Call, position: int, keyword: str) -> ast.expr | None:
     return next((k.value for k in node.keywords if k.arg == keyword), None)
 
 
+SECRET_FLOW = """
+def path_for(cmd):
+    return secret
+
+
+def show_helper(cmd):
+    _LOGGER.info(redact_webhook_ids(f"/api/webhook/{path_for(cmd)}"))  # leak
+
+
+def stored_helper_result(cmd):
+    webhook_id = path_for(cmd)
+    _LOGGER.info(redact_webhook_ids(f"/api/webhook/{webhook_id}"))  # leak
+
+
+def secret_default(webhook_id=secret):
+    _LOGGER.info(redact_webhook_ids(f"/api/webhook/{webhook_id}"))  # leak
+
+
+def box_holds_secret():
+    webhook_id = []
+    webhook_id.append(secret)
+    _LOGGER.info(redact_webhook_ids(f"/api/webhook/{webhook_id}"))  # leak
+
+
+@dataclass
+class Keyed:
+    webhook_id: str
+
+    def show(self):
+        _LOGGER.info(redact_webhook_ids(f"/api/webhook/{self.webhook_id}"))  # leak
+
+
+@dataclass
+class Idle:
+    command_path: str
+
+    def show(self):
+        _LOGGER.info(redact_webhook_ids(f"/api/webhook/{self.command_path}"))
+
+
+def build():
+    Idle(derive_webhook_id(secret, "k"))
+    return Keyed(secret)
+
+
+def caught(webhook_id, session):
+    try:
+        session.get(f"/api/webhook/{webhook_id}")
+    except OSError as err:
+        _LOGGER.warning("failed %s", err)  # leak
+
+
+def caught_secret(session):
+    try:
+        session.get(secret)
+    except OSError as err:
+        _LOGGER.warning("failed %s", err)  # leak
+
+
+def caught_as_an_id_name(session):
+    try:
+        session.get(secret)
+    except OSError as webhook_id:
+        _LOGGER.info(redact_webhook_ids(f"/api/webhook/{webhook_id}"))  # leak
+
+
+def caught_nothing(session, cmd):
+    try:
+        session.get("/api/state")
+    except OSError as err:
+        _LOGGER.warning("failed %s", err)
+
+
+def streams(webhook_id, other):
+    sys.stderr.write(webhook_id)  # leak
+    sys.stdout.writelines([webhook_id])  # leak
+    warnings.warn(webhook_id)  # leak
+    warnings.warn_explicit(webhook_id, UserWarning, "f", 1)  # leak
+    err.add_note(webhook_id)  # leak
+    other.write(webhook_id)
+    sys.stderr.write("fixed text")
+"""
+
+
+def test_the_scan_keeps_the_secret_apart_from_ids_and_follows_it_into_handlers_and_streams() -> None:
+    hits = _scan(SECRET_FLOW)
+    marked = [number for number, line in enumerate(SECRET_FLOW.splitlines(), 1) if line.endswith("# leak")]
+
+    assert sorted(line for _scope, line in hits) == marked
+
+
+_SHOW = 'def show(webhook_id):\n    _LOGGER.info(redact_webhook_ids(f"/api/webhook/{webhook_id}"))\n'
+
+
+@pytest.mark.parametrize(
+    ("source", "leaks"),
+    [
+        (f"from ..webhook_security import redact_webhook_ids\n\n\n{_SHOW}", False),
+        (f"from ..webhook_security import redact_webhook_ids as _r\n\n\n{_SHOW}", False),
+        (f"from .helpers import redact_webhook_ids\n\n\n{_SHOW}", True),
+        (f"from ..webhook_security import other as redact_webhook_ids\n\n\n{_SHOW}", True),
+        (f"import json as redact_webhook_ids\n\n\n{_SHOW}", True),
+        (f"redact_webhook_ids = str\n\n\n{_SHOW}", True),
+        (f"def redact_webhook_ids(text):\n    return text\n\n\n{_SHOW}", True),
+        (f"class redact_webhook_ids:\n    pass\n\n\n{_SHOW}", True),
+        (f"for redact_webhook_ids in (str,):\n    pass\n\n\n{_SHOW}", True),
+        (f"from .helpers import *\n\n\n{_SHOW}", True),
+        (f"from ..webhook_security import *\n\n\n{_SHOW}", False),
+        (
+            _SHOW.replace(
+                "    _LOGGER", "    match {}:\n        case {**redact_webhook_ids}:\n            pass\n    _LOGGER"
+            ),
+            True,
+        ),
+        (_SHOW.replace("show(webhook_id)", "show(webhook_id, redact_webhook_ids)"), True),
+        (_SHOW.replace("    _LOGGER", "    redact_webhook_ids = str\n    _LOGGER"), True),
+    ],
+)
+def test_a_name_bound_to_something_else_than_the_production_redactor_is_not_trusted(source: str, leaks: bool) -> None:
+    assert bool(_scan(source)) is leaks
+
+
+def _plain_get(call: ast.Call) -> bool:
+    """`.get(key)` or `.get(key, <constant>)`: a fallback that names something else could be another entry's host."""
+    return 1 <= len(call.args) <= 2 and not call.keywords and all(isinstance(a, ast.Constant) for a in call.args[1:])
+
+
 def _entry_host_read(host: ast.expr) -> str | None:
-    """The entry whose host option `host` reads: `<entry>.data[CONF_HOST]` or `.data.get(CONF_HOST, ...)`, in str()."""
+    """The entry whose host option `host` reads: `<entry>.data[CONF_HOST]` or `.data.get(CONF_HOST, "")`, in str()."""
     if isinstance(host, ast.Call) and _call_name(host) == "str" and len(host.args) == 1:
         host = host.args[0]
     if isinstance(host, ast.Subscript):
         data, key = host.value, host.slice
-    elif isinstance(host, ast.Call) and isinstance(host.func, ast.Attribute) and host.func.attr == "get" and host.args:
+    elif isinstance(host, ast.Call) and isinstance(host.func, ast.Attribute) and host.func.attr == "get":
+        if not _plain_get(host):
+            return None
         data, key = host.func.value, host.args[0]
     else:
         return None
@@ -1167,6 +1388,10 @@ def _host_problem(node: ast.Call) -> str | None:
         ("WebhookSecurity(hass, self.entry.entry_id, sid, entry.data[CONF_HOST])", False),
         ("WebhookSecurity(hass, entry.entry_id, sid)", False),
         ('WebhookSecurity(hass, entry.entry_id, sid, str(other.data.get(CONF_HOST, "")))', False),
+        ("WebhookSecurity(hass, entry.entry_id, sid, str(entry.data.get(CONF_HOST, other.data[CONF_HOST])))", False),
+        ("WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, other_host))", False),
+        ('WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, default=""))', False),
+        ('WebhookSecurity(hass, entry.entry_id, sid, entry.data.get(CONF_HOST, "", 1))', False),
         ('WebhookSecurity(hass, entry.entry_id, sid, f"{entry.data[CONF_HOST]}x")', False),
         ("WebhookSecurity(hass, entry.entry_id, sid, CONF_HOST)", False),
         ("WebhookSecurity(hass, entry.entry_id, sid, entry.options[CONF_HOST])", False),
