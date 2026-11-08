@@ -5755,10 +5755,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
         """Start a 1-Wire status poll, unless one still runs, the entry unloads or no sensor is configured.
 
         One poll at a time, so an older answer never overwrites a newer one; async_shutdown cancels the running
-        one before the API session closes under it. Without configured sensors there is nothing to poll — an
-        unknown sensor list (start from the saved config, #250) still polls, as the entities may exist.
+        one before the API session closes under it. Without configured sensors there is nothing to poll, and an
+        unknown sensor list (no config page parsed yet) has no 1-Wire entities either: the platforms only create
+        them from a known list, and once known it stays known.
         """
-        if self.unloading or (self.data or {}).get(ONEWIRE_DATA_KEY) == {}:
+        if self.unloading or not (self.data or {}).get(ONEWIRE_DATA_KEY):
             return
         if self._onewire_task is not None and not self._onewire_task.done():
             _LOGGER.debug("[%s] 1-Wire status poll still running, skipping this tick", self.server_id)

@@ -523,37 +523,49 @@ def _scheduling_coordinator(data: dict[str, Any] | None) -> ComexioCoordinator:
     return coordinator
 
 
-@pytest.mark.parametrize("data", [None, {}, {ONEWIRE_DATA_KEY: None}, {ONEWIRE_DATA_KEY: {"OT1": _sensor()}}], ids=str)
-def test_schedule_polls_unless_no_sensor_is_configured(data: dict[str, Any] | None) -> None:
-    """An unknown list (first poll pending, start from the saved config) still polls: the entities may exist."""
-    coordinator = _scheduling_coordinator(data)
+def _configured_data() -> dict[str, Any]:
+    """Coordinator data with one known sensor: the only state in which the poll has entities to feed."""
+    return {ONEWIRE_DATA_KEY: {"OT1": _sensor()}}
+
+
+def test_schedule_polls_configured_sensors() -> None:
+    coordinator = _scheduling_coordinator(_configured_data())
 
     coordinator._async_schedule_onewire_tick()
 
     coordinator.hass.async_create_task.assert_called_once()
 
 
-def test_schedule_skips_an_installation_without_sensors() -> None:
-    coordinator = _scheduling_coordinator({ONEWIRE_DATA_KEY: {}})
+@pytest.mark.parametrize("data", [None, {}, {ONEWIRE_DATA_KEY: None}, {ONEWIRE_DATA_KEY: {}}], ids=str)
+def test_schedule_skips_without_a_known_sensor(data: dict[str, Any] | None) -> None:
+    """No sensor configured, or the list unknown: either way no 1-Wire entity exists to feed."""
+    coordinator = _scheduling_coordinator(data)
 
     coordinator._async_schedule_onewire_tick()
 
     coordinator.hass.async_create_task.assert_not_called()
 
 
-def test_schedule_skips_while_unloading_or_a_poll_runs() -> None:
-    coordinator = _scheduling_coordinator(None)
+def test_schedule_skips_while_unloading() -> None:
+    coordinator = _scheduling_coordinator(_configured_data())
     coordinator.unloading = True
+
     coordinator._async_schedule_onewire_tick()
-    coordinator.unloading = False
+
+    coordinator.hass.async_create_task.assert_not_called()
+
+
+def test_schedule_skips_while_a_poll_runs() -> None:
+    coordinator = _scheduling_coordinator(_configured_data())
     coordinator._onewire_task = MagicMock(done=MagicMock(return_value=False))
+
     coordinator._async_schedule_onewire_tick()
 
     coordinator.hass.async_create_task.assert_not_called()
 
 
 def test_schedule_starts_a_new_poll_once_the_last_one_is_done() -> None:
-    coordinator = _scheduling_coordinator(None)
+    coordinator = _scheduling_coordinator(_configured_data())
     coordinator._onewire_task = MagicMock(done=MagicMock(return_value=True))
 
     coordinator._async_schedule_onewire_tick()
@@ -564,7 +576,7 @@ def test_schedule_starts_a_new_poll_once_the_last_one_is_done() -> None:
 
 def test_poll_start_ticks_at_once_and_then_every_interval(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without the immediate tick, the entities would stay unavailable for the first interval."""
-    coordinator = _scheduling_coordinator(None)
+    coordinator = _scheduling_coordinator(_configured_data())
     track = MagicMock(return_value="cancel")
     monkeypatch.setattr(coordinator_module, "async_track_time_interval", track)
 
@@ -574,6 +586,21 @@ def test_poll_start_ticks_at_once_and_then_every_interval(monkeypatch: pytest.Mo
     track.assert_called_once_with(
         coordinator.hass, coordinator._async_schedule_onewire_tick, timedelta(seconds=ONEWIRE_POLL_INTERVAL_SEC)
     )
+
+
+def test_poll_start_with_an_unknown_list_polls_once_the_list_is_known(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The interval runs even while the sensor list is unknown, so a list parsed later is polled from then on."""
+    coordinator = _scheduling_coordinator(None)
+    track = MagicMock(return_value="cancel")
+    monkeypatch.setattr(coordinator_module, "async_track_time_interval", track)
+
+    coordinator.async_start_onewire_poll()
+
+    coordinator.hass.async_create_task.assert_not_called()
+    tick = track.call_args.args[1]
+    coordinator.data = _configured_data()
+    tick()
+    coordinator.hass.async_create_task.assert_called_once()
 
 
 @pytest.mark.parametrize(
