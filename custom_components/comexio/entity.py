@@ -3,6 +3,7 @@ from collections.abc import Callable
 import logging
 from typing import Any
 
+from homeassistant.core import callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import DeviceInfo
@@ -349,6 +350,18 @@ class ComexioOneWireEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
     def _reading(self) -> float | None:
         sensor = self.coordinator.onewire_sensor(self._address)
         return None if sensor is None else sensor.get("value")
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Take the sensor's name from the current config: a rename in Comexio changes no Web-IO command.
+
+        A marker's command carries its title, so the audit sees a rename and the sync's reload renames the entity;
+        a 1-Wire command is named by the address alone (aiocomexio onewire_command_name). Without this the old
+        name would stay until the next reload. A sensor gone from the config keeps its last name.
+        """
+        if (sensor := self.coordinator.onewire_sensor(self._address)) is not None:
+            self._attr_name = onewire_entity_name(sensor)
+        super()._handle_coordinator_update()
 
 
 class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):

@@ -80,6 +80,9 @@ from .const import (
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
     ONEWIRE_DATA_KEY,
+    ONEWIRE_NO_FUB_MODULES_CAUSE,
+    ONEWIRE_SHARED_ID_LOG_MSG,
+    ONEWIRE_UNKNOWN_KIND_LOG_MSG,
     QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
@@ -111,14 +114,6 @@ _PLAN_DPI_RANGE = range(45, 121)  # what Comexio accepts for a plan (aiocomexio 
 _PLAN_NOT_RUNNING_ANSWER = "0:not_found"
 
 _LOGGER = logging.getLogger(__name__)
-
-# Why _parse_onewire kept the last 1-Wire sensors when the config carried no $FubModules (a failed fetch).
-ONEWIRE_NO_FUB_MODULES_CAUSE = "the config carries no $FubModules"
-# The 1-Wire sensors _parse_onewire leaves out, each warned about once per changed set.
-ONEWIRE_UNKNOWN_KIND_LOG_MSG = "1-Wire sensors of unknown kind get no Web-IO command and no entity: %s"
-ONEWIRE_SHARED_ID_LOG_MSG = (
-    "1-Wire sensors that share their Id with another one get no Web-IO command and no entity: %s"
-)
 
 # The API whose set_value last met another certificate, kept per asyncio task: two writes in flight at once (two
 # entities, a service call) run in tasks of their own, so neither reads the other's cause.

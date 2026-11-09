@@ -25,10 +25,12 @@ from custom_components.comexio.binary_sensor import ComexioOneWireBinarySensor, 
 from custom_components.comexio.button import ComexioSyncButton, _known_source_names
 from custom_components.comexio.const import (
     ONEWIRE_DATA_KEY,
+    ONEWIRE_NO_FUB_MODULES_CAUSE,
     ONEWIRE_PENDING_VALUES_MAX,
     ONEWIRE_PROBLEM_MISSING,
     ONEWIRE_PROBLEM_NOT_FOUND,
     ONEWIRE_PROBLEM_READ_ERROR,
+    ONEWIRE_SHARED_ID_LOG_MSG,
     SOURCE_CATEGORIES,
     WebioClass,
     onewire_entity_name,
@@ -178,7 +180,7 @@ def test_a_config_without_fub_modules_warns_once_until_one_parsed(
 
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 2
-    assert all(api_module.ONEWIRE_NO_FUB_MODULES_CAUSE in w for w in warnings)
+    assert all(ONEWIRE_NO_FUB_MODULES_CAUSE in w for w in warnings)
 
 
 def test_a_sensor_of_unknown_kind_warns_once_per_changed_set(
@@ -223,8 +225,8 @@ def test_of_sensors_sharing_a_config_id_only_the_first_by_address_gets_an_entity
         comexio_api._parse_onewire({"2": {}, "12": {**shared["12"], "6": _entry(5, "OX")}})
 
     assert [(i["id"], i["address"]) for i in items] == [(4, "OH4"), (5, "OT5"), (6, "OT6")]
-    warnings = [r.getMessage() for r in caplog.records if r.msg == api_module.ONEWIRE_SHARED_ID_LOG_MSG]
-    assert warnings == [api_module.ONEWIRE_SHARED_ID_LOG_MSG % s for s in ("OT4", "OT4", "OT4, OX5")]
+    warnings = [r.getMessage() for r in caplog.records if r.msg == ONEWIRE_SHARED_ID_LOG_MSG]
+    assert warnings == [ONEWIRE_SHARED_ID_LOG_MSG % s for s in ("OT4", "OT4", "OT4, OX5")]
 
 
 def test_the_status_fetch_reports_a_changed_certificate_without_raising(comexio_api: ComexioAPI) -> None:
@@ -297,7 +299,30 @@ def test_a_push_without_a_finite_number_makes_the_reading_unknown(pushed: Any) -
     coordinator.update_onewire("OT1", pushed)
 
     assert item["value"] is None
-    assert coordinator._onewire_values == {}
+    # Kept as the sensor's last word, so a restore after it cannot bring back a stale reading.
+    assert coordinator._onewire_values == {"OT1": None}
+
+
+def test_a_restore_does_not_replace_a_reading_a_push_made_unknown() -> None:
+    item = _item()
+    coordinator = _coordinator(item)
+    coordinator.update_onewire("OT1", "n/a")
+
+    coordinator.restore_onewire_value("OT1", 19.0)
+
+    assert item["value"] is None
+
+
+def test_the_next_config_keeps_a_reading_a_push_made_unknown() -> None:
+    # A poll must neither drop the unknown reading (a restore would then bring back a stale one) nor invent one.
+    coordinator = _coordinator(_item("OT1"))
+    coordinator.update_onewire("OT1", "n/a")
+    fresh = [_item("OT1")]
+
+    coordinator._merge_onewire_values(fresh)
+
+    assert fresh[0]["value"] is None
+    assert coordinator._onewire_values == {"OT1": None}
 
 
 def test_a_push_for_an_unknown_sensor_warns_once_and_again_after_it_was_known(
@@ -611,11 +636,14 @@ def test_the_plan_preview_labels_a_sensor_element_like_its_entity() -> None:
 
 def test_the_source_label_maps_carry_the_knx_and_1wire_maps_of_the_plan_services() -> None:
     coordinator = _coordinator(_item("OT1", config_id=4))
+    knx_item = {"id": 4, "name": "K4 Dimmer", "type": "analog", "value": None}
+    coordinator.data["knx"] = [knx_item]
 
     maps = coordinator.function_plan_source_label_maps()
 
-    assert set(maps) == {"knx_by_id", "onewire_by_id"}
-    assert maps["onewire_by_id"] == coordinator.function_plan_onewire_label_map()
+    # The same id 4 in both maps: a KNX object and a 1-Wire sensor share the numeric id space, each map keeps its own.
+    assert maps == {"knx_by_id": {"4": knx_item}, "onewire_by_id": coordinator.function_plan_onewire_label_map()}
+    assert maps["onewire_by_id"]["4"]["name"] == "OT1 Kitchen"
 
 
 def test_the_visualize_text_names_a_sensor_element_like_its_pill() -> None:
@@ -688,7 +716,7 @@ def test_the_flow_diagram_names_a_sensor_element_like_its_pill() -> None:
         result = asyncio.run(flow_diagram._handle_function_plan_flow_diagram(MagicMock(), SimpleNamespace(data={})))
 
     assert result["error"] is None
-    assert "OT1" in result["svg"]
+    assert "OT1 Kitchen" in result["svg"]
 
 
 @pytest.mark.parametrize(("query", "found"), [("OT1", True), ("ot*", True), ("OT2", False), ('"Kitchen"', True)])
@@ -833,6 +861,69 @@ def test_a_digital_sensor_restores_its_last_state(
     asyncio.run(entity.async_added_to_hass())
 
     assert item["value"] == restored
+
+
+@pytest.mark.parametrize(("pushed", "kept"), [(30, 30.0), ("n/a", None)])
+def test_a_reading_pushed_before_the_analog_entity_was_added_beats_its_last_state(
+    monkeypatch: pytest.MonkeyPatch, pushed: Any, kept: float | None
+) -> None:
+    # The webhooks are registered before the platforms set up: a push can come before the restore.
+    monkeypatch.setattr(CoordinatorEntity, "async_added_to_hass", AsyncMock())
+    item = _item()
+    coordinator = _coordinator(item)
+    coordinator.update_onewire("OT1", pushed)
+    entity = ComexioOneWireSensor(coordinator, item)
+    entity.entity_id = "sensor.srv_onewire_ot1"
+    entity.async_get_last_sensor_data = AsyncMock(return_value=_last_sensor_data("19.5"))  # type: ignore[method-assign]
+
+    asyncio.run(entity.async_added_to_hass())
+
+    assert item["value"] == kept
+
+
+@pytest.mark.parametrize(("pushed", "kept"), [(1, 1.0), ("n/a", None)])
+def test_a_reading_pushed_before_the_digital_entity_was_added_beats_its_last_state(
+    monkeypatch: pytest.MonkeyPatch, pushed: Any, kept: float | None
+) -> None:
+    monkeypatch.setattr(CoordinatorEntity, "async_added_to_hass", AsyncMock())
+    item = _item("OIB1", kind="digital")
+    coordinator = _coordinator(item)
+    coordinator.update_onewire("OIB1", pushed)
+    entity = ComexioOneWireBinarySensor(coordinator, item)
+    entity.async_get_last_state = AsyncMock(return_value=SimpleNamespace(state="off"))  # type: ignore[method-assign]
+
+    asyncio.run(entity.async_added_to_hass())
+
+    assert item["value"] == kept
+
+
+def test_a_sensor_renamed_in_comexio_is_renamed_at_the_next_coordinator_update() -> None:
+    # The 1-Wire command is named by the address, so no audit or sync reload would rename the entity.
+    item = _item(title="Kitchen")
+    coordinator = _coordinator(item)
+    entity = ComexioOneWireSensor(coordinator, item)
+    entity.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+    unique_id = entity.unique_id
+    coordinator.data = {ONEWIRE_DATA_KEY: [_item(title="Pantry")]}
+
+    entity._handle_coordinator_update()
+
+    assert entity.name == "OT1 Pantry"
+    # Only the display name follows the description; the id carries the address alone (CLAUDE.md id rule).
+    assert entity.unique_id == unique_id
+    entity.async_write_ha_state.assert_called_once()
+
+
+def test_a_sensor_gone_from_the_config_keeps_its_last_name() -> None:
+    item = _item(title="Kitchen")
+    coordinator = _coordinator(item)
+    entity = ComexioOneWireBinarySensor(coordinator, item)
+    entity.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+    coordinator.data = {ONEWIRE_DATA_KEY: []}
+
+    entity._handle_coordinator_update()
+
+    assert entity.name == "OT1 Kitchen"
 
 
 def _registry_entry(unique_id: str, domain: str) -> SimpleNamespace:

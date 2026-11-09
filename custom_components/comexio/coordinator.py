@@ -1247,8 +1247,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         self._io_index: dict[tuple[str, str], dict[str, Any]] = {}
         # Quickbus IOs repeat their identifier per device, so the webhook addresses them by IO Id
         self._quickbus_index: dict[str, dict[str, Any]] = {}
-        # Pushed 1-Wire readings by sensor address: the config poll parses the sensors without a value.
-        self._onewire_values: dict[str, float] = {}
+        # Pushed 1-Wire readings by sensor address: the config poll parses the sensors without a value. None: a
+        # configured sensor's push made its reading unknown (_set_onewire_value).
+        self._onewire_values: dict[str, float | None] = {}
         # 1-Wire read status by address, fetched with the config poll (never a value source); None while unknown.
         self.onewire_status: dict[str, OneWireStatus] | None = None
         self._onewire_status_warned = False
@@ -5359,11 +5360,13 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._set_onewire_value(sensor, value)
 
     def _set_onewire_value(self, sensor: dict[str, Any], value: float | None) -> None:
+        """Set a configured sensor's reading; an unknown one (None) is kept as well, as its last word.
+
+        Kept, not dropped: a push that made the reading unknown before the entity was added must stay unknown,
+        not give way to the restored last state (restore_onewire_value yields to every address it finds here).
+        """
         sensor["value"] = value
-        if value is None:
-            self._onewire_values.pop(sensor["address"], None)
-        else:
-            self._onewire_values[sensor["address"]] = value
+        self._onewire_values[sensor["address"]] = value
 
     async def _async_refresh_onewire_status(self, sensors: list[dict[str, Any]]) -> None:
         """Fetch the 1-Wire read status with the config poll; the readings themselves only come by push.

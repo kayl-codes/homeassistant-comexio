@@ -1,6 +1,9 @@
 """The ledger, the migration run and the handler of the per-command webhook ids (dg), end to end."""
 
+import ast
 from datetime import timedelta
+import inspect
+import textwrap
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -930,3 +933,24 @@ def test_redact_webhook_ids_hides_every_id_and_leaves_the_rest() -> None:
     assert second not in shown
     assert "/api/webhook/comexio_srv" in shown
     assert "b" * 31 in shown
+
+
+def _setup_call_lines(name: str) -> list[int]:
+    """The lines of async_setup_entry that call a function or method of this name."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(comexio_init.async_setup_entry)))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) == name or getattr(node.func, "attr", None) == name)
+    ]
+
+
+def test_the_webhooks_are_registered_before_the_platforms_set_up_their_entities() -> None:
+    # A 1-Wire reading only comes by push: one sent while the platforms set up must find its webhook registered.
+    webhooks = _setup_call_lines("_setup_webhooks")
+    platforms = _setup_call_lines("async_forward_entry_setups")
+
+    assert len(webhooks) == 1
+    assert len(platforms) == 1
+    assert webhooks[0] < platforms[0]

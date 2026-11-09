@@ -225,7 +225,7 @@ The same applies to IOs and Quickbus devices: each extension picked under **Exte
 
 ## 🔗 1-Wire Sensors
 
-Comexio's 1-Wire sensors (`OT` temperature in °C, `OH` humidity in %, other kinds as the bare number) become read-only entities on the device `<instance> 1-Wire` — a digital sensor as `binary_sensor`, every other one as `sensor`. The ids carry only the address (`sensor.iosrv1_onewire_ot1`), so renaming a sensor in Comexio keeps the entity. Opt out via **Create entities for 1-Wire sensors** in the integration options.
+Comexio's 1-Wire sensors (`OT` temperature in °C, `OH` humidity in %, other kinds as the bare number) become read-only entities on the device `<instance> 1-Wire` — a digital sensor as `binary_sensor`, every other one as `sensor`. The ids carry only the address (`sensor.iosrv1_onewire_ot1`), so renaming a sensor in Comexio keeps the entity; its name follows with the next configuration poll. Opt out via **Create entities for 1-Wire sensors** in the integration options.
 
 - **Push only:** values are never polled. The sync creates a Web-IO class `<name> [1Wire]` with one command per sensor and wires it into managed plans `HA - 1Wire [1-100]`; Comexio pushes each change to HA. After a restart an entity shows its last value until the next push.
 - **Status with the configuration poll:** the 1-Wire monitor's status (read error, not found) is read with the configuration poll (scan interval). A sensor with a problem becomes unavailable, and the diagnostic `1-Wire problem` sensor lists it.
@@ -525,7 +525,7 @@ Dasselbe gilt für IOs und Quickbus-Geräte: Jede unter **Als IO-Cluster-Pläne 
 
 ## 🔗 1-Wire-Sensoren
 
-Comexios 1-Wire-Sensoren (`OT` Temperatur in °C, `OH` Feuchte in %, andere Arten als reine Zahl) werden zu Nur-Lese-Entitäten am Gerät `<Instanz> 1-Wire` — ein digitaler Sensor als `binary_sensor`, jeder andere als `sensor`. Die IDs tragen nur die Adresse (`sensor.iosrv1_onewire_ot1`); ein Umbenennen in Comexio lässt die Entität bestehen. Abwählbar über **1-Wire-Sensoren (Temperatur, Feuchte, ...) als Entitäten anlegen** in den Integrations-Optionen.
+Comexios 1-Wire-Sensoren (`OT` Temperatur in °C, `OH` Feuchte in %, andere Arten als reine Zahl) werden zu Nur-Lese-Entitäten am Gerät `<Instanz> 1-Wire` — ein digitaler Sensor als `binary_sensor`, jeder andere als `sensor`. Die IDs tragen nur die Adresse (`sensor.iosrv1_onewire_ot1`); ein Umbenennen in Comexio lässt die Entität bestehen, ihr Name folgt mit dem nächsten Konfigurations-Poll. Abwählbar über **1-Wire-Sensoren (Temperatur, Feuchte, ...) als Entitäten anlegen** in den Integrations-Optionen.
 
 - **Nur per Push:** Werte werden nie gepollt. Der Sync legt eine Web-IO-Klasse `<Name> [1Wire]` mit einem Befehl je Sensor an und verdrahtet sie in verwaltete Logikpläne `HA - 1Wire [1-100]`; Comexio meldet jede Änderung an HA. Nach einem Neustart zeigt eine Entität ihren letzten Wert bis zum nächsten Push.
 - **Status mit dem Konfigurations-Poll:** Der Status des 1-Wire-Monitors (Lesefehler, nicht gefunden) wird mit dem Konfigurations-Poll (Scan-Intervall) gelesen. Ein Sensor mit Problem wird unavailable, der Diagnose-Sensor `1-Wire-Problem` listet ihn.

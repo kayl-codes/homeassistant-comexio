@@ -413,6 +413,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         model="IO-Server",
     )
 
+    # ---------------------------
+    # Webhook Setup
+    # ---------------------------
+    # Before the platforms: a 1-Wire reading only comes by push, so one sent while the entities are being set up
+    # would be lost until the sensor changes again. The handlers write into coordinator.data, which the entities
+    # read once added; a restored last state yields to a reading pushed since (restore_onewire_value).
+    _setup_webhooks(hass, entry, coordinator, security)
+
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     entry.async_on_unload(track_quickbus_devices(coordinator))
@@ -428,11 +436,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     entry.async_create_background_task(
         hass, _async_fix_statistics_units(hass, server_id, entry.entry_id), f"comexio_{server_id}_fix_statistics_units"
     )
-
-    # ---------------------------
-    # Webhook Setup
-    # ---------------------------
-    _setup_webhooks(hass, entry, coordinator, security)
 
     # One-shot check after an update from a KNX pre-release (flag set by async_migrate_entry).
     # Deliberately BEFORE the update listener is registered: clearing the flag writes the

@@ -1379,6 +1379,14 @@ WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG = (
 # address comes from the request, so the dict must stay bounded; the next config fetch prunes it as well.
 ONEWIRE_PENDING_VALUES_MAX = 64
 
+# Why api._parse_onewire kept the last 1-Wire sensors when the config carried no $FubModules (a failed fetch).
+ONEWIRE_NO_FUB_MODULES_CAUSE = "the config carries no $FubModules"
+# The 1-Wire sensors api._parse_onewire leaves out, each warned about once per changed set.
+ONEWIRE_UNKNOWN_KIND_LOG_MSG = "1-Wire sensors of unknown kind get no Web-IO command and no entity: %s"
+ONEWIRE_SHARED_ID_LOG_MSG = (
+    "1-Wire sensors that share their Id with another one get no Web-IO command and no entity: %s"
+)
+
 # How many unknown IOs the coordinator remembers as already warned about (later pushes of them log
 # at DEBUG only). The pushed ext/identifier come from the request, so the set must stay bounded:
 # past the limit, one warning says so and every further unknown IO logs at DEBUG only.
