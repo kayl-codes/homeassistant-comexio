@@ -176,6 +176,7 @@ from .const import (
     UPTIME_POLL_INTERVAL_SEC,
     WATCHDOG_HISTORY_MAX_ENTRIES,
     WEBHOOK_ADDRESS_AUTO,
+    WEBHOOK_EARLY_ONEWIRE_LOG_MSG,
     WEBHOOK_FORMER_IO_LOG_MSG,
     WEBHOOK_MIGRATION_BUDGET_SEC,
     WEBHOOK_MIGRATION_DONE,
@@ -5343,7 +5344,9 @@ class ComexioCoordinator(DataUpdateCoordinator):
         Only a finite number counts as a reading, anything else as unknown (like an IO's push). A sensor the data
         does not have yet (a push during the config fetch that brings it) keeps its reading in _onewire_values for
         the merge of that fetch, an unknown one as well (it is the sensor's last word, see _set_onewire_value);
-        the merge drops it if the new config does not have the sensor either.
+        the merge drops it if the new config does not have the sensor either. Before the first refresh there is no
+        data at all: only the saved sensors' commands have a webhook then (_saved_onewire_items), and their
+        readings wait the same way.
         """
         address = str(address)
         kind = WebioClass.ONEWIRE
@@ -5352,8 +5355,12 @@ class ComexioCoordinator(DataUpdateCoordinator):
             kept = address in self._onewire_values or self._pending_onewire_values() < ONEWIRE_PENDING_VALUES_MAX
             if kept:
                 self._onewire_values[address] = _live_io_number(value)
-            msg = WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG if kept else WEBHOOK_UNKNOWN_ONEWIRE_DROPPED_LOG_MSG
-            self._log_unknown_webhook_io(warn_key, msg, one_line(address), value)
+            if kept and self.data is None:
+                # A saved sensor's reading during the first refresh: expected, no warning of an unknown sensor.
+                _LOGGER.debug(WEBHOOK_EARLY_ONEWIRE_LOG_MSG, one_line(address), value)
+            else:
+                msg = WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG if kept else WEBHOOK_UNKNOWN_ONEWIRE_DROPPED_LOG_MSG
+                self._log_unknown_webhook_io(warn_key, msg, one_line(address), value)
         else:
             previous = sensor.get("value")
             self._set_onewire_value(sensor, _live_io_number(value))
@@ -5366,8 +5373,23 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
     def _pending_onewire_values(self) -> int:
         """How many kept readings belong to sensors the data does not have (yet); only these count to the bound."""
-        configured = {sensor["address"] for sensor in (self.data or {}).get(ONEWIRE_DATA_KEY, [])}
+        sensors = self._saved_onewire_items() if self.data is None else self.data.get(ONEWIRE_DATA_KEY, [])
+        configured = {sensor["address"] for sensor in sensors}
         return sum(address not in configured for address in self._onewire_values)
+
+    def _saved_onewire_items(self) -> list[dict[str, Any]]:
+        """The saved config's 1-Wire sensors while this setup has no data yet (async_seed_saved_onewire_sensors).
+
+        The api holds them as its last known ones until the first refresh. None once there is data, and none with
+        import_onewire off: their readings would be held for a merge that drops them.
+        """
+        if self.data is not None:
+            return []
+        category = SOURCE_CATEGORIES[WebioClass.ONEWIRE]
+        conf = {**self.config_entry.data, **self.config_entry.options}
+        if not conf.get(category.import_conf_key, category.import_default):
+            return []
+        return self.api.last_known_onewire_items
 
     def restore_onewire_value(self, address: str, value: float) -> None:
         """Seed a 1-Wire sensor's reading from its entity's last state after a restart, unless one was pushed since.
@@ -5563,6 +5585,10 @@ class ComexioCoordinator(DataUpdateCoordinator):
             )
             return False
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
+        # A copy of the saved sensors (the stored config stays as saved): a reading pushed while the login failed on
+        # the certificate waits in _onewire_values and goes onto its sensor like after a poll.
+        data[ONEWIRE_DATA_KEY] = [dict(sensor) for sensor in data[ONEWIRE_DATA_KEY]]
+        self._merge_onewire_values(data[ONEWIRE_DATA_KEY])
         self.data = data
         # The unfiltered list, as the api keeps it: the import_onewire option is applied to what it returns.
         self.api.seed_onewire_items(stored.get(ONEWIRE_DATA_KEY, []))
@@ -8893,10 +8919,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         include_held and the ignored items are not told apart: an id registered for a command that does not exist
         is never called, so the set errs on the wide side and never misses a command that does.
+
+        Before the first data only the ids of the saved 1-Wire sensors: their readings come by push alone, and
+        update_onewire holds one pushed during the first refresh for its merge. Every other kind needs the data
+        to take a push.
         """
         security = self.api.webhook_security
-        if not security or not self.data:
+        if not security:
             return set()
+        if not self.data:
+            return {
+                derive_webhook_id(security.secret, command_key(WebioClass.ONEWIRE, item))
+                for item in self._saved_onewire_items()
+            }
         source = self.webio_source_data(include_held=True)
         items = (
             (WebioClass.MARKER, source.get("markers", [])),

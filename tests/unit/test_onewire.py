@@ -9,13 +9,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiocomexio import ComexioCertificateMismatchError, ComexioDataError
 from aiocomexio.onewire import OneWireStatus
 from homeassistant.components.sensor import SensorDeviceClass
-from homeassistant.const import PERCENTAGE, UnitOfTemperature
-from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.const import CONF_HOST, PERCENTAGE, UnitOfTemperature
+from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import pytest
 
 from custom_components.comexio import (
-    _async_first_refresh,
+    _async_connect,
     _dispatch_push,
     _onewire_entity_uids,
     api as api_module,
@@ -25,6 +25,7 @@ from custom_components.comexio.api import SYSTEM_INFO_CERTIFICATE_CHANGED, Comex
 from custom_components.comexio.binary_sensor import ComexioOneWireBinarySensor, ComexioOneWireProblemSensor
 from custom_components.comexio.button import ComexioSyncButton, _known_source_names
 from custom_components.comexio.const import (
+    LOGIN_ERROR_CONNECTION,
     ONEWIRE_DATA_KEY,
     ONEWIRE_NO_FUB_MODULES_CAUSE,
     ONEWIRE_PENDING_VALUES_MAX,
@@ -418,17 +419,87 @@ def test_a_reading_past_the_bound_is_not_kept_and_the_log_says_so(caplog: pytest
     ]
 
 
-def test_the_saved_onewire_sensors_are_seeded_before_the_first_refresh() -> None:
-    # The first poll may read no 1-Wire sensors: the api must know the saved ones by then.
+def test_the_saved_onewire_sensors_and_their_webhooks_come_before_the_login_and_the_first_refresh() -> None:
+    # The first poll may read no 1-Wire sensors: the api must know the saved ones by then. And a reading pushed
+    # during the login or the first refresh must find its webhook: the ids follow the seeding at once.
     calls: list[str] = []
     coordinator = MagicMock()
     coordinator.async_seed_saved_onewire_sensors = AsyncMock(side_effect=lambda: calls.append("seed"))
+    coordinator.sync_webhooks = MagicMock(side_effect=lambda: calls.append("webhooks"))
     coordinator.async_config_entry_first_refresh = AsyncMock(side_effect=lambda: calls.append("refresh"))
+    api = MagicMock()
+    api.login = AsyncMock(side_effect=lambda: calls.append("login") or True)
 
-    from_saved_config = asyncio.run(_async_first_refresh(MagicMock(), coordinator))
+    with patch("custom_components.comexio.async_clear_certificate_changed"):
+        from_saved_config = asyncio.run(_async_connect(MagicMock(), MagicMock(), api, coordinator))
 
     assert from_saved_config is False
-    assert calls == ["seed", "refresh"]
+    assert calls == ["seed", "webhooks", "login", "refresh"]
+
+
+@pytest.mark.parametrize(
+    ("login_error", "raised"),
+    [(LOGIN_ERROR_CONNECTION, ConfigEntryNotReady), ("rejected", ConfigEntryAuthFailed)],
+    ids=["unreachable", "rejected"],
+)
+def test_the_saved_sensors_webhooks_stand_before_a_login_that_fails(login_error: str, raised: type[Exception]) -> None:
+    # A push of the failed attempt's window is kept by the coordinator, the retry builds a new one.
+    calls: list[str] = []
+    coordinator = MagicMock()
+    coordinator.async_seed_saved_onewire_sensors = AsyncMock(side_effect=lambda: calls.append("seed"))
+    coordinator.sync_webhooks = MagicMock(side_effect=lambda: calls.append("webhooks"))
+    api = MagicMock()
+    api.login = AsyncMock(return_value=False)
+    api.last_login_error = login_error
+    entry = SimpleNamespace(data={CONF_HOST: "192.0.2.1"})
+    connecting = _async_connect(MagicMock(), entry, api, coordinator)
+
+    with (
+        patch("custom_components.comexio.async_replaced_fingerprint", AsyncMock(return_value=None)),
+        pytest.raises(raised),
+    ):
+        asyncio.run(connecting)
+
+    assert calls == ["seed", "webhooks"]
+    coordinator.async_config_entry_first_refresh.assert_not_called()
+
+
+def test_a_reading_past_the_bound_before_the_first_refresh_is_not_kept(caplog: pytest.LogCaptureFixture) -> None:
+    coordinator = _coordinator()
+    coordinator.data = None
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
+    coordinator.api = SimpleNamespace(last_known_onewire_items=[_item("OT0")])
+
+    with caplog.at_level(logging.WARNING):
+        for number in range(ONEWIRE_PENDING_VALUES_MAX + 1):
+            coordinator.update_onewire(f"OH{number}", number)
+
+    assert len(coordinator._onewire_values) == ONEWIRE_PENDING_VALUES_MAX
+    assert f"OH{ONEWIRE_PENDING_VALUES_MAX}" not in coordinator._onewire_values
+    assert "not kept: too many readings of unknown sensors are held already" in caplog.text
+
+
+def test_a_reading_pushed_before_the_first_refresh_waits_for_its_merge(caplog: pytest.LogCaptureFixture) -> None:
+    # Before the first data only the saved sensors' commands have a webhook; more of them than the bound still fit.
+    saved = [_item(f"OT{number}", config_id=number) for number in range(ONEWIRE_PENDING_VALUES_MAX + 2)]
+    coordinator = _coordinator()
+    coordinator.data = None
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
+    coordinator.api = SimpleNamespace(last_known_onewire_items=saved)
+
+    with caplog.at_level(logging.DEBUG):
+        for number, item in enumerate(saved):
+            coordinator.update_onewire(item["address"], number)
+
+    assert len(coordinator._onewire_values) == len(saved)
+    assert [r.levelno for r in caplog.records if "1-Wire" in r.getMessage()] == [logging.DEBUG] * len(saved)
+    assert "Webhook push for 1-Wire sensor OT0 (value 0) before the first refresh, held for it" in caplog.text
+
+    fresh = [_item("OT1", config_id=1), _item("OT5", config_id=5)]
+    coordinator._merge_onewire_values(fresh)
+
+    assert [i["value"] for i in fresh] == [1, 5]
+    assert set(coordinator._onewire_values) == {"OT1", "OT5"}  # the merge drops the readings of the other addresses
 
 
 def test_the_readings_kept_for_sensors_not_in_the_data_are_bounded() -> None:

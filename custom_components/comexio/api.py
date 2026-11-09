@@ -1799,6 +1799,11 @@ class ComexioAPI:
         self._onewire_items = [onewire_item(sensor) for sensor in known]
         return copy.deepcopy(self._onewire_items)
 
+    @property
+    def last_known_onewire_items(self) -> list[dict[str, Any]]:
+        """The 1-Wire items of the last config whose group parsed, or the seeded ones before; not for changing."""
+        return self._onewire_items
+
     def seed_onewire_items(self, items: list[dict[str, Any]]) -> None:
         """Take the 1-Wire sensors of a saved config as the last known ones (before the first refresh; #250).
 

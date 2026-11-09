@@ -1379,6 +1379,7 @@ WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG = (
 # configured sensors' readings do not count). The pushed address comes from the request, so the dict must stay
 # bounded; the next config fetch prunes it as well.
 ONEWIRE_PENDING_VALUES_MAX = 64
+WEBHOOK_EARLY_ONEWIRE_LOG_MSG = "Webhook push for 1-Wire sensor %s (value %r) before the first refresh, held for it"
 WEBHOOK_UNKNOWN_ONEWIRE_DROPPED_LOG_MSG = (
     "Webhook push for unknown 1-Wire sensor %s (value %r) — not in the current config and not kept: "
     "too many readings of unknown sensors are held already"

@@ -56,6 +56,7 @@ from custom_components.comexio.plan_watchdog import (
     vanished_plan_token,
 )
 from custom_components.comexio.services import _context
+from custom_components.comexio.webhook_security import derive_webhook_id, payload_key
 from tests.common import load_json_fixture
 
 FUBS = {"19": {"Id": 19, "Name": "Test1", "Active": 0}, "43": {"Id": 43, "Name": "Licht", "Active": 1}}
@@ -243,6 +244,8 @@ class _FakeCoordinator(SimpleNamespace):
     _merge_onewire_values = ComexioCoordinator._merge_onewire_values
     update_onewire = ComexioCoordinator.update_onewire
     _pending_onewire_values = ComexioCoordinator._pending_onewire_values
+    _saved_onewire_items = ComexioCoordinator._saved_onewire_items
+    webhook_command_ids = ComexioCoordinator.webhook_command_ids
     onewire_sensor = ComexioCoordinator.onewire_sensor
     _set_onewire_value = ComexioCoordinator._set_onewire_value
     _fire_plan_event = ComexioCoordinator._fire_plan_event
@@ -4199,6 +4202,28 @@ def test_the_saved_onewire_sensors_are_the_last_known_ones_of_a_poll_that_reads_
     assert coordinator.data is None
 
 
+@pytest.mark.parametrize(("import_onewire", "expected"), [(True, 1), (False, 0)])
+def test_before_the_first_data_the_webhook_ids_are_those_of_the_saved_onewire_sensors(
+    api: ComexioAPI, import_onewire: bool, expected: int
+) -> None:
+    # Their readings come by push alone: one sent during the login or the first refresh must find its webhook.
+    stored = coordinator_module.saved_config(_parsed_config())
+    sensors = stored[coordinator_module.ONEWIRE_DATA_KEY]
+    coordinator = _saved_config_coordinator(api, stored, options={"import_onewire": import_onewire})
+    coordinator.data = None
+    api.webhook_security = SimpleNamespace(secret="secret")
+    assert coordinator.webhook_command_ids() == set()  # nothing seeded yet
+
+    asyncio.run(coordinator.async_seed_saved_onewire_sensors())
+
+    # Derived from the payload the command sends, as the webhook handler checks it (WebhookSecurity.accepts).
+    ids = {derive_webhook_id("secret", payload_key({"type": "onewire", "id": s["address"]})) for s in sensors}
+    assert len(sensors) == 1
+    assert coordinator.webhook_command_ids() == (ids if expected else set())
+    api.webhook_security = None  # no secret, no ids
+    assert coordinator.webhook_command_ids() == set()
+
+
 def test_without_a_saved_config_the_api_starts_without_onewire_sensors(
     api: ComexioAPI, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -4271,6 +4296,20 @@ def test_a_saved_config_starts_the_entry_read_only(api: ComexioAPI, caplog: pyte
     assert coordinator._reading_through_certificate_change is True
     assert coordinator._saved_config is stored  # an unchanged config is not written again
     assert "set up read only from the config Comexio last sent" in caplog.text
+
+
+def test_a_reading_pushed_before_a_read_only_start_lands_on_its_sensor(api: ComexioAPI) -> None:
+    # The login failed on the certificate: a reading pushed meanwhile waits in _onewire_values, the sensors of the
+    # saved config get it like after a poll. The stored config itself keeps its None.
+    stored = coordinator_module.saved_config(_parsed_config())
+    coordinator = _saved_config_coordinator(api, stored)
+    coordinator._onewire_values = {"OT1": 18.5, "GONE": 3.0}
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is True
+
+    assert [s["value"] for s in coordinator.data[coordinator_module.ONEWIRE_DATA_KEY]] == [18.5]
+    assert coordinator._onewire_values == {"OT1": 18.5}  # a sensor the config does not have is dropped, as by a poll
+    assert [s["value"] for s in stored[coordinator_module.ONEWIRE_DATA_KEY]] == [None]
 
 
 def test_a_read_only_start_keeps_the_saved_1wire_sensors_for_a_poll_that_parses_none(api: ComexioAPI) -> None:

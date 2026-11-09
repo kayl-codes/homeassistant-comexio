@@ -268,12 +268,13 @@ def _setup_webhooks(
     def sync_webhooks() -> None:
         """Register the webhook ids the commands use now, drop the ones no command can use any more."""
         if not coordinator.data:
-            # No data yet (or lost): the ids derived from it would be empty and every registered one dropped. The
-            # old id does not depend on data, so commands that still post to it are heard from the start (the first
-            # poll runs after this setup); the registered ids stay as they are.
-            if security.legacy_enabled:
-                keep = registered | refused  # `refused` ids keep their one-time warning
-                _register_webhooks(hass, handler, server_id, registered, refused, keep | {legacy_webhook_id(server_id)})
+            # No data yet: only the ids of the saved 1-Wire sensors' commands (webhook_command_ids), whose readings
+            # the coordinator holds for the first refresh's merge. Not the old id: nothing could take its pushes
+            # before the first data (no IO index, an IO push would warn of an unknown IO). So an install whose
+            # commands still push to the old id (legacy_enabled, not synced yet) is heard from the first data on,
+            # as before. The registered ids stay as they are (`refused` ids keep their one-time warning).
+            keep = registered | refused
+            _register_webhooks(hass, handler, server_id, registered, refused, keep | coordinator.webhook_command_ids())
             return
         wanted = coordinator.webhook_command_ids()
         if security.legacy_enabled:
@@ -349,11 +350,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         # The last attempt could not reach Comexio, which may still be booting: the first refresh starts the grace.
         coordinator.note_comexio_unreachable()
 
+    # ---------------------------
+    # Webhook Setup
+    # ---------------------------
+    # Before the login and the first refresh: a 1-Wire reading only comes by push, so one sent meanwhile would be
+    # lost until the sensor changes again. Nothing is registered here yet (no data); _async_connect registers the
+    # ids of the saved 1-Wire sensors, the first data those of every command (sync_webhooks).
+    _setup_webhooks(hass, entry, coordinator, security)
+
     try:
         from_saved_config = await _async_connect(hass, entry, api, coordinator)
     except Exception:
         # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
         api.close()
+        # HA unregisters the ids (the unload callbacks of _setup_webhooks); their set must not outlive the attempt.
+        hass.data[DOMAIN].pop(f"{entry.entry_id}_webhooks", None)
         # A rejected login proves Comexio answers, even with the flag carried over from the last attempt.
         _track_setup_outage(
             hass,
@@ -366,14 +377,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
-    # ---------------------------
-    # Webhook Setup
-    # ---------------------------
-    # Right after the first refresh told the commands, before the awaited rest of the setup (stores, extension
-    # renames, platforms): a 1-Wire reading only comes by push, so one sent meanwhile would be lost until the sensor
-    # changes again. The handlers write into coordinator.data, which the entities read once added; a restored last
-    # state yields to a reading pushed since (restore_onewire_value).
-    _setup_webhooks(hass, entry, coordinator, security)
+    # The ids of every command, right after the first refresh told them (a saved config standing in for it tells
+    # no listener) and before the awaited rest of the setup (stores, extension renames, platforms), so a push sent
+    # meanwhile finds its webhook. The handlers write into coordinator.data, which the entities read once added; a
+    # restored last state yields to a reading pushed since (restore_onewire_value).
+    coordinator.sync_webhooks()
 
     # Restore the last checked extension-firmware snapshot before entities are created,
     # so update.* entities (update.py) don't start at Unknown after every restart.
@@ -667,6 +675,11 @@ async def _async_connect(
     from the config the last scraped poll saved, so the entities stay and webhook pushes keep arriving. Without
     one it waits for the repair.
     """
+    # The saved 1-Wire sensors first: a first poll that reads none keeps the last known ones (those, not none), and
+    # the webhook ids of their commands are registered with them. A reading pushed during the login or the first
+    # refresh then waits in the coordinator for that refresh's merge (update_onewire) instead of being refused.
+    await coordinator.async_seed_saved_onewire_sensors()
+    coordinator.sync_webhooks()
     if not await api.login():
         if (actual := await async_replaced_fingerprint(api)) is not None:
             # Never accepted on its own: the repair shows both fingerprints and asks.
@@ -692,8 +705,6 @@ async def _async_connect(
 
 async def _async_first_refresh(entry: ConfigEntry, coordinator: ComexioCoordinator) -> bool:
     """Run the first refresh after a login; True when it met another certificate and the saved config stands in."""
-    # A first poll that reads no 1-Wire sensors keeps the last known ones: those of the saved config, not none.
-    await coordinator.async_seed_saved_onewire_sensors()
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
