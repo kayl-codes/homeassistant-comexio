@@ -305,6 +305,8 @@ class _FakeCoordinator(SimpleNamespace):
     _async_full_setup = ComexioCoordinator._async_full_setup
     _keep_data_through_certificate_change = ComexioCoordinator._keep_data_through_certificate_change
     _async_save_config = ComexioCoordinator._async_save_config
+    _async_save_config_or_keep_onewire_status = ComexioCoordinator._async_save_config_or_keep_onewire_status
+    onewire_status = None
     async_start_from_saved_config = ComexioCoordinator.async_start_from_saved_config
     async_seed_saved_onewire_sensors = ComexioCoordinator.async_seed_saved_onewire_sensors
     _index_ios = ComexioCoordinator._index_ios
@@ -3861,6 +3863,51 @@ def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     coordinator._async_refresh_system_info_storage.assert_not_awaited()
     coordinator._async_refresh_onewire_status.assert_not_awaited()
+
+
+def _poll_fetching_a_new_onewire_status(coordinator: _FakeCoordinator, fetched: dict) -> None:
+    """A scraped poll whose 1-Wire status fetch sets `fetched`, as _async_refresh_onewire_status does."""
+
+    async def answering() -> dict:
+        coordinator._last_poll_scraped = True
+        coordinator._polled_plan_ids = None
+        return {}
+
+    async def fetch_status(_sensors: list) -> None:
+        coordinator.onewire_status = fetched
+
+    coordinator._async_fetch_and_audit = answering
+    coordinator._async_refresh_onewire_status = fetch_status
+
+
+@pytest.mark.parametrize("before", [None, {"OT1": object()}], ids=["no_status_yet", "a_status"])
+def test_a_poll_whose_config_save_fails_keeps_the_1wire_status_of_the_poll_before(
+    api: ComexioAPI, certificate_repair: SimpleNamespace, before: dict | None
+) -> None:
+    # HA keeps the old data of a failed poll: the entities must not judge its sensors by the new poll's status.
+    coordinator = _certificate_coordinator(api)
+    coordinator.onewire_status = before
+    _poll_fetching_a_new_onewire_status(coordinator, {"OT2": object()})
+    coordinator._async_save_config = AsyncMock(side_effect=OSError("disk full"))
+
+    update = ComexioCoordinator._async_update_data(coordinator)
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(update)
+    assert coordinator.onewire_status is before
+
+
+def test_a_poll_whose_config_save_works_publishes_its_1wire_status(
+    api: ComexioAPI, certificate_repair: SimpleNamespace
+) -> None:
+    fetched = {"OT2": object()}
+    coordinator = _certificate_coordinator(api)
+    coordinator.onewire_status = {"OT1": object()}
+    _poll_fetching_a_new_onewire_status(coordinator, fetched)
+    coordinator._async_save_config = AsyncMock()
+
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+    coordinator._async_save_config.assert_awaited_once()
+    assert coordinator.onewire_status is fetched
 
 
 # #250: a setup that meets another certificate starts read only from the config the last scraped poll saved.

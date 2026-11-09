@@ -1545,6 +1545,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
         # Only this poll's config may be saved, never one a failed poll left behind.
         self._scraped_config = None
         mismatches_before = self.api.certificate_mismatch_count
+        onewire_status_before = self.onewire_status
         fetched = False
         try:
             data = await self._async_fetch_and_audit()
@@ -1580,7 +1581,7 @@ class ComexioCoordinator(DataUpdateCoordinator):
             # also when a login or config fetch alongside it cleared certificate_mismatch since.
             if self.api.certificate_mismatch is None and self.api.certificate_mismatch_count == mismatches_before:
                 self._clear_certificate_changed()
-            await self._async_save_config()
+            await self._async_save_config_or_keep_onewire_status(onewire_status_before)
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
         if self._polled_plan_ids is not None:
@@ -5527,6 +5528,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         await self._saved_config_store.async_save(saved)
         self._saved_config = saved
+
+    async def _async_save_config_or_keep_onewire_status(self, status_before: dict[str, OneWireStatus] | None) -> None:
+        """Save the config; a save that fails fails the poll, so the 1-Wire status it fetched must not outlive it.
+
+        HA keeps the data of the poll before when one fails, while _async_refresh_onewire_status has already set the
+        status of the sensors this poll read: the entities would judge the old sensors by the new status.
+        """
+        try:
+            await self._async_save_config()
+        except Exception:
+            self.onewire_status = status_before
+            raise
 
     async def async_seed_saved_onewire_sensors(self) -> None:
         """Hand the api the 1-Wire sensors of the saved config as its last known ones, before the first refresh.
