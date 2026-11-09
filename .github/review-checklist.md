@@ -189,6 +189,11 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   repair placeholder or a diagnostics dump. Refused requests are logged through `WebhookSecurity.warn_refused`
   (throttled, no payload), notification text through `redact_webhook_ids`. The old id switches off only after the
   restart of Comexio and the read-back of every command (`docs/WEBHOOK_SECURITY.md`).
+  `tests/unit/test_webhook_ids_stay_secret.py` scans for it (ids and the secret followed by name into logging, notifications,
+  repair placeholders and `raise`/`assert` text; a handler that logs the traceback of a `try` that handled an id counts);
+  a print it cannot rule out goes into its `ALLOWED` with the exact call text and a reason. Flag a new `ALLOWED` entry
+  whose reason does not hold, an id handed to a module-external call or through an alias or `setattr` (the scan does not
+  follow those, see its docstring), and a `WebhookSecurity(...)` built without the entry's host.
 - **New storage keys are built from the entry id:** HA uses a `Store` key as a file path under `.storage/`. A new
   per-entry store takes `entry.entry_id` into its key — HA makes it unique and free of path separators — never a
   value the user types (e.g. the server ID): an entry created before the flow refused empty IDs and path separators
