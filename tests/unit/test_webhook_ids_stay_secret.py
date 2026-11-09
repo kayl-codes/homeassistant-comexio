@@ -37,7 +37,9 @@ an id either. A bare id, an id after other text, and its keyword arguments are s
 The old id `comexio_<server_id>` is not replaced by it, and is no finding either: it is derived from the server id
 that every entity_id shows, so anyone who can read the log can build it, and it is switched off after the migration.
 An exception being handled counts like a named one: when the `try` body handled an id or the secret, a log call in
-its handler that prints the traceback (`.exception(...)`, `exc_info=...`, `traceback.print_exc()`) is a finding.
+its handler that prints the traceback (`.exception(...)`, `exc_info=...`, `traceback.print_exc()`) is a finding, and
+`sys.exception()` / `sys.exc_info()` there carry the id like a name bound by `as`.
+A use listed in ALLOWED is pinned to the text of the call, so an argument added to it is a new finding.
 
 Not followed: a value handed on through another module, `setattr`/`getattr` with a computed name, a mutating method
 outside MUTATORS, a class or function reached through another name than its own (an alias, a returned callable), a
@@ -45,7 +47,8 @@ callback handed over by keyword or an argument placed before the callback, a con
 attribute (`self.Holder(...)`), a base class named through an attribute (`pkg.Base`), a stream reached through a
 local alias or a deeper attribute (`err = sys.stderr; err.write(...)`, `sys.stdout.buffer.write(...)`), a traceback
 printed by a function the handler calls or by an own wrapper (`self._log(msg, exc_info=True)`), a traceback printer
-reached through an import alias (`from traceback import format_exc as fe`), a module-level
+reached through an import alias (`from traceback import format_exc as fe`), `sys.exception()` reached through one
+(`import sys as _sys`) or called in a function or lambda defined inside a handler, a module-level
 import or alias
 placed after the function that uses it, a module-level or enclosing-scope name assigned after the function's
 definition, a taint assigned later in a loop body than the use it reaches on the next pass, and the texts the
@@ -63,9 +66,13 @@ from collections import Counter
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import SimpleNamespace
 from typing import NamedTuple
 
+from aiocomexio.const import WebioClass
 import pytest
+
+from custom_components.comexio import webhook_security as ws
 
 INTEGRATION = Path(__file__).parents[2] / "custom_components" / "comexio"
 
@@ -90,6 +97,7 @@ PRINTING_CALLS = frozenset(
     }
 )
 TRACEBACK_CALLS = frozenset({"print_exc", "format_exc", "print_exception", "format_exception", "print_last"})
+ACTIVE_EXCEPTION_CALLS = frozenset({"exception", "exc_info"})  # `sys.exception()` and `sys.exc_info()`
 STREAM_NAMES = frozenset({"stdout", "stderr"})  # `sys.stderr.write(...)` prints like `print`
 STREAM_WRITES = frozenset({"write", "writelines"})
 SINK_NAMES = LOG_METHODS | PRINTING_CALLS
@@ -104,11 +112,12 @@ PRODUCTION_MODULE = "custom_components.comexio.webhook_security"  # where redact
 SECURITY_CLASS = "WebhookSecurity"
 ENTRY_ID_KEYWORD = "entry_id"
 
-# (file relative to the integration, Class.method) -> (uses counted there, why the id is not shown there). Each use
-# counts, so a second one in a listed function fails too.
-ALLOWED: dict[tuple[str, str], tuple[int, str]] = {
+# (file relative to the integration, Class.method) -> (the calls listed there as `ast.unparse` writes them, why the id
+# is not shown there). A listed call is pinned to its exact text: a second use fails, and so does an argument added to
+# the listed one (the id would reach the log under an entry that only vouches for the call as it is).
+ALLOWED: dict[tuple[str, str], tuple[tuple[str, ...], str]] = {
     ("__init__.py", "_webhook_handler.handle_webhook"): (
-        1,
+        ("_LOGGER.exception('Webhook Error: %s', e)",),
         "the `try` hands webhook_id to WebhookSecurity.accepts only, and HA dispatches only ids registered by "
         "sync_webhooks (ASCII hex or comexio_<server>); `_same` and derive_webhook_id can raise only on a payload "
         "character that is not encodable, and that error quotes the payload character, never the id",
@@ -142,6 +151,8 @@ def _prints_traceback(node: ast.Call, *, printing: bool) -> bool:
     traceback printers."""
     if _call_name(node) in TRACEBACK_CALLS:
         return True
+    if _is_active_exception(node):
+        return False  # `sys.exception()` returns the exception, it logs nothing; what is done with it is checked there
     wants_it = any(  # `**options` may hold exc_info: no way to tell, so it counts
         keyword.arg is None
         or (keyword.arg == "exc_info" and not (isinstance(keyword.value, ast.Constant) and not keyword.value.value))
@@ -163,9 +174,23 @@ class _Taint:
     calls: frozenset[str] = frozenset()
     secret_calls: frozenset[str] = frozenset()
     shadowed: bool = False  # the module binds the redactor's name to something else: no call of it is trusted
+    handling: bool = False  # inside a handler of a `try` that handled an id: the active exception may quote it
 
 
 _NO_TAINT = _Taint()
+
+
+def _is_active_exception(node: ast.AST) -> bool:
+    """`sys.exception()`, `sys.exc_info()` (also from `from sys import ...`): the exception being handled, fetched
+    without an `as` name."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Attribute):
+        return func.attr in ACTIVE_EXCEPTION_CALLS and isinstance(func.value, ast.Name) and func.value.id == "sys"
+    return isinstance(func, ast.Name) and (
+        func.id == "exc_info" or (func.id == "exception" and not node.args and not node.keywords)
+    )
 
 
 def _is_bare_secret(node: ast.AST, taint: _Taint, *, ids_only: bool = False) -> bool:
@@ -241,6 +266,8 @@ def _carries_id(node: ast.AST, taint: _Taint = _NO_TAINT) -> bool:
         return True
     if isinstance(node, ast.Constant) and node.value == FORM_PATH_FIELD:
         return True
+    if taint.handling and _is_active_exception(node):
+        return True  # the handled exception, fetched without a name: its text may quote the id like `err` would
     return any(_carries_id(child, taint) for child in ast.iter_child_nodes(node))
 
 
@@ -465,6 +492,7 @@ class _Frame:
             frozenset(flow.calls),
             frozenset(flow.secret_calls),
             flow.shadowed,
+            self.handling,
         )
 
     def carries_id(self, node: ast.AST) -> bool:
@@ -487,6 +515,7 @@ class _Scan(ast.NodeVisitor):
         self.module = module or _Module()
         self.learned = _Flow()
         self.hits: list[tuple[str, int]] = []
+        self.calls: list[str] = []  # the text of each hit, in the order of `hits`
 
     def _enter(self, node: ast.AST, name: str, *, function: bool, is_class: bool = False) -> None:
         self.scope.append(name)
@@ -624,6 +653,7 @@ class _Scan(ast.NodeVisitor):
 
     def _hit(self, node: ast.AST) -> None:
         self.hits.append((".".join(self.scope), node.lineno))
+        self.calls.append(ast.unparse(node))
 
     def _store(self, target: ast.AST, *, secret: bool) -> None:
         """Taints where a value carrying an id goes: a local, an attribute name, the container of an item."""
@@ -867,9 +897,9 @@ def _redactor_is_rebound(tree: ast.AST, depth: int = 1) -> bool:
     return any(name in SAFE_WRAPPERS for node in ast.walk(tree) for name in _bound_names(node, depth))
 
 
-def _scan(source: str, depth: int = 1) -> list[tuple[str, int]]:
-    """Passes over the module until the flow it learns (attributes, returns, arguments) stops growing; the hits of
-    the last pass, which saw all of it, count. `depth`: how many dots a relative import needs to reach the package."""
+def _scan_module(source: str, depth: int = 1) -> _Scan:
+    """Passes over the module until the flow it learns (attributes, returns, arguments) stops growing; the last
+    pass, which saw all of it, is returned. `depth`: how many dots a relative import needs to reach the package."""
     tree = _inline_path_field(ast.parse(source))
     module = _module(tree)
     flow = _Flow(shadowed=_redactor_is_rebound(tree, depth))
@@ -877,7 +907,12 @@ def _scan(source: str, depth: int = 1) -> list[tuple[str, int]]:
         scan = _Scan(flow, module)
         scan.visit(tree)
         if not flow.absorb(scan.learned):
-            return scan.hits
+            return scan
+
+
+def _scan(source: str, depth: int = 1) -> list[tuple[str, int]]:
+    """The hits (scope, line) of a module."""
+    return _scan_module(source, depth).hits
 
 
 def _import_depth(rel: str) -> int:
@@ -891,20 +926,80 @@ def test_a_file_reaches_the_package_with_one_dot_per_path_part() -> None:
     assert _import_depth("a/b/c.py") == 3
 
 
-def test_no_log_line_notification_repair_or_exception_carries_a_webhook_id_or_the_secret() -> None:
-    found: Counter[tuple[str, str]] = Counter()
-    lines: dict[tuple[str, str], list[int]] = {}
-    for path in sorted(INTEGRATION.rglob("*.py")):
-        rel = path.relative_to(INTEGRATION).as_posix()
-        for scope, line in _scan(path.read_text(encoding="utf-8"), depth=_import_depth(rel)):
-            found[rel, scope] += 1
-            lines.setdefault((rel, scope), []).append(line)
+def _audit(sources: dict[str, str]) -> tuple[dict[str, int], dict[str, str]]:
+    """Scans the sources (file relative to the integration -> text) and compares the hits with ALLOWED: what is not
+    listed, and what is listed but no longer there as written. A hit is listed by file, scope and its call's text."""
+    found: Counter[tuple[str, str, str]] = Counter()
+    lines: dict[tuple[str, str, str], list[int]] = {}
+    for rel, source in sources.items():
+        scan = _scan_module(source, depth=_import_depth(rel))
+        for (scope, line), call in zip(scan.hits, scan.calls, strict=True):
+            found[rel, scope, call] += 1
+            lines.setdefault((rel, scope, call), []).append(line)
 
-    allowed = Counter({key: count for key, (count, _why) in ALLOWED.items()})
-    unlisted = {f"{k[0]}::{k[1] or '<module>'} (lines {lines[k]})": n for k, n in (found - allowed).items()}
-    stale = {f"{k[0]}::{k[1] or '<module>'}": f"{n} listed too many" for k, n in (allowed - found).items()}
+    allowed = Counter(
+        {(rel, scope, call): n for (rel, scope), (calls, _why) in ALLOWED.items() for call, n in Counter(calls).items()}
+    )
+    unlisted = {f"{k[0]}::{k[1] or '<module>'} {k[2]} (lines {lines[k]})": n for k, n in (found - allowed).items()}
+    stale = {f"{k[0]}::{k[1] or '<module>'} {k[2]}": f"{n} listed too many" for k, n in (allowed - found).items()}
+    return unlisted, stale
+
+
+def test_no_log_line_notification_repair_or_exception_carries_a_webhook_id_or_the_secret() -> None:
+    sources = {
+        path.relative_to(INTEGRATION).as_posix(): path.read_text(encoding="utf-8")
+        for path in sorted(INTEGRATION.rglob("*.py"))
+    }
+
+    unlisted, stale = _audit(sources)
+
     assert not unlisted, f"a webhook id or the secret may reach a log, a notification or an exception: {unlisted}"
-    assert not stale, f"ALLOWED lists uses that no longer exist (lower the count or drop the entry): {stale}"
+    assert not stale, f"ALLOWED lists calls that no longer exist as written (drop or correct the entry): {stale}"
+
+
+def test_a_listed_call_is_pinned_to_its_text_so_an_added_id_argument_is_not_covered_by_it() -> None:
+    listed_calls = ALLOWED["__init__.py", "_webhook_handler.handle_webhook"][0]
+    assert len(listed_calls) == 1
+    listed = listed_calls[0]
+    handler = (
+        "def _webhook_handler():\n  def handle_webhook(webhook_id):\n    try:\n        accepts(webhook_id)\n"
+        "    except Exception as e:\n"
+    )
+    added = "_LOGGER.exception('Webhook Error: %s', e, webhook_id)"
+
+    assert _audit({"__init__.py": f"{handler}        {listed}\n"}) == ({}, {})  # as listed: covered
+    # one hit in the same place, but another call: the entry does not cover it, and what it listed is gone
+    unlisted, stale = _audit({"__init__.py": f"{handler}        {added}\n"})
+    assert [added in key for key in unlisted] == [True]
+    assert [listed in key for key in stale] == [True]
+
+
+def test_the_scan_trusts_the_redactor_and_the_names_the_integration_really_has() -> None:
+    """The scan trusts `redact_webhook_ids` by name and `ID_NAMES` / `SECRET_NAMES` as holders of an id: that holds
+    only while the production module really has them and the redactor really removes what it derives."""
+    assert {ws.redact_webhook_ids.__name__} == SAFE_WRAPPERS
+    assert ws.__name__ == PRODUCTION_MODULE
+    assert WEBHOOK_PATH == ws.WEBHOOK_PATH_PREFIX
+    assert {ws.derive_webhook_id.__name__, ws.command_path.__name__, ws.WebhookSecurity.path_for.__name__} <= ID_NAMES
+
+    ids = [ws.derive_webhook_id(secret, key) for secret in ("s", "another secret") for key in ("a", "b|c", "")]
+    for webhook_id in ids:
+        assert len(webhook_id) == 32
+        for text in (
+            f"{WEBHOOK_PATH}{webhook_id}",
+            f"POST http://ha.local:8123{WEBHOOK_PATH}{webhook_id} failed",
+            f'"{WEBHOOK_PATH}{webhook_id}", "{WEBHOOK_PATH}{webhook_id}"',
+        ):
+            shown = ws.redact_webhook_ids(text)
+            assert webhook_id not in shown
+            assert ws.WEBHOOK_ID_REDACTED in shown
+
+    items = {WebioClass.IO: {"ext_name": "EXT1", "identifier": "Q1"}, WebioClass.MARKER: {"id": 7}}
+    holder = SimpleNamespace(secret="s")  # path_for only reads the secret of its instance
+    paths = [ws.command_path("s", cls, item) for cls, item in items.items()]
+    paths += [ws.WebhookSecurity.path_for(holder, cls, item) for cls, item in items.items()]  # type: ignore[arg-type]
+    for path in paths:  # what `command_path` and `path_for` return is a path the redactor can empty of its id
+        assert ws.redact_webhook_ids(path) == f"{WEBHOOK_PATH}{ws.WEBHOOK_ID_REDACTED}"
 
 
 def test_the_scan_sees_an_id_where_it_is_printed_and_not_where_it_is_redacted_or_not_printed() -> None:
@@ -1413,6 +1508,31 @@ def caught_no_id_without_a_name(session):
         _LOGGER.exception("failed")
         _LOGGER.warning("failed", exc_info=True)
         traceback.print_exc()
+
+
+def fetched_exception(session, webhook_id, other, security):
+    key = security.secret  # a local holding the secret: only the secret taint knows it, not the id one
+    try:
+        session.get(key)
+    except OSError:
+        _LOGGER.error("failed %s", sys.exception())  # leak
+    try:
+        session.post(webhook_id)
+    except OSError:
+        _LOGGER.error("failed %s", sys.exception())  # leak
+        _LOGGER.error("failed %s", sys.exc_info()[1])  # leak
+        _LOGGER.error("failed %s", exc_info()[1])  # leak
+        _LOGGER.error("failed %s", exception())  # leak
+        active = sys.exception()
+        _LOGGER.error("failed %s", active)  # leak
+        _LOGGER.error("failed %s", sys.version)
+        _LOGGER.error("failed %s", clock.exc_info())
+        _LOGGER.error("failed %s", exception("a message"))
+    try:
+        session.get("/api/state")
+    except OSError:
+        _LOGGER.error("failed %s", sys.exception())
+    _LOGGER.error("outside of any handler %s", sys.exception())
 
 
 def streams(webhook_id, other):
