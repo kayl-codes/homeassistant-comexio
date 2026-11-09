@@ -242,6 +242,7 @@ class _FakeCoordinator(SimpleNamespace):
     _async_refresh_onewire_status = AsyncMock()
     _merge_onewire_values = ComexioCoordinator._merge_onewire_values
     update_onewire = ComexioCoordinator.update_onewire
+    _pending_onewire_values = ComexioCoordinator._pending_onewire_values
     onewire_sensor = ComexioCoordinator.onewire_sensor
     _set_onewire_value = ComexioCoordinator._set_onewire_value
     _fire_plan_event = ComexioCoordinator._fire_plan_event
@@ -302,6 +303,7 @@ class _FakeCoordinator(SimpleNamespace):
     _keep_data_through_certificate_change = ComexioCoordinator._keep_data_through_certificate_change
     _async_save_config = ComexioCoordinator._async_save_config
     async_start_from_saved_config = ComexioCoordinator.async_start_from_saved_config
+    async_seed_saved_onewire_sensors = ComexioCoordinator.async_seed_saved_onewire_sensors
     _index_ios = ComexioCoordinator._index_ios
     _track_offline_extensions = ComexioCoordinator._track_offline_extensions
 
@@ -4182,6 +4184,70 @@ def test_a_saved_config_that_cannot_be_loaded_starts_no_read_only_entry(
 
     assert asyncio.run(coordinator.async_start_from_saved_config()) is False
     assert coordinator.started_from_saved_config is False
+    assert "Saved Comexio config is unreadable" in caplog.text
+
+
+def test_the_saved_onewire_sensors_are_the_last_known_ones_of_a_poll_that_reads_none(api: ComexioAPI) -> None:
+    # A new api object knows no sensors: without the saved ones the registered 1-Wire entities got no entity object.
+    stored = coordinator_module.saved_config(_parsed_config())
+    coordinator = _saved_config_coordinator(api, stored)
+
+    asyncio.run(coordinator.async_seed_saved_onewire_sensors())
+
+    assert api._parse_onewire(None) == stored[coordinator_module.ONEWIRE_DATA_KEY]
+    assert api.onewire_known is False  # only a parsed group proves them current (the entity cleanup waits for it)
+    assert coordinator.data is None
+
+
+def test_without_a_saved_config_the_api_starts_without_onewire_sensors(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = _saved_config_coordinator(api, None)
+
+    asyncio.run(coordinator.async_seed_saved_onewire_sensors())
+
+    assert api._onewire_items == []
+    assert "Saved Comexio config is unreadable" not in caplog.text
+
+
+def test_a_config_saved_before_the_onewire_list_existed_seeds_no_sensors(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    stored = coordinator_module.saved_config(_parsed_config())
+    del stored[coordinator_module.ONEWIRE_DATA_KEY]
+    coordinator = _saved_config_coordinator(api, stored)
+
+    asyncio.run(coordinator.async_seed_saved_onewire_sensors())
+
+    assert api._onewire_items == []
+    assert "Saved Comexio config is unreadable" not in caplog.text
+
+
+def test_a_damaged_saved_config_seeds_no_onewire_sensors(api: ComexioAPI, caplog: pytest.LogCaptureFixture) -> None:
+    damaged = {**coordinator_module.saved_config(_parsed_config()), "markers": "damaged"}
+    coordinator = _saved_config_coordinator(api, damaged)
+
+    asyncio.run(coordinator.async_seed_saved_onewire_sensors())
+
+    assert api._onewire_items == []
+    assert "Saved Comexio config is unreadable (not a saved config)" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [NotImplementedError, HomeAssistantError("unreadable"), OSError("I/O error")],
+    ids=["newer store version after a downgrade", "file HA cannot read", "disk error"],
+)
+def test_a_saved_config_that_cannot_be_loaded_seeds_no_onewire_sensors(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture, error: BaseException | type[BaseException]
+) -> None:
+    # Never fails the setup: the first refresh still runs and may well read the sensors.
+    coordinator = _saved_config_coordinator(api, None)
+    coordinator._saved_config_store.async_load = AsyncMock(side_effect=error)
+
+    asyncio.run(coordinator.async_seed_saved_onewire_sensors())
+
+    assert api._onewire_items == []
     assert "Saved Comexio config is unreadable" in caplog.text
 
 

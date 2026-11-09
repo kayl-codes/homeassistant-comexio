@@ -954,3 +954,18 @@ def test_the_webhooks_are_registered_before_the_platforms_set_up_their_entities(
     assert len(webhooks) == 1
     assert len(platforms) == 1
     assert webhooks[0] < platforms[0]
+
+
+def test_nothing_is_awaited_between_the_first_refresh_and_the_webhook_registration() -> None:
+    # The first refresh tells the commands, and with them the webhook ids: a push during a later await of the setup
+    # (stores, extension renames) must already find its webhook.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(comexio_init.async_setup_entry)))
+    connect = _setup_call_lines("_async_connect")
+    webhooks = _setup_call_lines("_setup_webhooks")
+    awaited = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Await | ast.AsyncWith | ast.AsyncFor)]
+
+    # _async_connect runs the first refresh: the line the webhooks must follow.
+    assert "_async_first_refresh(" in inspect.getsource(comexio_init._async_connect)
+    assert len(connect) == 1
+    assert connect[0] < webhooks[0]
+    assert [line for line in awaited if connect[0] < line < webhooks[0]] == []

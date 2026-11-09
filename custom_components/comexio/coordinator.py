@@ -153,6 +153,7 @@ from .const import (
     MARKER_READ_ONLY_SUFFIX,
     ONEWIRE_DATA_KEY,
     ONEWIRE_PENDING_VALUES_MAX,
+    ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG,
     PLAN_FAILURE_AFTER_GONE_MEMBER,
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
@@ -189,6 +190,7 @@ from .const import (
     WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_WARNED_MAX,
+    WEBHOOK_UNKNOWN_ONEWIRE_DROPPED_LOG_MSG,
     WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG,
     WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG,
     WEBHOOK_VALUE_LOG_MSG,
@@ -767,18 +769,29 @@ def _range_category_of_key(key: str) -> SourceCategory | None:
     return next((cat for cat in _RANGE_CATEGORIES if key.startswith(cat.audit_key_prefix)), None)
 
 
+def _is_range_key(word: str, category: SourceCategory) -> bool:
+    """Whether a command name's second word is an audit key of this id-range category: its prefix, then the id.
+
+    Not "1Wire" of a 1-Wire command "HA 1Wire <address>": that name carries the address, not the config id, and
+    read as a key it would put every 1-Wire command without a current sensor under one key.
+    """
+    prefix = category.audit_key_prefix
+    return category.range_clustered and word.startswith(prefix) and word[len(prefix) :].isdecimal()
+
+
 def _fallback_audit_key(full_name: str) -> str:
     """Best-effort audit key of a Web-IO command with no current HA counterpart, for grouping only.
 
     Registry-driven: any range_clustered category ("HA <prefix><ID> <Name>", e.g. Marker/KNX)
-    is identified by its audit_key_prefix, so a further range_clustered category needs no new
-    branch here. IOs via "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces; a
+    is identified by its audit_key_prefix and id, so a further range_clustered category needs no new
+    branch here; a 1-Wire command is named by its address and keeps its whole name. IOs via
+    "HA IO <Ext> <Ident>" may misparse if <Ext> itself contains spaces; a
     stale name of a known IO is matched before, by _stale_io_command_keys.
     """
     parts = full_name.split(" ")
     if len(parts) < 3:
         return full_name
-    if any(cat.range_clustered and parts[1].startswith(cat.audit_key_prefix) for cat in SOURCE_CATEGORIES.values()):
+    if any(_is_range_key(parts[1], cat) for cat in SOURCE_CATEGORIES.values()):
         return parts[1]
     if parts[1] == "IO" and len(parts) >= 4:
         return io_audit_key(parts[2], parts[3])
@@ -5329,18 +5342,18 @@ class ComexioCoordinator(DataUpdateCoordinator):
 
         Only a finite number counts as a reading, anything else as unknown (like an IO's push). A sensor the data
         does not have yet (a push during the config fetch that brings it) keeps its reading in _onewire_values for
-        the merge of that fetch; the merge drops it if the new config does not have the sensor either.
+        the merge of that fetch, an unknown one as well (it is the sensor's last word, see _set_onewire_value);
+        the merge drops it if the new config does not have the sensor either.
         """
         address = str(address)
         kind = WebioClass.ONEWIRE
         warn_key = _webhook_warn_key(kind, address)
         if (sensor := self.onewire_sensor(address)) is None:
-            reading = _live_io_number(value)
-            if reading is None:
-                self._onewire_values.pop(address, None)
-            elif address in self._onewire_values or len(self._onewire_values) < ONEWIRE_PENDING_VALUES_MAX:
-                self._onewire_values[address] = reading
-            self._log_unknown_webhook_io(warn_key, WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG, one_line(address), value)
+            kept = address in self._onewire_values or self._pending_onewire_values() < ONEWIRE_PENDING_VALUES_MAX
+            if kept:
+                self._onewire_values[address] = _live_io_number(value)
+            msg = WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG if kept else WEBHOOK_UNKNOWN_ONEWIRE_DROPPED_LOG_MSG
+            self._log_unknown_webhook_io(warn_key, msg, one_line(address), value)
         else:
             previous = sensor.get("value")
             self._set_onewire_value(sensor, _live_io_number(value))
@@ -5350,6 +5363,11 @@ class ComexioCoordinator(DataUpdateCoordinator):
             self._fire_plan_event(kind, str(sensor["id"]), onewire_entity_name(sensor), value)
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
+
+    def _pending_onewire_values(self) -> int:
+        """How many kept readings belong to sensors the data does not have (yet); only these count to the bound."""
+        configured = {sensor["address"] for sensor in (self.data or {}).get(ONEWIRE_DATA_KEY, [])}
+        return sum(address not in configured for address in self._onewire_values)
 
     def restore_onewire_value(self, address: str, value: float) -> None:
         """Seed a 1-Wire sensor's reading from its entity's last state after a restart, unless one was pushed since.
@@ -5487,6 +5505,27 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return
         await self._saved_config_store.async_save(saved)
         self._saved_config = saved
+
+    async def async_seed_saved_onewire_sensors(self) -> None:
+        """Hand the api the 1-Wire sensors of the saved config as its last known ones, before the first refresh.
+
+        A poll that reads no 1-Wire sensors (ComexioAPI._parse_onewire: no $FubModules, a changed group) keeps the
+        last known ones, and a new api object knows none: without these the registered 1-Wire entities would get
+        no entity object for this whole setup. A first refresh that parses the sensors replaces them. A store
+        that is missing or unreadable leaves the api without any, as before; it never fails the setup.
+        """
+        try:
+            # See async_start_from_saved_config for what the load raises.
+            stored = await self._saved_config_store.async_load()
+        except (HomeAssistantError, OSError, NotImplementedError) as err:
+            _LOGGER.warning(ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG, self.server_id, repr(err))
+            return
+        if stored is None:
+            return
+        if not is_saved_config(stored):
+            _LOGGER.warning(ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG, self.server_id, "not a saved config")
+            return
+        self.api.seed_onewire_items(stored.get(ONEWIRE_DATA_KEY, []))
 
     async def async_start_from_saved_config(self) -> bool:
         """Take the config the last scraped poll saved as this setup's data, read only (#250).

@@ -15,6 +15,7 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import pytest
 
 from custom_components.comexio import (
+    _async_first_refresh,
     _dispatch_push,
     _onewire_entity_uids,
     api as api_module,
@@ -360,14 +361,74 @@ def test_a_push_for_a_sensor_the_fetch_in_flight_brings_survives_its_merge() -> 
     coordinator = _coordinator()
     coordinator.update_onewire("OT1", "21,5")
     coordinator.update_onewire("OT9", 3)
-    coordinator.update_onewire("OT9", "n/a")  # an unreadable push forgets the reading, like for a known sensor
-    assert coordinator._onewire_values == {"OT1": pytest.approx(21.5)}
+    coordinator.update_onewire("OT9", "n/a")  # an unreadable push is kept as unknown, like for a known sensor
+    assert coordinator._onewire_values == {"OT1": pytest.approx(21.5), "OT9": None}
     fresh = [_item("OT1"), _item("OT9", config_id=9)]
 
     coordinator._merge_onewire_values(fresh)
 
     assert [i["value"] for i in fresh] == [pytest.approx(21.5), None]
-    assert coordinator._onewire_values == {"OT1": pytest.approx(21.5)}
+    assert coordinator._onewire_values == {"OT1": pytest.approx(21.5), "OT9": None}
+
+
+def test_a_restore_does_not_replace_an_unknown_push_from_before_the_sensor_was_in_the_data() -> None:
+    # The push lands during the fetch that brings the sensor; its entity is added later and restores a last state.
+    coordinator = _coordinator()
+    coordinator.update_onewire("OT1", "n/a")
+    fresh = [_item("OT1")]
+    coordinator._merge_onewire_values(fresh)
+    coordinator.data[ONEWIRE_DATA_KEY] = fresh
+
+    coordinator.restore_onewire_value("OT1", 19.0)
+
+    assert fresh[0]["value"] is None
+
+
+def test_the_readings_of_configured_sensors_do_not_use_up_the_bound() -> None:
+    # The bound is for addresses the data does not have: an installation with many sensors still keeps a new one's.
+    items = [_item(f"OT{number}", config_id=number) for number in range(ONEWIRE_PENDING_VALUES_MAX + 1)]
+    coordinator = _coordinator(*items)
+    for item in items:
+        coordinator.update_onewire(item["address"], 1)
+
+    coordinator.update_onewire("OH1", 55)
+
+    assert coordinator._onewire_values["OH1"] == 55
+
+
+def test_a_reading_past_the_bound_is_not_kept_and_the_log_says_so(caplog: pytest.LogCaptureFixture) -> None:
+    # A configured sensor's reading does not count, an unknown (None) reading of a pending address does.
+    coordinator = _coordinator(_item("OT1"))
+    coordinator.update_onewire("OT1", 20)
+    coordinator.update_onewire("OH0", "n/a")
+    for number in range(1, ONEWIRE_PENDING_VALUES_MAX):
+        coordinator.update_onewire(f"OH{number}", number)
+
+    with caplog.at_level(logging.WARNING):
+        coordinator.update_onewire("OH999", 7)
+        coordinator.update_onewire("OH1", "n/a")  # one already kept still follows its pushes
+
+    assert "OH999" not in coordinator._onewire_values
+    assert coordinator._onewire_values["OH0"] is None
+    assert coordinator._onewire_values["OH1"] is None
+    assert len(coordinator._onewire_values) == ONEWIRE_PENDING_VALUES_MAX + 1
+    assert [r.getMessage() for r in caplog.records if "OH999" in r.getMessage()] == [
+        "Webhook push for unknown 1-Wire sensor OH999 (value 7) — not in the current config and not kept: "
+        "too many readings of unknown sensors are held already"
+    ]
+
+
+def test_the_saved_onewire_sensors_are_seeded_before_the_first_refresh() -> None:
+    # The first poll may read no 1-Wire sensors: the api must know the saved ones by then.
+    calls: list[str] = []
+    coordinator = MagicMock()
+    coordinator.async_seed_saved_onewire_sensors = AsyncMock(side_effect=lambda: calls.append("seed"))
+    coordinator.async_config_entry_first_refresh = AsyncMock(side_effect=lambda: calls.append("refresh"))
+
+    from_saved_config = asyncio.run(_async_first_refresh(MagicMock(), coordinator))
+
+    assert from_saved_config is False
+    assert calls == ["seed", "refresh"]
 
 
 def test_the_readings_kept_for_sensors_not_in_the_data_are_bounded() -> None:

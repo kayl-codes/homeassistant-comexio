@@ -366,6 +366,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
 
+    # ---------------------------
+    # Webhook Setup
+    # ---------------------------
+    # Right after the first refresh told the commands, before the awaited rest of the setup (stores, extension
+    # renames, platforms): a 1-Wire reading only comes by push, so one sent meanwhile would be lost until the sensor
+    # changes again. The handlers write into coordinator.data, which the entities read once added; a restored last
+    # state yields to a reading pushed since (restore_onewire_value).
+    _setup_webhooks(hass, entry, coordinator, security)
+
     # Restore the last checked extension-firmware snapshot before entities are created,
     # so update.* entities (update.py) don't start at Unknown after every restart.
     await coordinator.async_load_extension_firmware()
@@ -412,14 +421,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         manufacturer="Comexio",
         model="IO-Server",
     )
-
-    # ---------------------------
-    # Webhook Setup
-    # ---------------------------
-    # Before the platforms: a 1-Wire reading only comes by push, so one sent while the entities are being set up
-    # would be lost until the sensor changes again. The handlers write into coordinator.data, which the entities
-    # read once added; a restored last state yields to a reading pushed since (restore_onewire_value).
-    _setup_webhooks(hass, entry, coordinator, security)
 
     # Set up platforms
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -691,6 +692,8 @@ async def _async_connect(
 
 async def _async_first_refresh(entry: ConfigEntry, coordinator: ComexioCoordinator) -> bool:
     """Run the first refresh after a login; True when it met another certificate and the saved config stands in."""
+    # A first poll that reads no 1-Wire sensors keeps the last known ones: those of the saved config, not none.
+    await coordinator.async_seed_saved_onewire_sensors()
     try:
         await coordinator.async_config_entry_first_refresh()
     except ConfigEntryNotReady:
