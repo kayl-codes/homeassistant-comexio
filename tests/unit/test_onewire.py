@@ -4,7 +4,7 @@ import asyncio
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioDataError
 from aiocomexio.onewire import OneWireStatus
@@ -25,6 +25,7 @@ from custom_components.comexio.binary_sensor import ComexioOneWireBinarySensor, 
 from custom_components.comexio.button import ComexioSyncButton, _known_source_names
 from custom_components.comexio.const import (
     ONEWIRE_DATA_KEY,
+    ONEWIRE_PENDING_VALUES_MAX,
     ONEWIRE_PROBLEM_MISSING,
     ONEWIRE_PROBLEM_NOT_FOUND,
     ONEWIRE_PROBLEM_READ_ERROR,
@@ -43,7 +44,10 @@ from custom_components.comexio.coordinator import ComexioCoordinator, _imported_
 from custom_components.comexio.diagnostics import DIAGNOSTICS_OPTION_KEYS
 from custom_components.comexio.entity import onewire_sensors_for_platform
 from custom_components.comexio.sensor import ComexioOneWireSensor
+from custom_components.comexio.services import flow_diagram
+from custom_components.comexio.services.backup import _attach_backup_diffs, _label_backup_identity, _LabelMaps
 from custom_components.comexio.services.misc import _build_element_matcher, _search_plan_labels
+from custom_components.comexio.services.plan_actions import _build_visualize_lines
 from custom_components.comexio.webhook_security import derive_webhook_id, payload_key
 
 SERVER = "srv"
@@ -326,6 +330,32 @@ def test_the_next_config_keeps_the_pushed_readings_of_the_sensors_still_there() 
     assert coordinator._onewire_values == {"OT1": 21}
 
 
+def test_a_push_for_a_sensor_the_fetch_in_flight_brings_survives_its_merge() -> None:
+    # The push lands while get_raw_config is still running: the data has no such sensor yet.
+    coordinator = _coordinator()
+    coordinator.update_onewire("OT1", "21,5")
+    coordinator.update_onewire("OT9", 3)
+    coordinator.update_onewire("OT9", "n/a")  # an unreadable push forgets the reading, like for a known sensor
+    assert coordinator._onewire_values == {"OT1": pytest.approx(21.5)}
+    fresh = [_item("OT1"), _item("OT9", config_id=9)]
+
+    coordinator._merge_onewire_values(fresh)
+
+    assert [i["value"] for i in fresh] == [pytest.approx(21.5), None]
+    assert coordinator._onewire_values == {"OT1": pytest.approx(21.5)}
+
+
+def test_the_readings_kept_for_sensors_not_in_the_data_are_bounded() -> None:
+    # The pushed address comes from the request: a flood of new ones must not grow the dict without end.
+    coordinator = _coordinator()
+    for number in range(ONEWIRE_PENDING_VALUES_MAX + 10):
+        coordinator.update_onewire(f"OT{number}", number)
+    coordinator.update_onewire("OT0", 99)  # one already kept is still updated
+
+    assert len(coordinator._onewire_values) == ONEWIRE_PENDING_VALUES_MAX
+    assert coordinator._onewire_values["OT0"] == 99
+
+
 def test_a_restart_seeds_the_last_state_unless_a_push_came_first() -> None:
     ot1, ot2 = _item("OT1"), _item("OT2", config_id=2)
     coordinator = _coordinator(ot1, ot2)
@@ -543,6 +573,32 @@ def test_the_sync_finds_a_created_command_by_its_exact_name() -> None:
     )
 
 
+def test_a_command_name_two_items_share_is_left_to_the_gap_closing() -> None:
+    # Two markers with the same name: the command could be either one's, so it is attributed to neither.
+    data = {
+        "markers": [{"id": 5, "name": "M5 Licht"}, {"id": 6, "name": "M5 Licht"}, {"id": 7, "name": "M7 Tür"}],
+        ONEWIRE_DATA_KEY: [_item("OT1", config_id=4)],
+    }
+    cats = [SOURCE_CATEGORIES[WebioClass.MARKER], SOURCE_CATEGORIES[WebioClass.ONEWIRE]]
+
+    known = _known_source_names(data, cats)
+
+    assert known == {"HA M7 Tür": (WebioClass.MARKER, 7), "HA 1Wire OT1": (WebioClass.ONEWIRE, 4)}
+    # Not attributed to either item by name; a marker's name still carries its id, which the name parse reads.
+    assert ComexioSyncButton._classify_created_names(["HA M5 Licht", "HA M7 Tür"], cats, {}, known) == (
+        {WebioClass.MARKER: [5, 7]},
+        [],
+    )
+
+
+def test_a_dropped_ambiguous_command_name_is_warned_about(caplog: pytest.LogCaptureFixture) -> None:
+    data = {"markers": [{"id": 5, "name": "M5 Licht"}, {"id": 6, "name": "M5 Licht"}]}
+
+    _known_source_names(data, [SOURCE_CATEGORIES[WebioClass.MARKER]])
+
+    assert "command 'HA M5 Licht' is named by more than one Comexio item" in caplog.text
+
+
 def test_the_plan_preview_labels_a_sensor_element_like_its_entity() -> None:
     coordinator = _coordinator(_item("OT1", config_id=4), _item("OH4", config_id=4, title="Bath"))
 
@@ -551,6 +607,88 @@ def test_the_plan_preview_labels_a_sensor_element_like_its_entity() -> None:
     assert list(labels) == ["4"]
     assert labels["4"]["name"] == "OT1 Kitchen"
     assert labels["4"]["address"] == "OT1"
+
+
+def test_the_source_label_maps_carry_the_knx_and_1wire_maps_of_the_plan_services() -> None:
+    coordinator = _coordinator(_item("OT1", config_id=4))
+
+    maps = coordinator.function_plan_source_label_maps()
+
+    assert set(maps) == {"knx_by_id", "onewire_by_id"}
+    assert maps["onewire_by_id"] == coordinator.function_plan_onewire_label_map()
+
+
+def test_the_visualize_text_names_a_sensor_element_like_its_pill() -> None:
+    coordinator = _coordinator(_item("OT1", config_id=4))
+    elements = {"1": {"reference": {"type": 12, "ref_id": 4}, "position_x": 0, "position_y": 0}}
+
+    _conn_lines, orphan_lines = _build_visualize_lines(
+        elements, {}, {}, ({}, {}, {}), coordinator.function_plan_source_label_maps()
+    )
+
+    assert "OT1 Kitchen" in orphan_lines[0]
+
+
+def test_the_visualize_text_names_a_sensor_on_either_end_of_a_connection() -> None:
+    coordinator = _coordinator(_item("OT1", config_id=4))
+    elements = {
+        "1": {"reference": {"type": 12, "ref_id": 4}, "position_x": 0, "position_y": 0},
+        "2": {"reference": {"type": 12, "ref_id": 4}, "position_x": 100, "position_y": 0},
+    }
+    connections = {"1": {"input": {"FubElementId": 1}, "output": [{"FubElementId": 2}], "type": 0}}
+
+    conn_lines, _orphan_lines = _build_visualize_lines(
+        elements, connections, {}, ({}, {}, {}), coordinator.function_plan_source_label_maps()
+    )
+
+    assert conn_lines[0].count("OT1 Kitchen") == 2
+
+
+def test_a_backup_diff_names_a_sensor_connection_like_its_pill() -> None:
+    coordinator = _coordinator(_item("OT1", config_id=4))
+    coordinator.function_plan_label_maps = lambda: ({}, {}, {})
+    coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
+    elements = {
+        "1": {"reference": {"type": 12, "ref_id": 4}, "position_x": 0, "position_y": 0},
+        "2": {"reference": {"type": 2, "ref_id": 5}, "position_x": 100, "position_y": 0},
+    }
+    wire = {"1": {"input": {"FubElementId": 1}, "output": [{"FubElementId": 2}], "type": 0}}
+    snapshots = {0: {"elements": elements, "connections": wire}, 1: {"elements": elements, "connections": {}}}
+
+    async def get_snapshot(_kind: str, _fub_id: int, _name: str, slot: int) -> dict[str, Any] | None:
+        return snapshots.get(slot)
+
+    coordinator.function_plan_backup = SimpleNamespace(async_get_snapshot=get_snapshot)
+    entries = [{"fub_id": 7, "plan_name": "Plan", "slot": 0}]
+
+    asyncio.run(_attach_backup_diffs(coordinator, entries, "auto"))
+
+    assert "OT1 Kitchen" in str(entries[0]["diff"]["connections"])
+
+
+def test_a_backup_diff_names_a_sensor_endpoint_like_its_pill() -> None:
+    coordinator = _coordinator(_item("OT1", config_id=4))
+    maps = _LabelMaps({}, {}, {}, coordinator.function_plan_source_label_maps())
+
+    # diff_snapshots() identity of a type without a stable cross-snapshot reference: (type, ref_id, x, y, name).
+    assert "OT1 Kitchen" in _label_backup_identity((12, 4, 10.0, 20.0, ""), {}, maps)
+
+
+def test_the_flow_diagram_names_a_sensor_element_like_its_pill() -> None:
+    coordinator = _coordinator(_item("OT1", config_id=4))
+    coordinator.function_plan_catalog = SimpleNamespace(async_get_catalog=AsyncMock(return_value={}))
+    elements = {
+        "1": {"reference": {"type": 12, "ref_id": 4}, "position_x": 0, "position_y": 0},
+        "2": {"reference": {"type": 2, "ref_id": 5}, "position_x": 100, "position_y": 0},
+    }
+    connections = {"1": {"input": {"FubElementId": 1}, "output": [{"FubElementId": 2}], "type": 0}}
+    source = (coordinator, MagicMock(), 7, "Plan", elements, connections, "live", None)
+
+    with patch.object(flow_diagram, "_resolve_visualize_live_source", AsyncMock(return_value=source)):
+        result = asyncio.run(flow_diagram._handle_function_plan_flow_diagram(MagicMock(), SimpleNamespace(data={})))
+
+    assert result["error"] is None
+    assert "OT1" in result["svg"]
 
 
 @pytest.mark.parametrize(("query", "found"), [("OT1", True), ("ot*", True), ("OT2", False), ('"Kitchen"', True)])

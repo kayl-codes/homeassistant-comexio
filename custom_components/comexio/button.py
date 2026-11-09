@@ -281,14 +281,24 @@ def _known_source_names(
 ) -> dict[str, tuple[WebioClass, int]]:
     """Web-IO command name -> (class, source id) of every item of the range-clustered categories.
 
-    Matched by exact name: a 1-Wire command name ends in the sensor's address, not in its config id.
+    Matched by exact name: a 1-Wire command name ends in the sensor's address, not in its config id. A name two
+    items share (equal names in the config) is left out and warned about: the command could belong to either, so
+    it is not attributed to one of them. A marker or KNX name still carries its id, which the name parse reads;
+    otherwise the audit finds the command as unwired and the next full sync wires it.
     """
     names: dict[str, tuple[WebioClass, int]] = {}
+    ambiguous: set[str] = set()
     for cat in clustered_cats:
         for item in data.get(cat.data_key, []):
             expected_cmd_name = f"HA {item['name']}"
+            if expected_cmd_name in names:
+                ambiguous.add(expected_cmd_name)
             names[expected_cmd_name] = (cat.key, int(item["id"]))
-    return names
+    for name in sorted(ambiguous):
+        _LOGGER.warning(
+            "Web-IO command '%s' is named by more than one Comexio item; the next full sync wires it", one_line(name)
+        )
+    return {name: source for name, source in names.items() if name not in ambiguous}
 
 
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:

@@ -300,8 +300,7 @@ def test_a_poll_reads_the_plan_ids_only_from_a_readable_plan_list(raw_config: di
 def test_the_search_reports_the_plan_list_entries_it_could_not_read() -> None:
     coordinator = SimpleNamespace(
         function_plan_label_maps=lambda: ({}, {}, {}),
-        function_plan_knx_label_map=dict,
-        function_plan_onewire_label_map=dict,
+        function_plan_source_label_maps=dict,
         function_plan_catalog=SimpleNamespace(async_get_catalog=AsyncMock(return_value={})),
         function_plan_plans={7: {"elements": {}, "connections": {}}},
     )

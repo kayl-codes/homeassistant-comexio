@@ -1371,7 +1371,13 @@ WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — n
 WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
 
 # The same for a 1-Wire sensor, addressed by its address (unknown, or its import is off). Args: address, new value.
-WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG = "Webhook push for unknown 1-Wire sensor %s (value %r) — not tracked, dropped"
+WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG = (
+    "Webhook push for unknown 1-Wire sensor %s (value %r) — not in the current config, "
+    "kept only for the config fetch that may bring it"
+)
+# How many readings of 1-Wire sensors the data does not have (yet) the coordinator keeps for that fetch. The pushed
+# address comes from the request, so the dict must stay bounded; the next config fetch prunes it as well.
+ONEWIRE_PENDING_VALUES_MAX = 64
 
 # How many unknown IOs the coordinator remembers as already warned about (later pushes of them log
 # at DEBUG only). The pushed ext/identifier come from the request, so the set must stay bounded:

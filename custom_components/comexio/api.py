@@ -1804,6 +1804,16 @@ class ComexioAPI:
         self._onewire_items = [onewire_item(sensor) for sensor in known]
         return copy.deepcopy(self._onewire_items)
 
+    def seed_onewire_items(self, items: list[dict[str, Any]]) -> None:
+        """Take the 1-Wire sensors of a saved config as the last known ones (a setup read only, #250).
+
+        A later poll that meets another certificate parses no group 12; without this it would keep none and the
+        sensors would vanish from the data. onewire_known stays False: only a parsed group proves them current.
+        Nothing is taken once a group parsed: those sensors are fresher than the saved ones.
+        """
+        if not self.onewire_known:
+            self._onewire_items = copy.deepcopy(items)
+
     def _kept_onewire_items(self, cause: str) -> list[dict[str, Any]]:
         """The last 1-Wire sensors that parsed, warning once per cause why these did not."""
         if cause != self._onewire_parse_error:

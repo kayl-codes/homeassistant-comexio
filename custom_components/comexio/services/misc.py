@@ -561,10 +561,7 @@ async def _handle_function_plan_search(hass: HomeAssistant, call: ServiceCall) -
 
     matches_element = _build_element_matcher(query)
     markers_by_id, webio_by_id, ios_by_id = coordinator.function_plan_label_maps()
-    source_maps = {
-        "knx_by_id": coordinator.function_plan_knx_label_map(),
-        "onewire_by_id": coordinator.function_plan_onewire_label_map(),
-    }
+    source_maps = coordinator.function_plan_source_label_maps()
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
     plans = sorted(function_plans(api.fub_data), key=lambda kv: kv[0])

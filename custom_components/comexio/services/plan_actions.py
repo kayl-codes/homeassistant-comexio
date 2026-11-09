@@ -6,8 +6,10 @@ these four handlers act on a single live (or, for visualize, snapshot) function 
 without touching the stored backup catalog itself (that's backup.py's job).
 """
 
+from collections.abc import Mapping
 import logging
 import time
+from typing import Any
 
 from aiocomexio.function_plan import resolve_element_label, snapshot_label_maps
 import aiohttp
@@ -52,20 +54,39 @@ _TITLE_SORT_ERR = "Function Plan Sort — Error"
 
 
 def _label_for_id(
-    elem_id: str | int, elements: dict, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+    elem_id: str | int,
+    elements: dict,
+    catalog: dict,
+    markers_by_id: dict,
+    webio_by_id: dict,
+    ios_by_id: dict,
+    source_maps: Mapping[str, Mapping[str, Any]],
 ) -> str:
     """Human-readable label for a function plan element referenced by id, via the shared resolver
     (also used by function_plan_search and the backup-diff labeler) — covers markers, WebIO
-    commands, IOs, blocks, time modules, calendar functions, constants and comments instead of
-    a bare 'Typ{n} ref={ref_id}' fallback for anything past markers/WebIO.
+    commands, IOs, KNX and 1-Wire sensors, blocks, time modules, calendar functions, constants and comments
+    instead of a bare 'Typ{n} ref={ref_id}' fallback for anything past markers/WebIO.
     """
-    return resolve_element_label(elements.get(str(elem_id), {}), catalog, markers_by_id, webio_by_id, ios_by_id)
+    return resolve_element_label(
+        elements.get(str(elem_id), {}), catalog, markers_by_id, webio_by_id, ios_by_id, **source_maps
+    )
 
 
 def _build_visualize_lines(
-    elements: dict, connections: dict, catalog: dict, markers_by_id: dict, webio_by_id: dict, ios_by_id: dict
+    elements: dict,
+    connections: dict,
+    catalog: dict,
+    maps: tuple[dict, dict, dict],
+    source_maps: Mapping[str, Mapping[str, Any]],
 ) -> tuple[list[str], list[str]]:
-    """Build the connection lines and orphan-element lines for the function plan visualize text diagram."""
+    """Build the connection lines and orphan-element lines for the function plan visualize text diagram.
+
+    maps: the marker, Web-IO and IO label maps; source_maps: the KNX and 1-Wire ones (resolve_element_label's keywords).
+    """
+
+    def label_of(elem_id: str | int) -> str:
+        return _label_for_id(elem_id, elements, catalog, *maps, source_maps)
+
     connected_elem_ids: set[str] = set()
     conn_lines: list[str] = []
     for conn in sorted(connections.values(), key=lambda c: c.get("input", {}).get("FubElementId", 0)):
@@ -78,14 +99,9 @@ def _build_visualize_lines(
         for out in conn.get("output", []):
             out_id = str(out.get("FubElementId", "?"))
             inv_out = " ¬" if out.get("Inverted") else ""
-            out_parts.append(
-                f"{_label_for_id(out_id, elements, catalog, markers_by_id, webio_by_id, ios_by_id)}{inv_out}"
-            )
+            out_parts.append(f"{label_of(out_id)}{inv_out}")
             connected_elem_ids.add(out_id)
-        conn_lines.append(
-            f"  {_label_for_id(inp_id, elements, catalog, markers_by_id, webio_by_id, ios_by_id)}{inv_in} "
-            f"→[{conn_type}]→ {', '.join(out_parts)}"
-        )
+        conn_lines.append(f"  {label_of(inp_id)}{inv_in} →[{conn_type}]→ {', '.join(out_parts)}")
 
     orphan_lines: list[str] = []
     for elem_id, elem in sorted(
@@ -93,8 +109,7 @@ def _build_visualize_lines(
     ):
         if elem_id not in connected_elem_ids:
             x, y = elem.get("position_x", 0), elem.get("position_y", 0)
-            label = _label_for_id(elem_id, elements, catalog, markers_by_id, webio_by_id, ios_by_id)
-            orphan_lines.append(f"  {label} (@ {x:.0f},{y:.0f})")
+            orphan_lines.append(f"  {label_of(elem_id)} (@ {x:.0f},{y:.0f})")
 
     return conn_lines, orphan_lines
 
@@ -250,7 +265,11 @@ async def handle_function_plan_visualize(hass: HomeAssistant, call: ServiceCall)
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
     conn_lines, orphan_lines = _build_visualize_lines(
-        elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id
+        elements,
+        connections,
+        catalog,
+        (markers_by_id, webio_by_id, ios_by_id),
+        coordinator.function_plan_source_label_maps(),
     )
 
     lines = [f"**Plan {fub_id}** ({source})"]

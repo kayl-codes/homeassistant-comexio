@@ -4207,6 +4207,30 @@ def test_a_saved_config_starts_the_entry_read_only(api: ComexioAPI, caplog: pyte
     assert "set up read only from the config Comexio last sent" in caplog.text
 
 
+def test_a_read_only_start_keeps_the_saved_1wire_sensors_for_a_poll_that_parses_none(api: ComexioAPI) -> None:
+    stored = coordinator_module.saved_config(_parsed_config())
+    coordinator = _saved_config_coordinator(api, stored, options={"import_onewire": False})
+
+    assert asyncio.run(coordinator.async_start_from_saved_config()) is True
+
+    # A poll meeting another certificate reads no group 12: the api falls back on the saved sensors, unfiltered
+    # (the import option is applied to what it returns), and does not take them for freshly parsed.
+    kept = api._parse_onewire(None)
+    assert [sensor["address"] for sensor in kept] == ["OT1"]
+    assert kept == stored[coordinator_module.ONEWIRE_DATA_KEY]
+    assert kept is not stored[coordinator_module.ONEWIRE_DATA_KEY]
+    assert api.onewire_known is False
+
+
+def test_the_saved_1wire_sensors_do_not_replace_those_a_parsed_group_gave(api: ComexioAPI) -> None:
+    fresh = [{"id": 4, "address": "OT1", "name": "1Wire OT1", "value": None}]
+    api._onewire_items, api.onewire_known = fresh, True
+
+    api.seed_onewire_items([{"id": 9, "address": "OT9", "name": "1Wire OT9", "value": None}])
+
+    assert api._onewire_items is fresh
+
+
 def test_a_read_only_start_keeps_its_data_through_the_next_poll(
     api: ComexioAPI, certificate_repair: SimpleNamespace, caplog: pytest.LogCaptureFixture
 ) -> None:

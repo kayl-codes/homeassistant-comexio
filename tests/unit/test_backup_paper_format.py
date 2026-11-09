@@ -124,6 +124,7 @@ def test_the_backup_diff_names_a_changed_paper_format(plan: dict[str, Any]) -> N
 
     coordinator = SimpleNamespace(
         function_plan_label_maps=lambda: ({}, {}, {}),
+        function_plan_source_label_maps=dict,
         function_plan_catalog=SimpleNamespace(async_get_catalog=AsyncMock(return_value={})),
         function_plan_backup=SimpleNamespace(async_get_snapshot=get_snapshot),
     )

@@ -152,6 +152,7 @@ from .const import (
     LOGIN_ERROR_REJECTED,
     MARKER_READ_ONLY_SUFFIX,
     ONEWIRE_DATA_KEY,
+    ONEWIRE_PENDING_VALUES_MAX,
     PLAN_FAILURE_AFTER_GONE_MEMBER,
     PLAN_FAILURE_NOT_RESOLVED,
     PLAN_FAILURE_OFF_CANVAS,
@@ -3750,6 +3751,16 @@ class ComexioCoordinator(DataUpdateCoordinator):
             by_id.setdefault(str(sensor["id"]), {**sensor, "name": onewire_entity_name(sensor)})
         return by_id
 
+    def function_plan_source_label_maps(self) -> dict[str, dict[str, Any]]:
+        """The KNX and 1-Wire label maps as keyword arguments of resolve_element_label and the SVG renderers.
+
+        Live only: a backup captures the marker, Web-IO and IO labels (snapshot_label_maps), not these.
+        """
+        return {
+            "knx_by_id": self.function_plan_knx_label_map(),
+            "onewire_by_id": self.function_plan_onewire_label_map(),
+        }
+
     async def async_repoint_function_plan_fub_id(
         self, plan_name: str, old_fub_id: int, new_fub_id: int, *, old_id_still_live: bool = False
     ) -> list[str]:
@@ -5315,12 +5326,19 @@ class ComexioCoordinator(DataUpdateCoordinator):
     def update_onewire(self, address: str, value: float | int | str) -> None:
         """Store a 1-Wire sensor's pushed reading; its command pushes the sensor address as the id.
 
-        Only a finite number counts as a reading, anything else as unknown (like an IO's push).
+        Only a finite number counts as a reading, anything else as unknown (like an IO's push). A sensor the data
+        does not have yet (a push during the config fetch that brings it) keeps its reading in _onewire_values for
+        the merge of that fetch; the merge drops it if the new config does not have the sensor either.
         """
         address = str(address)
         kind = WebioClass.ONEWIRE
         warn_key = _webhook_warn_key(kind, address)
         if (sensor := self.onewire_sensor(address)) is None:
+            reading = _live_io_number(value)
+            if reading is None:
+                self._onewire_values.pop(address, None)
+            elif address in self._onewire_values or len(self._onewire_values) < ONEWIRE_PENDING_VALUES_MAX:
+                self._onewire_values[address] = reading
             self._log_unknown_webhook_io(warn_key, WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG, one_line(address), value)
         else:
             previous = sensor.get("value")
@@ -5504,6 +5522,8 @@ class ComexioCoordinator(DataUpdateCoordinator):
             return False
         self.cover_keywords = parse_keyword_list(conf.get(CONF_COVER_KEYWORDS, DEFAULT_COVER_KEYWORDS))
         self.data = data
+        # The unfiltered list, as the api keeps it: the import_onewire option is applied to what it returns.
+        self.api.seed_onewire_items(stored.get(ONEWIRE_DATA_KEY, []))
         # Stands in for the first refresh, also one that failed on the certificate: the entities are available.
         self.last_update_success = True
         self.last_exception = None

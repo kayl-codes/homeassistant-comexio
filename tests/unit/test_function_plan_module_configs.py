@@ -533,6 +533,7 @@ def _attach(snapshots: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
 
     coordinator = SimpleNamespace(
         function_plan_label_maps=lambda: ({}, {}, {}),
+        function_plan_source_label_maps=dict,
         function_plan_catalog=SimpleNamespace(async_get_catalog=AsyncMock(return_value={})),
         function_plan_backup=SimpleNamespace(async_get_snapshot=get_snapshot),
     )
