@@ -185,7 +185,9 @@ WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
 WEBIO_CLASS_QUICKBUS = WebioClass.QUICKBUS
-WEBIO_CLASSES = tuple(WebioClass)
+# The classes this integration manages, one SOURCE_CATEGORIES entry each — not tuple(WebioClass):
+# a class a newer aiocomexio adds (e.g. ONEWIRE in 0.10.0) joins only together with its category.
+WEBIO_CLASSES = (WEBIO_CLASS_MARKER, WEBIO_CLASS_IO, WEBIO_CLASS_KNX, WEBIO_CLASS_QUICKBUS)
 
 # Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
 # as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}",

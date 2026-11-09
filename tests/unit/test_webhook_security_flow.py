@@ -29,6 +29,7 @@ _DOMAIN = "comexio"
 def test_a_command_saved_with_its_own_path_is_scheduled_for_saving_the_old_path_is_not(
     comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr("custom_components.comexio.api.dt_util.utcnow", lambda: NOW)
     comexio_api.webhook_security = security = _security(monkeypatch)
     _use_client(comexio_api, SimpleNamespace(save_webio_command=AsyncMock()))
     own = comexio_api.build_webio_commands(SERVER, PARSED)[0]
@@ -41,6 +42,8 @@ def test_a_command_saved_with_its_own_path_is_scheduled_for_saving_the_old_path_
     security._store.async_delay_save.assert_called_once()
     saved = security._store.async_delay_save.call_args.args[0]()
     assert saved["migrated"] == [own["Name"]]
+    assert security.migrated == {own["Name"]}
+    assert security.last_write == NOW  # the write is stamped: the boot-time comparison of the migration rests on it
 
 
 def test_the_ledger_survives_a_reload(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -97,6 +100,8 @@ def test_a_command_the_run_cannot_rewrite_keeps_the_old_id_on(monkeypatch: pytes
 
 
 def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any) -> Any:
+    # the real bookkeeping stamps the write with the clock: pin it to NOW, the time the boot is measured from
+    monkeypatch.setattr("custom_components.comexio.api.dt_util.utcnow", lambda: NOW)
     coordinator = _coordinator(monkeypatch, boot=boot, written=NOW)
     coordinator.unloading = False
     coordinator._restore_lock = SimpleNamespace(locked=lambda: False)
@@ -109,10 +114,19 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
     coordinator._webio_range_targets = lambda: {"HA m": target}
     held = {"Parameter": "/api/webhook/comexio_srv", "Data": "local d = {value=1}"}  # the command as Comexio holds it
 
-    async def _save(_base: Any, _device: Any, payload: dict[str, Any], **_k: Any) -> bool:
+    async def _send(_device: Any, payload: dict[str, Any], **_k: Any) -> None:
         held.update(Parameter=payload["Parameter"], Data=payload["Data"])  # what the tick really sent
-        coordinator.api.webhook_security.migrated.add("HA m")
-        return True
+
+    # the production save path runs on a fake client: its bookkeeping (ledger entry, last_write, scheduled save) is
+    # what the tick tests below rely on, so they fail when it stops recording a write instead of passing on a ledger
+    # that a stub filled in
+    api = coordinator.api
+    api.client = SimpleNamespace(save_webio_command=AsyncMock(side_effect=_send))
+    # `api` is a namespace, not a ComexioAPI: the production method is bound to it for save_single_command to call
+    api._note_command_written = lambda payload: ComexioAPI._note_command_written(api, payload)
+
+    async def _save(base: Any, device: Any, payload: dict[str, Any], **kwargs: Any) -> bool:
+        return await ComexioAPI.save_single_command(api, base, device, payload, **kwargs)
 
     coordinator.api.get_webio_command_form = AsyncMock(
         side_effect=lambda *_a, **_k: SimpleNamespace(parameter=held["Parameter"], data=held["Data"])
@@ -124,7 +138,7 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
 def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    coordinator = _tick_coordinator(monkeypatch, cmd_id="", boot=NOW + timedelta(hours=1))
+    coordinator = _tick_coordinator(monkeypatch, cmd_id="", boot=NOW - timedelta(hours=1))  # booted before the write
     security = coordinator.api.webhook_security
 
     assert _run(coordinator._async_webhook_migration_tick()) == "pending"
@@ -134,8 +148,18 @@ def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
 
     coordinator.data["webio_commands"]["HA m"]["cmdId"] = "9"
 
-    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    # the tick that writes the last command cannot finish: Comexio sends the new command only after a restart
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
     assert "HA m" in security.migrated
+    assert security.legacy_enabled
+    coordinator.sync_webhooks.assert_not_called()
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+    assert security.legacy_enabled
+    coordinator.sync_webhooks.assert_not_called()
+
+    coordinator.system_info.boot_time = security.last_write + timedelta(minutes=5)
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
     assert not security.legacy_enabled
     coordinator.sync_webhooks.assert_called_once_with()
 
