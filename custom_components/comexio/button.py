@@ -18,6 +18,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform, entity_registry as er, issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
@@ -587,7 +588,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     webio_range_check_button = ComexioWebioRangeCheckButton(coordinator, coordinator.server_id)
     uninstall_cleanup_button = ComexioCleanupButton(coordinator, coordinator.server_id)
     plan_toggle_button = ComexioPlanToggleButton(coordinator, coordinator.server_id)
-    entities: list[Any] = [
+    entities: list[ButtonEntity] = [
         sync_button,
         cancel_button,
         migration_button,
@@ -639,7 +640,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     )
 
 
-class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
+class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Button for automated Web-IO lifecycle management with Deep Delta Sync."""
 
     _attr_has_entity_name = True
@@ -654,7 +655,7 @@ class ComexioSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3435,7 +3436,7 @@ _TRIGGER_BUTTON_CLASSES: dict[WebioClass, type[ComexioMarkerTriggerButton]] = {
 }
 
 
-class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
+class ComexioCancelSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Button to interrupt an ongoing Comexio sync process."""
 
     _attr_has_entity_name = True
@@ -3451,7 +3452,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3471,7 +3472,7 @@ class ComexioCancelSyncButton(CoordinatorEntity, ButtonEntity):
         self.async_write_ha_state()
 
 
-class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
+class ComexioFirmwareCheckButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Button to force-run the extension firmware check outside its nightly window.
 
     Comexio warns this call can briefly interrupt extension outputs — pressing it
@@ -3491,7 +3492,7 @@ class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3521,7 +3522,7 @@ class ComexioFirmwareCheckButton(CoordinatorEntity, ButtonEntity):
             )
 
 
-class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
+class ComexioWebioRangeCheckButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Button to force-run the Web-IO analog Min/Max range check outside its nightly window.
 
     See coordinator.async_force_webio_range_check / async_start_webio_range_check — the
@@ -3547,7 +3548,7 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
         self.entity_id = webio_range_check_entity_id(server_id)
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3590,7 +3591,7 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity, ButtonEntity):
             )
 
 
-class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
+class ComexioEntityIdMigrationButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Button to migrate entity_ids to the Comexio scheme (see coordinator.detect_entity_id_mismatches)."""
 
     _attr_has_entity_name = True
@@ -3605,7 +3606,7 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3643,7 +3644,7 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity, ButtonEntity):
         )
 
 
-class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
+class ComexioStatisticsCleanupButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Button to delete orphaned long-term statistics left behind by entity renames."""
 
     _attr_has_entity_name = True
@@ -3658,7 +3659,7 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3687,7 +3688,7 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity, ButtonEntity):
         self.coordinator.async_set_updated_data(self.coordinator.data)
 
 
-class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
+class ComexioCleanupButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Raises the uninstall-cleanup Repair issue, whose dialog tears down what the
     integration created in Comexio — everything, or one scope (markers / IOs / KNX).
     """
@@ -3705,7 +3706,7 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3732,7 +3733,7 @@ class ComexioCleanupButton(CoordinatorEntity, ButtonEntity):
             )
 
 
-class ComexioPlanToggleButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity, ButtonEntity):
+class ComexioPlanToggleButton(ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], ButtonEntity):
     """Start/stop toggle for the currently selected 'Plan' plan.
 
     The icon always shows the OPPOSITE of the plan's current activation state — mdi:pause

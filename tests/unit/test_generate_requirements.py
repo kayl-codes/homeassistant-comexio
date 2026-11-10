@@ -3,6 +3,8 @@
 import json
 from pathlib import Path
 import re
+import tomllib
+from typing import Any
 
 import pytest
 
@@ -94,20 +96,112 @@ def test_out_of_sync_requirements_txt_is_rewritten(repo: Path) -> None:
     assert gr.main(["--check"]) == 0
 
 
-def test_ci_workflow_installs_from_requirements_txt() -> None:
-    """CI installs the manifest packages only from requirements.txt, never by name.
+SETUP_PYTHON_ACTION = "actions/setup-python@"
+CHECKOUT_ACTION = "actions/checkout@"
+WITH_KEY = "with"
+CONTINUE_ON_ERROR_KEY = "continue-on-error"
+NAME_KEY = "name"
+PERMISSIONS_KEY = "permissions"
+STEPS_KEY = "steps"
+USES_KEY = "uses"
+RUN_KEY = "run"
 
-    The raw text is scanned for names, comments included: stripping them would need quote-aware
-    YAML and shell parsing, and a comment naming a manifest package is cheap to reword. A word
-    that starts with "<name>-" (a wheel or sdist file name) counts as naming the package.
+
+def _workflow() -> str:
+    return (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+def _mypy_job() -> dict[str, Any]:
+    """The mypy job, parsed, so a step's own keys (if, continue-on-error, env) are visible to the guards."""
+    # Imported here: a module-level `import yaml` here makes the subprocess tests of
+    # test_function_plan_render fail with WinError 6 (measured on Windows; cause not found).
+    import yaml  # noqa: PLC0415
+
+    workflow = yaml.safe_load(_workflow())
+    # Workflow level too: `defaults.run.shell` or `env` there would change the mypy script just the same. YAML 1.1
+    # reads the key `on` as True.
+    assert set(workflow) <= {NAME_KEY, True, PERMISSIONS_KEY, "jobs"}
+    job = workflow["jobs"]["mypy"]
+    # Strict allowlist, so a job-level `if`, `continue-on-error`, `defaults` (a run shell), `env`, `strategy` or
+    # `container` cannot skip, excuse or change all steps at once. A harmless new key (`needs`, `concurrency`)
+    # fails it too: add it here on purpose.
+    assert set(job) <= {NAME_KEY, "runs-on", PERMISSIONS_KEY, "timeout-minutes", STEPS_KEY}
+    # The mypy script is bash (`set -o pipefail`); on a Windows runner the default shell is PowerShell.
+    assert job["runs-on"] == "ubuntu-latest"
+    return job
+
+
+def _mypy_steps() -> list[dict[str, Any]]:
+    return _mypy_job()[STEPS_KEY]
+
+
+def _always_runs(step: dict[str, Any]) -> bool:
+    """A step that always runs as written: no condition, no continue-on-error, no env/shell/directory change."""
+    return set(step) <= {NAME_KEY, USES_KEY, WITH_KEY, RUN_KEY}
+
+
+def test_mypy_target_matches_the_ci_interpreter() -> None:
+    """[tool.mypy] python_version is the interpreter the mypy job runs on, so a local run checks like CI."""
+    # Every setup-python step of the job, so a second one cannot hide a drift, nor a skipped one pose as the real one.
+    setups = [step for step in _mypy_steps() if str(step.get(USES_KEY, "")).startswith(SETUP_PYTHON_ACTION)]
+    pyproject = tomllib.loads((gr.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert len(setups) == 1
+    assert _always_runs(setups[0])
+    version = setups[0][WITH_KEY]["python-version"]
+    assert isinstance(version, str), "quote python-version: YAML reads an unquoted 3.10 as the number 3.1"
+    assert version == str(pyproject["tool"]["mypy"]["python_version"])
+
+
+def test_ci_workflow_installs_from_requirements_txt() -> None:
+    """CI installs the manifest packages only from a requirements file, never by name.
+
+    The mypy job installs tests/requirements.txt, whose manifest pins the script checks. The raw
+    text is scanned for names, comments included: stripping them would need quote-aware YAML and
+    shell parsing, and a comment naming a manifest package is cheap to reword. A word that starts
+    with "<name>-" (a wheel or sdist file name) counts as naming the package.
     """
-    workflow = (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = _workflow()
     manifest = json.loads(gr.MANIFEST.read_text(encoding="utf-8"))
     names = {gr._normalize(re.match(r"[A-Za-z0-9][\w.-]*", r)[0]) for r in manifest["requirements"]}
     words = {gr._normalize(word) for word in re.findall(r"[A-Za-z0-9][\w.-]*", workflow)}
     named = {name for name in names for word in words if word == name or word.startswith(f"{name}-")}
 
-    # An install line, not a commented-out one.
-    assert re.search(r"^\s*pip install [^#\n]*--no-deps -r requirements\.txt\s*$", workflow, re.MULTILINE)
+    steps = _mypy_steps()
+    # Exactly one checkout, setup and install step (a second one fails on purpose), in this order: checkout (the
+    # install reads tests/requirements.txt), interpreter setup, the install step (always runs, not commented out or
+    # `if: false`), then the step that runs mypy. No step may run before its input exists.
+    checkouts = [i for i, step in enumerate(steps) if str(step.get(USES_KEY, "")).startswith(CHECKOUT_ACTION)]
+    setups = [i for i, step in enumerate(steps) if str(step.get(USES_KEY, "")).startswith(SETUP_PYTHON_ACTION)]
+    installs = [
+        i
+        for i, step in enumerate(steps)
+        if re.fullmatch(r"pip install -r tests/requirements\.txt mypy==[\d.]+", str(step.get(RUN_KEY, "")).strip())
+    ]
+    # Any step whose script mentions the mypy command, so a wrapped one (`if false; then mypy ...; fi`) is found too.
+    mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get(RUN_KEY, ""))]
+    assert len(checkouts) == 1
+    assert len(setups) == 1
+    assert len(installs) == 1
+    assert len(mypy_runs) == 1
+    assert _always_runs(steps[checkouts[0]])
+    # No `with` on the checkout: a `repository` or `ref` override would check other code than this PR's.
+    assert WITH_KEY not in steps[checkouts[0]]
+    assert _always_runs(steps[installs[0]])
+    # The step is pinned to exactly the known two script lines and to keys that cannot skip or change it: a shell
+    # conditional, `|| true`, a second command, `if`, `shell`, `env` or `working-directory` cannot hide a skipped
+    # type check. continue-on-error must stay true: the job is non-blocking by design, and making it blocking is a
+    # decision this test should force into the open. Strict on purpose: a comment line inside the script fails it
+    # too, so move such a comment above the step.
+    mypy_step = steps[mypy_runs[0]]
+    assert set(mypy_step) <= {NAME_KEY, "id", RUN_KEY, CONTINUE_ON_ERROR_KEY}
+    assert mypy_step.get(CONTINUE_ON_ERROR_KEY) is True
+    script = [line.strip() for line in mypy_step[RUN_KEY].strip().splitlines()]
+    assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
+    # Checkout, setup, install and mypy form one unbroken chain: a step between them could rewrite the checked-out
+    # source, or uninstall or shadow the HA stack.
+    assert setups[0] == checkouts[0] + 1
+    assert installs[0] == setups[0] + 1
+    assert mypy_runs[0] == installs[0] + 1
     assert "aiocomexio" in names
     assert not named

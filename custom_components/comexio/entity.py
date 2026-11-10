@@ -175,7 +175,7 @@ class ComexioStableEntityIdMixin:
             self.entity_id = f"{self.platform.domain}.{stable_object_id(self.unique_id)}"
 
 
-class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
+class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator]):
     """Shared base for all IO entities attached to an extension module.
 
     Centralises device_info and offline-availability logic that would otherwise
@@ -202,7 +202,7 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self._ext_name not in self.coordinator.offline_extensions
+        return super().available and self._ext_name not in (self.coordinator.offline_extensions or ())
 
 
 class ComexioQuickbusIOEntity(ComexioIOEntity):
@@ -321,7 +321,7 @@ def onewire_sensors_for_platform(coordinator: ComexioCoordinator, platform: str)
     return [s for s in coordinator.data.get(ONEWIRE_DATA_KEY, []) if onewire_platform(s) == platform]
 
 
-class ComexioOneWireEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
+class ComexioOneWireEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator]):
     """Shared base of the 1-Wire sensor entities: read-only, the reading only comes by push (Web-IO).
 
     Unavailable once the 1-Wire status (fetched with the config poll) reports the sensor not found, with a read
@@ -364,7 +364,7 @@ class ComexioOneWireEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
         super()._handle_coordinator_update()
 
 
-class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity):
+class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator]):
     """Shared base for all marker entities (writable and read-only).
 
     Centralises unique_id/name/device_info that would otherwise be duplicated
@@ -469,7 +469,7 @@ class ComexioKnxEntity(ComexioMarkerEntity):
         )
 
 
-class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity):
+class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator]):
     """Shared base for DPT3.x (Dimmer 3.007 / Blinds 3.008) composite KNX entities.
 
     Comexio splits a DPT3.x KNX object into two K-elements sharing one KnxDeviceId — a

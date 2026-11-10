@@ -66,6 +66,8 @@ def _run_with_hash_seed(script: str, seed: str) -> bytes:
         [sys.executable, "-c", script],
         env={**os.environ, "PYTHONHASHSEED": seed},
         cwd=REPO_ROOT,
+        # Own stdin: under pre-commit on Windows the inherited one is an invalid handle (WinError 6).
+        stdin=subprocess.DEVNULL,
         capture_output=True,
         check=False,
     )

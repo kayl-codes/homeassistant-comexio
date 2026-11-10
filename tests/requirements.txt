@@ -1,7 +1,7 @@
 # Test dependencies for the unit test suite (tests/unit/).
 # homeassistant is the runtime pin (2026.10.4): the tested modules import it at module level even though the
-# unit tests never start an HA instance. The mypy job in .github/workflows/ci.yml checks against
-# homeassistant-stubs 2026.10.0, the newest 2026.10 stubs on PyPI, so the two versions differ on purpose.
+# unit tests never start an HA instance. The mypy job in .github/workflows/ci.yml installs this file
+# too and type-checks against the same homeassistant version.
 homeassistant==2026.10.4
 # certifi: homeassistant only sets a floor (>=2021.5.30); this one keeps out the emSign roots with
 # compromised intermediates (PYSEC-2026-4320), so OSV-Scanner resolves a fixed version too.

@@ -37,7 +37,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}
 
-    entities: list = []
+    entities: list[NumberEntity] = []
 
     if conf.get("import_markers", True):
         ignored_ids = coordinator.ignored_marker_ids

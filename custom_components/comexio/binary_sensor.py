@@ -210,7 +210,9 @@ class ComexioOneWireBinarySensor(ComexioOneWireEntity, BinarySensorEntity, Resto
         return None if value is None else value != 0
 
 
-class ComexioOneWireProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):
+class ComexioOneWireProblemSensor(
+    ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator], BinarySensorEntity
+):
     """On while a configured 1-Wire sensor has a read error, is not found or is missing from the 1-Wire monitor.
 
     The status comes with the config poll; unknown while it could not be fetched.
@@ -244,7 +246,9 @@ class ComexioOneWireProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity,
         return self._problems() or {}
 
 
-class ComexioManagedPlansProblemSensor(ComexioStableEntityIdMixin, CoordinatorEntity, BinarySensorEntity):
+class ComexioManagedPlansProblemSensor(
+    ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator], BinarySensorEntity
+):
     """On while a watched function plan (HA-managed, or a user plan picked in the options) does not run.
 
     See plan_watchdog.
@@ -368,7 +372,7 @@ class ComexioSdCardSensor(BinarySensorEntity):
         self._attr_unique_id = f"comexio_{server_id}_sd_card_sensor"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,

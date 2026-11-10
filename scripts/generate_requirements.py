@@ -3,14 +3,14 @@
 
 manifest.json's "requirements" array is the single source of truth for this
 integration's Python dependencies (it's what HA installs at runtime).
-requirements.txt is both the lockfile-shaped input OSV-Scanner parses and the
-dependency source of the CI mypy job; it must never be hand-edited independently
-of manifest.json.
+requirements.txt is the lockfile-shaped input OSV-Scanner parses; it must never
+be hand-edited independently of manifest.json.
 
 The test requirement files list their own packages; every exact manifest pin
 (name==version) must appear in them at the same version, so tests never run
-against another library version than HA installs. The CI workflow pins nothing
-itself: it installs from requirements.txt.
+against another library version than HA installs. The CI workflow pins none of
+them itself: the unit-test and mypy jobs install tests/requirements.txt, the HA
+integration-test job tests/ha/requirements.txt.
 """
 
 import json

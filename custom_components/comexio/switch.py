@@ -28,7 +28,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     """Set up Comexio switches (digital markers and digital outputs)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}
-    entities = []
+    entities: list[SwitchEntity] = []
 
     # 1. Digital Markers (skip ignored markers)
     if conf.get("import_markers", True):

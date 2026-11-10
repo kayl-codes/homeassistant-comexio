@@ -40,10 +40,10 @@ combine-as-imports = true
 quote-style = "double"
 
 [tool.mypy]
-# homeassistant-stubs uses PEP 696 generic defaults (e.g. ConfigEntry[_DataT = None]),
-# which mypy only parses under python_version >= 3.13, independent of this project's
-# own requires-python (>=3.12, unaffected since we never write 3.13-only syntax).
-python_version = "3.13"
+# The CI job runs 3.14 with the full homeassistant runtime package (it ships py.typed), whose sources use
+# PEP 696 generic defaults (ConfigEntry[_DataT = None]) that mypy only parses under python_version >= 3.13.
+# Pinned to the CI interpreter so a local run on an older Python checks the same way.
+python_version = "3.14"
 warn_unused_ignores = true
 warn_redundant_casts = true
 

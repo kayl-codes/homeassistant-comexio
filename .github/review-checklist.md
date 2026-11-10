@@ -323,7 +323,8 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   fixture in `tests/ha/conftest.py` and never reach the network. Flag a test that constructs or patches it elsewhere.
 - Exact pins of manifest.json requirements in `tests/requirements.txt` and `tests/ha/requirements.txt` must match
   manifest.json (`scripts/generate_requirements.py --check` enforces it). `ci.yml` never names a manifest package
-  itself; it installs them with `-r requirements.txt` (`test_ci_workflow_installs_from_requirements_txt`).
+  itself: the unit-test and mypy jobs install `tests/requirements.txt`, the HA integration job
+  `tests/ha/requirements.txt` (`test_ci_workflow_installs_from_requirements_txt`).
 - Every reason a repair flow aborts with needs a translation under `issues.<translation_key>.fix_flow.abort`
   in all five translation files (`tests/unit/test_repair_translations.py`); a new fixable issue goes into that
   test's `ENTRY_STEP_BY_ISSUE` (the step `async_step_init` routes it to; the test reads the issue_id from the
