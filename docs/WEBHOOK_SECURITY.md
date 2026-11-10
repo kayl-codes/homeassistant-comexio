@@ -52,7 +52,10 @@ the commands stay exactly as they are. Entities, names and automations are not t
 The commands live in Comexio, so they have to be rewritten there. The integration does this on its own:
 
 1. **After the update**, Home Assistant accepts the **old ID and the new ones side by side**. Nothing stops
-   working, and the commands that have not been rewritten yet keep pushing to the old ID.
+   working, and the commands that have not been rewritten yet keep pushing to the old ID. **Until the old ID is
+   switched off, it is as weak as before:** whoever knows it can still set any marker or IO. The window closes
+   only after the restart of the Comexio server (steps 3 to 5), so do that restart soon after the notification
+   appears.
 2. **Every night at 01:30** the integration rewrites the commands that still use the old ID. It does so within a time
    budget of 3.5 hours per night and remembers which commands are done (the *ledger*), so a large installation simply
    continues the next night. Commands that a sync creates from now on are born with their own ID.
@@ -176,7 +179,10 @@ genau, wie sie sind. Entitäten, Namen und Automationen bleiben unberührt.
 Die Commands liegen in Comexio, also müssen sie dort umgeschrieben werden. Das macht die Integration selbst:
 
 1. **Nach dem Update** akzeptiert Home Assistant die **alte ID und die neuen nebeneinander**. Nichts hört auf zu
-   funktionieren, und Commands, die noch nicht umgeschrieben sind, pushen weiter an die alte ID.
+   funktionieren, und Commands, die noch nicht umgeschrieben sind, pushen weiter an die alte ID. **Bis die alte ID
+   abgeschaltet ist, bleibt sie so schwach wie bisher:** Wer sie kennt, kann weiterhin jeden Merker und jedes IO
+   setzen. Das Fenster schließt sich erst nach dem Neustart des Comexio-Servers (Schritte 3 bis 5), starte ihn also
+   zeitnah, wenn die Benachrichtigung erscheint.
 2. **Jede Nacht um 01:30** schreibt die Integration die Commands um, die noch die alte ID nutzen. Sie hat dafür ein
    Zeitbudget von 3,5 Stunden pro Nacht und merkt sich, welche Commands fertig sind (das *Ledger*). Eine große Anlage
    setzt also einfach in der nächsten Nacht fort. Commands, die ein Sync ab jetzt anlegt, bekommen gleich ihre eigene ID.
