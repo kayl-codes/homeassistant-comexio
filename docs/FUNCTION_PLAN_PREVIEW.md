@@ -2,7 +2,7 @@
 
 🌍 *[🇩🇪 Auf Deutsch lesen (Read this in German)](#-deutsch)*
 
-This guide covers the **Function Plan Preview** — an interactive, live-updating diagram of a Comexio function plan (Logikplan) rendered directly inside Home Assistant. For general setup and options, see the [Configuration Guide](CONFIGURATION.md); for the full action list, see the [README](README.md#-function-plan-management-logikplan).
+This guide covers the **Function Plan Preview** — an interactive, live-updating diagram of a Comexio function plan (Logikplan) rendered directly inside Home Assistant. For general setup and options, see the [Configuration Guide](CONFIGURATION.md); for the full action list, see the [README](../README.md#-function-plan-management-logikplan).
 
 ---
 
@@ -837,7 +837,7 @@ function_plan_search:
 
 ---
 
-*[← Back to README](README.md)*
+*[← Back to README](../README.md)*
 
 ---
 
@@ -849,7 +849,7 @@ Diese Anleitung beschreibt die **Logikplan-Vorschau** — ein interaktives, live
 aktualisiertes Diagramm eines Comexio-Funktionsplans (Logikplan), direkt in Home
 Assistant dargestellt. Für die allgemeine Einrichtung siehe die
 [Konfigurationsanleitung](CONFIGURATION.md), für die vollständige Aktionsliste siehe die
-[README](README.md#-funktionsplan-verwaltung-logikplan).
+[README](../README.md#-funktionsplan-verwaltung-logikplan).
 
 ---
 
@@ -1076,4 +1076,4 @@ sämtliche Aktionen der Integration definiert (einschließlich der oben gelistet
 
 ---
 
-*[← Zurück zur README](README.md)*
+*[← Zurück zur README](../README.md)*

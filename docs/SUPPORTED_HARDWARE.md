@@ -2,9 +2,9 @@
 
 🌍 *[🇩🇪 Auf Deutsch lesen (Read this in German)](#-deutsch)*
 
-Which Comexio extensions and Quickbus devices work with this integration, and how far each one has been tested. For the entity types in general, see the [README](README.md#-supported-entities).
+Which Comexio extensions, Quickbus devices and 1-Wire sensors work with this integration, and how far each one has been tested. For the entity types in general, see the [README](../README.md#-supported-entities).
 
-**Tested with:** integration v0.32.0, Comexio firmware 11.1.5, on one installation. Modules are listed by their type as Comexio shows it on its IO page, not by the name you give them.
+**Tested with:** integration v0.40.0, Comexio firmware 11.1.5, on one installation. Modules are listed by their type as Comexio shows it on its IO page, not by the name you give them.
 
 How the integration chooses the entity:
 
@@ -91,6 +91,17 @@ These are offline on the test installation, so **no live value or write has ever
 
 `TL1` and `UL1` on **Dali Bridge** and **Modbus Bridge**, and `BVol1` on **Doorstation**, are inactive in Comexio, so they got no entity and remain unchecked.
 
+### 1-Wire sensors
+
+The sensors of Comexio's 1-Wire bus are read-only. Their values arrive only by push, see [1-Wire sensors](../README.md#-1-wire-sensors) in the README. The test installation has only dummy sensors, so **no real sensor value has been seen yet**. What was checked: the device `<instance> 1-Wire`, the entities with their names and ids, and the *unavailable* state plus the diagnostic `1-Wire problem` sensor for a sensor that cannot be read.
+
+| Prefix | Meaning | In Home Assistant | Result |
+| :--- | :--- | :--- | :--- |
+| `OT` | temperature | `sensor` temperature (°C) | entity ok, value awaiting a real sensor |
+| `OH` | humidity | `sensor` humidity (%) | entity ok, value awaiting a real sensor |
+| `OP`, `OILL`, `OVAD`, `OVDD`, `OIB`, other | air pressure, brightness, voltages, ... | `sensor` showing the bare number, without unit | entity ok, value awaiting a real sensor |
+| any, digital type | digital sensor | `binary_sensor` | not tested |
+
 ### Not tested at all
 
 | Hardware | Note |
@@ -101,9 +112,9 @@ These are offline on the test installation, so **no live value or write has ever
 
 # 🇩🇪 Deutsch
 
-Welche Comexio-Erweiterungen und Quickbus-Geräte mit dieser Integration funktionieren und wie weit sie jeweils getestet sind. Die Entitätstypen allgemein stehen in der [README](README.md#-unterstützte-entitäten).
+Welche Comexio-Erweiterungen, Quickbus-Geräte und 1-Wire-Sensoren mit dieser Integration funktionieren und wie weit sie jeweils getestet sind. Die Entitätstypen allgemein stehen in der [README](../README.md#-unterstützte-entitäten).
 
-**Getestet mit:** Integration v0.32.0, Comexio-Firmware 11.1.5, auf einer Installation. Die Module stehen hier mit ihrem Typ, wie ihn Comexio auf der IO-Seite anzeigt, nicht mit dem selbst vergebenen Namen.
+**Getestet mit:** Integration v0.40.0, Comexio-Firmware 11.1.5, auf einer Installation. Die Module stehen hier mit ihrem Typ, wie ihn Comexio auf der IO-Seite anzeigt, nicht mit dem selbst vergebenen Namen.
 
 So wählt die Integration die Entität:
 
@@ -189,6 +200,17 @@ Diese sind auf der Testinstallation offline, deshalb **wurde noch nie ein Live-W
 „Nur lesbar“ heißt in dieser Tabelle immer: Comexio führt den IO als Ausgang, sein Bezeichner beginnt aber weder mit `Q` noch mit `I`, und sein IO-Typ zählt als Eingang.
 
 `TL1` und `UL1` auf **Dali Bridge** und **Modbus Bridge** sowie `BVol1` auf **Doorstation** sind in Comexio inaktiv, haben also keine Entität bekommen und bleiben ungeprüft.
+
+### 1-Wire-Sensoren
+
+Die Sensoren des 1-Wire-Busses von Comexio sind nur lesbar. Ihre Werte kommen ausschließlich per Push, siehe [1-Wire-Sensoren](../README.md#-1-wire-sensoren) in der README. Die Testinstallation hat nur Dummy-Sensoren, deshalb **wurde noch kein Wert eines echten Sensors beobachtet**. Geprüft sind: das Gerät `<Instanz> 1-Wire`, die Entitäten mit Namen und IDs sowie der Zustand *nicht verfügbar* samt Diagnose-Sensor `1-Wire-Problem` bei einem Sensor, der nicht lesbar ist.
+
+| Präfix | Bedeutung | In Home Assistant | Ergebnis |
+| :--- | :--- | :--- | :--- |
+| `OT` | Temperatur | `sensor` Temperatur (°C) | Entität ok, Wert wartet auf einen echten Sensor |
+| `OH` | Feuchte | `sensor` Luftfeuchte (%) | Entität ok, Wert wartet auf einen echten Sensor |
+| `OP`, `OILL`, `OVAD`, `OVDD`, `OIB`, andere | Luftdruck, Helligkeit, Spannungen, ... | `sensor` mit der nackten Zahl, ohne Einheit | Entität ok, Wert wartet auf einen echten Sensor |
+| beliebig, digitaler Typ | digitaler Sensor | `binary_sensor` | nicht getestet |
 
 ### Gar nicht getestet
 

@@ -92,7 +92,8 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
     │  update_marker() / update_io_by_name()  ← called by webhook handler
     │
     ├── Entities: sensor / switch / number / button / binary_sensor
-    └── Webhook: POST /api/webhook/comexio_{server_id}  ← push from Comexio
+    └── Webhook: POST /api/webhook/<id of the command>  ← push from Comexio (one HMAC-derived id per Web-IO command;
+                the old comexio_{server_id} stays registered only until the migration is verified, see below)
 ```
 
 ### Module roles
@@ -101,7 +102,8 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 |------|------|
 | `__init__.py` | Entry setup, webhook registration, orphan entity cleanup, `update_listener` |
 | `api.py` | `ComexioAPI`: RSA login, config fetch, full Web-IO lifecycle; parsing, scraping and Web-IO command building come from `aiocomexio` (`config`, `scrape`, `webio`) |
-| `coordinator.py` | `ComexioCoordinator`: polling, audit logic, webhook state merging, sync lock |
+| `coordinator.py` | `ComexioCoordinator`: polling, audit logic, webhook state merging, sync lock, nightly webhook-id migration |
+| `webhook_security.py` | `WebhookSecurity`: entry secret, HMAC webhook id per command, migration ledger, legacy-id switch |
 | `button.py` | Sync button (delta vs. recreate strategy), cancel button, `press_action` service |
 | `repairs.py` | HA Repairs flow — lets user pick audit fix action from the UI |
 | `config_flow.py` | Config entry setup wizard with auto-discovery (DNS `comexio.*`) |
@@ -173,12 +175,33 @@ Both `schema_marker` and `schema_io` are `str.format_map(SafeDict(...))` templat
 - Available placeholders: `ServerAlias`, `MarkerId`, `MarkerTitle`, `ExtName`, `IoId`, `IoTitle`
 - An unnamed marker, and an IO whose description is empty or merely repeats its identifier, gets the title `#nn` — the title is never empty, so no schema renders an empty name or a dangling separator. Accepted limit: a schema of only `{IoTitle}` names all unnamed IOs of an extension `#nn`.
 
+### Webhook ids (dg)
+
+Every Web-IO command pushes to an id of its own: `derive_webhook_id(secret, command_key)` (HMAC-SHA256, 32 hex chars). The secret and the migration ledger live in a `Store` keyed by the entry id (`webhook_security_store`), never in the config entry. The handler accepts a request only if `WebhookSecurity.accepts(id, payload)` holds (the id belongs to the payload's command, `server=` matches the entry); the old id `comexio_{server_id}` is accepted only while `legacy_enabled`.
+
+- **Migration:** the nightly tick (01:30, `_async_webhook_migration_tick`) rewrites each command's path and `server=` field (protocol and address stay as they are). The old id is switched off only when every command is in the ledger, Comexio has restarted after the last write (`_restart_pending`: Comexio sends a changed command only after a restart) **and** a read-back of every command confirms path and body (`command_deviation`). Do not shorten that chain.
+- **Never log or notify a per-command id or a payload from the endpoint** (it takes no authentication): refused requests go through `WebhookSecurity.warn_refused` (throttled, no payload), notifications through `redact_webhook_ids`.
+- **The scan that enforces it:** `tests/unit/test_webhook_ids_stay_secret.py` reads every module of the integration as an AST and follows a webhook id or the secret (taint by name) into logging calls, `print`, `warn_refused`, notifications, repair placeholders and the text of a `raise`/`assert`; it also fails on a `WebhookSecurity(...)` built without the entry's host. A print that is safe anyway is listed in its `ALLOWED` with the exact call text and the reason (today only `handle_webhook`'s `_LOGGER.exception('Webhook Error: %s', e)`: the id goes to `security.accepts` and nowhere else; simulated 2026-11-09 with hostile payloads, no leak). An argument added to a listed call is a new finding.
+- User docs: `docs/WEBHOOK_SECURITY.md` (EN + DE). Keep it in step with the flow above.
+
+### Documentation layout
+
+The guides (`BACKUPS`, `CONFIGURATION`, `FUNCTION_PLAN_PREVIEW`, `KNX`, `SUPPORTED_HARDWARE`, `WEBHOOK_SECURITY`) and their screenshots (`docs/assets/ui/`) live in `docs/`. `README.md`, `CHANGELOG.md`, `CLAUDE.md` and `info.md` stay in the root (HACS and GitHub read them there). `custom_components/comexio/orphaned_backups.py` links `docs/BACKUPS.md` by URL: move a guide only together with that link.
+
 ### Race-condition guards (see inline comments)
 
 - **R1** (`coordinator.py`): Webhook updates arriving *during* a `get_raw_config` HTTP round-trip are preserved — coordinator clears dirty sets before the fetch, then prefers webhook values over stale API snapshot.
 - **R2** (`__init__.py`, `button.py`): `_skip_next_listener_reload` flag prevents a double-reload when the sync button writes to `audit_ignored` in options (the explicit reload after sync is the canonical one).
 - **R4** (`coordinator.py`): `_sync_lock` (asyncio.Lock) ensures only one sync run at a time.
 - **Guarded reload** (`coordinator.async_reload_entry`): every reload of the entry goes through it — it skips the reload while a sync runs (the sync's closing reload covers it) and otherwise waits for `_sync_lock`, running restores and plan edits. HA's own `config_entries.async_reload` / `async_schedule_reload` would tear the coordinator down mid-sync or mid-restore; a use is allowed only where the guard cannot apply, listed with its reason in `ALLOWED` of `tests/unit/test_guarded_reloads.py`, which fails on any unlisted use.
+
+### Registry scope
+
+The entity and device registries hold the entries of every integration, and a unique_id is unique per integration only — a scan of a whole registry that matches on it can pick another integration's entry (#270). The integration therefore reads the registries through `er.async_entries_for_config_entry` / `dr.async_entries_for_config_entry`. Accessing `entities`, `deleted_entities`, `devices`, `deleted_devices` or the helpers that return foreign entries (`async_entries_for_area` / `_category` / `_device` / `_label`) is allowed only where a scan has to see more, listed with its reason in `ALLOWED` of `tests/unit/test_registry_scans.py`, which fails on any unlisted use.
+
+### Repairs belong to their config entry
+
+Every repair is raised through `issue_owner.async_create_entry_issue(hass, entry_id, issue_id, ...)`, never through `ir.async_create_issue` directly. From Home Assistant 2026.11 on it passes `config_entry_id`, so a repair is removed together with its entry; an older Home Assistant does not know the keyword, so it is left out there (detected on the signature, the HACS minimum stays 2026.8.0). A repair whose entry is already gone is not raised, only logged at debug level. `tests/unit/test_issue_owner.py` fails on a direct `ir.async_create_issue`, on the issue registry reached any other way than `ir.<attribute>`, on a lookup by a name built at runtime, on a wrapper call with another entry id than the one form each file reaches its own entry by, and on a second persistent repair. The KNX pre-release cleanup is the only persistent one; one raised before the link existed is never re-created with it, so `async_remove_entry` deletes it by id.
 
 ### GitHub Actions — HACS-spezifische Ausnahme
 
