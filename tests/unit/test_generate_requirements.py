@@ -107,8 +107,10 @@ def _mypy_job() -> dict[str, Any]:
     import yaml  # noqa: PLC0415
 
     job = yaml.safe_load(_workflow())["jobs"]["mypy"]
-    # A job-level condition or continue-on-error would skip or excuse every step at once.
-    assert not {"if", "continue-on-error"} & job.keys()
+    # Strict allowlist, so a job-level `if`, `continue-on-error`, `defaults` (a run shell), `env`, `strategy` or
+    # `container` cannot skip, excuse or change all steps at once. A harmless new key (`needs`, `concurrency`)
+    # fails it too: add it here on purpose.
+    assert set(job) <= {"name", "runs-on", "permissions", "timeout-minutes", "steps"}
     return job
 
 
@@ -149,8 +151,10 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     named = {name for name in names for word in words if word == name or word.startswith(f"{name}-")}
 
     steps = _mypy_steps()
-    # The interpreter is set up first, then the install step runs (an always-running one, not commented out or
-    # `if: false`), then the step that runs mypy: no step may run on another interpreter or before its input exists.
+    # Exactly one checkout, setup and install step (a second one fails on purpose), in this order: checkout (the
+    # install reads tests/requirements.txt), interpreter setup, the install step (always runs, not commented out or
+    # `if: false`), then the step that runs mypy. No step may run before its input exists.
+    checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout@")]
     setups = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/setup-python@")]
     installs = [
         i
@@ -159,7 +163,8 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     ]
     # Any step whose script mentions the mypy command, so a wrapped one (`if false; then mypy ...; fi`) is found too.
     mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get("run", ""))]
-    assert len(setups) == len(installs) == len(mypy_runs) == 1
+    assert len(checkouts) == len(setups) == len(installs) == len(mypy_runs) == 1
+    assert _always_runs(steps[checkouts[0]])
     assert _always_runs(steps[installs[0]])
     # The step is pinned to exactly the known two script lines and to keys that cannot skip or change it: a shell
     # conditional, `|| true`, a second command, `if`, `shell`, `env` or `working-directory` cannot hide a skipped
@@ -169,6 +174,6 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     assert set(mypy_step) <= {"name", "id", "run", "continue-on-error"}
     script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
     assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
-    assert setups[0] < installs[0] < mypy_runs[0]
+    assert checkouts[0] < setups[0] < installs[0] < mypy_runs[0]
     assert "aiocomexio" in names
     assert not named
