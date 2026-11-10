@@ -89,7 +89,7 @@ async def async_setup_entry(
     async_add_entities([ComexioPlanSelectEntity(coordinator), ComexioPlanBackupSelectEntity(coordinator)])
 
 
-class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
+class ComexioPlanSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], SelectEntity):
     """Select entity listing available function plans for use in service calls."""
 
     _attr_has_entity_name = True
@@ -187,7 +187,9 @@ def _follow_in_preview(coordinator: ComexioCoordinator) -> None:
     )
 
 
-class ComexioPlanBackupSelectEntity(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SelectEntity):
+class ComexioPlanBackupSelectEntity(
+    ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], SelectEntity
+):
     """Select entity listing stored backup snapshots for the plan chosen in the 'Plan' selector.
 
     Lets the plan preview (plan_preview.py) render a historical snapshot instead of the

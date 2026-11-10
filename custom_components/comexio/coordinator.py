@@ -1128,8 +1128,11 @@ def _previous_vanished_name(previous: set[tuple[int, str]], fub_id: int) -> str:
     return next(iter(names)) if len(names) == 1 else unnamed_plan_label(fub_id)
 
 
-class ComexioCoordinator(DataUpdateCoordinator):
+class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Coordinator to manage data fetching and state updates with Type-Audit."""
+
+    # HA types it ConfigEntry | None; this coordinator always gets its entry in __init__.
+    config_entry: ConfigEntry
 
     # Plans the ignored-source audit of this poll loaded live, so the KNX audit reuses what the
     # marker audit fetched instead of a second bulk request. None outside that audit block; only
