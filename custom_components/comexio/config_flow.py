@@ -307,6 +307,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 # Opt-in, default OFF — blind implementation, see project_knx_objects memory.
                 vol.Required("import_knx", default=ui.get("import_knx", False)): bool,
                 vol.Required("import_quickbus", default=ui.get("import_quickbus", True)): bool,
+                vol.Required("import_onewire", default=ui.get("import_onewire", True)): bool,
                 vol.Required("webio_name", default=ui.get("webio_name", "HomeAssistant")): str,
                 vol.Required(
                     "scan_interval",

@@ -1,6 +1,9 @@
 """The ledger, the migration run and the handler of the per-command webhook ids (dg), end to end."""
 
+import ast
 from datetime import timedelta
+import inspect
+import textwrap
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -287,27 +290,50 @@ def test_the_registered_ids_follow_the_items_and_the_legacy_switch(monkeypatch: 
 
 
 @pytest.mark.parametrize("legacy_enabled", [True, False])
-def test_the_setup_without_data_registers_only_the_old_id_and_unregisters_nothing(
+def test_the_setup_before_the_first_data_registers_only_the_saved_onewire_ids(
     monkeypatch: pytest.MonkeyPatch, legacy_enabled: bool
 ) -> None:
+    # Before the login nothing is known; the saved 1-Wire sensors then bring the ids of their commands (the
+    # coordinator's webhook_command_ids without data). Never the old id: nothing could take its pushes yet.
     registered: list[str] = []
     unregister = MagicMock()
     monkeypatch.setattr(ha_webhook, "async_register", lambda _h, _d, _n, wid, _handler: registered.append(wid))
     monkeypatch.setattr(ha_webhook, "async_unregister", unregister)
     security = _security(monkeypatch)
     security.legacy_enabled = legacy_enabled
+    early: set[str] = set()
     coordinator = SimpleNamespace(
         server_id=SERVER,
-        data={},
-        webhook_command_ids=lambda: {"a" * 32},
+        data=None,
+        webhook_command_ids=lambda: set(early),
         async_add_listener=MagicMock(),
         sync_webhooks=None,
     )
     _setup_webhooks(MagicMock(data={_DOMAIN: {}}), MagicMock(entry_id="e1"), coordinator, security)  # type: ignore[arg-type]
-    coordinator.sync_webhooks()  # idempotent: the old id is not registered twice
+    assert registered == []
 
-    assert registered == ([ws.legacy_webhook_id(SERVER)] if legacy_enabled else [])
+    early.add("a" * 32)
+    coordinator.sync_webhooks()
+    coordinator.sync_webhooks()  # idempotent: the id is not registered twice
+    assert registered == ["a" * 32]
+
+    # A first refresh that fails tells the listeners without data: the early ids stay.
+    early.clear()
+    coordinator.sync_webhooks()
     unregister.assert_not_called()
+    coordinator.data = {}  # emptied data is no data either: nothing is dropped, the old id stays unregistered
+    coordinator.sync_webhooks()
+    unregister.assert_not_called()
+    assert ws.legacy_webhook_id(SERVER) not in registered
+
+    # The first data: the ids of every command, the old id while it is on, and the early id only if still one.
+    coordinator.data = {"io": []}
+    coordinator.webhook_command_ids = lambda: {"b" * 32}
+    coordinator.sync_webhooks()
+
+    assert set(registered) == {"a" * 32, "b" * 32} | ({ws.legacy_webhook_id(SERVER)} if legacy_enabled else set())
+    unregister.assert_called_once()
+    assert unregister.call_args.args[1] == "a" * 32
 
 
 @pytest.mark.parametrize(
@@ -954,3 +980,50 @@ def test_redact_webhook_ids_hides_every_id_and_leaves_the_rest() -> None:
     assert second not in shown
     assert "/api/webhook/comexio_srv" in shown
     assert "b" * 31 in shown
+
+
+def _setup_call_lines(name: str) -> list[int]:
+    """The lines of async_setup_entry that call a function or method of this name."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(comexio_init.async_setup_entry)))
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) == name or getattr(node.func, "attr", None) == name)
+    ]
+
+
+def test_the_webhooks_are_registered_before_the_platforms_set_up_their_entities() -> None:
+    # A 1-Wire reading only comes by push: one sent while the platforms set up must find its webhook registered.
+    webhooks = _setup_call_lines("_setup_webhooks")
+    platforms = _setup_call_lines("async_forward_entry_setups")
+
+    assert len(webhooks) == 1
+    assert len(platforms) == 1
+    assert webhooks[0] < platforms[0]
+
+
+def test_the_webhooks_are_set_up_before_the_login_and_the_first_refresh() -> None:
+    # A 1-Wire reading pushed during the login or the first refresh must find the webhook of its (saved) sensor.
+    connect = _setup_call_lines("_async_connect")
+    webhooks = _setup_call_lines("_setup_webhooks")
+
+    assert len(connect) == 1
+    assert len(webhooks) == 1
+    assert webhooks[0] < connect[0]
+
+
+def test_nothing_is_awaited_between_the_first_refresh_and_the_webhook_ids_of_every_command() -> None:
+    # The first refresh tells the commands, and with them the webhook ids: a push during a later await of the setup
+    # (stores, extension renames) must already find its webhook.
+    tree = ast.parse(textwrap.dedent(inspect.getsource(comexio_init.async_setup_entry)))
+    connect = _setup_call_lines("_async_connect")
+    synced = _setup_call_lines("sync_webhooks")
+    awaited = [node.lineno for node in ast.walk(tree) if isinstance(node, ast.Await | ast.AsyncWith | ast.AsyncFor)]
+
+    # _async_connect runs the first refresh: the line the ids of every command must follow.
+    assert "_async_first_refresh(" in inspect.getsource(comexio_init._async_connect)
+    assert len(connect) == 1
+    assert len(synced) == 1
+    assert connect[0] < synced[0]
+    assert [line for line in awaited if connect[0] < line < synced[0]] == []

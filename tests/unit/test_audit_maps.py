@@ -19,6 +19,10 @@ from custom_components.comexio.coordinator import (
     [
         ("HA M5 Licht", "M5"),
         ("HA K7 Jalousie", "K7"),
+        ("HA 1W12 Kitchen", "1W12"),
+        # A 1-Wire command is named by the sensor's address: "1Wire" is no "1W<config id>" key.
+        ("HA 1Wire OT1", "HA 1Wire OT1"),
+        ("HA Markise Sued", "HA Markise Sued"),  # a prefix without an id is no key either
         ("HA IO Ext1 I1", io_audit_key("Ext1", "I1")),
         ("HA IO Ext1", "HA IO Ext1"),  # too short for an IO key
         ("Fremd", "Fremd"),
@@ -172,3 +176,18 @@ def test_commands_of_a_switched_off_class_leave_the_audit() -> None:
 def test_no_class_switched_off_keeps_every_command() -> None:
     commands = {"HA K1 Tor": {"webioClass": "knx"}}
     assert _split_disabled_commands(commands, tuple(WebioClass)) == (commands, {})
+
+
+def test_onewire_commands_without_a_sensor_each_keep_a_key_of_their_own() -> None:
+    # Read as the key "1Wire", every 1-Wire command without a current sensor would share one audit key.
+    commands = {
+        "HA 1Wire OT1": {"cmdId": 1, "typeId": 2, "webioClass": "onewire", "webIoId": 11},
+        "HA 1Wire OT2": {"cmdId": 2, "typeId": 2, "webioClass": "onewire", "webIoId": 12},
+    }
+
+    com_map = _build_com_audit_map(commands, {})
+
+    assert {key: [com["id"] for com in coms] for key, coms in com_map.items()} == {
+        "HA 1Wire OT1": [1],
+        "HA 1Wire OT2": [2],
+    }

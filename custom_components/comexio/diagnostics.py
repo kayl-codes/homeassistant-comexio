@@ -42,6 +42,7 @@ DIAGNOSTICS_OPTION_KEYS = (
     "import_markers",
     "import_ios",
     "import_quickbus",
+    "import_onewire",
     "import_knx",
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     "scan_interval",

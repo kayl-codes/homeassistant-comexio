@@ -111,10 +111,11 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 | `services.py` | `generate_web_io` service |
 | `const.py` | All constants; `KNOWN_DOMAINS` list drives HA IP / DNS resolution |
 
-### Two Comexio data types
+### Comexio data types
 
 - **Markers** (`FubModules["2"]`): server-side state variables (digital or analog). Live values fetched via dashboard refresh endpoint. IDs are integers; webhook payload `{"type": "marker", "id": "...", "value": ...}`.
 - **IOs** (`FubModules["1"]`): physical inputs/outputs on extension modules. Whether binary or analog is determined by `$ioTypes` (scraped from admin page). Webhook payload `{"type": "io", "ext": "...", "io": "...", "value": ...}`.
+- **1-Wire sensors** (`FubModules["12"]`, plan element type 12 with `ref_id` = config id): read-only, keyed by their address (`OT1`); values arrive **only by push** from the Web-IO class `<name> [1Wire]` (plans `{prefix} - 1Wire [1-100]`, range-clustered like markers) — never poll them. Only their status (read error / not found, `api.get_onewire_status()`) comes with the config poll and drives availability plus the `onewire_problem` sensor. Webhook payload `{"type": "onewire", "id": "<address>", "value": ...}`; the webhook dispatch keys pushes by address, not config id (config ids repeat across prefixes).
 
 ### Two authentication paths
 
@@ -142,6 +143,8 @@ Column plans — IO extensions (`{prefix} - IO [A,B]`, option `logikplan_io_exte
 | KNX entity | `comexio_{server_id}_k{id}` | `{domain}.{server_id}_k{id}` |
 | Quickbus IO entity (read-only) | `comexio_{server_id}_qb{io_id}` | `{binary_sensor|sensor}.{server_id}_qb{io_id}` |
 | IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
+| 1-Wire sensor (read-only) | `comexio_{server_id}_onewire_{address}` (lowercase) | `{sensor|binary_sensor}.{server_id}_onewire_{address}` |
+| 1-Wire problem sensor | `comexio_{server_id}_onewire_problem` | `binary_sensor.{server_id}_onewire_problem` |
 | Function plan run state | `comexio_{server_id}_fub{id}` | `sensor.{server_id}_fub{id}` |
 | Orphaned backups sensor | `comexio_{server_id}_orphaned_backups` | `sensor.{server_id}_orphaned_backups` |
 | Function plan problem sensor | `comexio_{server_id}_managed_plans_problem` | `binary_sensor.{server_id}_managed_plans_problem` |
@@ -157,7 +160,7 @@ The entity_id is `const.stable_object_id(unique_id)`, requested by `entity.Comex
 
 ### Device names
 
-Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name` / `marker_device_name`): `<server> BASE` (onboard IOs, no tag, matched case-insensitively), `<server> EXT - <ext>`, `<server> QB - <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> Markers` (no tag). Plain letter tags, no brackets: the HA frontend sorts with ICU, where `[` would sort before `#` and push `<server> # Function plans` away from the hub. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}`. An entity whose entity_id HA derives from its device name must not pick up a tag: the extension firmware entity requests its pre-tag id `const.extension_firmware_object_id` (`update.{server}_{ext}_firmware`).
+Sub-devices are tagged by kind so each kind lists together (`const.extension_device_name` / `quickbus_device_name` / `marker_device_name`): `<server> BASE` (onboard IOs, no tag, matched case-insensitively), `<server> EXT - <ext>`, `<server> QB - <device>` (linked via_device to its host extension's device once that exists, else to the hub), `<server> Markers` (no tag), `<server> 1-Wire` (`const.onewire_device_name`, no tag). Plain letter tags, no brackets: the HA frontend sorts with ICU, where `[` would sort before `#` and push `<server> # Function plans` away from the hub. Device names are display only — identifiers stay `{server_id}_{ext}` / `{server_id}_qb{device_id}`. An entity whose entity_id HA derives from its device name must not pick up a tag: the extension firmware entity requests its pre-tag id `const.extension_firmware_object_id` (`update.{server}_{ext}_firmware`).
 
 ### Entity naming (configurable)
 

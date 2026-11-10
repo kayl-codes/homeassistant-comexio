@@ -9,11 +9,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import ComexioConnectionError
+from aiocomexio.onewire import OneWireSensor
 import pytest
 
 from custom_components.comexio import webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.const import WebioClass
+from custom_components.comexio.const import ONEWIRE_DATA_KEY, WebioClass
 from custom_components.comexio.coordinator import ComexioCoordinator
 from tests.unit.test_api_helpers import PARSED
 
@@ -146,6 +147,43 @@ def test_a_payload_names_the_key_its_command_was_derived_from(payload: dict[str,
     assert key == ws.command_key(WebioClass(payload.get("type", "marker")), item)
 
 
+def test_a_onewire_command_is_keyed_by_its_address_as_item_and_as_sensor() -> None:
+    # The audit/sync pass the data item, aiocomexio's builders the OneWireSensor: both must give the same key,
+    # and it is the address the push carries as its id, never the config id.
+    item = {"id": 4, "address": "OT1", "name": "1Wire OT1", "type": "analog"}
+    sensor = OneWireSensor(address="OT1", config_id=4, prefix="OT", name="", hw_id="", kind="analog")
+
+    assert ws.command_key(WebioClass.ONEWIRE, item) == "onewire:OT1"
+    assert ws.command_key(WebioClass.ONEWIRE, sensor) == "onewire:OT1"
+    assert ws.payload_key({"type": "onewire", "id": "OT1"}) == "onewire:OT1"
+
+
+def test_every_built_onewire_command_gets_its_own_id_that_only_its_payload_fits(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    security = _security(monkeypatch)
+    comexio_api.webhook_security = security
+    source = {
+        **PARSED,
+        ONEWIRE_DATA_KEY: [
+            {"id": 1, "address": "OT1", "name": "1Wire OT1", "type": "analog", "prefix": "OT"},
+            {"id": 2, "address": "OH2", "name": "1Wire OH2", "type": "analog", "prefix": "OH"},
+        ],
+    }
+
+    commands = comexio_api.build_webio_commands(SERVER, source, WebioClass.ONEWIRE)
+
+    assert [_payload(c["Data"])["id"] for c in commands] == ["OT1", "OH2"]
+    assert len({_own_id(c) for c in commands}) == 2
+    for command in commands:
+        payload = _payload(command["Data"])
+        assert payload["type"] == "onewire"
+        assert security.accepts(_own_id(command), payload)
+        assert not any(
+            security.accepts(_own_id(command), _payload(other["Data"])) for other in commands if other is not command
+        )
+
+
 @pytest.mark.parametrize("payload", [{}, {"type": "io", "ext": "BASE"}, {"type": "knx"}, {"value": 1}])
 def test_a_payload_without_an_address_names_no_key(payload: dict[str, str]) -> None:
     assert ws.payload_key(payload) is None
@@ -158,6 +196,69 @@ def test_the_old_id_carries_any_value_only_while_it_is_enabled(monkeypatch: pyte
     assert security.accepts(old, {"type": "marker", "id": "5"})
     security.legacy_enabled = False
     assert not security.accepts(old, {"type": "marker", "id": "5"})
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"type": "marker", "id": "5"},
+        {"type": "io", "ext": "BASE", "io": "Q1"},
+        {"type": "knx", "id": "3"},
+        {"type": "quickbus", "id": "501"},
+    ],
+)
+def test_the_old_id_still_carries_every_kind_whose_commands_posted_to_it(
+    monkeypatch: pytest.MonkeyPatch, payload: dict[str, str]
+) -> None:
+    # Only the kinds whose commands never used the old id lose it; the others still post there until migrated.
+    assert _security(monkeypatch).accepts(ws.legacy_webhook_id(SERVER), payload)
+
+
+def test_the_old_id_never_carries_a_onewire_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    # 1-Wire commands carry their own id from the start, so a 1-Wire push on the old id is forged (#284).
+    security = _security(monkeypatch)
+    old = ws.legacy_webhook_id(SERVER)
+    payload = {"type": "onewire", "id": "OT1", "value": 21.5}
+
+    assert not security.accepts(old, payload)
+    assert security.accepts(ws.derive_webhook_id(security.secret, "onewire:OT1"), payload)
+    security.legacy_enabled = False
+    assert not security.accepts(old, payload)
+
+
+@pytest.mark.parametrize("kind", [["onewire"], {"a": 1}, 5], ids=["array", "object", "number"])
+def test_a_type_that_is_no_string_is_refused_on_every_id(monkeypatch: pytest.MonkeyPatch, kind: object) -> None:
+    # A JSON array or object would not even hash: the set lookups raised instead of refusing (#284).
+    security = _security(monkeypatch)
+    payload = {"type": kind, "id": "5", "value": 1}
+
+    assert ws.payload_key(payload) is None
+    assert not security.accepts(ws.legacy_webhook_id(SERVER), payload)
+    assert not security.accepts(ws.derive_webhook_id(security.secret, "marker:5"), payload)
+
+
+@pytest.mark.parametrize(
+    ("ext", "io_id"), [(["BASE"], "Q1"), ("BASE", 1), ({"a": 1}, "Q1")], ids=["ext-array", "io-number", "ext-object"]
+)
+def test_an_io_address_that_is_no_string_is_refused_on_every_id(
+    monkeypatch: pytest.MonkeyPatch, ext: object, io_id: object
+) -> None:
+    # The IO update lowercases ext and io: on the old id such a payload raised in the handler instead (#284).
+    security = _security(monkeypatch)
+    payload = {"type": "io", "ext": ext, "io": io_id, "value": 1}
+
+    assert ws.payload_key(payload) is None
+    assert not security.accepts(ws.legacy_webhook_id(SERVER), payload)
+    assert not security.accepts(ws.derive_webhook_id(security.secret, f"io:{ext}:{io_id}"), payload)
+
+
+@pytest.mark.parametrize("payload", [{"id": "5", "value": 1}, {"type": None, "id": "5", "value": 1}])
+def test_a_payload_without_a_type_names_a_marker(monkeypatch: pytest.MonkeyPatch, payload: dict[str, object]) -> None:
+    security = _security(monkeypatch)
+
+    assert ws.payload_key(payload) == "marker:5"
+    assert security.accepts(ws.derive_webhook_id(security.secret, "marker:5"), payload)
+    assert security.accepts(ws.legacy_webhook_id(SERVER), payload)
 
 
 def test_a_forged_id_a_foreign_server_and_a_non_ascii_id_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:

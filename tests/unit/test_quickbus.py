@@ -491,7 +491,8 @@ def _comexio_commands(parsing_api: ComexioAPI, quickbus_result: dict[str, Any]) 
 def _audit(ha_map: dict[str, Any], com_commands: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     com_map = _build_com_audit_map(com_commands, ha_map)
-    return coordinator._compare_audit_maps(ha_map, com_map, {}, (None, None, None), {}, set(), set())
+    unchecked = dict.fromkeys(("2", "11", "12", "1"), (None, None))
+    return coordinator._compare_audit_maps(ha_map, com_map, {}, unchecked, {}, set(), set())
 
 
 def test_synced_quickbus_commands_audit_clean(parsing_api: ComexioAPI, quickbus_result: dict[str, Any]) -> None:

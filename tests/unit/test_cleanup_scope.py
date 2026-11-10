@@ -7,6 +7,7 @@ from custom_components.comexio.cleanup_scope import (
     CLEANUP_SCOPE_IO,
     CLEANUP_SCOPE_KNX,
     CLEANUP_SCOPE_MARKER,
+    CLEANUP_SCOPE_ONEWIRE,
     CLEANUP_SCOPE_QUICKBUS,
     TRIGGER_PLAN_DELETE,
     TRIGGER_PLAN_KEEP,
@@ -53,6 +54,17 @@ WEBIO_DEVICES = {
 )
 def test_plans_in_scope(scope: str, expected: set[str]) -> None:
     assert set(plans_in_scope(PLAN_MAP, scope)) == expected
+
+
+def test_the_onewire_scope_takes_the_onewire_plans_only() -> None:
+    plans = {**PLAN_MAP, "HA - 1Wire [1-100]": 7, "Old - 1Wire [101-200]": 8}
+
+    assert set(plans_in_scope(plans, CLEANUP_SCOPE_ONEWIRE)) == {"HA - 1Wire [1-100]", "Old - 1Wire [101-200]"}
+    assert not plan_in_scope("HA - 1Wire [1-100]", CLEANUP_SCOPE_MARKER)
+    assert not plan_in_scope(FUNCTION_PLAN_TRIGGER_PLAN_NAME, CLEANUP_SCOPE_ONEWIRE)
+    # 1-Wire sensors have no trigger pairs, so the cleanup leaves the shared trigger plan alone.
+    assert scope_trigger_ref_type(CLEANUP_SCOPE_ONEWIRE) is None
+    assert not scope_includes_knx(CLEANUP_SCOPE_ONEWIRE)
 
 
 def test_plan_in_scope_ignores_the_prefix() -> None:
@@ -150,6 +162,7 @@ def test_has_knx_artifacts_counts_bridge_markers() -> None:
         ("io", CLEANUP_SCOPE_IO),
         (WebioClass.KNX, CLEANUP_SCOPE_KNX),
         (WebioClass.QUICKBUS, CLEANUP_SCOPE_QUICKBUS),
+        (WebioClass.ONEWIRE, CLEANUP_SCOPE_ONEWIRE),
     ],
 )
 def test_scope_of_class_removes_exactly_that_class(webio_class: str, scope: str) -> None:

@@ -13,7 +13,8 @@ from datetime import datetime, timedelta
 import json
 import logging
 import time
-from typing import Any
+from types import MappingProxyType
+from typing import Any, NamedTuple
 
 from aiocomexio import ComexioConnectionError
 from aiocomexio.function_plan import diff_snapshots, resolve_element_label, snapshot_label_maps
@@ -92,8 +93,22 @@ _PLAN_LIST_UNEXPECTED = (
 
 _AGE_KEYS = ("days", "hours", "minutes", "seconds")
 
-# (markers_by_id, webio_by_id, ios_by_id) as snapshot_label_maps returns them.
-_LabelMaps = tuple[Mapping[str, Any], Mapping[str, Any], Mapping[str, Any]]
+
+class _LabelMaps(NamedTuple):
+    """The maps one side of a backup diff resolves its element labels with."""
+
+    # As snapshot_label_maps returns them: a snapshot's own names laid over the live ones.
+    markers: Mapping[str, Any]
+    webio: Mapping[str, Any]
+    ios: Mapping[str, Any]
+    # The KNX and 1-Wire maps (resolve_element_label's keywords): live only, a backup does not capture them.
+    sources: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
+
+    def label(self, elem: dict, catalog: dict) -> str:
+        """The label of one plan element."""
+        return resolve_element_label(elem, catalog, self.markers, self.webio, self.ios, **self.sources)
+
+
 # A block setting one side of a backup diff does not have.
 _MISSING_VALUE = "—"
 # Diff line when a side of the diff was stored before block settings were captured (#nv = no
@@ -209,9 +224,7 @@ def _sort_backup_entries(entries: list[dict], order_by: str) -> list[dict]:
     return sorted(entries, key=lambda e: e.get("captured_at") or "", reverse=True)  # newest (default)
 
 
-def _label_backup_identity(
-    identity: tuple, catalog: dict, markers_by_id: Mapping, webio_by_id: Mapping, ios_by_id: Mapping
-) -> str:
+def _label_backup_identity(identity: tuple, catalog: dict, maps: _LabelMaps) -> str:
     """Human-readable label for one diff_snapshots() element/endpoint identity tuple.
 
     identity is a fixed-shape (type, ref_id, x, y, name) tuple — x/y/name are None for types
@@ -221,26 +234,22 @@ def _label_backup_identity(
     """
     etype, ref_id, _pos_x, _pos_y, name = identity
     elem = {"reference": {"type": etype, "ref_id": ref_id}, "name": name or ""}
-    return resolve_element_label(elem, catalog, markers_by_id, webio_by_id, ios_by_id)
+    return maps.label(elem, catalog)
 
 
-def _label_backup_wire(
-    wire: tuple, catalog: dict, markers_by_id: Mapping, webio_by_id: Mapping, ios_by_id: Mapping
-) -> str:
+def _label_backup_wire(wire: tuple, catalog: dict, maps: _LabelMaps) -> str:
     """Human-readable 'source → target' label for one diff_snapshots() connection tuple."""
     (src_identity, _src_port, src_inv), (dst_identity, _dst_port, dst_inv) = wire
-    src_label = _label_backup_identity(src_identity, catalog, markers_by_id, webio_by_id, ios_by_id)
-    dst_label = _label_backup_identity(dst_identity, catalog, markers_by_id, webio_by_id, ios_by_id)
+    src_label = _label_backup_identity(src_identity, catalog, maps)
+    dst_label = _label_backup_identity(dst_identity, catalog, maps)
     inv = " ¬" if src_inv or dst_inv else ""
     return f"{src_label} → {dst_label}{inv}"
 
 
-def _label_backup_moved_wire(
-    pair: tuple[tuple, tuple], catalog: dict, markers_by_id: Mapping, webio_by_id: Mapping, ios_by_id: Mapping
-) -> str:
+def _label_backup_moved_wire(pair: tuple[tuple, tuple], catalog: dict, maps: _LabelMaps) -> str:
     """Human-readable label for one diff_snapshots() connections['moved'] (old_wire, new_wire) pair."""
     old_wire, new_wire = pair
-    label = _label_backup_wire(new_wire, catalog, markers_by_id, webio_by_id, ios_by_id)
+    label = _label_backup_wire(new_wire, catalog, maps)
     (old_src, _, _), (old_dst, _, _) = old_wire
     (new_src, _, _), (new_dst, _, _) = new_wire
     moves = [
@@ -265,8 +274,8 @@ def _label_diff_group(
     AT THAT SNAPSHOT rather than today's possibly since-renamed live name.
     """
     return {
-        "added": [_label_backup_identity(i, catalog, *newer_maps) for i in group["added"]],
-        "removed": [_label_backup_identity(i, catalog, *older_maps) for i in group["removed"]],
+        "added": [_label_backup_identity(i, catalog, newer_maps) for i in group["added"]],
+        "removed": [_label_backup_identity(i, catalog, older_maps) for i in group["removed"]],
     }
 
 
@@ -280,13 +289,11 @@ def _label_connection_diff(
     connections (see _split_moved in aiocomexio.function_plan.backup_diff): a wire whose endpoint only shifted
     position, with no actual add/remove, shown as one entry instead of a confusing pair.
     """
-    n_markers, n_webio, n_ios = newer_maps
-    o_markers, o_webio, o_ios = older_maps
     labeled = {
-        "added": [_label_backup_wire(w, catalog, n_markers, n_webio, n_ios) for w in group["added"]],
-        "removed": [_label_backup_wire(w, catalog, o_markers, o_webio, o_ios) for w in group["removed"]],
+        "added": [_label_backup_wire(w, catalog, newer_maps) for w in group["added"]],
+        "removed": [_label_backup_wire(w, catalog, older_maps) for w in group["removed"]],
     }
-    labeled["moved"] = [_label_backup_moved_wire(pair, catalog, n_markers, n_webio, n_ios) for pair in group["moved"]]
+    labeled["moved"] = [_label_backup_moved_wire(pair, catalog, newer_maps) for pair in group["moved"]]
     return labeled
 
 
@@ -299,6 +306,7 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
     so a renamed/deleted marker doesn't misrepresent an old backup with today's name.
     """
     live_markers, live_webio, live_ios = coordinator.function_plan_label_maps()
+    sources = coordinator.function_plan_source_label_maps()
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
     for entry in entries:
         fub_id, plan_name, slot = entry["fub_id"], entry["plan_name"], entry["slot"]
@@ -309,8 +317,8 @@ async def _attach_backup_diffs(coordinator: ComexioCoordinator, entries: list[di
         if newer is None:
             continue
         raw_diff = diff_snapshots(newer, older)
-        newer_maps = snapshot_label_maps(newer.get("labels"), live_markers, live_webio, live_ios)
-        older_maps = snapshot_label_maps(older.get("labels"), live_markers, live_webio, live_ios)
+        newer_maps = _LabelMaps(*snapshot_label_maps(newer.get("labels"), live_markers, live_webio, live_ios), sources)
+        older_maps = _LabelMaps(*snapshot_label_maps(older.get("labels"), live_markers, live_webio, live_ios), sources)
         entry["diff"] = {
             "markers": _label_diff_group(raw_diff["markers"], catalog, newer_maps, older_maps),
             "ios": _label_diff_group(raw_diff["ios"], catalog, newer_maps, older_maps),
@@ -371,7 +379,7 @@ def _label_block_settings_diff(
     """
     elements = newer.get("elements") or {}
     return [
-        f"{resolve_element_label(elements[elem_id], catalog, *newer_maps)} (#{elem_id}): {one_line(name)} "
+        f"{newer_maps.label(elements[elem_id], catalog)} (#{elem_id}): {one_line(name)} "
         f"{_MISSING_VALUE if old is None else old} → {_MISSING_VALUE if new is None else new}"
         for elem_id, name, old, new in changes
     ]
