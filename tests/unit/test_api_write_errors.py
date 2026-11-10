@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
 import logging
 from pathlib import Path
@@ -15,7 +17,7 @@ import aiohttp
 from homeassistant.const import EntityCategory
 import pytest
 
-from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module
+from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, api as api_module, sensor as sensor_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.api_write import ATTR_LAST_FAILURES, ApiWriteStats, failure_class
 from custom_components.comexio.const import API_WRITE_FAILURES_KEPT
@@ -270,3 +272,27 @@ def test_the_counter_name_exists_in_every_translation() -> None:
     for name in ("strings", "en", "de", "fr", "es"):
         sensors = json.loads((folder / f"{name}.json").read_text(encoding="utf-8"))["entity"]["sensor"]
         assert sensors["api_write_errors"]["name"], name
+
+
+def test_the_setup_adds_the_counter_sensor() -> None:
+    setup = ast.parse(inspect.getsource(sensor_module.async_setup_entry))
+    added = [
+        node
+        for node in ast.walk(setup)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == ComexioApiWriteErrorsSensor.__name__
+    ]
+
+    assert len(added) == 1
+
+
+def test_an_io_write_without_extension_names_the_target_in_its_log(
+    api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        _run(api.set_value("io", "103\nforged line", 0))
+
+    (record,) = caplog.records
+    assert "id: 103" in record.getMessage()
+    assert "\n" not in record.getMessage()

@@ -5807,7 +5807,11 @@ class ComexioAPI:
             elif target_type == "knx":
                 await self.client.set_knx_value(int(target_id), value)
             elif ext is None or identifier is None:
-                _LOGGER.error("Missing 'ext' or 'identifier' for non-marker API write. Type: %s", target_type)
+                _LOGGER.error(
+                    "Missing 'ext' or 'identifier' for non-marker API write. Type: %s, id: %s",
+                    target_type,
+                    one_line(str(target_id)),
+                )
                 return _WriteAttempt(ValueError("missing 'ext' or 'identifier'"), reported=True)
             else:
                 await self._set_io_value(ext, identifier, value)
