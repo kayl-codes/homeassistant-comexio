@@ -98,6 +98,8 @@ def test_out_of_sync_requirements_txt_is_rewritten(repo: Path) -> None:
 
 SETUP_PYTHON_ACTION = "actions/setup-python@"
 CHECKOUT_ACTION = "actions/checkout@"
+WITH_KEY = "with"
+CONTINUE_ON_ERROR_KEY = "continue-on-error"
 
 
 def _workflow() -> str:
@@ -128,7 +130,7 @@ def _mypy_steps() -> list[dict[str, Any]]:
 
 def _always_runs(step: dict[str, Any]) -> bool:
     """A step that always runs as written: no condition, no continue-on-error, no env/shell/directory change."""
-    return set(step) <= {"name", "uses", "with", "run"}
+    return set(step) <= {"name", "uses", WITH_KEY, "run"}
 
 
 def test_mypy_target_matches_the_ci_interpreter() -> None:
@@ -139,7 +141,7 @@ def test_mypy_target_matches_the_ci_interpreter() -> None:
 
     assert len(setups) == 1
     assert _always_runs(setups[0])
-    version = setups[0]["with"]["python-version"]
+    version = setups[0][WITH_KEY]["python-version"]
     assert isinstance(version, str), "quote python-version: YAML reads an unquoted 3.10 as the number 3.1"
     assert version == str(pyproject["tool"]["mypy"]["python_version"])
 
@@ -174,7 +176,7 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     assert len(checkouts) == len(setups) == len(installs) == len(mypy_runs) == 1
     assert _always_runs(steps[checkouts[0]])
     # No `with` on the checkout: a `repository` or `ref` override would check other code than this PR's.
-    assert "with" not in steps[checkouts[0]]
+    assert WITH_KEY not in steps[checkouts[0]]
     assert _always_runs(steps[installs[0]])
     # The step is pinned to exactly the known two script lines and to keys that cannot skip or change it: a shell
     # conditional, `|| true`, a second command, `if`, `shell`, `env` or `working-directory` cannot hide a skipped
@@ -182,10 +184,12 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     # decision this test should force into the open. Strict on purpose: a comment line inside the script fails it
     # too, so move such a comment above the step.
     mypy_step = steps[mypy_runs[0]]
-    assert set(mypy_step) <= {"name", "id", "run", "continue-on-error"}
-    assert mypy_step.get("continue-on-error") is True
+    assert set(mypy_step) <= {"name", "id", "run", CONTINUE_ON_ERROR_KEY}
+    assert mypy_step.get(CONTINUE_ON_ERROR_KEY) is True
     script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
     assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
-    assert checkouts[0] < setups[0] < installs[0] < mypy_runs[0]
+    assert checkouts[0] < setups[0] < installs[0]
+    # The mypy step follows the install directly: a step between them could uninstall or shadow the HA stack.
+    assert mypy_runs[0] == installs[0] + 1
     assert "aiocomexio" in names
     assert not named
