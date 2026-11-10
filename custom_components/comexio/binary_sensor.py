@@ -372,7 +372,7 @@ class ComexioSdCardSensor(BinarySensorEntity):
         self._attr_unique_id = f"comexio_{server_id}_sd_card_sensor"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,

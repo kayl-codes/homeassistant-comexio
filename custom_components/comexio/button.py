@@ -18,6 +18,7 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_platform, entity_registry as er, issue_registry as ir
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 import voluptuous as vol
@@ -654,7 +655,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3451,7 +3452,7 @@ class ComexioCancelSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntit
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3491,7 +3492,7 @@ class ComexioFirmwareCheckButton(CoordinatorEntity[ComexioCoordinator], ButtonEn
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3547,7 +3548,7 @@ class ComexioWebioRangeCheckButton(CoordinatorEntity[ComexioCoordinator], Button
         self.entity_id = webio_range_check_entity_id(server_id)
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3605,7 +3606,7 @@ class ComexioEntityIdMigrationButton(CoordinatorEntity[ComexioCoordinator], Butt
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3658,7 +3659,7 @@ class ComexioStatisticsCleanupButton(CoordinatorEntity[ComexioCoordinator], Butt
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -3705,7 +3706,7 @@ class ComexioCleanupButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         self._attr_entity_category = EntityCategory.CONFIG
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,

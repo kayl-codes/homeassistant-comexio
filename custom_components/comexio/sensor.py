@@ -117,7 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}
 
-    entities = []
+    entities: list[SensorEntity] = []
     if conf.get("import_ios", True):
         include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
         entities.extend(
@@ -250,7 +250,7 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
     @property
     def state_class(self) -> SensorStateClass | None:
         """Suppress long-term statistics while extension is offline to avoid unit-mismatch warnings."""
-        if self._ext_name in self.coordinator.offline_extensions:
+        if self._ext_name in (self.coordinator.offline_extensions or ()):
             return None
         return self._attr_state_class
 
@@ -386,7 +386,7 @@ class ComexioSyncStatusSensor(CoordinatorEntity[ComexioCoordinator], RestoreEnti
         self._attr_icon = "mdi:cloud-sync"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -536,7 +536,7 @@ class ComexioOfflineExtensionsSensor(CoordinatorEntity[ComexioCoordinator], Sens
         self._attr_translation_key = "offline_extensions"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -546,11 +546,11 @@ class ComexioOfflineExtensionsSensor(CoordinatorEntity[ComexioCoordinator], Sens
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.offline_extensions)
+        return len(self.coordinator.offline_extensions or ())
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"extensions": sorted(self.coordinator.offline_extensions)}
+        return {"extensions": sorted(self.coordinator.offline_extensions or ())}
 
 
 class ComexioVersionSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
@@ -570,8 +570,8 @@ class ComexioVersionSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
         self._attr_translation_key = "comexio_version"
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
+    def device_info(self) -> DeviceInfo:
+        info: DeviceInfo = {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
@@ -643,7 +643,7 @@ class ComexioBusLoadSensor(SensorEntity):
         self._attr_unique_id = f"comexio_{server_id}_bus_load_sensor"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -799,7 +799,7 @@ class ComexioExtensionCountSensor(CoordinatorEntity[ComexioCoordinator], SensorE
         self._attr_translation_key = "extension_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -825,7 +825,7 @@ class ComexioActiveMarkerCountSensor(CoordinatorEntity[ComexioCoordinator], Sens
         self._attr_translation_key = "active_marker_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -875,7 +875,7 @@ class ComexioWebioCommandCountSensor(CoordinatorEntity[ComexioCoordinator], Sens
         self._attr_translation_key = "webio_command_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -906,7 +906,7 @@ class ComexioWatchdogEventSensor(CoordinatorEntity[ComexioCoordinator], SensorEn
         self._attr_translation_key = "watchdog_event"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,

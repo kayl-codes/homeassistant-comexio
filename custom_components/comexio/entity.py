@@ -202,7 +202,7 @@ class ComexioIOEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoord
 
     @property
     def available(self) -> bool:
-        return super().available and self._ext_name not in self.coordinator.offline_extensions
+        return super().available and self._ext_name not in (self.coordinator.offline_extensions or ())
 
 
 class ComexioQuickbusIOEntity(ComexioIOEntity):
