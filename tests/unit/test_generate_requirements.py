@@ -3,6 +3,7 @@
 import json
 from pathlib import Path
 import re
+import tomllib
 
 import pytest
 
@@ -94,6 +95,31 @@ def test_out_of_sync_requirements_txt_is_rewritten(repo: Path) -> None:
     assert gr.main(["--check"]) == 0
 
 
+def _workflow() -> str:
+    return (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+
+def _mypy_job_block(workflow: str) -> str:
+    """The mypy job's own block, up to the next two-space-indented job key (a comment line does not end it).
+
+    Scoped so that an identical line in another job cannot satisfy an assertion about the mypy job.
+    """
+    match = re.search(r"^  mypy:\n(.*?)(?=^  [\w-]+:\s*$|\Z)", workflow, re.MULTILINE | re.DOTALL)
+    assert match is not None
+    return match[1]
+
+
+def test_mypy_target_matches_the_ci_interpreter() -> None:
+    """[tool.mypy] python_version is the interpreter the mypy job runs on, so a local run checks like CI."""
+    # Every setup-python version of the job, so a second one cannot hide a drift; quotes and a trailing comment allowed.
+    ci_versions = re.findall(
+        r"^\s*python-version:\s*['\"]?([\d.]+)['\"]?\s*(?:#.*)?$", _mypy_job_block(_workflow()), re.MULTILINE
+    )
+    pyproject = tomllib.loads((gr.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+
+    assert ci_versions == [str(pyproject["tool"]["mypy"]["python_version"])]
+
+
 def test_ci_workflow_installs_from_requirements_txt() -> None:
     """CI installs the manifest packages only from a requirements file, never by name.
 
@@ -102,19 +128,16 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     shell parsing, and a comment naming a manifest package is cheap to reword. A word that starts
     with "<name>-" (a wheel or sdist file name) counts as naming the package.
     """
-    workflow = (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    workflow = _workflow()
     manifest = json.loads(gr.MANIFEST.read_text(encoding="utf-8"))
     names = {gr._normalize(re.match(r"[A-Za-z0-9][\w.-]*", r)[0]) for r in manifest["requirements"]}
     words = {gr._normalize(word) for word in re.findall(r"[A-Za-z0-9][\w.-]*", workflow)}
     named = {name for name in names for word in words if word == name or word.startswith(f"{name}-")}
 
-    # The mypy job's own block (up to the next two-space-indented job key, a comment line does not end it):
-    # an identical line in another job must not satisfy the assertion.
-    mypy_job = re.search(r"^  mypy:\n(.*?)(?=^  [\w-]+:\s*$|\Z)", workflow, re.MULTILINE | re.DOTALL)
-    assert mypy_job is not None
+    mypy_job = _mypy_job_block(workflow)
     # An install line, not a commented-out one, and before the step that runs mypy.
-    install = re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", mypy_job[1], re.MULTILINE)
-    mypy_run = re.search(r"^\s*mypy custom_components/comexio\b", mypy_job[1], re.MULTILINE)
+    install = re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", mypy_job, re.MULTILINE)
+    mypy_run = re.search(r"^\s*mypy custom_components/comexio\b", mypy_job, re.MULTILINE)
     assert install is not None
     assert mypy_run is not None
     assert install.start() < mypy_run.start()
