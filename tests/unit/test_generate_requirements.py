@@ -96,6 +96,10 @@ def test_out_of_sync_requirements_txt_is_rewritten(repo: Path) -> None:
     assert gr.main(["--check"]) == 0
 
 
+SETUP_PYTHON_ACTION = "actions/setup-python@"
+CHECKOUT_ACTION = "actions/checkout@"
+
+
 def _workflow() -> str:
     return (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
@@ -106,7 +110,11 @@ def _mypy_job() -> dict[str, Any]:
     # test_function_plan_render fail with WinError 6 (measured on Windows; cause not found).
     import yaml  # noqa: PLC0415
 
-    job = yaml.safe_load(_workflow())["jobs"]["mypy"]
+    workflow = yaml.safe_load(_workflow())
+    # Workflow level too: `defaults.run.shell` or `env` there would change the mypy script just the same. YAML 1.1
+    # reads the key `on` as True.
+    assert set(workflow) <= {"name", True, "permissions", "jobs"}
+    job = workflow["jobs"]["mypy"]
     # Strict allowlist, so a job-level `if`, `continue-on-error`, `defaults` (a run shell), `env`, `strategy` or
     # `container` cannot skip, excuse or change all steps at once. A harmless new key (`needs`, `concurrency`)
     # fails it too: add it here on purpose.
@@ -126,7 +134,7 @@ def _always_runs(step: dict[str, Any]) -> bool:
 def test_mypy_target_matches_the_ci_interpreter() -> None:
     """[tool.mypy] python_version is the interpreter the mypy job runs on, so a local run checks like CI."""
     # Every setup-python step of the job, so a second one cannot hide a drift, nor a skipped one pose as the real one.
-    setups = [step for step in _mypy_steps() if str(step.get("uses", "")).startswith("actions/setup-python@")]
+    setups = [step for step in _mypy_steps() if str(step.get("uses", "")).startswith(SETUP_PYTHON_ACTION)]
     pyproject = tomllib.loads((gr.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert len(setups) == 1
@@ -154,8 +162,8 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     # Exactly one checkout, setup and install step (a second one fails on purpose), in this order: checkout (the
     # install reads tests/requirements.txt), interpreter setup, the install step (always runs, not commented out or
     # `if: false`), then the step that runs mypy. No step may run before its input exists.
-    checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/checkout@")]
-    setups = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/setup-python@")]
+    checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith(CHECKOUT_ACTION)]
+    setups = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith(SETUP_PYTHON_ACTION)]
     installs = [
         i
         for i, step in enumerate(steps)
