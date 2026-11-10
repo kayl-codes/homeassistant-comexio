@@ -191,9 +191,10 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     assert mypy_step.get(CONTINUE_ON_ERROR_KEY) is True
     script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
     assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
-    assert checkouts[0] < setups[0]
-    assert setups[0] < installs[0]
-    # The mypy step follows the install directly: a step between them could uninstall or shadow the HA stack.
+    # Checkout, setup, install and mypy form one unbroken chain: a step between them could rewrite the checked-out
+    # source, or uninstall or shadow the HA stack.
+    assert setups[0] == checkouts[0] + 1
+    assert installs[0] == setups[0] + 1
     assert mypy_runs[0] == installs[0] + 1
     assert "aiocomexio" in names
     assert not named
