@@ -173,7 +173,10 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     ]
     # Any step whose script mentions the mypy command, so a wrapped one (`if false; then mypy ...; fi`) is found too.
     mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get("run", ""))]
-    assert len(checkouts) == len(setups) == len(installs) == len(mypy_runs) == 1
+    assert len(checkouts) == 1
+    assert len(setups) == 1
+    assert len(installs) == 1
+    assert len(mypy_runs) == 1
     assert _always_runs(steps[checkouts[0]])
     # No `with` on the checkout: a `repository` or `ref` override would check other code than this PR's.
     assert WITH_KEY not in steps[checkouts[0]]
@@ -188,7 +191,8 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     assert mypy_step.get(CONTINUE_ON_ERROR_KEY) is True
     script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
     assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
-    assert checkouts[0] < setups[0] < installs[0]
+    assert checkouts[0] < setups[0]
+    assert setups[0] < installs[0]
     # The mypy step follows the install directly: a step between them could uninstall or shadow the HA stack.
     assert mypy_runs[0] == installs[0] + 1
     assert "aiocomexio" in names
