@@ -100,6 +100,11 @@ SETUP_PYTHON_ACTION = "actions/setup-python@"
 CHECKOUT_ACTION = "actions/checkout@"
 WITH_KEY = "with"
 CONTINUE_ON_ERROR_KEY = "continue-on-error"
+NAME_KEY = "name"
+PERMISSIONS_KEY = "permissions"
+STEPS_KEY = "steps"
+USES_KEY = "uses"
+RUN_KEY = "run"
 
 
 def _workflow() -> str:
@@ -115,28 +120,28 @@ def _mypy_job() -> dict[str, Any]:
     workflow = yaml.safe_load(_workflow())
     # Workflow level too: `defaults.run.shell` or `env` there would change the mypy script just the same. YAML 1.1
     # reads the key `on` as True.
-    assert set(workflow) <= {"name", True, "permissions", "jobs"}
+    assert set(workflow) <= {NAME_KEY, True, PERMISSIONS_KEY, "jobs"}
     job = workflow["jobs"]["mypy"]
     # Strict allowlist, so a job-level `if`, `continue-on-error`, `defaults` (a run shell), `env`, `strategy` or
     # `container` cannot skip, excuse or change all steps at once. A harmless new key (`needs`, `concurrency`)
     # fails it too: add it here on purpose.
-    assert set(job) <= {"name", "runs-on", "permissions", "timeout-minutes", "steps"}
+    assert set(job) <= {NAME_KEY, "runs-on", PERMISSIONS_KEY, "timeout-minutes", STEPS_KEY}
     return job
 
 
 def _mypy_steps() -> list[dict[str, Any]]:
-    return _mypy_job()["steps"]
+    return _mypy_job()[STEPS_KEY]
 
 
 def _always_runs(step: dict[str, Any]) -> bool:
     """A step that always runs as written: no condition, no continue-on-error, no env/shell/directory change."""
-    return set(step) <= {"name", "uses", WITH_KEY, "run"}
+    return set(step) <= {NAME_KEY, USES_KEY, WITH_KEY, RUN_KEY}
 
 
 def test_mypy_target_matches_the_ci_interpreter() -> None:
     """[tool.mypy] python_version is the interpreter the mypy job runs on, so a local run checks like CI."""
     # Every setup-python step of the job, so a second one cannot hide a drift, nor a skipped one pose as the real one.
-    setups = [step for step in _mypy_steps() if str(step.get("uses", "")).startswith(SETUP_PYTHON_ACTION)]
+    setups = [step for step in _mypy_steps() if str(step.get(USES_KEY, "")).startswith(SETUP_PYTHON_ACTION)]
     pyproject = tomllib.loads((gr.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert len(setups) == 1
@@ -164,15 +169,15 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     # Exactly one checkout, setup and install step (a second one fails on purpose), in this order: checkout (the
     # install reads tests/requirements.txt), interpreter setup, the install step (always runs, not commented out or
     # `if: false`), then the step that runs mypy. No step may run before its input exists.
-    checkouts = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith(CHECKOUT_ACTION)]
-    setups = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith(SETUP_PYTHON_ACTION)]
+    checkouts = [i for i, step in enumerate(steps) if str(step.get(USES_KEY, "")).startswith(CHECKOUT_ACTION)]
+    setups = [i for i, step in enumerate(steps) if str(step.get(USES_KEY, "")).startswith(SETUP_PYTHON_ACTION)]
     installs = [
         i
         for i, step in enumerate(steps)
-        if re.fullmatch(r"pip install -r tests/requirements\.txt mypy==[\d.]+", str(step.get("run", "")).strip())
+        if re.fullmatch(r"pip install -r tests/requirements\.txt mypy==[\d.]+", str(step.get(RUN_KEY, "")).strip())
     ]
     # Any step whose script mentions the mypy command, so a wrapped one (`if false; then mypy ...; fi`) is found too.
-    mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get("run", ""))]
+    mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get(RUN_KEY, ""))]
     assert len(checkouts) == 1
     assert len(setups) == 1
     assert len(installs) == 1
@@ -187,9 +192,9 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     # decision this test should force into the open. Strict on purpose: a comment line inside the script fails it
     # too, so move such a comment above the step.
     mypy_step = steps[mypy_runs[0]]
-    assert set(mypy_step) <= {"name", "id", "run", CONTINUE_ON_ERROR_KEY}
+    assert set(mypy_step) <= {NAME_KEY, "id", RUN_KEY, CONTINUE_ON_ERROR_KEY}
     assert mypy_step.get(CONTINUE_ON_ERROR_KEY) is True
-    script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
+    script = [line.strip() for line in mypy_step[RUN_KEY].strip().splitlines()]
     assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
     # Checkout, setup, install and mypy form one unbroken chain: a step between them could rewrite the checked-out
     # source, or uninstall or shadow the HA stack.
