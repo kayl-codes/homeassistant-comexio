@@ -588,7 +588,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     webio_range_check_button = ComexioWebioRangeCheckButton(coordinator, coordinator.server_id)
     uninstall_cleanup_button = ComexioCleanupButton(coordinator, coordinator.server_id)
     plan_toggle_button = ComexioPlanToggleButton(coordinator, coordinator.server_id)
-    entities: list[Any] = [
+    entities: list[ButtonEntity] = [
         sync_button,
         cancel_button,
         migration_button,
