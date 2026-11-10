@@ -324,6 +324,9 @@
       "last_boot": {
         "name": "Last boot"
       },
+      "api_write_errors": {
+        "name": "API write errors"
+      },
       "connection": {
         "name": "Connection",
         "state": {

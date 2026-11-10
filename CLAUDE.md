@@ -126,6 +126,10 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 - **Admin session (RSA):** `api.login()` — uses RSA PKCS1v15 to encrypt credentials, stores the cookie. Required for config scraping and Web-IO management.
 - **API (Basic Auth):** `api.set_value()` — used for writing values to markers and IOs. Configured separately via `CONF_API_USERNAME` / `CONF_API_PASSWORD`. Exception: since aiocomexio 0.9.0 only the digital outputs `Q*` and `DG*` go over `/api/`; every other IO (the analog outputs `AO*`, which `/api/` answers with `Forbidden`, but also `AI*`, `QI*`, …) is written over the admin session — `set_value` asks `aiocomexio.io_written_over_admin_session` (#259).
 
+### API write errors (`ComexioAPI.set_value`, #289)
+
+Every failed write (`set_value` returning False) is counted in `ApiWriteStats` (`api_write.py`, in memory, reset on restart) and shown by the diagnostic sensor "API write errors" (count; attribute `last_failures` with time, target and error class of the latest three).
+
 ### Sync strategy (button.py)
 
 The sync button (`ComexioSyncButton.async_handle_press`) chooses between two strategies:
@@ -152,6 +156,7 @@ Column plans — IO extensions (`{prefix} - IO [A,B]`, option `logikplan_io_exte
 | Function plan run state | `comexio_{server_id}_fub{id}` | `sensor.{server_id}_fub{id}` |
 | Orphaned backups sensor | `comexio_{server_id}_orphaned_backups` | `sensor.{server_id}_orphaned_backups` |
 | Function plan problem sensor | `comexio_{server_id}_managed_plans_problem` | `binary_sensor.{server_id}_managed_plans_problem` |
+| API write errors sensor | `comexio_{server_id}_api_write_errors` | `sensor.{server_id}_api_write_errors` |
 | Free storage sensor | `comexio_{server_id}_free_storage_sensor` | `sensor.{server_id}_free_storage_sensor` |
 | Last boot sensor | `comexio_{server_id}_last_boot_sensor` | `sensor.{server_id}_last_boot_sensor` |
 | Time server setting sensor | `comexio_{server_id}_time_server_problem` | `binary_sensor.{server_id}_time_server_problem` |

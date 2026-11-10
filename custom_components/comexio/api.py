@@ -46,6 +46,7 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.util import dt as dt_util
 
 # Mandatory DOMAIN import for Audit logic
+from .api_write import ApiWriteStats
 from .const import (
     COMEXIO_HTTP_TIMEOUT_SEC,
     COMEXIO_PROGRESS_LOG_INTERVAL_SEC,
@@ -120,6 +121,13 @@ _LOGGER = logging.getLogger(__name__)
 _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
     "comexio_write_met_another_certificate", default=None
 )
+
+
+class _WriteAttempt(NamedTuple):
+    """The outcome of one send of an API write: the error (None: it went through), and whether it was logged already."""
+
+    error: BaseException | None
+    reported: bool = False
 
 
 def _webhook_path(
@@ -774,6 +782,8 @@ class ComexioAPI:
         # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
         # repair comes up with the first request that meets it, not only with the next full poll.
         self.on_certificate_mismatch: Callable[[str], None] | None = None
+        # Failed /api/ writes, shown by the "API write errors" sensor.
+        self.write_stats = ApiWriteStats()
         # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
         # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
         # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
@@ -5774,8 +5784,22 @@ class ComexioAPI:
 
         Markers, KNX objects and IOs go to /api/ with the API user (Basic Auth). An analog output AO* goes over the
         admin session instead, since /api/ answers "Forbidden" for it (#259).
+
+        Every failed write is counted in write_stats (#289).
         """
         _write_met_another_certificate.set(None)
+        attempt = await self._write_once(target_type, target_id, value, ext, identifier)
+        if attempt.error is None:
+            return True
+        self.write_stats.record_failure(f"{target_type} {target_id}", attempt.error)
+        if not attempt.reported:
+            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, attempt.error)
+        return False
+
+    async def _write_once(
+        self, target_type: str, target_id: str | int, value: float | int, ext: str | None, identifier: str | None
+    ) -> "_WriteAttempt":
+        """One send of a write: no error when it went through, else the error and whether it was reported already."""
         try:
             if target_type == "marker":
                 await self.client.set_marker_value(int(target_id), value)
@@ -5783,24 +5807,21 @@ class ComexioAPI:
                 await self.client.set_knx_value(int(target_id), value)
             elif ext is None or identifier is None:
                 _LOGGER.error("Missing 'ext' or 'identifier' for non-marker API write. Type: %s", target_type)
-                return False
+                return _WriteAttempt(ValueError("missing 'ext' or 'identifier'"), reported=True)
             else:
                 await self._set_io_value(ext, identifier, value)
         except ComexioCertificateMismatchError as err:
             self._note_write_met_another_certificate(err, target_type, target_id)
-            return False
+            return _WriteAttempt(err, reported=True)
         except ComexioConnectionError as err:
             if (mismatch := await self._replaced_certificate_behind(err)) is not None:
                 self._note_write_met_another_certificate(mismatch, target_type, target_id)
-                return False
-            failure: Exception = err
+                return _WriteAttempt(err, reported=True)
+            return _WriteAttempt(err)
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
-            failure = err
-        else:
-            return True
-        _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, failure)
-        return False
+            return _WriteAttempt(err)
+        return _WriteAttempt(None)
 
     async def _set_io_value(self, ext: str, identifier: str, value: float | int) -> None:
         """client.set_io_value; an analog output goes over the admin session, so a lapsed login is renewed once.
