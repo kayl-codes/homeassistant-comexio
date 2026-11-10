@@ -15,7 +15,8 @@ on:
       - '.gitattributes'
   # No paths filter on pull requests: the master ruleset requires jobs of this workflow, and a required
   # check that never starts blocks the merge (e.g. a docs-only PR). Keep "Type check - mypy" out of the
-  # required checks while it is non-blocking (continue-on-error), it reports success unless the dependency install fails.
+  # required checks while it is non-blocking (continue-on-error): it reports success unless a step
+  # before mypy itself (checkout, Python setup, dependency install) fails.
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -86,12 +87,13 @@ jobs:
       - name: Summarize mypy results
         if: always()
         run: |
-          # Report mypy's own closing line: only a run that finished has one, so a missing install,
+          # Report mypy's own closing line: only a run that finished has one, so a failed earlier step,
           # a crash or a config error can never read as "0 errors".
           if [ ! -f mypy-output.txt ]; then
-            echo "### mypy: did not run (dependency install failed) — see job log" >> "$GITHUB_STEP_SUMMARY"
+            echo "### mypy: did not run (an earlier step failed) — see job log" >> "$GITHUB_STEP_SUMMARY"
           elif grep -qE '^(Found [0-9]+ errors? in|Success: no issues found in) ' mypy-output.txt; then
-            echo "### mypy: $(tail -n 1 mypy-output.txt) (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
+            summary="$(tail -n 1 mypy-output.txt)"
+            echo "### mypy: ${summary} (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
           else
             echo "### mypy: run did not complete (crash or config error) — see job log" >> "$GITHUB_STEP_SUMMARY"
           fi

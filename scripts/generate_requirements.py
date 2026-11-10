@@ -9,7 +9,8 @@ be hand-edited independently of manifest.json.
 The test requirement files list their own packages; every exact manifest pin
 (name==version) must appear in them at the same version, so tests never run
 against another library version than HA installs. The CI workflow pins none of
-them itself: the test jobs and the mypy job install tests/requirements.txt.
+them itself: the unit-test and mypy jobs install tests/requirements.txt, the HA
+integration-test job tests/ha/requirements.txt.
 """
 
 import json

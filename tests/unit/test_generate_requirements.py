@@ -112,7 +112,11 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     # an identical line in another job must not satisfy the assertion.
     mypy_job = re.search(r"^  mypy:\n(.*?)(?=^  [\w-]+:\s*$|\Z)", workflow, re.MULTILINE | re.DOTALL)
     assert mypy_job is not None
-    # An install line, not a commented-out one.
-    assert re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", mypy_job[1], re.MULTILINE)
+    # An install line, not a commented-out one, and before the step that runs mypy.
+    install = re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", mypy_job[1], re.MULTILINE)
+    mypy_run = re.search(r"^\s*mypy custom_components/comexio\b", mypy_job[1], re.MULTILINE)
+    assert install is not None
+    assert mypy_run is not None
+    assert install.start() < mypy_run.start()
     assert "aiocomexio" in names
     assert not named
