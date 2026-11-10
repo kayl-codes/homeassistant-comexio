@@ -15,7 +15,8 @@ on:
       - '.gitattributes'
   # No paths filter on pull requests: the master ruleset requires jobs of this workflow, and a required
   # check that never starts blocks the merge (e.g. a docs-only PR). Keep "Type check - mypy" out of the
-  # required checks while it is non-blocking (continue-on-error), it always reports success.
+  # required checks while it is non-blocking (continue-on-error): it reports success unless a step
+  # before mypy itself (checkout, Python setup, dependency install) fails.
   pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
@@ -60,31 +61,23 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out code from GitHub
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:
-          # homeassistant-stubs requires >=3.14.2 (see pyproject.toml [tool.mypy] comment
-          # for why mypy's own python_version setting is pinned lower, at 3.13).
+          # Same interpreter as HA 2026.10's own runtime and the test jobs.
           python-version: '3.14'
-      - name: Install mypy
-        run: |
-          # homeassistant-stubs declares a hard dependency on the full homeassistant
-          # runtime package, which drags in HA's entire mandatory dependency tree
-          # (Bluetooth stack, boto3, SQLAlchemy, ...). On the still-new cp314 ABI most
-          # of those don't have prebuilt wheels yet, so combined with --only-binary
-          # pip's resolver backtracks across dozens of versions and hits
-          # "resolution-too-deep". We only need the .pyi stub files, never the runtime
-          # package itself, so install it with --no-deps to skip that tree entirely.
-          pip install --only-binary :all: mypy==2.3.1
-          # Newest 2026.10 stubs on PyPI; they lag the 2026.10.4 runtime pinned in tests/requirements.txt.
-          pip install --only-binary :all: --no-deps homeassistant-stubs==2026.10.0
-          # The integration's own library ships py.typed. Installed from requirements.txt, which
-          # generate_requirements.py keeps equal to manifest.json, so this job never pins a version itself.
-          pip install --only-binary :all: --no-deps -r requirements.txt
+          cache: 'pip'
+          cache-dependency-path: tests/requirements.txt
+      - name: Install mypy and the full HA stack
+        # The real homeassistant package ships py.typed, so mypy checks against the exact runtime version
+        # pinned in tests/requirements.txt (the integration's library pin sits there too), not against lagging
+        # homeassistant-stubs. Same environment as the unit tests, so no --only-binary: on the cp314 ABI
+        # binary-only pip's resolver backtracks through HA's dependency tree until "resolution-too-deep".
+        run: pip install -r tests/requirements.txt mypy==2.3.1
       - name: Run mypy
         id: mypy
         continue-on-error: true
@@ -94,11 +87,18 @@ jobs:
       - name: Summarize mypy results
         if: always()
         run: |
-          count=$(grep -c ": error:" mypy-output.txt || true)
-          if [ "${{ steps.mypy.outcome }}" = "failure" ] && [ "$count" -eq 0 ]; then
-            echo "### mypy: run failed without producing line-level errors (fatal crash or config issue) — see job log" >> "$GITHUB_STEP_SUMMARY"
+          # Report mypy's own closing line: only a run that finished has one, so a failed earlier step,
+          # a crash or a config error can never read as "0 errors".
+          if [ ! -f mypy-output.txt ]; then
+            echo "### mypy: no output captured (an earlier step failed, or mypy-output.txt could not be written)" \
+              "— see job log" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q 'errors prevented further checking' mypy-output.txt; then
+            echo "### mypy: aborted early (errors prevented further checking) — see job log" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -qE '^(Found [0-9]+ errors? in|Success: no issues found in) ' mypy-output.txt; then
+            summary="$(tail -n 1 mypy-output.txt)"
+            echo "### mypy: ${summary} (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "### mypy: ${count} error(s) found (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"
+            echo "### mypy: run did not complete (crash or config error) — see job log" >> "$GITHUB_STEP_SUMMARY"
           fi
 
   tests:
