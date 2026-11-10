@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import re
 import tomllib
+from typing import Any
 
 import pytest
 
@@ -99,25 +100,38 @@ def _workflow() -> str:
     return (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
 
-def _mypy_job_block(workflow: str) -> str:
-    """The mypy job's own block, up to the next two-space-indented job key (a comment line does not end it).
+def _mypy_job() -> dict[str, Any]:
+    """The mypy job, parsed, so a step's own keys (if, continue-on-error, env) are visible to the guards."""
+    # Imported here: a module-level `import yaml` here makes the subprocess tests of
+    # test_function_plan_render fail with WinError 6 (measured on Windows; cause not found).
+    import yaml  # noqa: PLC0415
 
-    Scoped so that an identical line in another job cannot satisfy an assertion about the mypy job.
-    """
-    match = re.search(r"^  mypy:\n(.*?)(?=^  [\w-]+:\s*$|\Z)", workflow, re.MULTILINE | re.DOTALL)
-    assert match is not None
-    return match[1]
+    job = yaml.safe_load(_workflow())["jobs"]["mypy"]
+    # A job-level condition or continue-on-error would skip or excuse every step at once.
+    assert not {"if", "continue-on-error"} & job.keys()
+    return job
+
+
+def _mypy_steps() -> list[dict[str, Any]]:
+    return _mypy_job()["steps"]
+
+
+def _always_runs(step: dict[str, Any]) -> bool:
+    """A step that always runs as written: no condition, no continue-on-error, no env/shell/directory change."""
+    return set(step) <= {"name", "uses", "with", "run"}
 
 
 def test_mypy_target_matches_the_ci_interpreter() -> None:
     """[tool.mypy] python_version is the interpreter the mypy job runs on, so a local run checks like CI."""
-    # Every setup-python version of the job, so a second one cannot hide a drift; quotes and a trailing comment allowed.
-    ci_versions = re.findall(
-        r"^\s*python-version:\s*['\"]?([\d.]+)['\"]?\s*(?:#.*)?$", _mypy_job_block(_workflow()), re.MULTILINE
-    )
+    # Every setup-python step of the job, so a second one cannot hide a drift, nor a skipped one pose as the real one.
+    setups = [step for step in _mypy_steps() if str(step.get("uses", "")).startswith("actions/setup-python@")]
     pyproject = tomllib.loads((gr.ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
-    assert ci_versions == [str(pyproject["tool"]["mypy"]["python_version"])]
+    assert len(setups) == 1
+    assert _always_runs(setups[0])
+    version = setups[0]["with"]["python-version"]
+    assert isinstance(version, str), "quote python-version: YAML reads an unquoted 3.10 as the number 3.1"
+    assert version == str(pyproject["tool"]["mypy"]["python_version"])
 
 
 def test_ci_workflow_installs_from_requirements_txt() -> None:
@@ -134,12 +148,24 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     words = {gr._normalize(word) for word in re.findall(r"[A-Za-z0-9][\w.-]*", workflow)}
     named = {name for name in names for word in words if word == name or word.startswith(f"{name}-")}
 
-    mypy_job = _mypy_job_block(workflow)
-    # An install line, not a commented-out one, and before the step that runs mypy.
-    install = re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", mypy_job, re.MULTILINE)
-    mypy_run = re.search(r"^\s*mypy custom_components/comexio\b", mypy_job, re.MULTILINE)
-    assert install is not None
-    assert mypy_run is not None
-    assert install.start() < mypy_run.start()
+    steps = _mypy_steps()
+    # The interpreter is set up first, then the install step runs (an always-running one, not commented out or
+    # `if: false`), then the step that runs mypy: no step may run on another interpreter or before its input exists.
+    setups = [i for i, step in enumerate(steps) if str(step.get("uses", "")).startswith("actions/setup-python@")]
+    installs = [
+        i
+        for i, step in enumerate(steps)
+        if re.fullmatch(r"pip install -r tests/requirements\.txt mypy==[\d.]+", str(step.get("run", "")).strip())
+    ]
+    mypy_runs = [
+        i
+        for i, step in enumerate(steps)
+        if re.search(r"^\s*mypy custom_components/comexio\b", str(step.get("run", "")), re.MULTILINE)
+    ]
+    assert len(setups) == len(installs) == len(mypy_runs) == 1
+    assert _always_runs(steps[installs[0]])
+    # continue-on-error stays allowed on the mypy step (the job is non-blocking by design), a condition does not.
+    assert "if" not in steps[mypy_runs[0]]
+    assert setups[0] < installs[0] < mypy_runs[0]
     assert "aiocomexio" in names
     assert not named
