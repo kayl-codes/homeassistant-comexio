@@ -234,10 +234,13 @@ The same applies to IOs and Quickbus devices: each extension picked under **Exte
 
 ## 🔗 1-Wire Sensors
 
-Comexio's 1-Wire sensors (`OT` temperature in °C, `OH` humidity in %, other kinds as the bare number) become read-only entities on the device `<instance> 1-Wire` — a digital sensor as `binary_sensor`, every other one as `sensor`. The ids carry only the address (`sensor.iosrv1_onewire_ot1`), so renaming a sensor in Comexio keeps the entity; its name follows with the next configuration poll. Opt out via **Create entities for 1-Wire sensors** in the integration options.
+The sensors of Comexio's 1-Wire bus (temperature, humidity, air pressure, brightness, ...) become read-only entities on the device `<instance> 1-Wire` — a digital sensor as `binary_sensor`, every other one as `sensor`. The entity is named after the address and Comexio's name (`OT1 vTS1`); its id (`sensor.iosrv1_onewire_ot1`) carries only the address, so renaming a sensor in Comexio keeps the entity and its name follows with the next configuration poll. The prefix `OT` gives a temperature in °C, `OH` a humidity in %; every other prefix (`OP`, `OILL`, `OVDD`, ...) shows the bare number. Opt out via **Create entities for 1-Wire sensors** in the integration options (on by default); the **Uninstall Cleanup** button offers *1-Wire only*.
 
-- **Push only:** values are never polled. The sync creates a Web-IO class `<name> [1Wire]` with one command per sensor and wires it into managed plans `HA - 1Wire [1-100]`; Comexio pushes each change to HA. After a restart an entity shows its last value until the next push.
-- **Status with the configuration poll:** the 1-Wire monitor's status (read error, not found) is read with the configuration poll (scan interval). A sensor with a problem becomes unavailable, and the diagnostic `1-Wire problem` sensor lists it.
+![1-Wire device in Home Assistant](docs/assets/ui/onewire_device_de.png)
+
+- **Push only:** values are never polled. The sync creates a Web-IO class `<name> [1Wire]` with one command per sensor and wires it into managed plans `HA - 1Wire [1-100]` (the sensor ids give the range, like the marker plans); Comexio pushes each change to HA. After a restart an entity shows its last value until the next push.
+- **First values:** a new sensor gets its entity after the next sync, and its value only once Comexio pushes it, which needs the Web-IO sync and one **restart of the Comexio server**, like every changed command. Until then the state is *unknown*.
+- **Status with the configuration poll:** the 1-Wire monitor's status (read error, not found) is read with the configuration poll (scan interval). A sensor with a problem becomes unavailable, and the diagnostic `1-Wire problem` sensor lists it (`read_error`, `not_found`, `missing`). In the screenshot `OIB10` cannot be read.
 - **Audit and repair** work like for the markers: a missing, renamed or extra 1-Wire command shows up in the sync status and is fixed by the sync.
 - **Not shown:** a sensor whose type Comexio reports as neither digital nor analog, and a sensor whose Id another one already has (a function plan element names its sensor by the Id alone), get no Web-IO command and no entity. The log names them with a warning.
 
@@ -246,18 +249,6 @@ Comexio's 1-Wire sensors (`OT` temperature in °C, `OH` humidity in %, other kin
 Comexio's KNX/EIB gateway objects ("K-Elements") can be imported as HA entities like Markers and IOs — opt in via **Create entities for KNX objects** in the integration options (off by default). Digital objects are automatically classified by their KNX datapoint type, with a Repair-issue-driven flow for genuinely ambiguous DPTs.
 
 📖 **[KNX Objects guide →](docs/KNX.md)** — naming, automatic unit/device-class detection, dimmer & blind (`cover`/`light`) support, DPT classification, the classification Repair flow, and known limitations.
-
-## 📡 1-Wire Sensors
-
-The sensors of Comexio's 1-Wire bus (temperature, humidity, air pressure, brightness, ...) become read-only entities on a device `<instance> 1-Wire`. Like markers and IOs they get their values by **push**: the integration creates the Web-IO class `<name> [1Wire]` and wires it into the managed function plans `HA - 1Wire [1-100]` (the sensor ids give the range, like the marker plans). Nothing is polled; only the read status of the sensors comes with the regular config poll.
-
-![1-Wire device in Home Assistant](docs/assets/ui/onewire_device_de.png)
-
-- **Name and ids:** the entity is named after the address and Comexio's name (`OT1 vTS1`); its id (`sensor.iosrv1_onewire_ot1`) carries only the address, so renaming a sensor in Comexio never changes it.
-- **Unit:** the prefix `OT` gives a temperature in °C, `OH` a humidity in %. Every other prefix (`OP`, `OILL`, `OVDD`, ...) shows the bare number. Digital sensors become `binary_sensor`.
-- **Read errors:** a sensor that has a read error or is not found is *unavailable*; the diagnostic **1-Wire problem** sensor is then on and lists them (`read_error`, `not_found`, `missing`). In the screenshot `OIB10` cannot be read.
-- **First values:** a new sensor gets its entity after the next sync, and its value only once Comexio pushes it, which needs the Web-IO sync and one **restart of the Comexio server**, like every changed command. Until then the state is *unknown*.
-- Switch it off with **Create entities for 1-Wire sensors** in the options (on by default); the **Uninstall Cleanup** button offers *1-Wire only*.
 
 ## 🔒 Encrypted Connection (HTTPS)
 
@@ -563,10 +554,13 @@ Dasselbe gilt für IOs und Quickbus-Geräte: Jede unter **Als IO-Cluster-Pläne 
 
 ## 🔗 1-Wire-Sensoren
 
-Comexios 1-Wire-Sensoren (`OT` Temperatur in °C, `OH` Feuchte in %, andere Arten als reine Zahl) werden zu Nur-Lese-Entitäten am Gerät `<Instanz> 1-Wire` — ein digitaler Sensor als `binary_sensor`, jeder andere als `sensor`. Die IDs tragen nur die Adresse (`sensor.iosrv1_onewire_ot1`); ein Umbenennen in Comexio lässt die Entität bestehen, ihr Name folgt mit dem nächsten Konfigurations-Poll. Abwählbar über **1-Wire-Sensoren (Temperatur, Feuchte, ...) als Entitäten anlegen** in den Integrations-Optionen.
+Die Sensoren des 1-Wire-Busses von Comexio (Temperatur, Feuchte, Luftdruck, Helligkeit, ...) werden zu Nur-Lese-Entitäten am Gerät `<Instanz> 1-Wire` — ein digitaler Sensor als `binary_sensor`, jeder andere als `sensor`. Die Entität heißt nach Adresse und Comexio-Name (`OT1 vTS1`); ihre ID (`sensor.iosrv1_onewire_ot1`) trägt nur die Adresse, ein Umbenennen in Comexio lässt die Entität bestehen, ihr Name folgt mit dem nächsten Konfigurations-Poll. Das Präfix `OT` ergibt eine Temperatur in °C, `OH` eine Feuchte in %; jedes andere Präfix (`OP`, `OILL`, `OVDD`, ...) zeigt die nackte Zahl. Abwählbar über **1-Wire-Sensoren (Temperatur, Feuchte, ...) als Entitäten anlegen** in den Integrations-Optionen (Standard an); die Schaltfläche **Deinstallations-Bereinigung** bietet *Nur 1-Wire* an.
 
-- **Nur per Push:** Werte werden nie gepollt. Der Sync legt eine Web-IO-Klasse `<Name> [1Wire]` mit einem Befehl je Sensor an und verdrahtet sie in verwaltete Logikpläne `HA - 1Wire [1-100]`; Comexio meldet jede Änderung an HA. Nach einem Neustart zeigt eine Entität ihren letzten Wert bis zum nächsten Push.
-- **Status mit dem Konfigurations-Poll:** Der Status des 1-Wire-Monitors (Lesefehler, nicht gefunden) wird mit dem Konfigurations-Poll (Scan-Intervall) gelesen. Ein Sensor mit Problem wird unavailable, der Diagnose-Sensor `1-Wire-Problem` listet ihn.
+![1-Wire-Gerät in Home Assistant](docs/assets/ui/onewire_device_de.png)
+
+- **Nur per Push:** Werte werden nie gepollt. Der Sync legt eine Web-IO-Klasse `<Name> [1Wire]` mit einem Befehl je Sensor an und verdrahtet sie in verwaltete Logikpläne `HA - 1Wire [1-100]` (die Sensor-IDs bestimmen den Bereich, wie bei den Merker-Plänen); Comexio meldet jede Änderung an HA. Nach einem Neustart zeigt eine Entität ihren letzten Wert bis zum nächsten Push.
+- **Erste Werte:** Ein neuer Sensor bekommt seine Entität nach dem nächsten Sync, seinen Wert erst, wenn Comexio ihn pusht; dafür braucht es den Web-IO-Sync und einen **Neustart des Comexio-Servers**, wie bei jedem geänderten Command. Bis dahin steht der Zustand auf *Unbekannt*.
+- **Status mit dem Konfigurations-Poll:** Der Status des 1-Wire-Monitors (Lesefehler, nicht gefunden) wird mit dem Konfigurations-Poll (Scan-Intervall) gelesen. Ein Sensor mit Problem wird unavailable, der Diagnose-Sensor `1-Wire-Problem` listet ihn (`read_error`, `not_found`, `missing`). Im Screenshot ist `OIB10` nicht lesbar.
 - **Audit und Reparatur** wie bei den Merkern: Ein fehlender, umbenannter oder überzähliger 1-Wire-Befehl erscheint im Sync-Status und wird vom Sync behoben.
 - **Nicht angezeigt:** Ein Sensor, dessen Typ Comexio weder als digital noch als analog meldet, und ein Sensor, dessen Id schon ein anderer trägt (ein Logikplan-Element nennt seinen Sensor nur über die Id), bekommen keinen Web-IO-Befehl und keine Entität. Das Log nennt sie mit einer Warnung.
 
@@ -575,18 +569,6 @@ Comexios 1-Wire-Sensoren (`OT` Temperatur in °C, `OH` Feuchte in %, andere Arte
 Comexios KNX/EIB-Gateway-Objekte ("K-Elemente") lassen sich wie Merker und IOs als HA-Entitäten importieren — Opt-in über **KNX-Objekte als Entitäten anlegen** in den Integrations-Optionen (standardmäßig aus). Digitale Objekte werden automatisch anhand ihres KNX-Datenpunkttyps klassifiziert, für echte mehrdeutige DPTs gibt es einen Repair-Issue-gestützten Flow.
 
 📖 **[Anleitung KNX-Objekte →](docs/KNX.md#-deutsch)** — Benennung, automatische Einheiten-/Device-Class-Erkennung, Dimmer- & Jalousie-Unterstützung (`cover`/`light`), DPT-Klassifizierung, der Klassifizierungs-Reparatur-Flow und bekannte Einschränkungen.
-
-## 📡 1-Wire-Sensoren
-
-Die Sensoren des 1-Wire-Busses von Comexio (Temperatur, Feuchte, Luftdruck, Helligkeit, ...) werden zu Nur-Lese-Entitäten an einem Gerät `<Instanz> 1-Wire`. Wie Merker und IOs bekommen sie ihre Werte per **Push**: Die Integration legt die Web-IO-Klasse `<Name> [1Wire]` an und verdrahtet sie in die verwalteten Logikpläne `HA - 1Wire [1-100]` (die Sensor-IDs bestimmen den Bereich, wie bei den Merker-Plänen). Es wird nichts gepollt; nur der Lesestatus der Sensoren kommt mit dem regulären Config-Poll.
-
-![1-Wire-Gerät in Home Assistant](docs/assets/ui/onewire_device_de.png)
-
-- **Name und IDs:** Die Entität heißt nach Adresse und Comexio-Name (`OT1 vTS1`); ihre ID (`sensor.iosrv1_onewire_ot1`) enthält nur die Adresse, ein Umbenennen in Comexio ändert sie nie.
-- **Einheit:** Das Präfix `OT` ergibt eine Temperatur in °C, `OH` eine Feuchte in %. Jedes andere Präfix (`OP`, `OILL`, `OVDD`, ...) zeigt die nackte Zahl. Digitale Sensoren werden zu `binary_sensor`.
-- **Lesefehler:** Ein Sensor mit Lesefehler oder ein nicht gefundener Sensor ist *nicht verfügbar*; der Diagnose-Sensor **1-Wire-Problem** ist dann an und listet sie (`read_error`, `not_found`, `missing`). Im Screenshot ist `OIB10` nicht lesbar.
-- **Erste Werte:** Ein neuer Sensor bekommt seine Entität nach dem nächsten Sync, seinen Wert erst, wenn Comexio ihn pusht; dafür braucht es den Web-IO-Sync und einen **Neustart des Comexio-Servers**, wie bei jedem geänderten Command. Bis dahin steht der Zustand auf *Unbekannt*.
-- Abschalten mit **1-Wire-Sensoren (Temperatur, Feuchte, ...) als Entitäten anlegen** in den Optionen (Standard an); die Schaltfläche **Deinstallations-Bereinigung** bietet *Nur 1-Wire* an.
 
 ## 🔒 Verschlüsselte Verbindung (HTTPS)
 
