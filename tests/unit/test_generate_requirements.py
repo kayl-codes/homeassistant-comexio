@@ -126,6 +126,8 @@ def _mypy_job() -> dict[str, Any]:
     # `container` cannot skip, excuse or change all steps at once. A harmless new key (`needs`, `concurrency`)
     # fails it too: add it here on purpose.
     assert set(job) <= {NAME_KEY, "runs-on", PERMISSIONS_KEY, "timeout-minutes", STEPS_KEY}
+    # The mypy script is bash (`set -o pipefail`); on a Windows runner the default shell is PowerShell.
+    assert job["runs-on"] == "ubuntu-latest"
     return job
 
 
