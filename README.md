@@ -73,12 +73,21 @@ Every contribution is greatly appreciated. Thank you for your support!
 
 ## 🚀 Installation
 
-### Option 1: HACS (Recommended)
-Since this integration is not (yet) in the standard HACS store, you can add it as a custom repository:
+### Option 1: Marketplace / HACS (Recommended)
+This integration is not (yet) in the default catalog, so add it from its repository URL. Home Assistant 2026.11 replaced the separate HACS installer with the built-in **Marketplace**; on 2026.10 and earlier use HACS.
+
+**Home Assistant 2026.11 or newer (Marketplace):**
+1. Go to **Settings** > **Marketplace**.
+2. Choose **Add from link** and enter the URL of this GitHub repository (this asks you to sign in to GitHub once; it only reads public information).
+3. Open the Comexio page, install it and restart Home Assistant.
+
+**Home Assistant 2026.10 (HACS):**
 1. Go to **HACS** > **Integrations**.
 2. Click the three dots in the top right corner and select **Custom repositories**.
 3. Add the URL of this GitHub repository and select the category **Integration**.
 4. Click Download and restart Home Assistant.
+
+If you already use HACS, Home Assistant migrates it to the Marketplace when it updates to 2026.11; installed integrations and custom repositories carry over.
 
 ### Option 2: Manual
 1. Download this repository as a ZIP file.
@@ -383,12 +392,21 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 
 ## 🚀 Installation
 
-### Option 1: HACS (Empfohlen)
-Da diese Integration (noch) nicht im Standard-HACS Store ist, kannst du sie als Custom Repository hinzufügen:
+### Option 1: Marketplace / HACS (Empfohlen)
+Diese Integration ist (noch) nicht im Standard-Katalog, du fügst sie deshalb über die Repository-URL hinzu. Home Assistant 2026.11 hat den separaten HACS-Installer durch den eingebauten **Marketplace** ersetzt; bis 2026.10 nutzt du HACS.
+
+**Home Assistant 2026.11 oder neuer (Marketplace):**
+1. Gehe zu **Einstellungen** > **Marketplace**.
+2. Wähle **Per Link hinzufügen** (englisch „Add from link“) und gib die URL dieses GitHub-Repositories ein (dafür meldest du dich einmalig bei GitHub an; gelesen werden nur öffentliche Informationen).
+3. Öffne die Comexio-Seite, installiere sie und starte Home Assistant neu.
+
+**Home Assistant 2026.10 (HACS):**
 1. Gehe in HACS zu **Integrationen**.
 2. Klicke oben rechts auf die drei Punkte und wähle **Benutzerdefinierte Repositorys**.
 3. Füge die URL dieses GitHub-Repositories hinzu und wähle die Kategorie **Integration**.
 4. Klicke auf Herunterladen und starte Home Assistant neu.
+
+Nutzt du bereits HACS, migriert Home Assistant es beim Update auf 2026.11 in den Marketplace; installierte Integrationen und Custom Repositories bleiben erhalten.
 
 ### Option 2: Manuell
 1. Lade dir das Repository als ZIP herunter.
