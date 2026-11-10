@@ -91,6 +91,8 @@ jobs:
           # a crash or a config error can never read as "0 errors".
           if [ ! -f mypy-output.txt ]; then
             echo "### mypy: did not run (an earlier step failed) — see job log" >> "$GITHUB_STEP_SUMMARY"
+          elif grep -q 'errors prevented further checking' mypy-output.txt; then
+            echo "### mypy: aborted early (errors prevented further checking) — see job log" >> "$GITHUB_STEP_SUMMARY"
           elif grep -qE '^(Found [0-9]+ errors? in|Success: no issues found in) ' mypy-output.txt; then
             summary="$(tail -n 1 mypy-output.txt)"
             echo "### mypy: ${summary} (non-blocking during initial type-coverage rollout)" >> "$GITHUB_STEP_SUMMARY"

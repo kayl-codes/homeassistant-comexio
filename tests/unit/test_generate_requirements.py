@@ -173,6 +173,8 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get("run", ""))]
     assert len(checkouts) == len(setups) == len(installs) == len(mypy_runs) == 1
     assert _always_runs(steps[checkouts[0]])
+    # No `with` on the checkout: a `repository` or `ref` override would check other code than this PR's.
+    assert "with" not in steps[checkouts[0]]
     assert _always_runs(steps[installs[0]])
     # The step is pinned to exactly the known two script lines and to keys that cannot skip or change it: a shell
     # conditional, `|| true`, a second command, `if`, `shell`, `env` or `working-directory` cannot hide a skipped
