@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### ✨ New Features
+- **1-Wire sensors as entities, by push:** the sensors of Comexio's 1-Wire bus (temperature `OT`, humidity `OH`, air pressure, brightness, ...) become read-only `sensor` / `binary_sensor` entities on a device `<instance> 1-Wire`. Their values are pushed through the new Web-IO class `<name> [1Wire]`, wired into managed function plans `HA - 1Wire [1-100]`, and are never polled; a sensor that cannot be read is unavailable, and the diagnostic **1-Wire problem** sensor lists read errors, sensors not found and sensors missing from Comexio's monitor. On by default (**Create entities for 1-Wire sensors**), the Uninstall Cleanup offers *1-Wire only*. After the update run the Web-IO sync once; the values appear after the next **Comexio restart**. See [1-Wire sensors](README.md#-1-wire-sensors) (#284).
+
 ### 🛠️ Core & Stability Improvements
 - **Every Web-IO command pushes to a webhook ID of its own:** the single, guessable `comexio_<server>` webhook ID let anybody who reached Home Assistant set the value of any marker or IO. Each command now has an ID derived (HMAC) from a secret that stays in Home Assistant, a push is accepted only if its ID and its content belong together, and the payload names the server. A nightly run (01:30) rewrites the commands; the old ID stays on until every command is rewritten, **Comexio has been restarted** and every command has been read back. See [docs/WEBHOOK_SECURITY.md](docs/WEBHOOK_SECURITY.md) (#279).
 - **Guides moved to `docs/`:** the backup, configuration, function plan preview, KNX and supported hardware guides now sit next to their screenshots; the README stays where HACS expects it. Links to the old file locations on GitHub no longer resolve.
