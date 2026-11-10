@@ -108,7 +108,11 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     words = {gr._normalize(word) for word in re.findall(r"[A-Za-z0-9][\w.-]*", workflow)}
     named = {name for name in names for word in words if word == name or word.startswith(f"{name}-")}
 
+    # The mypy job's own block (up to the next two-space-indented job key, a comment line does not end it):
+    # an identical line in another job must not satisfy the assertion.
+    mypy_job = re.search(r"^  mypy:\n(.*?)(?=^  [\w-]+:\s*$|\Z)", workflow, re.MULTILINE | re.DOTALL)
+    assert mypy_job is not None
     # An install line, not a commented-out one.
-    assert re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", workflow, re.MULTILINE)
+    assert re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", mypy_job[1], re.MULTILINE)
     assert "aiocomexio" in names
     assert not named
