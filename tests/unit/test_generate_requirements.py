@@ -157,15 +157,18 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
         for i, step in enumerate(steps)
         if re.fullmatch(r"pip install -r tests/requirements\.txt mypy==[\d.]+", str(step.get("run", "")).strip())
     ]
-    mypy_runs = [
-        i
-        for i, step in enumerate(steps)
-        if re.search(r"^\s*mypy custom_components/comexio\b", str(step.get("run", "")), re.MULTILINE)
-    ]
+    # Any step whose script mentions the mypy command, so a wrapped one (`if false; then mypy ...; fi`) is found too.
+    mypy_runs = [i for i, step in enumerate(steps) if "mypy custom_components/comexio" in str(step.get("run", ""))]
     assert len(setups) == len(installs) == len(mypy_runs) == 1
     assert _always_runs(steps[installs[0]])
-    # continue-on-error stays allowed on the mypy step (the job is non-blocking by design), a condition does not.
-    assert "if" not in steps[mypy_runs[0]]
+    # The step is pinned to exactly the known two script lines and to keys that cannot skip or change it: a shell
+    # conditional, `|| true`, a second command, `if`, `shell`, `env` or `working-directory` cannot hide a skipped
+    # type check. continue-on-error stays allowed (the job is non-blocking by design). Strict on purpose: a comment
+    # line inside the script fails it too, so move such a comment above the step.
+    mypy_step = steps[mypy_runs[0]]
+    assert set(mypy_step) <= {"name", "id", "run", "continue-on-error"}
+    script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
+    assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
     assert setups[0] < installs[0] < mypy_runs[0]
     assert "aiocomexio" in names
     assert not named
