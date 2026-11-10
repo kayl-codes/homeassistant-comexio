@@ -5791,9 +5791,10 @@ class ComexioAPI:
         attempt = await self._write_once(target_type, target_id, value, ext, identifier)
         if attempt.error is None:
             return True
-        self.write_stats.record_failure(f"{target_type} {target_id}", attempt.error)
+        # Logged before it is counted: the counter notifies a sensor, and the error must not depend on that.
         if not attempt.reported:
-            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, target_id, attempt.error)
+            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, one_line(str(target_id)), attempt.error)
+        self.write_stats.record_failure(f"{target_type} {target_id}", attempt.error)
         return False
 
     async def _write_once(
@@ -5816,7 +5817,8 @@ class ComexioAPI:
         except ComexioConnectionError as err:
             if (mismatch := await self._replaced_certificate_behind(err)) is not None:
                 self._note_write_met_another_certificate(mismatch, target_type, target_id)
-                return _WriteAttempt(err, reported=True)
+                # The cause the counter names is the certificate, as in the log and the repair.
+                return _WriteAttempt(mismatch, reported=True)
             return _WriteAttempt(err)
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.

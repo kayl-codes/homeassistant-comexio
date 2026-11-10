@@ -6,13 +6,18 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from typing import Any
 
 from homeassistant.util import dt as dt_util
 
-from .const import API_WRITE_FAILURES_KEPT
+from .const import API_WRITE_FAILURES_KEPT, one_line
+
+_LOGGER = logging.getLogger(__name__)
 
 ATTR_LAST_FAILURES = "last_failures"
+# A target is "<type> <id>"; the id of a write from a service call can be any text, and the state machine keeps it.
+_TARGET_MAX_LEN = 80
 
 
 def failure_class(err: BaseException) -> str:
@@ -52,7 +57,9 @@ class ApiWriteStats:
 
     def record_failure(self, target: str, err: BaseException) -> None:
         self.failed += 1
-        self._last_failures.append(WriteFailure(dt_util.utcnow(), target, failure_class(err)))
+        self._last_failures.append(
+            WriteFailure(dt_util.utcnow(), one_line(target)[:_TARGET_MAX_LEN], failure_class(err))
+        )
         self._notify()
 
     def add_listener(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -70,4 +77,9 @@ class ApiWriteStats:
 
     def _notify(self) -> None:
         for listener in tuple(self._listeners):
-            listener()
+            # A listener is a sensor writing its state: when that fails, the write that was counted must still
+            # report its own failure to its caller.
+            try:
+                listener()
+            except Exception:
+                _LOGGER.exception("A listener of the API write errors counter failed")
