@@ -168,10 +168,12 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     assert _always_runs(steps[installs[0]])
     # The step is pinned to exactly the known two script lines and to keys that cannot skip or change it: a shell
     # conditional, `|| true`, a second command, `if`, `shell`, `env` or `working-directory` cannot hide a skipped
-    # type check. continue-on-error stays allowed (the job is non-blocking by design). Strict on purpose: a comment
-    # line inside the script fails it too, so move such a comment above the step.
+    # type check. continue-on-error must stay true: the job is non-blocking by design, and making it blocking is a
+    # decision this test should force into the open. Strict on purpose: a comment line inside the script fails it
+    # too, so move such a comment above the step.
     mypy_step = steps[mypy_runs[0]]
     assert set(mypy_step) <= {"name", "id", "run", "continue-on-error"}
+    assert mypy_step.get("continue-on-error") is True
     script = [line.strip() for line in mypy_step["run"].strip().splitlines()]
     assert script == ["set -o pipefail", "mypy custom_components/comexio | tee mypy-output.txt"]
     assert checkouts[0] < setups[0] < installs[0] < mypy_runs[0]
