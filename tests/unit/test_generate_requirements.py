@@ -95,11 +95,12 @@ def test_out_of_sync_requirements_txt_is_rewritten(repo: Path) -> None:
 
 
 def test_ci_workflow_installs_from_requirements_txt() -> None:
-    """CI installs the manifest packages only from requirements.txt, never by name.
+    """CI installs the manifest packages only from a requirements file, never by name.
 
-    The raw text is scanned for names, comments included: stripping them would need quote-aware
-    YAML and shell parsing, and a comment naming a manifest package is cheap to reword. A word
-    that starts with "<name>-" (a wheel or sdist file name) counts as naming the package.
+    The mypy job installs tests/requirements.txt, whose manifest pins the script checks. The raw
+    text is scanned for names, comments included: stripping them would need quote-aware YAML and
+    shell parsing, and a comment naming a manifest package is cheap to reword. A word that starts
+    with "<name>-" (a wheel or sdist file name) counts as naming the package.
     """
     workflow = (gr.ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     manifest = json.loads(gr.MANIFEST.read_text(encoding="utf-8"))
@@ -108,6 +109,6 @@ def test_ci_workflow_installs_from_requirements_txt() -> None:
     named = {name for name in names for word in words if word == name or word.startswith(f"{name}-")}
 
     # An install line, not a commented-out one.
-    assert re.search(r"^\s*pip install [^#\n]*--no-deps -r requirements\.txt\s*$", workflow, re.MULTILINE)
+    assert re.search(r"^\s*run: pip install -r tests/requirements\.txt mypy==[\d.]+\s*$", workflow, re.MULTILINE)
     assert "aiocomexio" in names
     assert not named

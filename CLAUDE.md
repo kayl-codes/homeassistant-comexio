@@ -23,6 +23,10 @@ ruff format .
 # Format check only (CI mode)
 ruff format --check .
 
+# Type check (non-blocking CI job "Type check - mypy"; needs the full HA stack of tests/requirements.txt,
+# mypy==2.3.1, and no homeassistant-stubs in the same environment — they would shadow HA's own types)
+mypy custom_components/comexio
+
 # Pre-commit (runs ruff + whitespace/YAML/JSON checks)
 pre-commit run --all-files
 
