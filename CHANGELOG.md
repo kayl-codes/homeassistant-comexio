@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.40.0] — 2026-11-10
+
+Covers everything since v0.32.0.
+
 ### ✨ New Features
 - **1-Wire sensors as entities, by push:** the sensors of Comexio's 1-Wire bus (temperature `OT`, humidity `OH`, air pressure, brightness, ...) become read-only `sensor` / `binary_sensor` entities on a device `<instance> 1-Wire`. Their values are pushed through the new Web-IO class `<name> [1Wire]`, wired into managed function plans `HA - 1Wire [1-100]`, and are never polled; a sensor that cannot be read is unavailable, and the diagnostic **1-Wire problem** sensor lists read errors, sensors not found and sensors missing from Comexio's monitor. On by default (**Create entities for 1-Wire sensors**), the Uninstall Cleanup offers *1-Wire only*. After the update run the Web-IO sync once; the values appear after the next **Comexio restart**. See [1-Wire sensors](README.md#-1-wire-sensors) (#284).
 
@@ -14,11 +20,22 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **Every Web-IO command pushes to a webhook ID of its own:** the single, guessable `comexio_<server>` webhook ID let anybody who reached Home Assistant set the value of any marker or IO. Each command now has an ID derived (HMAC) from a secret that stays in Home Assistant, a push is accepted only if its ID and its content belong together, and the payload names the server. A nightly run (01:30) rewrites the commands; the old ID stays on until every command is rewritten, **Comexio has been restarted** and every command has been read back. See [docs/WEBHOOK_SECURITY.md](docs/WEBHOOK_SECURITY.md) (#279).
 - **Guides moved to `docs/`:** the backup, configuration, function plan preview, KNX and supported hardware guides now sit next to their screenshots; the README stays where HACS expects it. Links to the old file locations on GitHub no longer resolve.
 - **Type check against the real Home Assistant:** the non-blocking CI job "Type check - mypy" now installs the full Home Assistant package (Python 3.14, mypy 2.3.1, same pins as the unit tests) instead of `homeassistant-stubs`, so it checks against the exact version the tests run on. It reports its errors in the job summary and does not gate merges yet (#286).
+- **Repairs go away with their config entry:** removing the integration used to leave its repairs in Settings → Repairs until each was dismissed. They are now raised through one wrapper that links them to their config entry (Home Assistant 2026.11 removes a linked issue together with its entry) and does not raise one at all once the entry is gone, e.g. when a poll finishes after the removal. Before 2026.11 they are created unlinked as before, and removing the entry also deletes the KNX pre-release cleanup repair, the one that survives restarts (#277).
 - **Entity ids use Home Assistant's new hook:** the integration now sets the entity id of its entities in `async_prepare_to_add_to_hass`, the hook Home Assistant 2026.10 added for this, instead of overriding `add_to_platform_start`. Ids and names of existing and new entities stay exactly as they were (#281).
+- **Install instructions for the Marketplace:** the README now describes how to add the integration from its repository link in the Marketplace that replaces HACS in Home Assistant 2026.11, and how an existing HACS setup carries over.
+- **Tests and guards:** the Home Assistant integration tests run on Home Assistant 2026.10.4 and the OSV ignores that the newer pins made obsolete are gone (#276). Two source scans fail the build on a scan of a whole Home Assistant registry (#271) and on a log line, notification or exception that carries a webhook ID or the secret (#282). `aiocomexio` moves from 0.8.3 to 0.11.0 (#278, #283, #285).
+
+### 🐛 Bug Fixes & Refactoring
+- **The plan preview is no longer public:** the rendered preview of a function plan (marker names, wiring, live values) was written to `config/www`, which Home Assistant serves under `/local/` without a login. It now lives in `.storage` and is served only through Home Assistant's authenticated image proxy; the copy older versions left in `config/www` is deleted at the first start (and when the entry is removed). `comexio.function_plan_visualize` returns the proxy path as `url` (none while the Preview image entity is disabled). A plan card fed by the Plan Preview sensor now follows the preview image on the sensor's device (#272).
+- **System info no longer delays other requests:** the dashboard page behind *free storage* and *time server* takes about 2.5 s on the IO-Server, which handles one request at a time, so reading it every 5 minutes queued other requests, markers pushed back to Comexio among them, behind it. The storage part is now read with the configuration poll at the scan interval, the uptime keeps its own 5-minute tick and fetches only its own request. Free storage and time server are at most one scan interval old. Reported by **@BergNerd**, fixed by **@kayl-codes** (#274, #275).
+- **The marker/KNX cleanup only touches this integration's entities:** the sync button's cleanup looked up markers in the whole entity registry by unique ID, so an entity of another integration with a matching unique ID could have been removed. The lookup is limited to the entities of this config entry (#270).
 
 ### ⚠️ Requirements & Notes
+- **Restart required** after updating.
 - **Restart the Comexio server once after the update:** when the nightly run has rewritten all Web-IO commands, the notification "Comexio: restart needed" appears. Comexio only sends a changed command after a restart, and the old webhook ID is switched off only after that (#279).
 - **Home Assistant 2026.10.0 or newer is required** (before: 2026.8.0). HACS will not offer this version on an older Home Assistant (#281).
+- **Dependency:** `aiocomexio==0.11.0` (installed automatically by Home Assistant).
+- **Plan preview address changed:** a dashboard, automation or notification that loads `/local/comexio_<server>_plan_preview.svg` stops working, because that file is deleted. Use the Preview image entity or the `url` of `comexio.function_plan_visualize` instead. A plan card fed by the Plan Preview sensor needs the updated `comexio-plan-card.js` (card 0.9.59) in `config/www` (#272).
 
 ---
 
@@ -448,7 +465,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.32.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.40.0...HEAD
+[0.40.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.32.0...v0.40.0
 [0.32.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.30.0...v0.31.0
 [0.30.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.10.0...v0.30.0

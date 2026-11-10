@@ -4,7 +4,7 @@
 
 Which Comexio extensions, Quickbus devices and 1-Wire sensors work with this integration, and how far each one has been tested. For the entity types in general, see the [README](../README.md#-supported-entities).
 
-**Tested with:** integration v0.32.0, Comexio firmware 11.1.5, on one installation. Modules are listed by their type as Comexio shows it on its IO page, not by the name you give them.
+**Tested with:** integration v0.40.0, Comexio firmware 11.1.5, on one installation. Modules are listed by their type as Comexio shows it on its IO page, not by the name you give them.
 
 How the integration chooses the entity:
 
@@ -114,7 +114,7 @@ The sensors of Comexio's 1-Wire bus are read-only. Their values arrive only by p
 
 Welche Comexio-Erweiterungen, Quickbus-Geräte und 1-Wire-Sensoren mit dieser Integration funktionieren und wie weit sie jeweils getestet sind. Die Entitätstypen allgemein stehen in der [README](../README.md#-unterstützte-entitäten).
 
-**Getestet mit:** Integration v0.32.0, Comexio-Firmware 11.1.5, auf einer Installation. Die Module stehen hier mit ihrem Typ, wie ihn Comexio auf der IO-Seite anzeigt, nicht mit dem selbst vergebenen Namen.
+**Getestet mit:** Integration v0.40.0, Comexio-Firmware 11.1.5, auf einer Installation. Die Module stehen hier mit ihrem Typ, wie ihn Comexio auf der IO-Seite anzeigt, nicht mit dem selbst vergebenen Namen.
 
 So wählt die Integration die Entität:
 
