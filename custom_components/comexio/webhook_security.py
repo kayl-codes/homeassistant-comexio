@@ -27,6 +27,7 @@ from time import monotonic
 from typing import Any
 
 from aiocomexio.const import WebioClass
+from aiocomexio.onewire import OneWireSensor
 from homeassistant.components import webhook
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
@@ -57,18 +58,49 @@ def _part(value: Any) -> str:
     return str(value).replace("%", "%25").replace(":", "%3A")
 
 
-def command_key(webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+def command_key(webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
     """The key of the Web-IO command of a parsed item: its class plus the address Comexio pushes it under.
 
-    Must agree with payload_key for the payload that command sends (aiocomexio.webio).
+    Must agree with payload_key for the payload that command sends (aiocomexio.webio). A 1-Wire sensor's command
+    pushes the sensor's address as ``id``, not its config id; the sensor comes as aiocomexio's OneWireSensor (the
+    Web-IO builders) or as its data item (``address`` key, see api.onewire_item).
     """
+    if isinstance(item, OneWireSensor):
+        return f"{WebioClass.ONEWIRE}:{_part(item.address)}"
+    if webio_class == WebioClass.ONEWIRE:
+        return f"{WebioClass.ONEWIRE}:{_part(item['address'])}"
     if webio_class == WebioClass.IO:
         return f"io:{_part(item['ext_name'])}:{_part(item['identifier'])}"
     return f"{webio_class}:{_part(item['id'])}"
 
 
+# Payload types whose command key is "<type>:<id>"; any other type with an id is a marker's.
+_ID_KEYED_PAYLOAD_TYPES = frozenset({WebioClass.QUICKBUS, WebioClass.KNX, WebioClass.ONEWIRE})
+# Payload types whose commands carried their own id from the start: none of them ever posted to the old id, so a
+# push of theirs on it is forged even while the old id is on for the commands not migrated yet.
+_OWN_ID_ONLY_PAYLOAD_TYPES = frozenset({WebioClass.ONEWIRE})
+
+
+_IO_ADDRESS_FIELDS = ("ext", "io")
+
+
+def _has_malformed_field(data: Mapping[str, Any]) -> bool:
+    """True for a "type", or an IO's "ext"/"io", that is neither absent (or null) nor a string.
+
+    A JSON array or object as type would not even hash, and the IO update lowercases ext and io.
+    """
+    kind = data.get("type")
+    if kind is None:
+        return False
+    if not isinstance(kind, str):
+        return True
+    return kind == WebioClass.IO and not all(isinstance(data.get(field), str | None) for field in _IO_ADDRESS_FIELDS)
+
+
 def payload_key(data: Mapping[str, Any]) -> str | None:
-    """The command key a webhook payload names, or None if it names none (a missing address field)."""
+    """The command key a webhook payload names, or None if it names none (a missing address, a malformed field)."""
+    if _has_malformed_field(data):
+        return None
     kind = data.get("type")
     if kind == WebioClass.IO:
         ext, io_id = data.get("ext"), data.get("io")
@@ -76,7 +108,7 @@ def payload_key(data: Mapping[str, Any]) -> str | None:
     item_id = data.get("id")
     if item_id is None:
         return None
-    return f"{kind if kind in (WebioClass.QUICKBUS, WebioClass.KNX) else WebioClass.MARKER}:{_part(item_id)}"
+    return f"{kind if kind in _ID_KEYED_PAYLOAD_TYPES else WebioClass.MARKER}:{_part(item_id)}"
 
 
 def derive_webhook_id(secret: str, key: str) -> str:
@@ -84,7 +116,7 @@ def derive_webhook_id(secret: str, key: str) -> str:
     return hmac.new(secret.encode(), key.encode(), sha256).hexdigest()[:_ID_HEX_LENGTH]
 
 
-def command_path(secret: str, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+def command_path(secret: str, webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
     """The URL path a command POSTs to; the callable aiocomexio's builders take as their webhook path."""
     return f"{WEBHOOK_PATH_PREFIX}{derive_webhook_id(secret, command_key(webio_class, item))}"
 
@@ -217,7 +249,7 @@ class WebhookSecurity:
         id off before Comexio has restarted)."""
         self._store.async_delay_save(self._data, _SAVE_DELAY_SEC)
 
-    def path_for(self, webio_class: WebioClass, item: Mapping[str, Any]) -> str:
+    def path_for(self, webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
         return command_path(self.secret, webio_class, item)
 
     def mark_written(self, name: str, now: datetime) -> None:
@@ -228,16 +260,19 @@ class WebhookSecurity:
     def accepts(self, webhook_id: str, data: Mapping[str, Any]) -> bool:
         """Whether a request on webhook_id may deliver this payload.
 
-        The id of a command only carries that command's value; the old id carries any while it is enabled.
-        A payload that names another server is refused either way.
+        The id of a command only carries that command's value; the old id carries any while it is enabled, except
+        the kinds whose commands never posted to it. A payload that names another server, or whose type (or IO
+        address) is no string, is refused either way.
         """
+        if _has_malformed_field(data):
+            return False
         server = data.get("server")
         if server is not None and server != self.server_id:
             # Only a cut of the server name, never the payload: the sender is anybody who can reach the endpoint.
             self.warn_refused("foreign-server", "[%s] Webhook payload for server %.40r dropped", self.server_id, server)
             return False
-        if self.legacy_enabled and _same(webhook_id, legacy_webhook_id(self.server_id)):
-            return True
+        if _same(webhook_id, legacy_webhook_id(self.server_id)):
+            return self.legacy_enabled and data.get("type") not in _OWN_ID_ONLY_PAYLOAD_TYPES
         key = payload_key(data)
         return key is not None and _same(webhook_id, derive_webhook_id(self.secret, key))
 

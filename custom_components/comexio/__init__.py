@@ -38,6 +38,7 @@ from .const import (
     ISSUE_KNX_PRERELEASE_CLEANUP,
     LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
+    ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SETUP_UNREACHABLE_ENTRIES,
     SOURCE_CATEGORIES,
@@ -57,6 +58,10 @@ from .const import (
     known_extension_names,
     migrate_entry_options,
     offline_io_skipped,
+    onewire_platform,
+    onewire_problem_unique_id,
+    onewire_unique_id,
+    onewire_unique_id_prefix,
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
@@ -143,7 +148,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
     return True
 
 
-_WEBHOOK_KIND_LABELS = {"quickbus": "Quickbus", "knx": "KNX"}
+_WEBHOOK_KIND_LABELS = {WebioClass.QUICKBUS: "Quickbus", WebioClass.KNX: "KNX", WebioClass.ONEWIRE: "1-Wire"}
 
 
 def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:
@@ -155,7 +160,7 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
     val = data.get("value")
     webhook_type = data.get("type")
     server_id = coordinator.server_id
-    if webhook_type == "io":
+    if webhook_type == WebioClass.IO:
         ext = data.get("ext")
         io_id = data.get("io")
         if not ext or not io_id:
@@ -167,9 +172,12 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
     if item_id is None:
         label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
         security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
-    elif webhook_type == "quickbus":
+    elif webhook_type == WebioClass.QUICKBUS:
         coordinator.update_quickbus_io(item_id, val)
-    elif webhook_type == "knx":
+    elif webhook_type == WebioClass.ONEWIRE:
+        # The id of a 1-Wire push is the sensor's address (OT1), not its config id (aiocomexio.webio).
+        coordinator.update_onewire(str(item_id), val)
+    elif webhook_type == WebioClass.KNX:
         # Blind guess: KNX webhook payload shape assumed identical to markers
         # (no real KNX hardware/sample payload available — see project_knx_objects memory).
         coordinator.update_knx(item_id, val)
@@ -260,12 +268,13 @@ def _setup_webhooks(
     def sync_webhooks() -> None:
         """Register the webhook ids the commands use now, drop the ones no command can use any more."""
         if not coordinator.data:
-            # No data yet (or lost): the ids derived from it would be empty and every registered one dropped. The
-            # old id does not depend on data, so commands that still post to it are heard from the start (the first
-            # poll runs after this setup); the registered ids stay as they are.
-            if security.legacy_enabled:
-                keep = registered | refused  # `refused` ids keep their one-time warning
-                _register_webhooks(hass, handler, server_id, registered, refused, keep | {legacy_webhook_id(server_id)})
+            # No data yet: only the ids of the saved 1-Wire sensors' commands (webhook_command_ids), whose readings
+            # the coordinator holds for the first refresh's merge. Not the old id: nothing could take its pushes
+            # before the first data (no IO index, an IO push would warn of an unknown IO). So an install whose
+            # commands still push to the old id (legacy_enabled, not synced yet) is heard from the first data on,
+            # as before. The registered ids stay as they are (`refused` ids keep their one-time warning).
+            keep = registered | refused
+            _register_webhooks(hass, handler, server_id, registered, refused, keep | coordinator.webhook_command_ids())
             return
         wanted = coordinator.webhook_command_ids()
         if security.legacy_enabled:
@@ -341,11 +350,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         # The last attempt could not reach Comexio, which may still be booting: the first refresh starts the grace.
         coordinator.note_comexio_unreachable()
 
+    # ---------------------------
+    # Webhook Setup
+    # ---------------------------
+    # Before the login and the first refresh: a 1-Wire reading only comes by push, so one sent meanwhile would be
+    # lost until the sensor changes again. Nothing is registered here yet (no data); _async_connect registers the
+    # ids of the saved 1-Wire sensors, the first data those of every command (sync_webhooks).
+    _setup_webhooks(hass, entry, coordinator, security)
+
     try:
         from_saved_config = await _async_connect(hass, entry, api, coordinator)
     except Exception:
         # Close the session on any setup failure to prevent leaks on retry (ConfigEntryNotReady)
         api.close()
+        # HA unregisters the ids (the unload callbacks of _setup_webhooks); their set must not outlive the attempt.
+        hass.data[DOMAIN].pop(f"{entry.entry_id}_webhooks", None)
         # A rejected login proves Comexio answers, even with the flag carried over from the last attempt.
         _track_setup_outage(
             hass,
@@ -357,6 +376,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     _track_setup_outage(hass, entry.entry_id, False)
 
     hass.data[DOMAIN][entry.entry_id] = coordinator
+
+    # The ids of every command, right after the first refresh told them (a saved config standing in for it tells
+    # no listener) and before the awaited rest of the setup (stores, extension renames, platforms), so a push sent
+    # meanwhile finds its webhook. The handlers write into coordinator.data, which the entities read once added; a
+    # restored last state yields to a reading pushed since (restore_onewire_value).
+    coordinator.sync_webhooks()
 
     # Restore the last checked extension-firmware snapshot before entities are created,
     # so update.* entities (update.py) don't start at Unknown after every restart.
@@ -421,11 +446,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         hass, _async_fix_statistics_units(hass, server_id, entry.entry_id), f"comexio_{server_id}_fix_statistics_units"
     )
 
-    # ---------------------------
-    # Webhook Setup
-    # ---------------------------
-    _setup_webhooks(hass, entry, coordinator, security)
-
     # One-shot check after an update from a KNX pre-release (flag set by async_migrate_entry).
     # Deliberately BEFORE the update listener is registered: clearing the flag writes the
     # options, which must not trigger a reload of the entry that is still being set up.
@@ -448,8 +468,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     ent_reg = er.async_get(hass)
 
     # Get all IDs of objects currently recognized by the coordinator. Markers and KNX objects
-    # (registry-driven via SOURCE_CATEGORIES.range_clustered) share the "M{id}"/"K{id}" unique_id
-    # shape; IO uses its own ext_name+identifier shape and is handled separately below.
+    # (registry-driven via SOURCE_CATEGORIES.id_keyed_entities) share the "M{id}"/"K{id}" unique_id
+    # shape; IO, Quickbus IOs and 1-Wire sensors use their own shapes and are handled separately below.
     active_unique_ids = set()
     # Bridge Markers (kind == KNX_BRIDGE, see MARKER_KNX_BRIDGE_SUFFIX_RE) get no HA entity on
     # any platform — their uid is excluded from active_unique_ids below so the cleanup loop
@@ -468,7 +488,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # entity. Tracked separately for the same reason as bridge_reclassified_uids: a specific
     # log line beats the generic "orphaned entity" one for a deliberate reclassification.
     composite_reclassified_uids: set[str] = set()
-    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered):
+    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.id_keyed_entities):
         for src in coordinator.data.get(category.data_key, []):
             uid = f"comexio_{server_id}_{category.unique_id_infix}{src['id']}".lower()
             if src.get("kind") == MarkerKind.KNX_BRIDGE:
@@ -499,6 +519,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
             active_unique_ids.add(io_unique_id(server_id, io))
     quickbus_platforms, quickbus_offline_uids = _quickbus_entity_uids(server_id, coordinator.data, include_offline)
     active_unique_ids |= quickbus_platforms.keys()
+    onewire_platforms = _onewire_entity_uids(
+        server_id,
+        coordinator.data,
+        coordinator.api.onewire_known,
+        er.async_entries_for_config_entry(ent_reg, entry.entry_id),
+    )
+    active_unique_ids |= onewire_platforms.keys()
 
     # Server-level buttons and sensors (these are always active)
     active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
@@ -543,7 +570,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # HA domain (e.g. sensor → binary_sensor after firmware upgrade) get removed.
     # Markers and KNX objects share the same kind/type → platform rules.
     expected_platform: dict[str, str] = {}
-    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.range_clustered):
+    for category in (cat for cat in SOURCE_CATEGORIES.values() if cat.id_keyed_entities):
         for src in coordinator.data.get(category.data_key, []):
             kind = src.get("kind")
             if kind == MarkerKind.KNX_BRIDGE:
@@ -560,9 +587,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     for io in coordinator.data.get("io", []):
         if io_has_entity(io, include_offline) and (platform := io_platform(io)):
             expected_platform[io_unique_id(server_id, io)] = platform
-    expected_platform.update(quickbus_platforms)
+    expected_platform |= quickbus_platforms | onewire_platforms
     # The run-state sensors were binary sensors before they became enum sensors.
-    expected_platform.update(dict.fromkeys(plan_uids, "sensor"))
+    expected_platform |= dict.fromkeys(plan_uids, "sensor")
 
     # Before removing offline IO entities from the registry, snapshot their entity_ids.
     # async_detect_orphaned_statistics uses this set to exclude "temporarily orphaned"
@@ -648,6 +675,11 @@ async def _async_connect(
     from the config the last scraped poll saved, so the entities stay and webhook pushes keep arriving. Without
     one it waits for the repair.
     """
+    # The saved 1-Wire sensors first: a first poll that reads none keeps the last known ones (those, not none), and
+    # the webhook ids of their commands are registered with them. A reading pushed during the login or the first
+    # refresh then waits in the coordinator for that refresh's merge (update_onewire) instead of being refused.
+    await coordinator.async_seed_saved_onewire_sensors()
+    coordinator.sync_webhooks()
     if not await api.login():
         if (actual := await async_replaced_fingerprint(api)) is not None:
             # Never accepted on its own: the repair shows both fingerprints and asks.
@@ -732,6 +764,31 @@ def _quickbus_entity_uids(
         else:
             active[uid] = quickbus_io_platform(io)
     return active, offline
+
+
+def _onewire_entity_uids(
+    server_id: str, data: dict[str, Any], onewire_known: bool, registry_entries: Iterable[er.RegistryEntry]
+) -> dict[str, str]:
+    """unique_id → platform of each 1-Wire entity to keep: the sensors of data and their problem sensor.
+
+    While no config has told the 1-Wire sensors yet (api.onewire_known), the registered 1-Wire entities stay as they
+    are: an unparsed group is no installation without sensors, and their history would go with the entities.
+    """
+    active = {
+        onewire_unique_id(server_id, sensor["address"]): onewire_platform(sensor)
+        for sensor in data.get(ONEWIRE_DATA_KEY, [])
+    }
+    problem_uid = onewire_problem_unique_id(server_id)
+    if active:
+        active[problem_uid] = "binary_sensor"
+    if not onewire_known:
+        prefix = onewire_unique_id_prefix(server_id)
+        active |= {
+            e.unique_id: e.domain
+            for e in registry_entries
+            if e.unique_id == problem_uid or e.unique_id.startswith(prefix)
+        }
+    return active
 
 
 def _setup_unreachable_entries(hass: HomeAssistant) -> set[str]:

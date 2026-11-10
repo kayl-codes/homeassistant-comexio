@@ -58,7 +58,14 @@ async def _handle_function_plan_flow_diagram(hass: HomeAssistant, call: ServiceC
     catalog = await coordinator.function_plan_catalog.async_get_catalog()
 
     svg, skipped_count = render_flow_svg(
-        elements, connections, catalog, markers_by_id, webio_by_id, ios_by_id, plan_name
+        elements,
+        connections,
+        catalog,
+        markers_by_id,
+        webio_by_id,
+        ios_by_id,
+        plan_name,
+        **coordinator.function_plan_source_label_maps(),
     )
     return {
         "fub_id": fub_id,

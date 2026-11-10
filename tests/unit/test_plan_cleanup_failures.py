@@ -1060,6 +1060,7 @@ def test_visualize_text_returns_a_response() -> None:
     # (ag): the text format returned None, which HA rejects when a response is requested (HTTP 500).
     coordinator = SimpleNamespace(
         function_plan_label_maps=lambda: ({}, {}, {}),
+        function_plan_source_label_maps=dict,
         function_plan_catalog=SimpleNamespace(async_get_catalog=AsyncMock(return_value={})),
     )
     source = (coordinator, MagicMock(), 5, PLAN, {}, {}, "snapshot:auto:1", None)

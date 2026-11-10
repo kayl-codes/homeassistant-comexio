@@ -47,6 +47,7 @@ def _data() -> dict[str, Any]:
     return {
         "markers": [],
         "knx": [],
+        "onewire": [],
         "io": [ONLINE_IO, OFFLINE_IO, UNSUPPORTED_IO],
         QUICKBUS_IO_DATA_KEY: [ONLINE_QB_IO, OFFLINE_QB_IO],
     }
@@ -186,7 +187,8 @@ def _audit(
     """missing / orphan / ... of the audit, as the repair and the sync see them (_async_audit_webio's maps)."""
     data = {**(data or _data()), "webio_commands": commands, WEBIO_COMMAND_DUPLICATES_KEY: duplicates or []}
     ha_map, io_meta_by_key, com_map, _disabled = coordinator._build_audit_maps({}, data)
-    return coordinator._compare_audit_maps(ha_map, com_map, {}, (None, None, None), io_meta_by_key, set(), set())
+    unchecked = dict.fromkeys(("2", "11", "12", "1"), (None, None))
+    return coordinator._compare_audit_maps(ha_map, com_map, {}, unchecked, io_meta_by_key, set(), set())
 
 
 def test_the_audit_reports_no_held_io_as_missing_or_orphan() -> None:

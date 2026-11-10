@@ -514,6 +514,7 @@ def test_backup_diffs_mark_a_side_stored_without_settings_instead_of_hiding_it(p
 
     coordinator = SimpleNamespace(
         function_plan_label_maps=lambda: ({}, {}, {}),
+        function_plan_source_label_maps=dict,
         function_plan_catalog=SimpleNamespace(async_get_catalog=AsyncMock(return_value={})),
         function_plan_backup=SimpleNamespace(async_get_snapshot=get_snapshot),
     )
@@ -579,7 +580,9 @@ def test_a_restore_warns_when_the_backup_was_taken_on_other_firmware(
 def test_diff_labels_name_the_element_and_mark_missing_values(plan: dict[str, Any]) -> None:
     newer = _snapshot(plan, {})
     with patch.object(backup_service, "resolve_element_label", return_value="Oder"):
-        labels = backup_service._label_block_settings_diff([("4", "in_0", "26", None)], newer, {}, ({}, {}, {}))
+        labels = backup_service._label_block_settings_diff(
+            [("4", "in_0", "26", None)], newer, {}, backup_service._LabelMaps({}, {}, {})
+        )
     assert labels == ["Oder (#4): in_0 26 → —"]
 
 

@@ -4,6 +4,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Set as AbstractSet
 from contextlib import suppress
 from contextvars import ContextVar
+import copy
 from datetime import timedelta
 import hashlib
 import json
@@ -35,6 +36,7 @@ from aiocomexio import (
 )
 from aiocomexio.config import ParseOptions, iter_group
 from aiocomexio.const import WebioClass
+from aiocomexio.onewire import OneWireSensor, OneWireStatus, parse_onewire_config
 from aiocomexio.reference_catalog import KIND_FUB_BASE, ReferenceCheck
 from aiocomexio.session import session_kwargs
 import aiohttp
@@ -77,6 +79,10 @@ from .const import (
     MARKER_KIND_SUFFIX_RE,
     MARKER_KNX_BRIDGE_BLOCK_SIZE,
     MARKER_KNX_BRIDGE_SUFFIX_RE,
+    ONEWIRE_DATA_KEY,
+    ONEWIRE_NO_FUB_MODULES_CAUSE,
+    ONEWIRE_SHARED_ID_LOG_MSG,
+    ONEWIRE_UNKNOWN_KIND_LOG_MSG,
     QUICKBUS_IO_DATA_KEY,
     WEBIO_CLASS_NAME_KNX_LOOPBACK,
     WEBIO_DEVICE_NAME_KNX_LOOPBACK,
@@ -118,17 +124,76 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 
 def _webhook_path(
     server_id: str, security: WebhookSecurity | None
-) -> str | Callable[[WebioClass, Mapping[str, Any]], str]:
+) -> str | Callable[[WebioClass, Mapping[str, Any] | OneWireSensor], str]:
     """Path of HA's webhook the Web-IO commands of this server POST to: one per command, or the one of the old id."""
     return security.path_for if security else f"{WEBHOOK_PATH_PREFIX}{legacy_webhook_id(server_id)}"
 
 
-def _with_quickbus_ios(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
-    """parsed_data with its Quickbus IOs back under "io", where aiocomexio's Web-IO builders expect them.
+def onewire_item(sensor: OneWireSensor) -> dict[str, Any]:
+    """The data item of a 1-Wire sensor of known kind, shaped like a marker's (see const.ONEWIRE_DATA_KEY).
 
-    The builders tell them apart by their "quickbus" entry (own class, IO Id in the payload).
+    "name" is the command name without its "HA " (aiocomexio's onewire_command_name), as a marker's name is:
+    the audit, the sync and the plan wiring build "HA <name>" for every id-range category.
     """
-    return {**parsed_data, "io": [*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, [])]}
+    return {
+        "id": sensor.config_id,
+        "address": sensor.address,
+        "name": comexio_webio.onewire_command_name(sensor).removeprefix("HA "),
+        "title": sensor.name,
+        "type": sensor.kind,
+        "prefix": sensor.prefix,
+        "hw_id": sensor.hw_id,
+        "value": None,
+    }
+
+
+def _one_sensor_per_config_id(sensors: Iterable[OneWireSensor]) -> tuple[list[OneWireSensor], tuple[str, ...]]:
+    """The sensors sorted by config id, the first by address of those that share one; and the others' addresses.
+
+    A function plan element names its sensor by the Id alone, so the audit, the sync and the plan wiring key a
+    1-Wire sensor by it: of sensors sharing an Id (aiocomexio warns about it) only one can be wired. Comexio keys
+    the group by that Id, so a shared one is not expected; if it comes, every part of HA keeps the same sensor.
+    """
+    kept: dict[int, OneWireSensor] = {}
+    left_out: list[str] = []
+    for sensor in sorted(sensors, key=lambda s: (s.config_id, s.address)):
+        if sensor.config_id in kept:
+            left_out.append(sensor.address)
+        else:
+            kept[sensor.config_id] = sensor
+    return list(kept.values()), tuple(sorted(left_out))
+
+
+def _warned_once_per_change(last: tuple[str, ...], current: tuple[str, ...], message: str) -> tuple[str, ...]:
+    """Warn about the addresses of current unless they are the ones last warned about; return current."""
+    if current and current != last:
+        _LOGGER.warning(message, ", ".join(current))
+    return current
+
+
+def _onewire_sensor(item: Mapping[str, Any]) -> OneWireSensor:
+    """The aiocomexio sensor of a 1-Wire data item, for the Web-IO builders."""
+    return OneWireSensor(
+        address=item["address"],
+        config_id=int(item["id"]),
+        prefix=item.get("prefix", ""),
+        name=item.get("title", ""),
+        hw_id=item.get("hw_id", ""),
+        kind=item["type"],
+    )
+
+
+def _for_webio_builders(parsed_data: Mapping[str, Any]) -> dict[str, Any]:
+    """parsed_data in the shape aiocomexio's Web-IO builders expect.
+
+    The Quickbus IOs go back under "io" (the builders tell them apart by their "quickbus" entry: own
+    class, IO Id in the payload), the 1-Wire items become the address -> OneWireSensor mapping.
+    """
+    return {
+        **parsed_data,
+        "io": [*parsed_data.get("io", []), *parsed_data.get(QUICKBUS_IO_DATA_KEY, [])],
+        ONEWIRE_DATA_KEY: {item["address"]: _onewire_sensor(item) for item in parsed_data.get(ONEWIRE_DATA_KEY, [])},
+    }
 
 
 class _MismatchReportingClient(ComexioClient):
@@ -840,6 +905,14 @@ class ComexioAPI:
         # run-state answer whose fetch began before such a write may be older than its Active flags.
         self._fub_cache_epoch = 0
         self._paper_data: dict[str, Any] = {}  # paper_id_str → {Id, Name, MMX, MMY}
+        # The 1-Wire items of the last config whose group 12 parsed (see _parse_onewire); onewire_known once one did.
+        self._onewire_items: list[dict[str, Any]] = []
+        self.onewire_known = False
+        # The cause last warned about when the 1-Wire group did not parse; None while it parses.
+        self._onewire_parse_error: str | None = None
+        # The addresses of unknown kind and of a shared config id last warned about (see _parse_onewire).
+        self._onewire_unknown_kind: tuple[str, ...] = ()
+        self._onewire_shared_id: tuple[str, ...] = ()
         # Set by login() on failure so callers (setup) can tell a transient connection
         # problem (retry) apart from a genuine credential rejection (needs reauth).
         self.last_login_error: str | None = None
@@ -1684,16 +1757,83 @@ class ComexioAPI:
         # QUICKBUS_IO_DATA_KEY). io_all keeps them for plan labels.
         data[QUICKBUS_IO_DATA_KEY] = [io for io in data["io"] if io.get("quickbus")]
         data["io"] = [io for io in data["io"] if not io.get("quickbus")]
+        data[ONEWIRE_DATA_KEY] = self._parse_onewire(conf.get("FubModules"))
         _LOGGER.info(
-            "Audit: %d Markers, %d IOs, %d Quickbus IOs, %d KNX, %d Webhooks in Comexio for %s",
+            "Audit: %d Markers, %d IOs, %d Quickbus IOs, %d KNX, %d 1-Wire, %d Webhooks in Comexio for %s",
             len(data["markers"]),
             len(data["io"]),
             len(data[QUICKBUS_IO_DATA_KEY]),
             len(data["knx"]),
+            len(data[ONEWIRE_DATA_KEY]),
             len(data["webio_commands"]),
             webio_name,
         )
         return data
+
+    def _parse_onewire(self, fub_modules: Any) -> list[dict[str, Any]]:
+        """The 1-Wire sensors of known kind in $FubModules; the last ones that parsed if these do not.
+
+        A missing $FubModules is a failed fetch, not an installation without 1-Wire sensors; it and a changed
+        group (ComexioDataError) are warned about once per cause: either way the sensors stay as they were,
+        so their commands are neither reported as orphans nor deleted by a sync over one bad page
+        (onewire_known stays False until a group parsed, see the entity cleanup). A sensor of unknown kind
+        gets no command (aiocomexio would build none) and so no entity: no value would ever reach it. Nor does a
+        sensor whose config id an earlier one already has (_one_sensor_per_config_id). Either is warned about
+        once per changed set of such sensors: the sensor is in the config but HA never shows it, which a user
+        would otherwise only find in a debug log.
+        """
+        if not isinstance(fub_modules, Mapping) or not fub_modules:
+            return self._kept_onewire_items(ONEWIRE_NO_FUB_MODULES_CAUSE)
+        try:
+            sensors = parse_onewire_config(fub_modules)
+        except ComexioDataError as err:
+            return self._kept_onewire_items(str(err))
+        self._onewire_parse_error = None
+        self.onewire_known = True
+        unknown = tuple(sorted(s.address for s in sensors.values() if s.kind is None))
+        self._onewire_unknown_kind = _warned_once_per_change(
+            self._onewire_unknown_kind, unknown, ONEWIRE_UNKNOWN_KIND_LOG_MSG
+        )
+        known, shared = _one_sensor_per_config_id(s for s in sensors.values() if s.kind is not None)
+        self._onewire_shared_id = _warned_once_per_change(self._onewire_shared_id, shared, ONEWIRE_SHARED_ID_LOG_MSG)
+        self._onewire_items = [onewire_item(sensor) for sensor in known]
+        return copy.deepcopy(self._onewire_items)
+
+    @property
+    def last_known_onewire_items(self) -> list[dict[str, Any]]:
+        """The 1-Wire items of the last config whose group parsed, or the seeded ones before; not for changing."""
+        return self._onewire_items
+
+    def seed_onewire_items(self, items: list[dict[str, Any]]) -> None:
+        """Take the 1-Wire sensors of a saved config as the last known ones (before the first refresh; #250).
+
+        A later poll that meets another certificate parses no group 12; without this it would keep none and the
+        sensors would vanish from the data. onewire_known stays False: only a parsed group proves them current.
+        Nothing is taken once a group parsed: those sensors are fresher than the saved ones.
+        """
+        if not self.onewire_known:
+            self._onewire_items = copy.deepcopy(items)
+
+    def _kept_onewire_items(self, cause: str) -> list[dict[str, Any]]:
+        """The last 1-Wire sensors that parsed, warning once per cause why these did not."""
+        if cause != self._onewire_parse_error:
+            self._onewire_parse_error = cause
+            _LOGGER.warning("1-Wire sensors not read from the Comexio config, keeping the last known ones: %s", cause)
+        else:
+            _LOGGER.debug("1-Wire sensors still not read from the Comexio config: %s", cause)
+        return copy.deepcopy(self._onewire_items)
+
+    async def get_onewire_status(self) -> tuple[dict[str, OneWireStatus] | None, str | None]:
+        """The read-error state of the 1-Wire sensors by address, or None and the failure cause.
+
+        Rides the config poll (see coordinator._async_refresh_onewire_status), which warns about failures, so
+        they are logged at debug level here. A lapsed admin session is logged in again once.
+        """
+        try:
+            return await self._system_info_part(lambda: self.client.get_onewire_status(), [])  # noqa: PLW0108
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "1-Wire status not fetched")
+            return None, SYSTEM_INFO_CERTIFICATE_CHANGED
 
     def _load_config_names(self) -> tuple[str, str, str, str, str]:
         """Load configuration names from config_entry."""
@@ -2002,7 +2142,7 @@ class ComexioAPI:
         """
         return comexio_webio.build_webio_commands(
             _webhook_path(server_id, self.webhook_security),
-            _with_quickbus_ios(parsed_data),
+            _for_webio_builders(parsed_data),
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
@@ -2043,7 +2183,7 @@ class ComexioAPI:
         return comexio_webio.generate_webio_json(
             _webhook_path(server_id, self.webhook_security),
             webio_name,
-            _with_quickbus_ios(parsed_data),
+            _for_webio_builders(parsed_data),
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,

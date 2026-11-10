@@ -29,6 +29,7 @@ from aiocomexio.knx import (
     KNX_DPT_DIGITAL_AMBIGUOUS as KNX_DPT_DIGITAL_AMBIGUOUS,
     KNX_DPT_DIGITAL_DEVICE_CLASS as KNX_DPT_DIGITAL_DEVICE_CLASS,
 )
+from aiocomexio.onewire import OneWireStatus
 from aiocomexio.webio import quickbus_command_name
 from homeassistant.util import slugify
 
@@ -185,23 +186,34 @@ WEBIO_CLASS_MARKER = WebioClass.MARKER
 WEBIO_CLASS_IO = WebioClass.IO
 WEBIO_CLASS_KNX = WebioClass.KNX
 WEBIO_CLASS_QUICKBUS = WebioClass.QUICKBUS
+WEBIO_CLASS_ONEWIRE = WebioClass.ONEWIRE
 # The classes this integration manages, one SOURCE_CATEGORIES entry each — not tuple(WebioClass):
-# a class a newer aiocomexio adds (e.g. ONEWIRE in 0.10.0) joins only together with its category.
-WEBIO_CLASSES = (WEBIO_CLASS_MARKER, WEBIO_CLASS_IO, WEBIO_CLASS_KNX, WEBIO_CLASS_QUICKBUS)
+# a class a newer aiocomexio adds joins only together with its category.
+WEBIO_CLASSES = (WEBIO_CLASS_MARKER, WEBIO_CLASS_IO, WEBIO_CLASS_KNX, WEBIO_CLASS_QUICKBUS, WEBIO_CLASS_ONEWIRE)
 
 # Internal audit-map key convention (coordinator._async_update_data): IO entries are keyed
 # as "IO_{ext_name}_{identifier}", markers as bare "M{id}", KNX objects as bare "K{id}",
 # Quickbus IOs as "QB{io_id}" (their identifier repeats per device, only the IO's Id is
-# unique) — centralized here so the build and classify sides can't drift apart.
+# unique), 1-Wire sensors as "1W{config_id}" — centralized here so the build and classify
+# sides can't drift apart.
 _IO_AUDIT_KEY_PREFIX = "IO_"
 _MARKER_AUDIT_KEY_PREFIX = "M"
 _KNX_AUDIT_KEY_PREFIX = "K"
 _QUICKBUS_AUDIT_KEY_PREFIX = "QB"
+_ONEWIRE_AUDIT_KEY_PREFIX = "1W"
 
 # parse_config() output key of the Quickbus IOs (Multitouch gestures, motion sensors, ...). The
 # integration keeps them apart from "io": every IO code path addresses an IO by ext_name +
 # identifier, which a Quickbus IO's G1/TL1/R repeats on every device of the same kind.
 QUICKBUS_IO_DATA_KEY = "quickbus_io"
+
+# parse_config() output key of the 1-Wire sensors of known kind ($FubModules["12"]), a list of
+# {"id": config id, "address", "name": "1Wire <address>", "title", "type", "prefix", "hw_id", "value"}
+# — shaped like the markers, so the id-range plan machinery serves them too (see ComexioAPI._parse_onewire).
+ONEWIRE_DATA_KEY = "onewire"
+# Sensor prefixes with a known unit; any other prefix shows the bare number.
+ONEWIRE_PREFIX_TEMPERATURE = "OT"
+ONEWIRE_PREFIX_HUMIDITY = "OH"
 
 # parse_config() output key of the stored Web-IO commands whose name an earlier command already
 # has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
@@ -219,8 +231,9 @@ class SourceCategory:
     one cluster plan per extension, binary_sensor support) and keep some special
     handling at the call sites where genericity isn't reachable. Quickbus IOs share the
     IOs' $FubModules group but are keyed by their IO Id, read-only and wired into their
-    own column plans ("HA - QB [..]", see IoPlanKind). Adding a further Comexio module type = one more entry in
-    SOURCE_CATEGORIES.
+    own column plans ("HA - QB [..]", see IoPlanKind). 1-Wire sensors are read-only and wired into
+    id-range plans like the markers, but their entities are keyed by address (onewire_unique_id), not
+    by id. Adding a further Comexio module type = one more entry in SOURCE_CATEGORIES.
     """
 
     key: WebioClass
@@ -239,6 +252,9 @@ class SourceCategory:
     import_conf_key: str  # entry.options opt-in flag
     import_default: bool  # default for the opt-in flag (KNX ships OFF)
     ignored_conf_key: str | None = None  # entry.options key for the ignore-list (None → not supported)
+    # True → one entity per item, unique_id "comexio_<server>_<infix><id>" on the marker platform rules
+    # (switch/number/sensor/button by kind and type); False → the category builds its entities itself.
+    id_keyed_entities: bool = False
 
 
 # KNX objects live under $FubModules["11"] ("knxIo" per $FubTypes). They are implemented
@@ -263,6 +279,7 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         import_conf_key="import_markers",
         import_default=True,
         ignored_conf_key=CONF_IGNORED_MARKERS,
+        id_keyed_entities=True,
     ),
     WebioClass.IO: SourceCategory(
         key=WebioClass.IO,
@@ -299,6 +316,7 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         import_conf_key="import_knx",
         import_default=False,
         ignored_conf_key=CONF_IGNORED_KNX,
+        id_keyed_entities=True,
     ),
     # IOs of Quickbus devices (Multitouch gestures, motion sensors, ...): same $FubModules group
     # as the IOs, so it must stay after IO here — category_by_fub_module_type("1") is the IO
@@ -320,6 +338,28 @@ SOURCE_CATEGORIES: dict[WebioClass, SourceCategory] = {
         range_clustered=False,
         supports_trigger_pairs=False,
         import_conf_key="import_quickbus",
+        import_default=True,
+        ignored_conf_key=None,
+    ),
+    # 1-Wire sensors ($FubModules["12"], plan element type 12 with ref_id = config id): read-only, values
+    # only by push from their own Web-IO class, wired into id-range plans ("HA - 1Wire [1-100]") like the
+    # markers. No entity-name schema of their own: the IO schema fields are carried for the dataclass only,
+    # the entity name is the address plus the sensor's name (onewire_entity_name).
+    WebioClass.ONEWIRE: SourceCategory(
+        key=WebioClass.ONEWIRE,
+        fub_module_type="12",
+        data_key=ONEWIRE_DATA_KEY,
+        audit_key_prefix=_ONEWIRE_AUDIT_KEY_PREFIX,
+        webio_name_suffix=" [1Wire]",
+        label="1Wire",
+        schema_conf_key=CONF_SCHEMA_IO,
+        schema_default=DEFAULT_SCHEMA_IO,
+        id_placeholder="IoId",
+        title_placeholder="IoTitle",
+        unique_id_infix="onewire_",
+        range_clustered=True,
+        supports_trigger_pairs=False,
+        import_conf_key="import_onewire",
         import_default=True,
         ignored_conf_key=None,
     ),
@@ -359,11 +399,14 @@ def required_webio_classes(conf: Mapping[str, Any], data: Mapping[str, Any]) -> 
     import_quickbus is on by default, so without this every installation without a Quickbus
     device would get an empty [QB] class created and, until then, a "missing Web-IO class"
     repair — and a Quickbus IO only reaches HA through its wired plan pair, so a class for no
-    selected device is of no use. data: the (imported) parse result.
+    selected device is of no use. The 1-Wire class likewise only once a 1-Wire sensor is configured.
+    data: the (imported) parse result.
     """
-    return tuple(
-        cls for cls in active_webio_classes(conf) if cls != WebioClass.QUICKBUS or webio_quickbus_ios(conf, data)
-    )
+    needs_items = {
+        WebioClass.QUICKBUS: lambda: bool(webio_quickbus_ios(conf, data)),
+        WebioClass.ONEWIRE: lambda: bool(data.get(ONEWIRE_DATA_KEY)),
+    }
+    return tuple(cls for cls in active_webio_classes(conf) if cls not in needs_items or needs_items[cls]())
 
 
 def quickbus_device_id(io: Mapping[str, Any]) -> str:
@@ -1089,6 +1132,66 @@ def quickbus_io_platform(io: Mapping[str, Any]) -> str:
     return "binary_sensor" if io.get("is_binary") else "sensor"
 
 
+def onewire_unique_id_prefix(server_id: str) -> str:
+    """The unique_id prefix every 1-Wire sensor entity of a server shares."""
+    return f"comexio_{server_id}_{SOURCE_CATEGORIES[WebioClass.ONEWIRE].unique_id_infix}".lower()
+
+
+def onewire_unique_id(server_id: str, address: str) -> str:
+    """unique_id of a 1-Wire sensor's entity — its address (OT1), which stays when the sensor is renamed."""
+    return f"{onewire_unique_id_prefix(server_id)}{address}".lower()
+
+
+def onewire_problem_unique_id(server_id: str) -> str:
+    """unique_id of the 1-Wire problem sensor (read errors, sensors not found)."""
+    return f"comexio_{server_id}_onewire_problem"
+
+
+def onewire_platform(sensor: Mapping[str, Any]) -> str:
+    """Platform of a 1-Wire sensor's entity: read-only always, binary_sensor for a digital one."""
+    return "binary_sensor" if sensor.get("type") == "digital" else "sensor"
+
+
+def onewire_device_name(server_id: str) -> str:
+    """HA device name of the 1-Wire bus: "<server> 1-Wire", carrying every 1-Wire sensor."""
+    return f"{server_id} 1-Wire"
+
+
+def onewire_entity_name(sensor: Mapping[str, Any]) -> str:
+    """Entity name of a 1-Wire sensor: its address and, if Comexio has one, its name ("OT1 Kitchen")."""
+    label = one_line(sensor.get("title") or "")
+    return f"{sensor['address']} {label}" if label else sensor["address"]
+
+
+# Problem kinds of onewire_problems(), also the 1-Wire problem sensor's attribute names.
+ONEWIRE_PROBLEM_READ_ERROR = "read_error"
+ONEWIRE_PROBLEM_NOT_FOUND = "not_found"
+# Configured, but the 1-Wire monitor does not list it at all.
+ONEWIRE_PROBLEM_MISSING = "missing"
+
+
+def onewire_reading_ok(statuses: Mapping[str, OneWireStatus] | None, address: str) -> bool:
+    """Whether the sensor at address may show its reading: True while the status is unknown, else its status's ok."""
+    return statuses is None or ((status := statuses.get(address)) is not None and status.ok)
+
+
+def onewire_problems(statuses: Mapping[str, OneWireStatus], addresses: Iterable[str]) -> dict[str, list[str]]:
+    """The configured sensors (addresses) with a problem, per kind, each list sorted."""
+    found: dict[str, list[str]] = {
+        ONEWIRE_PROBLEM_READ_ERROR: [],
+        ONEWIRE_PROBLEM_NOT_FOUND: [],
+        ONEWIRE_PROBLEM_MISSING: [],
+    }
+    for address in sorted(set(addresses)):
+        if (status := statuses.get(address)) is None:
+            found[ONEWIRE_PROBLEM_MISSING].append(address)
+        elif not status.visible:
+            found[ONEWIRE_PROBLEM_NOT_FOUND].append(address)
+        elif not status.online:
+            found[ONEWIRE_PROBLEM_READ_ERROR].append(address)
+    return found
+
+
 def function_plan_id(fid: Any) -> int | None:
     """Plan id of a $Fubs key (api.fub_data), None for a key that is no plan id as str(fub_id) spells it.
 
@@ -1266,6 +1369,32 @@ WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — n
 
 # The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
 WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"
+
+# The same for a 1-Wire sensor, addressed by its address (unknown, or its import is off). Args: address, new value.
+WEBHOOK_UNKNOWN_ONEWIRE_LOG_MSG = (
+    "Webhook push for unknown 1-Wire sensor %s (value %r) — not in the current config, "
+    "kept only for the config fetch that may bring it"
+)
+# How many readings of 1-Wire sensors the data does not have (yet) the coordinator keeps for that fetch (the
+# configured sensors' readings do not count). The pushed address comes from the request, so the dict must stay
+# bounded; the next config fetch prunes it as well.
+ONEWIRE_PENDING_VALUES_MAX = 64
+WEBHOOK_EARLY_ONEWIRE_LOG_MSG = "Webhook push for 1-Wire sensor %s (value %r) before the first refresh, held for it"
+WEBHOOK_UNKNOWN_ONEWIRE_DROPPED_LOG_MSG = (
+    "Webhook push for unknown 1-Wire sensor %s (value %r) — not in the current config and not kept: "
+    "too many readings of unknown sensors are held already"
+)
+ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG = (
+    "[%s] Saved Comexio config is unreadable (%s); a first poll that reads no 1-Wire sensors starts without any"
+)
+
+# Why api._parse_onewire kept the last 1-Wire sensors when the config carried no $FubModules (a failed fetch).
+ONEWIRE_NO_FUB_MODULES_CAUSE = "the config carries no $FubModules"
+# The 1-Wire sensors api._parse_onewire leaves out, each warned about once per changed set.
+ONEWIRE_UNKNOWN_KIND_LOG_MSG = "1-Wire sensors of unknown kind get no Web-IO command and no entity: %s"
+ONEWIRE_SHARED_ID_LOG_MSG = (
+    "1-Wire sensors that share their Id with another one get no Web-IO command and no entity: %s"
+)
 
 # How many unknown IOs the coordinator remembers as already warned about (later pushes of them log
 # at DEBUG only). The pushed ext/identifier come from the request, so the set must stay bounded:
