@@ -39,7 +39,7 @@ async def async_setup_entry(  # NOSONAR
     knx_items = coordinator.data.get("knx", [])
     knx_by_id = {item["id"]: item for item in knx_items}
 
-    entities = []
+    entities: list[LightEntity] = []
     for item in knx_items:
         composite = item.get("knx_composite")
         if not composite or composite["role"] != "direction" or composite["domain"] != "light":

@@ -117,7 +117,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     coordinator = hass.data[DOMAIN][entry.entry_id]
     conf = {**entry.data, **entry.options}
 
-    entities = []
+    entities: list[SensorEntity] = []
     if conf.get("import_ios", True):
         include_offline = conf.get(CONF_INCLUDE_OFFLINE_EXTENSIONS, False)
         entities.extend(
@@ -250,7 +250,7 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
     @property
     def state_class(self) -> SensorStateClass | None:
         """Suppress long-term statistics while extension is offline to avoid unit-mismatch warnings."""
-        if self._ext_name in self.coordinator.offline_extensions:
+        if self._ext_name in (self.coordinator.offline_extensions or ()):
             return None
         return self._attr_state_class
 
@@ -371,7 +371,7 @@ ATTR_FAILED_WRITES = "failed_writes"
 ATTR_PROGRESS_DETAILS = "progress_details"
 
 
-class ComexioSyncStatusSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
+class ComexioSyncStatusSensor(CoordinatorEntity[ComexioCoordinator], RestoreEntity, SensorEntity):
     """Representation of the integration's sync status."""
 
     _attr_has_entity_name = True
@@ -386,7 +386,7 @@ class ComexioSyncStatusSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
         self._attr_icon = "mdi:cloud-sync"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -448,7 +448,9 @@ class ComexioSyncStatusSensor(CoordinatorEntity, RestoreEntity, SensorEntity):
         return attrs
 
 
-class ComexioFunctionPlanBackupSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
+class ComexioFunctionPlanBackupSensor(
+    ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], SensorEntity
+):
     """Diagnostic sensor summarizing stored function plan backup snapshots."""
 
     _attr_has_entity_name = True
@@ -477,7 +479,7 @@ class ComexioFunctionPlanBackupSensor(ComexioFunctionPlanEntityMixin, Coordinato
         return self.coordinator.function_plan_backup.summary()
 
 
-class ComexioOrphanedBackupsSensor(ComexioStableEntityIdMixin, CoordinatorEntity, SensorEntity):
+class ComexioOrphanedBackupsSensor(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic count of the stored snapshots of deleted function plans — next to 'Backups'.
 
     Above 0 there is something to restore or delete in the 'Plan' selector's orphaned-plans view;
@@ -521,7 +523,7 @@ class ComexioOrphanedBackupsSensor(ComexioStableEntityIdMixin, CoordinatorEntity
         return {"plans": [] if summary is None else summary[1]}
 
 
-class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
+class ComexioOfflineExtensionsSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor listing extension modules currently offline."""
 
     _attr_has_entity_name = True
@@ -534,7 +536,7 @@ class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "offline_extensions"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -544,14 +546,14 @@ class ComexioOfflineExtensionsSensor(CoordinatorEntity, SensorEntity):
 
     @property
     def native_value(self) -> int:
-        return len(self.coordinator.offline_extensions)
+        return len(self.coordinator.offline_extensions or ())
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        return {"extensions": sorted(self.coordinator.offline_extensions)}
+        return {"extensions": sorted(self.coordinator.offline_extensions or ())}
 
 
-class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
+class ComexioVersionSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor exposing Comexio's own firmware/frontend version (e.g. "11.0.2").
 
     Also stamped onto the hub device's sw_version so it shows on the device info page —
@@ -568,8 +570,8 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "comexio_version"
 
     @property
-    def device_info(self) -> dict[str, Any]:
-        info: dict[str, Any] = {
+    def device_info(self) -> DeviceInfo:
+        info: DeviceInfo = {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
             "manufacturer": "Comexio",
@@ -584,7 +586,7 @@ class ComexioVersionSensor(CoordinatorEntity, SensorEntity):
         return self.coordinator.api.comexio_version
 
 
-class ComexioPlanChangedSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
+class ComexioPlanChangedSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor listing plans whose auto-backup got a new snapshot this poll cycle.
 
     Pure last-cycle control aid (does not accumulate across polls): right after making an
@@ -641,7 +643,7 @@ class ComexioBusLoadSensor(SensorEntity):
         self._attr_unique_id = f"comexio_{server_id}_bus_load_sensor"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -784,7 +786,7 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
         )
 
 
-class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):
+class ComexioExtensionCountSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor: number of Comexio extension modules known to HA (online + offline)."""
 
     _attr_has_entity_name = True
@@ -797,7 +799,7 @@ class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "extension_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -810,7 +812,7 @@ class ComexioExtensionCountSensor(CoordinatorEntity, SensorEntity):
         return len(self.coordinator.data.get("extensions", {}))
 
 
-class ComexioActiveMarkerCountSensor(CoordinatorEntity, SensorEntity):
+class ComexioActiveMarkerCountSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor: number of active (non-ignored) markers known to HA."""
 
     _attr_has_entity_name = True
@@ -823,7 +825,7 @@ class ComexioActiveMarkerCountSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "active_marker_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -837,7 +839,9 @@ class ComexioActiveMarkerCountSensor(CoordinatorEntity, SensorEntity):
         return sum(int(m["id"]) not in ignored for m in self.coordinator.data.get("markers", []))
 
 
-class ComexioFunctionPlanCountSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
+class ComexioFunctionPlanCountSensor(
+    ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], SensorEntity
+):
     """Diagnostic sensor: total number of function plans on the Comexio server (managed + others)."""
 
     _attr_has_entity_name = True
@@ -858,7 +862,7 @@ class ComexioFunctionPlanCountSensor(ComexioFunctionPlanEntityMixin, Coordinator
         return len(self.coordinator.api.fub_data)
 
 
-class ComexioWebioCommandCountSensor(CoordinatorEntity, SensorEntity):
+class ComexioWebioCommandCountSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor: number of Web-IO commands HA has registered on the Comexio server."""
 
     _attr_has_entity_name = True
@@ -871,7 +875,7 @@ class ComexioWebioCommandCountSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "webio_command_count"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -884,7 +888,7 @@ class ComexioWebioCommandCountSensor(CoordinatorEntity, SensorEntity):
         return len(self.coordinator.data.get("webio_commands", {}))
 
 
-class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
+class ComexioWatchdogEventSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor exposing the most recent Bus-Load-Watchdog event, if any.
 
     Ties the statistics sensors together with the watchdog for exactly the diagnosis
@@ -902,7 +906,7 @@ class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
         self._attr_translation_key = "watchdog_event"
 
     @property
-    def device_info(self) -> dict[str, Any]:
+    def device_info(self) -> DeviceInfo:
         return {
             "identifiers": {(DOMAIN, self.coordinator.server_id)},
             "name": self.coordinator.server_id,
@@ -931,7 +935,7 @@ class ComexioWatchdogEventSensor(CoordinatorEntity, SensorEntity):
         }
 
 
-class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity, SensorEntity):
+class ComexioPlanPreviewSensor(ComexioFunctionPlanEntityMixin, CoordinatorEntity[ComexioCoordinator], SensorEntity):
     """Diagnostic sensor naming the last generated Function Plan preview (plan, source, time).
 
     Fed by coordinator.async_generate_plan_preview, called either from plan_preview (plan card,
@@ -977,7 +981,9 @@ _PLAN_RUN_STATE_ICONS = {
 }
 
 
-class ComexioFunctionPlanRunStateSensor(ComexioStableEntityIdMixin, CoordinatorEntity, SensorEntity):
+class ComexioFunctionPlanRunStateSensor(
+    ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator], SensorEntity
+):
     """Whether one function plan runs in Comexio — on the function plan sub-device.
 
     Reads the plan's Active flag from api.fub_data: a full poll that decodes $Fubs refreshes it
