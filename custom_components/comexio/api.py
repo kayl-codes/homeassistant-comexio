@@ -13,6 +13,7 @@ import math
 import re
 import time
 from typing import Any, NamedTuple, NoReturn
+import weakref
 
 from aiocomexio import (
     ComexioAuthenticationError,
@@ -46,8 +47,10 @@ from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.util import dt as dt_util
 
 # Mandatory DOMAIN import for Audit logic
-from .api_write import ApiWriteStats
+from .api_write import ApiWriteStats, connection_dropped, is_same_value
 from .const import (
+    API_WRITE_RETRY_MAX,
+    API_WRITE_RETRY_WINDOW_SEC,
     COMEXIO_HTTP_TIMEOUT_SEC,
     COMEXIO_PROGRESS_LOG_INTERVAL_SEC,
     CONF_SCHEMA_IO,
@@ -128,6 +131,8 @@ class _WriteAttempt(NamedTuple):
 
     error: BaseException | None
     reported: bool = False
+    # Seconds from the send until the connection error came back (before any certificate probe).
+    elapsed: float = 0.0
 
 
 def _webhook_path(
@@ -782,8 +787,13 @@ class ComexioAPI:
         # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
         # repair comes up with the first request that meets it, not only with the next full poll.
         self.on_certificate_mismatch: Callable[[str], None] | None = None
-        # Failed /api/ writes, shown by the "API write errors" sensor.
+        # Failed and repeated /api/ writes, shown by the "API write errors" sensor; cached_value (set by the
+        # coordinator) gives HA's own value of a write's target, so a drop is not repeated when it is already set.
         self.write_stats = ApiWriteStats()
+        self.cached_value: Callable[[str, str | int], object] | None = None
+        # One lock per target being written (dropped with its last user), so a repetition of an older write never
+        # lands after a newer one.
+        self._write_locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = weakref.WeakValueDictionary()
         # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
         # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
         # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
@@ -5779,28 +5789,121 @@ class ComexioAPI:
         value: float | int,
         ext: str | None = None,
         identifier: str | None = None,
+        *,
+        repeat: bool = True,
     ) -> bool:
         """Write a value; False if Comexio refused it or could not be reached.
 
         Markers, KNX objects and IOs go to /api/ with the API user (Basic Auth). An analog output AO* goes over the
         admin session instead, since /api/ answers "Forbidden" for it (#259).
 
-        Every failed write is counted in write_stats (#289).
+        A write over /api/ that failed because Comexio closed the connection before it answered is sent again, at
+        most API_WRITE_RETRY_MAX times (#289), while every drop came back within API_WRITE_RETRY_WINDOW_SEC and HA's
+        own value for the target is not yet the wanted one. Writes to one target run one after the other, so a
+        repetition of an older write never lands after a newer one. Every failure and every repetition is counted in
+        write_stats. A caller whose write toggles or pulses its target (a trigger marker) passes repeat=False.
+
+        The window is an assumption, not a measurement: a Comexio on the local network answers in milliseconds, so a
+        drop that comes back quickly may also have come after the command ran. A repetition of a write that toggles
+        or pulses its target could then act twice; for the usual set-to-a-value writes it changes nothing. When HA
+        already holds the wanted value, the drop is not repeated and the write is still reported as failed.
         """
         _write_met_another_certificate.set(None)
-        attempt = await self._write_once(target_type, target_id, value, ext, identifier)
-        if attempt.error is None:
-            return True
+        key = (target_type, str(target_id))
+        lock = self._write_locks.get(key)
+        if lock is None:
+            lock = self._write_locks[key] = asyncio.Lock()
+        async with lock:
+            return await self._write_and_repeat(target_type, target_id, value, ext, identifier, repeat)
+
+    async def _write_and_repeat(
+        self,
+        target_type: str,
+        target_id: str | int,
+        value: float | int,
+        ext: str | None,
+        identifier: str | None,
+        repeat: bool,
+    ) -> bool:
+        """set_value for one target at a time: send, and send again while _why_not_repeated has no objection."""
+        retries = 0
+        while True:
+            attempt = await self._write_once(target_type, target_id, value, ext, identifier)
+            if attempt.error is None:
+                if retries:
+                    self._note_write_recovered(target_type, target_id, retries)
+                return True
+            reason = self._why_not_repeated(attempt, target_type, target_id, value, identifier, retries, repeat)
+            if reason is not None:
+                _LOGGER.debug(
+                    "Comexio API write (%s %s) not repeated: %s", target_type, one_line(str(target_id)), reason
+                )
+                break
+            retries += 1
+            self._note_write_repeated(target_type, target_id, attempt, retries)
         # Logged before it is counted: the counter notifies a sensor, and the error must not depend on that.
         if not attempt.reported:
-            _LOGGER.error("Comexio API write failed (%s %s): %s", target_type, one_line(str(target_id)), attempt.error)
+            _LOGGER.error(
+                "Comexio API write failed (%s %s)%s: %s",
+                target_type,
+                one_line(str(target_id)),
+                f" after {retries} repetition(s)" if retries else "",
+                attempt.error,
+            )
         self.write_stats.record_failure(f"{target_type} {target_id}", attempt.error)
         return False
+
+    def _note_write_repeated(
+        self, target_type: str, target_id: str | int, attempt: "_WriteAttempt", retries: int
+    ) -> None:
+        self.write_stats.record_retry()
+        _LOGGER.debug(
+            "Comexio API write (%s %s) dropped after %.3f s, sending it again (%d/%d)",
+            target_type,
+            one_line(str(target_id)),
+            attempt.elapsed,
+            retries,
+            API_WRITE_RETRY_MAX,
+        )
+
+    def _note_write_recovered(self, target_type: str, target_id: str | int, retries: int) -> None:
+        self.write_stats.record_recovered()
+        _LOGGER.info(
+            "Comexio API write (%s %s) went through after %d retry(ies)", target_type, one_line(str(target_id)), retries
+        )
+
+    def _why_not_repeated(
+        self,
+        attempt: "_WriteAttempt",
+        target_type: str,
+        target_id: str | int,
+        value: float | int,
+        identifier: str | None,
+        retries: int,
+        repeat: bool,
+    ) -> str | None:
+        """None if a failed write is sent again, else why not (the debug line names it)."""
+        if not repeat:
+            return "the caller sends this write once (it toggles or pulses its target)"
+        if attempt.reported:
+            return "already reported (another certificate, or the write was rejected before it was sent)"
+        if attempt.error is None or not connection_dropped(attempt.error):
+            return "not a connection closed before the answer"
+        if target_type == "io" and (identifier is None or io_written_over_admin_session(identifier)):
+            return "not an /api/ write"
+        if retries >= API_WRITE_RETRY_MAX:
+            return f"already repeated {retries} times"
+        if attempt.elapsed > API_WRITE_RETRY_WINDOW_SEC:
+            return f"the connection dropped after {attempt.elapsed:.3f} s, Comexio may have taken the command"
+        if self.cached_value is not None and is_same_value(self.cached_value(target_type, target_id), value):
+            return "HA already holds the wanted value"
+        return None
 
     async def _write_once(
         self, target_type: str, target_id: str | int, value: float | int, ext: str | None, identifier: str | None
     ) -> "_WriteAttempt":
         """One send of a write: no error when it went through, else the error and whether it was reported already."""
+        started = time.monotonic()
         try:
             if target_type == "marker":
                 await self.client.set_marker_value(int(target_id), value)
@@ -5819,11 +5922,13 @@ class ComexioAPI:
             self._note_write_met_another_certificate(err, target_type, target_id)
             return _WriteAttempt(err, reported=True)
         except ComexioConnectionError as err:
+            # Taken before the certificate probe below, which is a handshake of its own and takes its time.
+            elapsed = time.monotonic() - started
             if (mismatch := await self._replaced_certificate_behind(err)) is not None:
                 self._note_write_met_another_certificate(mismatch, target_type, target_id)
                 # The cause the counter names is the certificate, as in the log and the repair.
-                return _WriteAttempt(mismatch, reported=True)
-            return _WriteAttempt(err)
+                return _WriteAttempt(mismatch, reported=True, elapsed=elapsed)
+            return _WriteAttempt(err, elapsed=elapsed)
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             return _WriteAttempt(err)

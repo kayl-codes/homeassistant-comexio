@@ -1150,6 +1150,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.api: ComexioAPI = api
         self.api.config_entry = entry
         self.api.on_certificate_mismatch = self._report_certificate_changed
+        self.api.cached_value = self.cached_value
         self.server_id: str = entry.data[CONF_SERVER_ID]
         self.function_plan_catalog = FunctionPlanCatalogManager(hass, self.server_id)
         self.reference_monitor = ReferenceCatalogMonitor(
@@ -5232,6 +5233,18 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._async_publish_pushed_value()
         self._fire_plan_event("knx", knx_id_str, label, value)
         self.schedule_plan_preview_refresh()
+
+    def cached_value(self, target_type: str, target_id: str | int) -> object:
+        """HA's own live value of a write target (marker, KNX object or IO), None if it has none.
+
+        An IO's placeholder value (nothing read yet) is no value: a write of 0 must not look already done.
+        """
+        key = str(target_id)
+        if target_type == "marker":
+            return self.marker_states.get(key)
+        if target_type == "knx":
+            return self.knx_states.get(key)
+        return self.io_states.get(key) if key in self._io_real_value_ids else None
 
     def source_states(self, source: WebioClass) -> dict[str, Any]:
         """Live value cache for a marker-like source category (registry-driven: markers/KNX)."""

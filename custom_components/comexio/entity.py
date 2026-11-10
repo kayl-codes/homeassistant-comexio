@@ -397,9 +397,9 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioC
         """Latest cached value for this source, or None if unknown."""
         return self.coordinator.source_states(self._SOURCE).get(self._marker_id)
 
-    async def _async_source_write(self, value: float | int) -> bool:
-        """Push a value to Comexio via the API (marker/KNX write path)."""
-        return await self.coordinator.api.set_value(self._SOURCE.value, self._marker_id, value)
+    async def _async_source_write(self, value: float | int, *, repeat: bool = True) -> bool:
+        """Push a value to Comexio via the API (marker/KNX write path); repeat=False for a toggle or pulse."""
+        return await self.coordinator.api.set_value(self._SOURCE.value, self._marker_id, value, repeat=repeat)
 
     def _source_cache_update(self, value: float | int) -> None:
         """Optimistically update the coordinator's value cache after a write."""
@@ -415,7 +415,9 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioC
         )
 
 
-async def _async_write_via_bridge(coordinator: ComexioCoordinator, subject: str, k_id: str, value: float | int) -> bool:
+async def _async_write_via_bridge(
+    coordinator: ComexioCoordinator, subject: str, k_id: str, value: float | int, *, repeat: bool = True
+) -> bool:
     """Push a value to a K-element's bridge Marker — never to the K-element itself.
 
     Shared by ComexioKnxEntity (single K-element domains) and ComexioKnxDpt3Entity (DPT3.x
@@ -440,7 +442,7 @@ async def _async_write_via_bridge(coordinator: ComexioCoordinator, subject: str,
             f"Comexio {subject}: no bridge Marker wired yet — run Full Sync or the 'Create KNX bridge "
             "Markers + feedback loop' repair action first"
         )
-    return await coordinator.api.set_value("marker", bridge_marker_id, value)
+    return await coordinator.api.set_value("marker", bridge_marker_id, value, repeat=repeat)
 
 
 class ComexioKnxEntity(ComexioMarkerEntity):
@@ -453,10 +455,10 @@ class ComexioKnxEntity(ComexioMarkerEntity):
 
     _SOURCE = WebioClass.KNX
 
-    async def _async_source_write(self, value: float | int) -> bool:
+    async def _async_source_write(self, value: float | int, *, repeat: bool = True) -> bool:
         """Push a value to Comexio for a KNX object — via its bridge Marker (see _async_write_via_bridge)."""
         return await _async_write_via_bridge(
-            self.coordinator, f"{self._source_label} {self._marker_id}", self._marker_id, value
+            self.coordinator, f"{self._source_label} {self._marker_id}", self._marker_id, value, repeat=repeat
         )
 
     @property

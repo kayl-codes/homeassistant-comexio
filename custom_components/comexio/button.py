@@ -3422,7 +3422,8 @@ class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):
                 f"{self._source_label} {self._marker_id} is no longer a trigger "
                 f"{self._source_label} — reload the integration to refresh entities."
             )
-        if not await self._async_source_write(1):
+        # Once only: the marker's plan input toggles on every incoming edge, so a repeated write could flip it twice.
+        if not await self._async_source_write(1, repeat=False):
             raise write_failed(self.coordinator, f"Failed to trigger {self._source_label} {self._marker_id}")
 
 

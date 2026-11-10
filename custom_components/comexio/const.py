@@ -620,6 +620,13 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
+# An /api/ write that failed because Comexio closed the connection before answering is sent again (#289), at most
+# this many times, and only while each failure came back within API_WRITE_RETRY_WINDOW_SEC of its send: a late
+# drop may mean Comexio took the command and then hung up. The window is an assumption, not a measurement: a local
+# Comexio answers in milliseconds, so a quick drop can also come after the command ran, and a repetition of a
+# marker that pulses on every write could then act twice.
+API_WRITE_RETRY_MAX = 3
+API_WRITE_RETRY_WINDOW_SEC = 0.5
 # The latest failed /api/ writes the "API write errors" sensor names in its attributes.
 API_WRITE_FAILURES_KEPT = 3
 # A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
