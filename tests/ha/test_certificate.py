@@ -25,6 +25,7 @@ from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 import custom_components.comexio as comexio_module
 from custom_components.comexio import config_flow as config_flow_module
 from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.api_write import ATTR_LAST_FAILURES
 from custom_components.comexio.certificate import (
     CERTIFICATE_ACCEPT_LOCKS,
     CERTIFICATE_PUSHES,
@@ -62,6 +63,7 @@ THIRD = "c" * 64
 NEW_HOST = "192.168.1.20"
 MARKER_SWITCH = f"switch.{SERVER_ID}_m1"
 IO_SENSOR = f"sensor.{SERVER_ID}_base_ai1"
+API_WRITE_ERRORS = f"sensor.{SERVER_ID}_api_write_errors"
 
 USER_INPUT = {
     CONF_SERVER_ID: SERVER_ID,
@@ -961,6 +963,16 @@ async def _restart_meeting_another_certificate(
     return entity_ids
 
 
+def _write_for_real(api: ComexioAPI) -> None:
+    """set_value and its send to the client run as in production, for a marker or KNX write.
+
+    The client underneath stays the test's; the coroutines an IO write or a connection error would reach
+    (_set_io_value, _replaced_certificate_behind) stay the fixture's mocks.
+    """
+    api.set_value = partial(ComexioAPI.set_value, api)  # type: ignore[method-assign]
+    api._write_once = partial(ComexioAPI._write_once, api)  # type: ignore[method-assign]
+
+
 def _comexio_answers_again(api_returns: dict, api_attributes: dict, api: ComexioAPI) -> None:
     api_returns["login"] = True
     api_attributes.clear()
@@ -1001,13 +1013,18 @@ async def test_a_restart_meeting_another_certificate_sets_up_read_only_from_the_
     assert hass.states.get(MARKER_SWITCH).state == "on"
 
     # The real write, on a client whose request meets the other certificate: refused, the state stays.
-    api.set_value = partial(ComexioAPI.set_value, api)
+    _write_for_real(api)
     api.client.set_marker_value = AsyncMock(
         side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
     )
     with pytest.raises(HomeAssistantError, match=re.escape(CERTIFICATE_CHANGED_MSG)):
         await hass.services.async_call("switch", "turn_off", {"entity_id": MARKER_SWITCH}, blocking=True)
     assert hass.states.get(MARKER_SWITCH).state == "on"
+    # The refused write shows in the counter sensor the setup registered.
+    errors = hass.states.get(API_WRITE_ERRORS)
+    assert errors.state == "1"
+    (failure,) = errors.attributes[ATTR_LAST_FAILURES]
+    assert (failure["target"], failure["error"]) == ("marker 1", "ComexioCertificateMismatchError")
 
 
 async def test_the_pinned_certificate_back_sets_a_read_only_entry_up_in_full(
@@ -3069,13 +3086,14 @@ async def test_a_poll_meeting_another_certificate_keeps_reading_until_one_gets_t
         assert hass.states.get(MARKER_SWITCH).state == state
 
     # The real write, on a client whose request meets the mismatch.
-    api.set_value = partial(ComexioAPI.set_value, api)
+    _write_for_real(api)
     api.client.set_marker_value = AsyncMock(
         side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED, actual=OTHER)
     )
     with pytest.raises(HomeAssistantError, match=re.escape(CERTIFICATE_CHANGED_MSG)):
         await hass.services.async_call("switch", "turn_on", {"entity_id": MARKER_SWITCH}, blocking=True)
     api.client.set_marker_value.assert_awaited_once()
+    assert hass.states.get(API_WRITE_ERRORS).state == "1"  # the counter sensor of a full setup follows the write
 
     async def pinned_certificate() -> dict:
         api.certificate_mismatch = None

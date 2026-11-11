@@ -128,7 +128,7 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 
 ### API write errors (`ComexioAPI.set_value`, #289)
 
-Every failed write (`set_value` returning False) is counted in `ApiWriteStats` (`api_write.py`, in memory, reset on restart) and shown by the diagnostic sensor "API write errors" (count; attribute `last_failures` with time, target and error class of the latest three).
+Every failed write (`set_value` returning False, whichever way it goes: `/api/` or, for an IO like `AO*`, the admin session) is counted in `ApiWriteStats` (`api_write.py`, in memory, reset on restart) and shown by the diagnostic sensor "API write errors" (count; attribute `last_failures` with time, target and error class of the latest three).
 
 ### Sync strategy (button.py)
 

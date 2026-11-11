@@ -782,7 +782,7 @@ class ComexioAPI:
         # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
         # repair comes up with the first request that meets it, not only with the next full poll.
         self.on_certificate_mismatch: Callable[[str], None] | None = None
-        # Failed /api/ writes, shown by the "API write errors" sensor.
+        # Failed value writes (set_value, over /api/ or the admin session), shown by the "API write errors" sensor.
         self.write_stats = ApiWriteStats()
         # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
         # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
@@ -5785,7 +5785,7 @@ class ComexioAPI:
         Markers, KNX objects and IOs go to /api/ with the API user (Basic Auth). An analog output AO* goes over the
         admin session instead, since /api/ answers "Forbidden" for it (#259).
 
-        Every failed write is counted in write_stats (#289).
+        Every failed write is counted in write_stats, whichever of the two ways it went (#289).
         """
         _write_met_another_certificate.set(None)
         attempt = await self._write_once(target_type, target_id, value, ext, identifier)
