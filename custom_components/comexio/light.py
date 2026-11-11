@@ -119,15 +119,28 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         """Move all the way down — DPT3.007 has no dedicated 'off' telegram."""
         await self._async_move_to(0)
 
-    async def _async_start_move(self, direction: int) -> None:
+    def _same_server(self, settings: tuple[str, ...]) -> bool:
+        """Whether a write still goes where it went when settings were taken (api.write_settings)."""
+        return self.coordinator.api.write_settings("marker") == settings
+
+    async def _async_stop(self, settings: tuple[str, ...]) -> bool:
+        """Write the stop of a move started with these connection settings; False if it did not get through.
+
+        The stop belongs to the server the move went to: after a reconfigure in between it is not sent, the same
+        marker may be another one there.
+        """
+        return self._same_server(settings) and await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
+
+    async def _async_start_move(self, direction: int, settings: tuple[str, ...]) -> None:
         """Write the direction, then the move step code; raises if the dimmer was not started.
 
         The move is sent once (see _async_write_stepcode). Comexio may have taken it before the connection
         dropped, so a failed move is followed by a stop: the dimmer must not ramp on with no stop ever sent.
-        If that stop fails too, the error says the actuator may still be moving.
+        If that stop does not get through either (_async_stop), the error says the actuator may still be moving.
         """
         failed = f"Failed to dim K{self._direction_id}/K{self._stepcode_id}"
-        if not await self._async_write_direction(direction):
+        if not await self._async_write_direction(direction) or not self._same_server(settings):
+            # Not moved either when a reconfigure came during the direction write: the move would go elsewhere.
             raise write_failed(self.coordinator, failed)
         if await self._async_write_stepcode(KNX_DPT3_STEPCODE_MOVE):
             return
@@ -135,9 +148,10 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         # right before it, and that has to be the refused move, not the stop. One of them is raised.
         stopped = write_failed(self.coordinator, failed)
         still_moving = write_failed(
-            self.coordinator, f"{failed}, and the stop telegram after it failed too — the actuator may still be moving"
+            self.coordinator,
+            f"{failed}, and the stop telegram after it did not get through — the actuator may still be moving",
         )
-        if await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK):
+        if await self._async_stop(settings):
             raise stopped
         raise still_moving
 
@@ -160,11 +174,12 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
             if delta != 0:
                 direction = KNX_DPT3_LIGHT_DIRECTION_INCREASE if delta > 0 else KNX_DPT3_LIGHT_DIRECTION_DECREASE
                 duration = abs(delta) / _MAX_BRIGHTNESS * KNX_DPT3_LIGHT_FULL_RANGE_SECONDS
-                await self._async_start_move(direction)
+                settings = self.coordinator.api.write_settings("marker")
+                await self._async_start_move(direction, settings)
                 try:
                     await asyncio.sleep(duration)
                 finally:
-                    stop_ok = await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
+                    stop_ok = await self._async_stop(settings)
 
             self._attr_brightness = target
             self._attr_is_on = target > 0

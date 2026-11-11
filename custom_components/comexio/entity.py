@@ -417,7 +417,13 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioC
 
 
 async def _async_write_via_bridge(
-    coordinator: ComexioCoordinator, subject: str, k_id: str, value: float | int, *, repeat: bool = True
+    coordinator: ComexioCoordinator,
+    subject: str,
+    k_id: str,
+    value: float | int,
+    *,
+    repeat: bool = True,
+    even_if_held: bool = False,
 ) -> bool:
     """Push a value to a K-element's bridge Marker — never to the K-element itself.
 
@@ -443,7 +449,7 @@ async def _async_write_via_bridge(
             f"Comexio {subject}: no bridge Marker wired yet — run Full Sync or the 'Create KNX bridge "
             "Markers + feedback loop' repair action first"
         )
-    return await coordinator.api.set_value("marker", bridge_marker_id, value, repeat=repeat)
+    return await coordinator.api.set_value("marker", bridge_marker_id, value, repeat=repeat, even_if_held=even_if_held)
 
 
 class ComexioKnxEntity(ComexioMarkerEntity):
@@ -511,13 +517,17 @@ class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         A step code 1-7 starts a move relative to where the cover or dimmer stands, so it is sent once: repeated
         after a drop that came when Comexio had already taken it, it could move a second time (and a dimmer's
         timed stop would no longer fit). A dropped move fails instead. The stop code is a state, and a lost stop
-        is the worse outcome, so it stays repeatable.
+        is the worse outcome, so it stays repeatable — also while HA still shows the step marker at 0: nothing
+        says that 0 is not the one from before the move.
         """
-        return await self._async_write_bridge(self._stepcode_id, stepcode, repeat=stepcode == KNX_DPT3_STEPCODE_BREAK)
+        stop = stepcode == KNX_DPT3_STEPCODE_BREAK
+        return await _async_write_via_bridge(
+            self.coordinator, f"K{self._stepcode_id}", self._stepcode_id, stepcode, repeat=stop, even_if_held=stop
+        )
 
-    async def _async_write_bridge(self, k_id: str, value: float | int, *, repeat: bool = True) -> bool:
+    async def _async_write_bridge(self, k_id: str, value: float | int) -> bool:
         """Write one K-element's bridge Marker (see _async_write_via_bridge)."""
-        return await _async_write_via_bridge(self.coordinator, f"K{k_id}", k_id, value, repeat=repeat)
+        return await _async_write_via_bridge(self.coordinator, f"K{k_id}", k_id, value)
 
     @property
     def device_info(self) -> DeviceInfo:
