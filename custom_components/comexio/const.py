@@ -620,6 +620,8 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
+# The latest failed value writes the "API write errors" sensor names in its attributes.
+API_WRITE_FAILURES_KEPT = 3
 # A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
 # reaches HA); the refusals in between are counted and named in the next line.
 WEBHOOK_REFUSAL_LOG_INTERVAL_SEC = 60

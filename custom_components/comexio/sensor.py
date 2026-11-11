@@ -25,6 +25,7 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
+from .api_write import ATTR_LAST_FAILURES
 from .certificate import (
     CONNECTION_CERTIFICATE_CHANGED,
     CONNECTION_HTTP,
@@ -175,6 +176,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             ComexioFreeStorageSensor(coordinator, coordinator.server_id),
             ComexioLastBootSensor(coordinator, coordinator.server_id),
             ComexioConnectionSensor(coordinator, coordinator.server_id),
+            ComexioApiWriteErrorsSensor(coordinator, coordinator.server_id),
         ]
     )
 
@@ -784,6 +786,43 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
                 ir.EVENT_REPAIRS_ISSUE_REGISTRY_UPDATED, _issue_updated, event_filter=_is_this_issue
             )
         )
+
+
+class ComexioApiWriteErrorsSensor(ComexioStableEntityIdMixin, SensorEntity):
+    """Diagnostic counter of the value writes that failed since HA started (#289).
+
+    Counts every failed write of ComexioAPI.set_value (marker, KNX object, IO) whatever the cause and whichever
+    way it goes: /api/, or the admin session for an IO like AO*. The attributes name the
+    latest three failures with time, target and error class. Kept in memory: HA restarting or the entry
+    reloading starts at 0. Not a CoordinatorEntity: a write fails between polls, so it follows the counter itself.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:alert-circle-outline"
+    _attr_translation_key = "api_write_errors"
+    _unrecorded_attributes = frozenset({ATTR_LAST_FAILURES})
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self._attr_unique_id = f"comexio_{server_id}_api_write_errors"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    @property
+    def native_value(self) -> int:
+        return self.coordinator.api.write_stats.failed
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self.coordinator.api.write_stats.attributes()
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self.async_on_remove(self.coordinator.api.write_stats.add_listener(self.async_write_ha_state))
 
 
 class ComexioExtensionCountSensor(CoordinatorEntity[ComexioCoordinator], SensorEntity):

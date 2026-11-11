@@ -44,6 +44,7 @@ from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, Com
         ("comexio_iosrv1_onewire_problem", "iosrv1_onewire_problem"),
         ("comexio_iosrv1_fub19", "iosrv1_fub19"),
         ("comexio_iosrv1_orphaned_backups", "iosrv1_orphaned_backups"),
+        ("comexio_iosrv1_api_write_errors", "iosrv1_api_write_errors"),
         ("comexio_iosrv1_managed_plans_problem", "iosrv1_managed_plans_problem"),
         ("comexio_iosrv1_function_plan_auto_start", "iosrv1_function_plan_auto_start"),
         ("comexio_iosrv1_function_plan_auto_start_user", "iosrv1_function_plan_auto_start_user"),
