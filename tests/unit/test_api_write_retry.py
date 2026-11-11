@@ -6,6 +6,7 @@ import ast
 import asyncio
 import inspect
 import logging
+import re
 import textwrap
 from types import SimpleNamespace
 from typing import Any
@@ -13,9 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError, ComexioRequestRejectedError
 import aiohttp
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 
-from custom_components.comexio import api as api_module, entity as entity_module
+from custom_components.comexio import api as api_module, entity as entity_module, light as light_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.api_write import (
     ApiWriteStats,
@@ -26,10 +28,12 @@ from custom_components.comexio.button import ComexioKnxTriggerButton, ComexioMar
 from custom_components.comexio.const import (
     API_WRITE_RETRY_MAX,
     API_WRITE_RETRY_WINDOW_SEC,
+    CERTIFICATE_CHANGED_MSG,
     SOURCE_CATEGORIES,
     MarkerKind,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.light import ComexioKnxLight
 
 DROPPED_CLASS = "ComexioConnectionError (ServerDisconnectedError)"
 
@@ -114,7 +118,7 @@ def test_the_value_lookup_gets_the_type_and_id_of_the_target(api: ComexioAPI, cl
 
     _run(api.set_value("marker", 7, 1))
 
-    assert seen == [("marker", 7)]
+    assert seen == [("marker", "7")]
 
 
 def test_a_drop_that_came_back_late_is_not_repeated(
@@ -176,6 +180,215 @@ def test_a_knx_write_is_repeated(api: ComexioAPI, client: MagicMock) -> None:
     client.set_knx_value.side_effect = [_dropped(), None]
 
     assert _run(api.set_value("knx", 9, 1)) is True
+
+    assert client.set_knx_value.await_count == 2
+    client.set_marker_value.assert_not_awaited()
+    client.set_io_value.assert_not_awaited()
+    assert (api.write_stats.failed, api.write_stats.retries, api.write_stats.recovered) == (0, 1, 1)
+
+
+@pytest.mark.parametrize("target_type", ["marker", "knx"])
+@pytest.mark.parametrize("spelling", [5, "5", "05", " 5 "])
+def test_the_value_lookup_gets_a_number_id_in_one_spelling(
+    api: ComexioAPI, client: MagicMock, target_type: str, spelling: str | int
+) -> None:
+    # The coordinator keys its values by "5": asked for "05", it would know none and the drop would be repeated.
+    api.cached_value = lambda kind, key: 1 if (kind, key) == (target_type, "5") else None
+    getattr(client, f"set_{target_type}_value").side_effect = _dropped()
+
+    assert _run(api.set_value(target_type, spelling, 1)) is False
+
+    assert getattr(client, f"set_{target_type}_value").await_count == 1
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target_id", "key"),
+    [
+        ("marker", 5, ("marker", "5")),
+        ("marker", "05", ("marker", "5")),
+        ("knx", "007", ("knx", "7")),
+        ("marker", "no number", ("marker", "no number")),
+        ("io", "05", ("io", "05")),
+    ],
+)
+def test_the_key_of_a_write_target(target_type: str, target_id: str | int, key: tuple[str, str]) -> None:
+    assert api_module._write_target_key(target_type, target_id) == key
+
+
+def test_a_repetition_is_not_sent_once_the_connection_settings_changed(api: ComexioAPI, client: MagicMock) -> None:
+    async def drop_and_reconfigure(_marker: int, _value: int) -> None:
+        api.host = "other-comexio.example"
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_and_reconfigure
+
+    assert _run(api.set_value("marker", 5, 1)) is False
+
+    # Marker 5 of the new server may be something else: the one send went to the old one, none to the new one.
+    assert client.set_marker_value.await_count == 1
+    stats = api.write_stats
+    assert (stats.failed, stats.retries, stats.recovered) == (1, 1, 0)
+    assert stats.last_failures[0].error == "ComexioError"
+
+
+def test_a_write_that_waited_for_its_turn_is_not_sent_once_the_connection_settings_changed(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    sent: list[int] = []
+
+    async def send(_marker: int, value: int) -> None:
+        sent.append(value)
+        await asyncio.sleep(0.02)
+        api.host = "other-comexio.example"
+
+    client.set_marker_value.side_effect = send
+
+    async def both() -> list[bool]:
+        return list(await asyncio.gather(api.set_value("marker", 5, 0), api.set_value("marker", 5, 1)))
+
+    assert _run(both()) == [True, False]
+
+    assert sent == [0]
+    assert api.write_stats.failed == 1
+
+
+def test_a_write_with_unchanged_connection_settings_is_sent(api: ComexioAPI, client: MagicMock) -> None:
+    assert _run(api.set_value("marker", 5, 1)) is True
+
+    client.set_marker_value.assert_awaited_once_with(5, 1)
+
+
+def _dpt3_entity(set_value: AsyncMock) -> entity_module.ComexioKnxDpt3Entity:
+    entity = entity_module.ComexioKnxDpt3Entity.__new__(entity_module.ComexioKnxDpt3Entity)
+    entity.coordinator = SimpleNamespace(  # type: ignore[assignment]
+        _knx_bridge_marker_by_k_id=lambda: {"9": "77", "10": "78"}, api=SimpleNamespace(set_value=set_value)
+    )
+    entity._direction_id = "9"
+    entity._stepcode_id = "10"
+    return entity
+
+
+@pytest.mark.parametrize("stepcode", [1, 4, 7])
+def test_a_dpt3_move_step_is_written_once_because_it_moves_from_where_the_target_stands(stepcode: int) -> None:
+    set_value = AsyncMock(return_value=True)
+
+    assert _run(_dpt3_entity(set_value)._async_write_stepcode(stepcode)) is True
+
+    set_value.assert_awaited_once_with("marker", "78", stepcode, repeat=False)
+
+
+def _dimmer(set_value: AsyncMock) -> ComexioKnxLight:
+    light = ComexioKnxLight.__new__(ComexioKnxLight)
+    light.coordinator = MagicMock()
+    light.coordinator.api.set_value = set_value
+    light.coordinator._knx_bridge_marker_by_k_id.return_value = {"9": "77", "10": "78"}
+    light._direction_id, light._stepcode_id = "9", "10"
+    light._attr_brightness, light._move_lock = 0, asyncio.Lock()
+    light.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+    return light
+
+
+def _sent(set_value: AsyncMock) -> list[tuple[str, int, bool]]:
+    return [(call.args[1], call.args[2], call.kwargs["repeat"]) for call in set_value.await_args_list]
+
+
+def test_a_dimmer_whose_move_was_not_confirmed_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The move is sent once; Comexio may have taken it before the connection dropped.
+    monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
+    set_value = AsyncMock(side_effect=[True, False, True])
+    light = _dimmer(set_value)
+
+    move = light._async_move_to(255)
+    with pytest.raises(RuntimeError, match=r"^Failed to dim K9/K10$"):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True)]
+    assert light._attr_brightness == 0
+
+
+def test_a_dimmer_whose_direction_write_failed_is_not_moved_and_gets_no_stop(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
+    set_value = AsyncMock(return_value=False)
+    light = _dimmer(set_value)
+
+    move = light._async_move_to(255)
+    with pytest.raises(RuntimeError, match=r"^Failed to dim K9/K10$"):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True)]
+
+
+def test_a_failed_stop_after_an_unconfirmed_move_tells_the_user_the_actuator_may_still_move(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
+    set_value = AsyncMock(side_effect=[True, False, False])
+    light = _dimmer(set_value)
+
+    move = light._async_move_to(255)
+    with pytest.raises(RuntimeError, match=r"^Failed to dim K9/K10, and the stop .* may still be moving$"):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True)]
+
+
+@pytest.mark.parametrize("stop_ok", [True, False])
+def test_the_error_of_an_unconfirmed_move_names_the_certificate_the_move_met_not_the_stop(stop_ok: bool) -> None:
+    light = _dimmer(AsyncMock())
+    api = light.coordinator.api
+    outcomes = iter([(True, False), (False, True), (stop_ok, False)])  # direction, move, stop
+
+    async def write(*_args: object, **_kwargs: object) -> bool:
+        ok, api.last_write_met_another_certificate = next(outcomes)
+        return ok
+
+    api.set_value = write
+
+    move = light._async_move_to(255)
+    with pytest.raises(HomeAssistantError, match=re.escape(CERTIFICATE_CHANGED_MSG)):
+        asyncio.run(move)
+
+
+def test_the_error_of_an_unconfirmed_move_names_no_certificate_the_stop_alone_met() -> None:
+    light = _dimmer(AsyncMock())
+    api = light.coordinator.api
+    outcomes = iter([(True, False), (False, False), (False, True)])  # direction, move, stop
+
+    async def write(*_args: object, **_kwargs: object) -> bool:
+        ok, api.last_write_met_another_certificate = next(outcomes)
+        return ok
+
+    api.set_value = write
+
+    move = light._async_move_to(255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(move)
+
+    assert CERTIFICATE_CHANGED_MSG not in str(raised.value)
+
+
+def test_a_dimmer_move_that_went_through_is_held_and_then_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(light_module, "KNX_DPT3_LIGHT_FULL_RANGE_SECONDS", 0.0)
+    set_value = AsyncMock(return_value=True)
+    light = _dimmer(set_value)
+
+    _run(light._async_move_to(255))
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True)]
+    assert light._attr_brightness == 255
+
+
+def test_a_dpt3_stop_and_a_dpt3_direction_stay_repeatable() -> None:
+    set_value = AsyncMock(return_value=True)
+    entity = _dpt3_entity(set_value)
+
+    _run(entity._async_write_stepcode(0))
+    _run(entity._async_write_direction(1))
+
+    assert [call.args + (call.kwargs["repeat"],) for call in set_value.await_args_list] == [
+        ("marker", "78", 0, True),
+        ("marker", "77", 1, True),
+    ]
 
 
 def test_the_stats_attributes_name_retries_recoveries_and_the_failures() -> None:
@@ -284,7 +497,7 @@ def test_the_cached_value_is_read_again_before_every_repetition(api: ComexioAPI,
     ("target_type", "target_id", "ext", "identifier", "expected"),
     [
         ("io", "103", "LED-Dimmer A3", "Q5", ("io", "103")),
-        ("knx", 9, None, None, ("knx", 9)),
+        ("knx", 9, None, None, ("knx", "9")),
     ],
 )
 def test_the_value_lookup_gets_io_and_knx_targets_too(
@@ -406,8 +619,9 @@ def test_a_newer_write_to_the_same_target_waits_and_lands_after_the_repetitions_
     assert sent == [0] * (1 + API_WRITE_RETRY_MAX) + [1]
 
 
+@pytest.mark.parametrize("other_spelling", ["5", "05", " 5 "])
 def test_the_same_target_under_another_id_type_shares_the_lock(
-    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch, other_spelling: str
 ) -> None:
     monkeypatch.setattr(api_module, "API_WRITE_RETRY_WINDOW_SEC", 10.0)
     running = 0
@@ -423,7 +637,7 @@ def test_the_same_target_under_another_id_type_shares_the_lock(
     client.set_marker_value.side_effect = send
 
     async def both() -> None:
-        await asyncio.gather(api.set_value("marker", 5, 0), api.set_value("marker", "5", 1))
+        await asyncio.gather(api.set_value("marker", 5, 0), api.set_value("marker", other_spelling, 1))
 
     _run(both())
 

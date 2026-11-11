@@ -627,7 +627,7 @@ COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
 # marker that pulses on every write could then act twice.
 API_WRITE_RETRY_MAX = 3
 API_WRITE_RETRY_WINDOW_SEC = 0.5
-# The latest failed /api/ writes the "API write errors" sensor names in its attributes.
+# The latest failed value writes the "API write errors" sensor names in its attributes.
 API_WRITE_FAILURES_KEPT = 3
 # A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
 # reaches HA); the refusals in between are counted and named in the next line.

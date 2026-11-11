@@ -1,4 +1,7 @@
-"""Failed and repeated API writes: the counters behind the diagnostic sensor, and when a write is sent again (#289)."""
+"""Failed and repeated value writes (ComexioAPI.set_value, #289).
+
+The counters behind the diagnostic sensor, and when a write is sent again.
+"""
 
 from __future__ import annotations
 
@@ -59,10 +62,11 @@ class WriteFailure:
 
 
 class ApiWriteStats:
-    """What went wrong with the /api/ writes of one config entry since HA started (or the entry was loaded).
+    """What went wrong with the value writes of one config entry since HA started (or the entry was loaded).
 
-    failed counts every write set_value reported as failed, whatever the cause; retries the extra sends after a
-    dropped connection, and recovered the writes that a retry saved. Kept in memory only: a restart starts at 0.
+    failed counts every write set_value reported as failed, whatever the cause and whichever way it went
+    (/api/, or the admin session for an IO like AO*); retries the extra sends after a dropped connection, and
+    recovered the writes that a retry saved. Kept in memory only: a restart starts at 0.
     """
 
     def __init__(self) -> None:

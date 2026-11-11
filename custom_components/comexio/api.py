@@ -135,6 +135,14 @@ class _WriteAttempt(NamedTuple):
     elapsed: float = 0.0
 
 
+def _write_target_key(target_type: str, target_id: str | int) -> tuple[str, str]:
+    """A write target as lock and cache key: a marker or KNX id in the one spelling its write uses (5, "5", "05")."""
+    if target_type in {"marker", "knx"}:
+        with suppress(TypeError, ValueError):
+            return target_type, str(int(target_id))
+    return target_type, str(target_id)
+
+
 def _webhook_path(
     server_id: str, security: WebhookSecurity | None
 ) -> str | Callable[[WebioClass, Mapping[str, Any] | OneWireSensor], str]:
@@ -787,8 +795,9 @@ class ComexioAPI:
         # Called with the presented fingerprint on every mismatch met here, so the certificate_changed
         # repair comes up with the first request that meets it, not only with the next full poll.
         self.on_certificate_mismatch: Callable[[str], None] | None = None
-        # Failed and repeated /api/ writes, shown by the "API write errors" sensor; cached_value (set by the
-        # coordinator) gives HA's own value of a write's target, so a drop is not repeated when it is already set.
+        # Failed value writes (set_value, over /api/ or the admin session) and the repetitions of dropped /api/
+        # writes, shown by the "API write errors" sensor; cached_value (set by the coordinator) gives HA's own
+        # value of a write's target, so a drop is not repeated when it is already set.
         self.write_stats = ApiWriteStats()
         self.cached_value: Callable[[str, str | int], object] | None = None
         # One lock per target being written (dropped with its last user), so a repetition of an older write never
@@ -5800,8 +5809,13 @@ class ComexioAPI:
         A write over /api/ that failed because Comexio closed the connection before it answered is sent again, at
         most API_WRITE_RETRY_MAX times (#289), while every drop came back within API_WRITE_RETRY_WINDOW_SEC and HA's
         own value for the target is not yet the wanted one. Writes to one target run one after the other, so a
-        repetition of an older write never lands after a newer one. Every failure and every repetition is counted in
-        write_stats. A caller whose write toggles or pulses its target (a trigger marker) passes repeat=False.
+        repetition of an older write never lands after a newer one. Every failure, whichever of the two ways the
+        write went, and every repetition is counted in write_stats. A caller whose write toggles or pulses its
+        target (a trigger marker, a relative KNX step) passes repeat=False.
+
+        The connection settings are taken when the write is issued: a write that waited for its turn or is due for
+        a repetition after a reconfigure changed them is not sent to the new ones, where the same id may name
+        another target. It fails and is counted.
 
         The window is an assumption, not a measurement: a Comexio on the local network answers in milliseconds, so a
         drop that comes back quickly may also have come after the command ran. A repetition of a write that toggles
@@ -5809,12 +5823,13 @@ class ComexioAPI:
         already holds the wanted value, the drop is not repeated and the write is still reported as failed.
         """
         _write_met_another_certificate.set(None)
-        key = (target_type, str(target_id))
+        settings = self._credentials()
+        key = _write_target_key(target_type, target_id)
         lock = self._write_locks.get(key)
         if lock is None:
             lock = self._write_locks[key] = asyncio.Lock()
         async with lock:
-            return await self._write_and_repeat(target_type, target_id, value, ext, identifier, repeat)
+            return await self._write_and_repeat(target_type, target_id, value, ext, identifier, repeat, settings)
 
     async def _write_and_repeat(
         self,
@@ -5824,11 +5839,12 @@ class ComexioAPI:
         ext: str | None,
         identifier: str | None,
         repeat: bool,
+        settings: tuple[str, ...],
     ) -> bool:
         """set_value for one target at a time: send, and send again while _why_not_repeated has no objection."""
         retries = 0
         while True:
-            attempt = await self._write_once(target_type, target_id, value, ext, identifier)
+            attempt = await self._write_once(target_type, target_id, value, ext, identifier, settings)
             if attempt.error is None:
                 if retries:
                     self._note_write_recovered(target_type, target_id, retries)
@@ -5895,14 +5911,27 @@ class ComexioAPI:
             return f"already repeated {retries} times"
         if attempt.elapsed > API_WRITE_RETRY_WINDOW_SEC:
             return f"the connection dropped after {attempt.elapsed:.3f} s, Comexio may have taken the command"
-        if self.cached_value is not None and is_same_value(self.cached_value(target_type, target_id), value):
+        cached_key = _write_target_key(target_type, target_id)
+        if self.cached_value is not None and is_same_value(self.cached_value(*cached_key), value):
             return "HA already holds the wanted value"
         return None
 
     async def _write_once(
-        self, target_type: str, target_id: str | int, value: float | int, ext: str | None, identifier: str | None
+        self,
+        target_type: str,
+        target_id: str | int,
+        value: float | int,
+        ext: str | None,
+        identifier: str | None,
+        settings: tuple[str, ...],
     ) -> "_WriteAttempt":
-        """One send of a write: no error when it went through, else the error and whether it was reported already."""
+        """One send of a write: no error when it went through, else the error and whether it was reported already.
+
+        settings are the connection settings the write was issued with (_credentials): once they differ, nothing is
+        sent, since self.client is then one for another server or user.
+        """
+        if self._credentials() != settings:
+            return _WriteAttempt(ComexioError("connection settings changed since the write was issued: not sent"))
         started = time.monotonic()
         try:
             if target_type == "marker":

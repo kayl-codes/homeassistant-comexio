@@ -14,6 +14,7 @@ from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
+    KNX_DPT3_STEPCODE_BREAK,
     ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
@@ -505,12 +506,18 @@ class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         return await self._async_write_bridge(self._direction_id, direction)
 
     async def _async_write_stepcode(self, stepcode: int) -> bool:
-        """Write the step-code K-element's bridge Marker (see class docstring)."""
-        return await self._async_write_bridge(self._stepcode_id, stepcode)
+        """Write the step-code K-element's bridge Marker (see class docstring).
 
-    async def _async_write_bridge(self, k_id: str, value: float | int) -> bool:
+        A step code 1-7 starts a move relative to where the cover or dimmer stands, so it is sent once: repeated
+        after a drop that came when Comexio had already taken it, it could move a second time (and a dimmer's
+        timed stop would no longer fit). A dropped move fails instead. The stop code is a state, and a lost stop
+        is the worse outcome, so it stays repeatable.
+        """
+        return await self._async_write_bridge(self._stepcode_id, stepcode, repeat=stepcode == KNX_DPT3_STEPCODE_BREAK)
+
+    async def _async_write_bridge(self, k_id: str, value: float | int, *, repeat: bool = True) -> bool:
         """Write one K-element's bridge Marker (see _async_write_via_bridge)."""
-        return await _async_write_via_bridge(self.coordinator, f"K{k_id}", k_id, value)
+        return await _async_write_via_bridge(self.coordinator, f"K{k_id}", k_id, value, repeat=repeat)
 
     @property
     def device_info(self) -> DeviceInfo:

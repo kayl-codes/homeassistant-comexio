@@ -119,6 +119,28 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         """Move all the way down — DPT3.007 has no dedicated 'off' telegram."""
         await self._async_move_to(0)
 
+    async def _async_start_move(self, direction: int) -> None:
+        """Write the direction, then the move step code; raises if the dimmer was not started.
+
+        The move is sent once (see _async_write_stepcode). Comexio may have taken it before the connection
+        dropped, so a failed move is followed by a stop: the dimmer must not ramp on with no stop ever sent.
+        If that stop fails too, the error says the actuator may still be moving.
+        """
+        failed = f"Failed to dim K{self._direction_id}/K{self._stepcode_id}"
+        if not await self._async_write_direction(direction):
+            raise write_failed(self.coordinator, failed)
+        if await self._async_write_stepcode(KNX_DPT3_STEPCODE_MOVE):
+            return
+        # The two possible errors, built before the stop is written: write_failed names the cause of the write
+        # right before it, and that has to be the refused move, not the stop. One of them is raised.
+        stopped = write_failed(self.coordinator, failed)
+        still_moving = write_failed(
+            self.coordinator, f"{failed}, and the stop telegram after it failed too — the actuator may still be moving"
+        )
+        if await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK):
+            raise stopped
+        raise still_moving
+
     async def _async_move_to(self, target: int) -> None:
         """Hold a move telegram proportional to the estimated brightness delta, then break.
 
@@ -138,10 +160,7 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
             if delta != 0:
                 direction = KNX_DPT3_LIGHT_DIRECTION_INCREASE if delta > 0 else KNX_DPT3_LIGHT_DIRECTION_DECREASE
                 duration = abs(delta) / _MAX_BRIGHTNESS * KNX_DPT3_LIGHT_FULL_RANGE_SECONDS
-                if not await self._async_write_direction(direction) or not await self._async_write_stepcode(
-                    KNX_DPT3_STEPCODE_MOVE
-                ):
-                    raise write_failed(self.coordinator, f"Failed to dim K{self._direction_id}/K{self._stepcode_id}")
+                await self._async_start_move(direction)
                 try:
                     await asyncio.sleep(duration)
                 finally:
