@@ -18,7 +18,9 @@ def comexio_api(monkeypatch: pytest.MonkeyPatch) -> ComexioAPI:
     The only place that constructs a ComexioAPI in the unit tests: once the communication
     layer moves into its own library, only this fixture needs to follow the new constructor.
     """
-    monkeypatch.setattr(api_module, "async_create_clientsession", lambda *_args, **_kwargs: MagicMock())
+    # A mock, so a test can ask how the sessions were asked for (api_module.async_create_session.call_args_list).
+    create_session = MagicMock(side_effect=lambda *_args, **_kwargs: MagicMock())
+    monkeypatch.setattr(api_module, "async_create_session", create_session)
     # The real kwargs build an aiohttp CookieJar, which needs a running event loop.
     monkeypatch.setattr(ComexioAPI, "_build_session_kwargs", lambda _self: {})
     return ComexioAPI(MagicMock(), "192.168.1.10", "admin", "admin")

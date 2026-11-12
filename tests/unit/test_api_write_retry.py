@@ -1762,3 +1762,76 @@ def test_a_drop_is_repeated_for_a_knx_object_or_io_that_does_not_yet_hold_the_va
 
     assert getattr(client, method).await_count == 2
     assert api.write_stats.retries == 1
+
+
+def test_a_write_issued_after_the_entry_was_unloaded_is_not_sent(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The session is gone with the entry: aiohttp would answer the request with a RuntimeError no caller expects.
+    api.close()
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    assert client.set_marker_value.await_count == 0
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line == "Comexio API write failed (marker 5): the entry was unloaded: not sent"
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+
+
+def test_a_repetition_is_not_sent_once_the_entry_was_unloaded(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def drop_and_unload(_marker: int, _value: int) -> None:
+        api.close()
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_and_unload
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("(not sent again: the entry was unloaded meanwhile)")
+    assert client.set_marker_value.await_count == 1
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)  # a repetition that is not sent is not counted
+
+
+def test_an_unloaded_entry_is_the_reason_named_even_if_the_value_changed_too(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    held = {"value": 0}
+    api.cached_value = lambda _type, _id: held["value"]
+
+    async def drop_unload_and_push(_marker: int, _value: int) -> None:
+        api.close()
+        held["value"] = 7
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_unload_and_push
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("(not sent again: the entry was unloaded meanwhile)")
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target_id", "ext", "identifier", "method"),
+    [("knx", 9, None, None, "set_knx_value"), ("io", "103", "LED-Dimmer A3", "Q5", "set_io_value")],
+)
+def test_no_kind_of_write_is_sent_after_the_entry_was_unloaded(
+    api: ComexioAPI,
+    client: MagicMock,
+    target_type: str,
+    target_id: str | int,
+    ext: str | None,
+    identifier: str | None,
+    method: str,
+) -> None:
+    api.close()
+
+    assert _run(api.set_value(target_type, target_id, 1, ext, identifier)) is False
+
+    assert getattr(client, method).await_count == 0

@@ -620,6 +620,14 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
+# How long (seconds) an idle connection to Comexio is kept for the next request (#289). Comexio closes an idle
+# connection after about 6 s (measured 2026-11-11: a request sent on one idle for 5.5-6.5 s met the close, 51 of
+# 767 with aiohttp's 15 s); a POST that meets it fails with "Server disconnected", and whether Comexio took it is
+# unknown. 3 s stays well clear of that window (0 failures in the same measurement).
+COMEXIO_KEEPALIVE_TIMEOUT_SEC = 3
+# A session no longer used (entry unloaded, preview session replaced) closes its connections this long after
+# COMEXIO_HTTP_TIMEOUT_SEC: no request of it can still be under way then, so none is cut off.
+COMEXIO_CONNECTOR_CLOSE_MARGIN_SEC = 5
 # An /api/ write that failed because Comexio closed the connection before answering is sent again (#289), at most
 # this many times, and only while each failure came back within API_WRITE_RETRY_WINDOW_SEC of its send: a late
 # drop may mean Comexio took the command and then hung up. The window is an assumption, not a measurement: a local

@@ -1,9 +1,11 @@
 """ComexioAPI's adapters over aiocomexio.ComexioClient: each ComexioError onto the old return contract."""
 
 import asyncio
+from collections.abc import Callable
 import contextlib
 from datetime import timedelta
 from functools import partial
+import inspect
 import logging
 from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock, call
@@ -2211,3 +2213,107 @@ def test_system_info_without_any_part_is_refused(comexio_api: ComexioAPI, client
         asyncio.run(reading)
     client.get_system_info.assert_not_awaited()
     client.get_uptime.assert_not_awaited()
+
+
+def test_the_api_takes_its_sessions_from_the_keep_alive_module(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The main session goes with the entry, a preview session (a new one after every lapsed login) does not.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    session = asyncio.run(comexio_api.ensure_preview_session())
+
+    assert session is not None
+    assert comexio_api._preview_session is session
+    discard.assert_not_called()  # a session that logged in is kept
+
+    assert api_module.async_create_session.call_args_list == [  # type: ignore[attr-defined]
+        call(comexio_api.hass, bind_to_entry=True),
+        call(comexio_api.hass, bind_to_entry=False),
+    ]
+
+
+def test_close_discards_the_main_and_the_preview_session(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    main, preview = comexio_api.session, MagicMock()
+    _install_preview(comexio_api, preview, MagicMock())
+
+    comexio_api.close()
+
+    assert discard.call_args_list == [call(main), call(preview)]
+
+
+def test_a_failed_preview_login_closes_its_unused_session_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Else every failed login of the preview poll would keep a connector for two minutes.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    comexio_api._login = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    assert discard.call_count == 1
+    assert discard.call_args.kwargs == {"unused": True}
+    assert discard.call_args.args[0] is not comexio_api.session
+
+
+def test_the_api_never_drops_a_session_on_its_own() -> None:
+    # session.detach() would leave the session's connector open for good, session.close() would cut a request off:
+    # every session is created and dropped through http_session.
+    source = inspect.getsource(api_module)
+    assert ".detach(" not in source
+    assert "async_create_clientsession(" not in source
+
+
+def _change_host(api: ComexioAPI) -> None:
+    api.host = "other.local"
+
+
+@pytest.mark.parametrize("meanwhile", [_change_host, ComexioAPI.close], ids=["settings changed", "entry unloaded"])
+def test_a_preview_session_outdated_during_its_login_is_closed_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, meanwhile: Callable[[ComexioAPI], None]
+) -> None:
+    async def login(_client: Any, _credentials: Any) -> bool:
+        meanwhile(comexio_api)
+        return True
+
+    comexio_api._login = login  # type: ignore[method-assign]
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    assert comexio_api._preview_session is None
+    (preview_discard,) = [c for c in discard.call_args_list if c.kwargs == {"unused": True}]
+    assert preview_discard.args[0] is not comexio_api.session
+
+
+@pytest.mark.parametrize("failing", ["_login", "_new_client"])
+def test_a_preview_session_is_closed_at_once_when_its_login_or_its_client_raises(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    monkeypatch.setattr(comexio_api, failing, MagicMock(side_effect=RuntimeError("boom")))
+
+    opening = comexio_api.ensure_preview_session()
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(opening)
+
+    assert comexio_api._preview_session is None
+    assert discard.call_count == 1
+    assert discard.call_args.kwargs == {"unused": True}
+
+
+def test_no_preview_session_is_created_once_the_entry_was_unloaded(comexio_api: ComexioAPI) -> None:
+    comexio_api.close()
+
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    assert api_module.async_create_session.call_count == 1  # type: ignore[attr-defined]  # the main session only
