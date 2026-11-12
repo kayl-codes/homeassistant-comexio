@@ -1,9 +1,12 @@
 """ComexioAPI's adapters over aiocomexio.ComexioClient: each ComexioError onto the old return contract."""
 
+import ast
 import asyncio
+from collections.abc import Callable
 import contextlib
 from datetime import timedelta
 from functools import partial
+import inspect
 import logging
 from typing import Any, NamedTuple
 from unittest.mock import AsyncMock, MagicMock, call
@@ -2211,3 +2214,239 @@ def test_system_info_without_any_part_is_refused(comexio_api: ComexioAPI, client
         asyncio.run(reading)
     client.get_system_info.assert_not_awaited()
     client.get_uptime.assert_not_awaited()
+
+
+def test_the_api_takes_its_sessions_from_the_keep_alive_module(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The main session goes with the entry, a preview session (a new one after every lapsed login) does not.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    session = asyncio.run(comexio_api.ensure_preview_session())
+
+    assert session is not None
+    assert comexio_api._preview_session is session
+    discard.assert_not_called()  # a session that logged in is kept
+
+    assert api_module.async_create_session.call_args_list == [  # type: ignore[attr-defined]
+        call(comexio_api.hass, bind_to_entry=True),
+        call(comexio_api.hass, bind_to_entry=False),
+    ]
+
+
+def test_close_discards_the_main_and_the_preview_session(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    main, preview = comexio_api.session, MagicMock()
+    _install_preview(comexio_api, preview, MagicMock())
+
+    comexio_api.close()
+
+    assert discard.call_args_list == [call(main, unused=False), call(preview, unused=False)]
+
+
+def test_close_immediately_closes_both_sessions_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The config flow's test login has ended every request: its connections need no grace period.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    main, preview = comexio_api.session, MagicMock()
+    _install_preview(comexio_api, preview, MagicMock())
+
+    comexio_api.close(immediately=True)
+
+    assert discard.call_args_list == [call(main, unused=True), call(preview, unused=True)]
+
+
+def test_close_immediately_without_a_preview_session_discards_the_main_one_only(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The common case of the config flow's test login: no preview session was ever opened.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    main = comexio_api.session
+
+    comexio_api.close(immediately=True)
+
+    assert discard.call_args_list == [call(main, unused=True)]
+
+
+def test_a_failed_preview_login_closes_its_unused_session_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Else every failed login of the preview poll would keep a connector for two minutes.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    comexio_api._login = AsyncMock(return_value=False)  # type: ignore[method-assign]
+
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    assert discard.call_count == 1
+    assert discard.call_args.kwargs == {"unused": True}
+    assert discard.call_args.args[0] is not comexio_api.session
+
+
+def _is_session_name(node: ast.AST) -> bool:
+    """A name or attribute whose own last part names a session (`session`, `self._preview_session`), not what hangs
+    off one (`self.session.connector`)."""
+    if isinstance(node, ast.Name):
+        return "session" in node.id.lower()
+    return isinstance(node, ast.Attribute) and "session" in node.attr.lower()
+
+
+_SESSION_DROPS = frozenset({"close", "detach"})  # close() cuts a request off, detach() leaves the connector open
+
+
+def _alias_key(node: ast.AST) -> str | None:
+    """What an alias is called: the name of a plain name (`s`) or the attribute of an attribute (`self._s`)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    return node.attr if isinstance(node, ast.Attribute) else None
+
+
+def _session_drop_lines(source: str) -> list[int]:
+    """Lines that close or detach a session: `x.session.close()` in any case, `getattr(session, "detach")` and an
+    alias of a session, a plain name or an attribute, however long the chain (`s = self.session; t = s; t.detach()`,
+    `self._s = self.session; self._s.close()`). Not caught: unpacking, loop, walrus or `with` targets, a bound method
+    taken first (`cb = self.session.detach; cb()`), a computed `getattr` name, and the alias set is one per module
+    (an attribute alias counts by its attribute name, whatever object it hangs off)."""
+    tree = ast.parse(source)
+    aliases: set[str] = set()
+    assigned = [
+        (key, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if (key := _alias_key(target)) is not None
+    ]
+    grew = True
+    while grew:
+        grew = False
+        for name, value in assigned:
+            names_one = _is_session_name(value) or (_alias_key(value) in aliases)
+            if name not in aliases and names_one:
+                aliases.add(name)
+                grew = True
+
+    def names_a_session(node: ast.AST) -> bool:
+        return _is_session_name(node) or (_alias_key(node) in aliases)
+
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr in _SESSION_DROPS and names_a_session(func.value):
+            lines.append(node.lineno)
+        elif isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) == 2:
+            target, name = node.args
+            if isinstance(name, ast.Constant) and name.value in _SESSION_DROPS and names_a_session(target):
+                lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "self.session.close()",
+        "self.Session.close()",
+        "self._preview_session.close()",
+        "s = self.session\ns.close()",
+        "s: object = self.session\ns.close()",
+        "s = self.session\nt = s\nt.close()",
+        "self._s = self.session\nself._s.close()",
+        "self._s = self.session\nself._t = self._s\nself._t.detach()",
+        "self._s = self.session\nother._s.close()",  # an attribute alias counts by its name, whatever it hangs off
+        "getattr(self.session, 'close')",
+        "self.session.detach()",
+        "self._preview_session.detach()",
+        "s = self.session\nt = s\nt.detach()",
+        "getattr(self.session, 'detach')()",
+        "getattr(self.session, 'detach')",
+    ],
+)
+def test_the_check_against_dropping_a_session_sees_the_ways_around_it(source: str) -> None:
+    assert _session_drop_lines(source) != []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "self.close()",
+        "connector.close()",
+        "c = self.session.connector\nc.close()",
+        "self._c = self.session.connector\nself._c.close()",
+        "s = self.session\nt = s.connector\nt.close()",
+        "client =self._new_client(self.session)\nclient.close()",
+        "c = self.session.connector\nc.detach()",
+        "getattr(self.session.connector, 'detach')",
+    ],
+)
+def test_the_check_against_dropping_a_session_leaves_other_calls_alone(source: str) -> None:
+    assert _session_drop_lines(source) == []
+
+
+def test_the_api_never_drops_a_session_on_its_own() -> None:
+    # session.detach() would leave the session's connector open for good, session.close() would cut a request off:
+    # every session is created and dropped through http_session.
+    source = inspect.getsource(api_module)
+    assert ".detach(" not in source
+    assert "async_create_clientsession(" not in source
+    # Neither close() nor detach() on a session, however it is reached (a docstring may name them, a call may not).
+    assert _session_drop_lines(source) == []
+
+
+def _change_host(api: ComexioAPI) -> None:
+    api.host = "other.local"
+
+
+@pytest.mark.parametrize("meanwhile", [_change_host, ComexioAPI.close], ids=["settings changed", "entry unloaded"])
+def test_a_preview_session_outdated_during_its_login_is_closed_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, meanwhile: Callable[[ComexioAPI], None]
+) -> None:
+    async def login(_client: Any, _credentials: Any) -> bool:
+        meanwhile(comexio_api)
+        return True
+
+    comexio_api._login = login  # type: ignore[method-assign]
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    assert comexio_api._preview_session is None
+    (preview_discard,) = [c for c in discard.call_args_list if c.kwargs == {"unused": True}]
+    assert preview_discard.args[0] is not comexio_api.session
+
+
+@pytest.mark.parametrize("failing", ["_login", "_new_client"])
+def test_a_preview_session_is_closed_at_once_when_its_login_or_its_client_raises(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, failing: str
+) -> None:
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    monkeypatch.setattr(comexio_api, failing, MagicMock(side_effect=RuntimeError("boom")))
+
+    opening = comexio_api.ensure_preview_session()
+    with pytest.raises(RuntimeError, match="boom"):
+        asyncio.run(opening)
+
+    assert comexio_api._preview_session is None
+    assert discard.call_count == 1
+    assert discard.call_args.kwargs == {"unused": True}
+    # The preview session was dropped, not the main one (only these two exist, each call of the fixture a new mock).
+    assert discard.call_args.args[0] is not comexio_api.session
+    assert api_module.async_create_session.call_count == 2  # type: ignore[attr-defined]
+
+
+def test_no_preview_session_is_created_once_the_entry_was_unloaded(comexio_api: ComexioAPI) -> None:
+    comexio_api.close()
+
+    assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    assert api_module.async_create_session.call_count == 1  # type: ignore[attr-defined]  # the main session only

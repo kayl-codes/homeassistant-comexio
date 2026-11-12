@@ -169,7 +169,7 @@ def mock_comexio_api(
 
     def _factory(*args: Any, **kwargs: Any) -> ComexioAPI:
         with (
-            patch.object(api_module, "async_create_clientsession", return_value=MagicMock()),
+            patch.object(api_module, "async_create_session", return_value=MagicMock()),
             patch.object(ComexioAPI, "_build_session_kwargs", return_value={}),
         ):
             api = ComexioAPI(*args, **kwargs)

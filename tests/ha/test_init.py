@@ -73,7 +73,7 @@ async def test_setup_and_unload(
     assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
     assert hass.states.get("switch.iosrv1_m1").state == "unavailable"
     assert WEBHOOK_ID not in hass.data[WEBHOOK_DOMAIN]
-    api.close.assert_called_once()
+    api.close.assert_called_once_with()
 
 
 async def test_unload_without_a_coordinator_still_unloads(
@@ -299,7 +299,7 @@ async def test_setup_retry_when_unreachable(
     await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with()
 
 
 async def test_io_entities_show_their_live_values(
@@ -359,7 +359,7 @@ async def test_setup_retry_when_first_refresh_fails(
     await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with()
 
 
 @pytest.mark.logged_exception  # HA logs the unexpected error of the setup with its traceback
@@ -371,7 +371,7 @@ async def test_setup_closes_the_session_when_the_webhook_store_refuses(
         await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with()
 
 
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "rejected"}])
@@ -388,7 +388,7 @@ async def test_setup_auth_failed(
     await _setup(hass, mock_config_entry)
 
     assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with()
 
 
 @pytest.mark.parametrize("api_attributes", [{"last_login_error": "rejected"}])

@@ -13,7 +13,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
-from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError, ComexioRequestRejectedError
+from aiocomexio import (
+    ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
+    ComexioConnectionError,
+    ComexioRequestRejectedError,
+)
 import aiohttp
 from homeassistant.exceptions import HomeAssistantError
 import pytest
@@ -1762,3 +1767,195 @@ def test_a_drop_is_repeated_for_a_knx_object_or_io_that_does_not_yet_hold_the_va
 
     assert getattr(client, method).await_count == 2
     assert api.write_stats.retries == 1
+
+
+def test_a_write_issued_after_the_entry_was_unloaded_is_not_sent(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The session is gone with the entry: aiohttp would answer the request with a RuntimeError no caller expects.
+    api.close()
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    assert client.set_marker_value.await_count == 0
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line == "Comexio API write failed (marker 5): the entry was unloaded: not sent"
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+
+
+def test_a_repetition_is_not_sent_once_the_entry_was_unloaded(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def drop_and_unload(_marker: int, _value: int) -> None:
+        api.close()
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_and_unload
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("(not sent again: the entry was unloaded meanwhile)")
+    assert client.set_marker_value.await_count == 1
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)  # a repetition that is not sent is not counted
+
+
+def test_an_unloaded_entry_is_the_reason_named_even_if_the_value_changed_too(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    held = {"value": 0}
+    api.cached_value = lambda _type, _id: held["value"]
+
+    async def drop_unload_and_push(_marker: int, _value: int) -> None:
+        api.close()
+        held["value"] = 7
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_unload_and_push
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("(not sent again: the entry was unloaded meanwhile)")
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target_id", "ext", "identifier", "method"),
+    [("knx", 9, None, None, "set_knx_value"), ("io", "103", "LED-Dimmer A3", "Q5", "set_io_value")],
+)
+def test_no_kind_of_write_is_sent_after_the_entry_was_unloaded(
+    api: ComexioAPI,
+    client: MagicMock,
+    target_type: str,
+    target_id: str | int,
+    ext: str | None,
+    identifier: str | None,
+    method: str,
+) -> None:
+    api.close()
+
+    assert _run(api.set_value(target_type, target_id, 1, ext, identifier)) is False
+
+    assert getattr(client, method).await_count == 0
+
+
+@pytest.mark.parametrize("login_result", [True, False], ids=["login went through", "login failed for the unload"])
+def test_an_analog_output_write_whose_login_ends_with_the_unload_is_reported_not_raised(
+    api: ComexioAPI,
+    client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    login_result: bool,
+) -> None:
+    # The lapsed admin session is renewed, the entry unloads meanwhile: the repetition would meet the closed session,
+    # and a login that fails because of it must not be reported as a refusal by Comexio.
+    client.set_io_value.side_effect = ComexioAuthenticationError("lapsed")
+
+    async def login_then_unload(_generation: int) -> bool:
+        api.close()
+        return login_result
+
+    monkeypatch.setattr(api, "_full_login", login_then_unload)
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "AO1")) is False
+
+    assert client.set_io_value.await_count == 1  # not sent again to the closed session
+    assert api.write_stats.failed == 1  # counted, as every failed write
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert "the entry was unloaded meanwhile: not repeated" in line
+
+
+def test_an_analog_output_write_unloaded_while_in_flight_does_not_log_in_again(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def lapse_while_unloading(_ext: str, _identifier: str, _value: int) -> None:
+        api.close()
+        raise ComexioAuthenticationError("lapsed")
+
+    client.set_io_value.side_effect = lapse_while_unloading
+    full_login = AsyncMock(return_value=True)
+    monkeypatch.setattr(api, "_full_login", full_login)
+
+    assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "AO1")) is False
+
+    full_login.assert_not_awaited()  # the detached session is not logged in on
+    assert api.write_stats.failed == 1
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target_id", "ext", "identifier", "method"),
+    [("marker", 5, None, None, "set_marker_value"), ("io", "103", "LED-Dimmer A3", "AO1", "set_io_value")],
+)
+def test_a_write_that_meets_the_session_closed_by_the_unload_is_reported_not_raised(
+    api: ComexioAPI,
+    client: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    target_type: str,
+    target_id: str | int,
+    ext: str | None,
+    identifier: str | None,
+    method: str,
+) -> None:
+    # A write that waited for the lock of its target, or one that logged in on the detached session, meets aiohttp's
+    # RuntimeError after the unload; set_value reports it like every failed write.
+    async def unloaded_meanwhile(*_args: object) -> None:
+        api.close()
+        raise RuntimeError("Session is closed")
+
+    getattr(client, method).side_effect = unloaded_meanwhile
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value(target_type, target_id, 1, ext, identifier)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("the entry was unloaded: not sent")  # reported once, with the reason
+    assert api.write_stats.failed == 1
+    assert not any(lock.locked() for lock in api._write_locks.values())  # the next write to the target is not blocked
+
+
+def test_an_unrelated_runtime_error_of_a_write_racing_the_unload_is_not_swallowed(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    async def unloaded_meanwhile(*_args: object) -> None:
+        api.close()
+        raise RuntimeError("a bug")
+
+    client.set_marker_value.side_effect = unloaded_meanwhile
+    write = api.set_value("marker", 5, 1, None, None)
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        _run(write)
+
+    assert not any(lock.locked() for lock in api._write_locks.values())
+
+
+def test_a_runtime_error_that_only_contains_the_session_closed_text_is_not_swallowed(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    # aiohttp raises exactly "Session is closed"; a different error that merely mentions it is a bug, not the unload.
+    async def unloaded_meanwhile(*_args: object) -> None:
+        api.close()
+        raise RuntimeError("Session is closed by a bug in our own code")
+
+    client.set_marker_value.side_effect = unloaded_meanwhile
+    write = api.set_value("marker", 5, 1, None, None)
+
+    with pytest.raises(RuntimeError, match="by a bug"):
+        _run(write)
+
+    assert not any(lock.locked() for lock in api._write_locks.values())
+
+
+def test_a_runtime_error_of_a_write_on_a_live_entry_is_not_swallowed(api: ComexioAPI, client: MagicMock) -> None:
+    client.set_marker_value.side_effect = RuntimeError("a bug")
+
+    write = api.set_value("marker", 5, 1, None, None)
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        _run(write)
+
+    assert not any(lock.locked() for lock in api._write_locks.values())

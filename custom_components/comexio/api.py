@@ -43,7 +43,6 @@ from aiocomexio.session import session_kwargs
 import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_create_clientsession
 from homeassistant.util import dt as dt_util
 
 # Mandatory DOMAIN import for Audit logic
@@ -105,6 +104,7 @@ from .const import (
 from .function_plan_block_settings import BlockSettings, parse_block_settings
 from .function_plan_module_configs import ModuleConfigTables, parse_module_config_tables
 from .function_plan_module_restore import ModuleConfigRestore, is_module_block, place_module_block
+from .http_session import async_create_session, discard_session
 from .webhook_security import WEBHOOK_PATH_PREFIX, WebhookSecurity, legacy_webhook_id
 
 # Function-plan element reference types needing special handling in function_plan_rebuild_plan_from_snapshot.
@@ -124,6 +124,16 @@ _LOGGER = logging.getLogger(__name__)
 _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
     "comexio_write_met_another_certificate", default=None
 )
+
+
+_UNLOADED_NOT_SENT = "the entry was unloaded: not sent"
+# What aiohttp raises on a session that was detached; any other RuntimeError of a write is a bug, unload or not.
+_AIOHTTP_SESSION_CLOSED = "Session is closed"
+
+
+def _unloaded_while_lapsed(err: BaseException) -> ComexioError:
+    """The error of an analog output write whose admin session lapsed while the entry was being unloaded."""
+    return ComexioError(f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated")
 
 
 class _WriteAttempt(NamedTuple):
@@ -838,7 +848,9 @@ class ComexioAPI:
         # can hang a caller indefinitely instead of surfacing as a catchable error — this
         # previously wedged the Function Plan backup cycle's lock forever, silently stopping
         # all future backups.
-        self.session: aiohttp.ClientSession = async_create_clientsession(hass, **self._build_session_kwargs())
+        self.session: aiohttp.ClientSession = async_create_session(
+            hass, bind_to_entry=True, **self._build_session_kwargs()
+        )
 
         # Second, independently logged-in session used exclusively by the Function Plan
         # preview's Stufe-2 connection-value poll (see coordinator._async_poll_connection_values).
@@ -1025,11 +1037,13 @@ class ComexioAPI:
                 return self._preview_session
             if self._closed or self.credentials_refused:
                 return None
-            session = async_create_clientsession(self.hass, **self._build_session_kwargs())
+            # Not bound to the entry: close() drops it, and a new one comes with every login that lapsed.
             credentials = self._credentials()
-            client = self._new_client(session)
+            session = async_create_session(self.hass, bind_to_entry=False, **self._build_session_kwargs())
             login_ok = False
             try:
+                # Inside the try: a client that cannot be built must not leave the session behind either.
+                client = self._new_client(session)
                 login_ok = await self._login(client, credentials)
             finally:
                 # Any non-success path (failed login, close() or new connection settings during
@@ -1037,7 +1051,8 @@ class ComexioAPI:
                 # orphaned.
                 settings_changed = credentials != self._credentials()
                 if not login_ok or self._closed or settings_changed:
-                    session.detach()
+                    # Never handed out, and its one request (the login) is over: nothing to wait for.
+                    discard_session(session, unused=True)
             if settings_changed:
                 _LOGGER.info("Connection settings changed during the preview login — opening a new session next poll")
                 return None
@@ -1109,7 +1124,7 @@ class ComexioAPI:
         if self._preview_session is None or self._preview_credentials == self._credentials():
             return
         _LOGGER.info("Comexio connection settings changed — reopening the preview session")
-        self._preview_session.detach()
+        discard_session(self._preview_session)
         self._preview_session = None
         self._preview_client = None
 
@@ -1742,7 +1757,7 @@ class ComexioAPI:
         _LOGGER.info("Preview session is no longer logged in — opening a new one on the next poll")
         self._preview_session = None
         self._preview_client = None
-        session.detach()
+        discard_session(session)
 
     def parse_config(
         self,
@@ -5970,6 +5985,8 @@ class ComexioAPI:
         held_before is HA's own value of the target when the write was issued (_held_value), settings the connection
         settings it was issued with (write_settings).
         """
+        if self._closed:
+            return "the entry was unloaded meanwhile"
         if not rule.even_if_held:
             objection = held_value_objection(held_before, self._held_value(target_type, target_id), value)
             if objection is not None:
@@ -5984,6 +6001,10 @@ class ComexioAPI:
             return None
         return self.cached_value(*_write_target_key(target_type, target_id))
 
+    def _met_the_closed_session(self, err: RuntimeError) -> bool:
+        """Whether the error is aiohttp's refusal of the session the unload detached (nothing else qualifies)."""
+        return self._closed and str(err) == _AIOHTTP_SESSION_CLOSED
+
     async def _write_once(
         self,
         target_type: str,
@@ -5996,8 +6017,11 @@ class ComexioAPI:
         """One send of a write: no error when it went through, else the error and whether it was reported already.
 
         settings are the connection settings the write was issued with (write_settings): once they differ, nothing
-        is sent, since self.client is then one for another server or user.
+        is sent, since self.client is then one for another server or user. Nor after close(): the session is gone,
+        and aiohttp answers a request on it with a RuntimeError (caught below for a write that was under way).
         """
+        if self._closed:
+            return _WriteAttempt(ComexioError(_UNLOADED_NOT_SENT))
         if self.write_settings(target_type, identifier) != settings:
             return _WriteAttempt(ComexioError("connection settings changed since the write was issued: not sent"))
         started = time.monotonic()
@@ -6029,6 +6053,20 @@ class ComexioAPI:
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             return _WriteAttempt(err)
+        except RuntimeError as err:
+            # aiohttp's "Session is closed": the entry was unloaded after the check above (a write that waited for
+            # the lock of its target, or a login on the detached session). Any other RuntimeError is a bug.
+            if not self._met_the_closed_session(err):
+                raise
+            _LOGGER.debug(
+                "Comexio API write (%s %s) met the closed session of the unloaded entry",
+                target_type,
+                one_line(str(target_id)),
+                exc_info=err,
+            )
+            unloaded = ComexioError(_UNLOADED_NOT_SENT)
+            unloaded.__cause__ = err  # kept for the traceback; the repetition rule looks for a dropped connection
+            return _WriteAttempt(unloaded)
         return _WriteAttempt(None)
 
     async def _set_io_value(self, ext: str, identifier: str, value: float | int) -> None:
@@ -6044,12 +6082,21 @@ class ComexioAPI:
         try:
             await self.client.set_io_value(ext, identifier, value)
         except ComexioAuthenticationError as err:
+            if self._closed:
+                # Unloaded while the write was in flight: no login on the detached session (aiohttp would raise a
+                # RuntimeError, which _write_once only reports).
+                raise _unloaded_while_lapsed(err) from err
             _LOGGER.debug(
                 "Comexio admin session lapsed before writing %s %s — logging in again",
                 one_line(ext),
                 one_line(identifier),
             )
-            if not await self._full_login(generation):
+            logged_in = await self._full_login(generation)
+            if self._closed:
+                # Unloaded during the login (it then fails for that very reason, or succeeds on a session that is
+                # gone): the unload is the cause to name, and the repetition would meet the detached session.
+                raise _unloaded_while_lapsed(err) from err
+            if not logged_in:
                 if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
                     # _login already raised the repair; the write error names the certificate as its cause.
                     _write_met_another_certificate.set(self)
@@ -6192,21 +6239,20 @@ class ComexioAPI:
             _LOGGER.warning("Extension firmware check failed: %s", err)
             return []
 
-    def close(self) -> None:
-        """Detach the main session and the dedicated preview session, if one was ever opened.
+    def close(self, *, immediately: bool = False) -> None:
+        """Take the main session and the dedicated preview session, if one was ever opened, out of use.
 
-        The main session is created during config entry setup, so async_create_clientsession
-        already registers it for auto-cleanup on entry unload/HA shutdown. The preview session
-        (see ensure_preview_session) is created lazily at runtime, outside that setup context,
-        so it only gets HA's homeassistant_stop cleanup — not entry-unload cleanup. Detaching
-        both explicitly here (already called from async_unload_entry and the setup-failure path)
-        avoids leaking the preview session's connection across integration reloads.
+        immediately: no request of either session can be under way (the config flow's test login, awaited to its
+        end), so their connections close at once instead of after the request timeout.
 
-        Uses detach() rather than close(): HA replaces close() on its own sessions with a
-        warn-only stub (warn_use), so await session.close() never released anything — it only
-        logged the "closes the Home Assistant aiohttp session" deprecation. detach() is what
-        HA's own cleanup does and actually unlinks the session from the pooled, hass-scoped
-        connector (keyed by verify_ssl/family/ssl_cipher) shared with every other session.
+        The main session is created during config entry setup, so it goes with the entry anyway
+        (http_session.async_create_session registers that). The preview session (see
+        ensure_preview_session) is created lazily at runtime, outside that setup context, so
+        without this call (from async_unload_entry and the setup-failure path) it would stay
+        until Home Assistant stops and leak its connections across integration reloads.
+
+        Through discard_session, not session.close(): a request still in flight finishes, and
+        the session's connections are closed once none can be under way any more (see there).
 
         Also flags the instance as closed so a login already in flight inside
         ensure_preview_session()'s lock detaches its freshly-authenticated session instead of
@@ -6214,8 +6260,8 @@ class ComexioAPI:
         never be detached (it was never visible here to begin with).
         """
         self._closed = True
-        self.session.detach()
+        discard_session(self.session, unused=immediately)
         if self._preview_session is not None:
-            self._preview_session.detach()
+            discard_session(self._preview_session, unused=immediately)
             self._preview_session = None
             self._preview_client = None

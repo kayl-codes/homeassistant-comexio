@@ -77,7 +77,7 @@ async def test_user_flow_creates_entry(hass: HomeAssistant, mock_comexio_api: li
     assert result["type"] is FlowResultType.FORM
     assert result["step_id"] == "ignore_lists"
     mock_comexio_api[0].login.assert_awaited_once()  # the credentials were tested before the ignore lists
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with(immediately=True)
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
@@ -297,7 +297,7 @@ async def test_user_flow_login_errors(
     assert result["type"] is FlowResultType.FORM
     assert result["errors"] == {"base": error}
     mock_comexio_api[0].login.assert_awaited_once()
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with(immediately=True)
 
 
 @pytest.mark.parametrize(
@@ -549,7 +549,7 @@ async def test_reauth_updates_the_credentials_and_reloads(
     api = mock_comexio_api[0]
     assert (api.username, api.password) == ("admin2", "new-secret")
     api.login.assert_awaited_once()  # the new credentials were tested before they were stored
-    api.close.assert_called_once()
+    api.close.assert_called_once_with(immediately=True)
 
 
 @pytest.mark.logged_exception  # _test_connection logs the failed login with its traceback
@@ -575,7 +575,7 @@ async def test_reauth_login_errors_keep_the_stored_credentials(
     assert result["errors"] == {"base": error}
     assert dict(mock_config_entry.data) == data_before
     mock_comexio_api[0].login.assert_awaited_once()
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with(immediately=True)
 
 
 RECONFIGURE_INPUT = {CONF_HOST: "192.168.1.20", CONF_USERNAME: "admin2", CONF_API_USERNAME: "api"}
@@ -635,7 +635,7 @@ async def test_reconfigure_login_errors_keep_the_stored_settings(
     assert result["errors"] == {"base": error}
     assert dict(mock_config_entry.data) == data_before
     mock_comexio_api[0].login.assert_awaited_once()
-    mock_comexio_api[0].close.assert_called_once()
+    mock_comexio_api[0].close.assert_called_once_with(immediately=True)
 
 
 async def test_reconfigure_refuses_a_host_another_entry_uses(
