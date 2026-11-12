@@ -13,7 +13,12 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call
 
-from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError, ComexioRequestRejectedError
+from aiocomexio import (
+    ComexioAuthenticationError,
+    ComexioCertificateMismatchError,
+    ComexioConnectionError,
+    ComexioRequestRejectedError,
+)
 import aiohttp
 from homeassistant.exceptions import HomeAssistantError
 import pytest
@@ -1835,3 +1840,47 @@ def test_no_kind_of_write_is_sent_after_the_entry_was_unloaded(
     assert _run(api.set_value(target_type, target_id, 1, ext, identifier)) is False
 
     assert getattr(client, method).await_count == 0
+
+
+@pytest.mark.parametrize("login_result", [True, False], ids=["login went through", "login failed for the unload"])
+def test_an_analog_output_write_whose_login_ends_with_the_unload_is_reported_not_raised(
+    api: ComexioAPI,
+    client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    login_result: bool,
+) -> None:
+    # The lapsed admin session is renewed, the entry unloads meanwhile: the repetition would meet the closed session,
+    # and a login that fails because of it must not be reported as a refusal by Comexio.
+    client.set_io_value.side_effect = ComexioAuthenticationError("lapsed")
+
+    async def login_then_unload(_generation: int) -> bool:
+        api.close()
+        return login_result
+
+    monkeypatch.setattr(api, "_full_login", login_then_unload)
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "AO1")) is False
+
+    assert client.set_io_value.await_count == 1  # not sent again to the closed session
+    assert api.write_stats.failed == 1  # counted, as every failed write
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert "the entry was unloaded meanwhile: not repeated" in line
+
+
+def test_an_analog_output_write_unloaded_while_in_flight_does_not_log_in_again(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def lapse_while_unloading(_ext: str, _identifier: str, _value: int) -> None:
+        api.close()
+        raise ComexioAuthenticationError("lapsed")
+
+    client.set_io_value.side_effect = lapse_while_unloading
+    full_login = AsyncMock(return_value=True)
+    monkeypatch.setattr(api, "_full_login", full_login)
+
+    assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "AO1")) is False
+
+    full_login.assert_not_awaited()  # the detached session is not logged in on
+    assert api.write_stats.failed == 1

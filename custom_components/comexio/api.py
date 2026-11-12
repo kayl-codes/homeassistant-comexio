@@ -6054,12 +6054,25 @@ class ComexioAPI:
         try:
             await self.client.set_io_value(ext, identifier, value)
         except ComexioAuthenticationError as err:
+            if self._closed:
+                # Unloaded while the write was in flight: no login on the detached session (aiohttp would raise a
+                # RuntimeError no caller expects).
+                raise ComexioError(
+                    f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated"
+                ) from err
             _LOGGER.debug(
                 "Comexio admin session lapsed before writing %s %s — logging in again",
                 one_line(ext),
                 one_line(identifier),
             )
-            if not await self._full_login(generation):
+            logged_in = await self._full_login(generation)
+            if self._closed:
+                # Unloaded during the login (it then fails for that very reason, or succeeds on a session that is
+                # gone): the unload is the cause to name, and the repetition would meet the detached session.
+                raise ComexioError(
+                    f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated"
+                ) from err
+            if not logged_in:
                 if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
                     # _login already raised the repair; the write error names the certificate as its cause.
                     _write_met_another_certificate.set(self)

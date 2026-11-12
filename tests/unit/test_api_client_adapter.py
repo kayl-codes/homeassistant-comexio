@@ -2264,14 +2264,80 @@ def test_a_failed_preview_login_closes_its_unused_session_at_once(
     assert discard.call_args.args[0] is not comexio_api.session
 
 
-def _closes_a_session(call: ast.Call) -> bool:
-    func = call.func
-    if isinstance(func, ast.Attribute):
-        return func.attr == "close" and "session" in ast.unparse(func.value).lower()
-    if isinstance(func, ast.Name) and func.id == "getattr" and len(call.args) == 2:
-        target, name = call.args
-        return isinstance(name, ast.Constant) and name.value == "close" and "session" in ast.unparse(target).lower()
-    return False
+def _is_session_name(node: ast.AST) -> bool:
+    """A name or attribute whose own last part names a session (`session`, `self._preview_session`), not what hangs
+    off one (`self.session.connector`)."""
+    if isinstance(node, ast.Name):
+        return "session" in node.id.lower()
+    return isinstance(node, ast.Attribute) and "session" in node.attr.lower()
+
+
+def _session_close_lines(source: str) -> list[int]:
+    """Lines that close a session: `x.session.close()` in any case, `getattr(session, "close")` and a plain-name alias
+    of a session, however long the chain (`s = self.session; t = s; t.close()`). Not caught: aliases that are no plain
+    name (`self._s = self.session`, unpacking, loop, walrus or `with` targets)."""
+    tree = ast.parse(source)
+    aliases: set[str] = set()
+    assigned = [
+        (target.id, node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    ]
+    grew = True
+    while grew:
+        grew = False
+        for name, value in assigned:
+            names_one = _is_session_name(value) or (isinstance(value, ast.Name) and value.id in aliases)
+            if name not in aliases and names_one:
+                aliases.add(name)
+                grew = True
+
+    def names_a_session(node: ast.AST) -> bool:
+        return _is_session_name(node) or (isinstance(node, ast.Name) and node.id in aliases)
+
+    lines: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "close" and names_a_session(func.value):
+            lines.append(node.lineno)
+        elif isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) == 2:
+            target, name = node.args
+            if isinstance(name, ast.Constant) and name.value == "close" and names_a_session(target):
+                lines.append(node.lineno)
+    return lines
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "self.session.close()",
+        "self.Session.close()",
+        "self._preview_session.close()",
+        "s = self.session\ns.close()",
+        "s: object = self.session\ns.close()",
+        "s = self.session\nt = s\nt.close()",
+        "getattr(self.session, 'close')",
+    ],
+)
+def test_the_check_against_closing_a_session_sees_the_ways_around_it(source: str) -> None:
+    assert _session_close_lines(source) != []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "self.close()",
+        "connector.close()",
+        "c = self.session.connector\nc.close()",
+        "client = self._new_client(self.session)\nclient.close()",
+    ],
+)
+def test_the_check_against_closing_a_session_leaves_other_closes_alone(source: str) -> None:
+    assert _session_close_lines(source) == []
 
 
 def test_the_api_never_drops_a_session_on_its_own() -> None:
@@ -2280,12 +2346,8 @@ def test_the_api_never_drops_a_session_on_its_own() -> None:
     source = inspect.getsource(api_module)
     assert ".detach(" not in source
     assert "async_create_clientsession(" not in source
-    # No close() on a session either (a docstring may name it, a call may not). Catches `x.session.close()` in any
-    # case and `getattr(session, "close")()`; an alias (`s = self.session; s.close()`) is beyond a name check.
-    closes = [
-        node.lineno for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and _closes_a_session(node)
-    ]
-    assert closes == []
+    # No close() on a session either (a docstring may name it, a call may not).
+    assert _session_close_lines(source) == []
 
 
 def _change_host(api: ComexioAPI) -> None:

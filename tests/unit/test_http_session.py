@@ -120,8 +120,13 @@ def _with_server(scenario: Callable[[_Server], Awaitable[None]]) -> None:
     asyncio.run(run())
 
 
-async def _until(condition: Callable[[], bool]) -> None:
-    async with asyncio.timeout(5):
+# Closing at once takes a few turns of the event loop; well under the margin a delayed close would take, but with
+# room for a loaded CI runner.
+AT_ONCE_SEC = 2.0
+
+
+async def _until(condition: Callable[[], bool], *, within: float = 5) -> None:
+    async with asyncio.timeout(within):
         while not condition():
             await asyncio.sleep(0.01)
 
@@ -349,7 +354,7 @@ def test_a_session_that_never_got_into_use_closes_its_connections_at_once(home: 
         await _get(session, server)
 
         discard_session(session, unused=True)
-        await _until(lambda: connector.closed)
+        await _until(lambda: connector.closed, within=AT_ONCE_SEC)  # not at the end of the 5 s margin
 
         assert home.timers == []
         home.unsub_ha_close.assert_called_once_with()
@@ -371,7 +376,8 @@ def test_the_connector_is_closed_when_the_session_cannot_be_built(home: _Home, m
         with pytest.raises(TypeError):
             async_create_session(home.hass, bind_to_entry=False, no_such_keyword=1)
         (connector,) = built
-        await _until(lambda: connector.closed)  # the connector built for it, itself, not only its listener
+        # The connector built for it, itself, not only its listener, and at once.
+        await _until(lambda: connector.closed, within=AT_ONCE_SEC)
 
         home.unsub_ha_close.assert_called_once_with()
 
