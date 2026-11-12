@@ -137,15 +137,25 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         return self._same_server(settings) and await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
 
     async def _async_stop(self, settings: tuple[str, ...]) -> bool:
-        """_async_send_stop; a cancellation while the stop is in flight gets one more stop before it goes on.
+        """The stop of a move, as _async_send_stop; a cancellation while it is in flight gets one more stop after it.
 
-        The cancelled request may not have reached Comexio, and a second stop telegram does no harm.
+        The cancelled request may not have reached Comexio, and a second stop telegram does no harm. A stop that is
+        not sent (the connection settings changed, or the bridge Marker data is gone: _async_write_via_bridge) is a
+        stop that did not get through: the caller's error says the actuator may still be moving, the log says why.
         """
         try:
-            return await self._async_send_stop(settings)
+            if self._same_server(settings):
+                return await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
+            reason = "the connection settings changed"
         except asyncio.CancelledError:
             await self._async_stop_after_cancel(settings)
             raise
+        except HomeAssistantError as err:
+            reason = str(err)
+        _LOGGER.warning(
+            "The stop telegram of dimming K%s/K%s was not sent: %s", self._direction_id, self._stepcode_id, reason
+        )
+        return False
 
     async def _async_stop_after_cancel(self, settings: tuple[str, ...]) -> None:
         """The stop of a move that was cancelled; it logs what went wrong instead of raising.

@@ -594,6 +594,68 @@ def test_a_dimmer_whose_move_was_not_confirmed_is_stopped(monkeypatch: pytest.Mo
     assert light._attr_brightness == 0
 
 
+def test_a_stop_the_bridge_data_cannot_send_after_a_refused_move_says_the_dimmer_may_still_be_moving(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The bridge Marker data went away between the move and its stop: the error must not stop at why it was not sent.
+    monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
+    set_value = AsyncMock(side_effect=[True, False])
+    light = _dimmer(set_value)
+    light.coordinator._knx_bridge_marker_by_k_id.side_effect = [{"9": "77"}, {"10": "78"}, None]
+
+    move = light._async_move_to(255)
+    still_moving = r"^Failed to dim K9/K10, and the stop telegram after it did not get through — the actuator may"
+    with (
+        caplog.at_level(logging.WARNING, logger=light_module.__name__),
+        pytest.raises(RuntimeError, match=still_moving),
+    ):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False)]
+    assert light._attr_brightness == 0
+    assert [record.getMessage() for record in caplog.records] == [
+        "The stop telegram of dimming K9/K10 was not sent: Comexio K10: bridge Marker data not loaded yet — try again "
+        "shortly"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("cause", "reason"),
+    [
+        ("bridge", "Comexio K10: bridge Marker data not loaded yet — try again shortly"),
+        ("reconfigure", "the connection settings changed"),
+    ],
+)
+def test_a_timed_stop_that_is_not_sent_moves_the_estimate_and_says_the_dimmer_may_still_be_moving(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, cause: str, reason: str
+) -> None:
+    monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
+    set_value = AsyncMock(return_value=True)
+    light = _dimmer(set_value)
+    host = ["comexio-a"]
+    light.coordinator.api.write_settings.side_effect = lambda _type: (host[0],)
+    if cause == "bridge":
+        light.coordinator._knx_bridge_marker_by_k_id.side_effect = [{"9": "77"}, {"10": "78"}, None]
+
+    async def hold(_seconds: float) -> None:
+        if cause == "reconfigure":
+            host[0] = "comexio-b"  # a reconfigure during the hold: the stop belongs to the server the move went to
+
+    monkeypatch.setattr(light_module.asyncio, "sleep", hold)
+
+    move = light._async_move_to(255)
+    failed = r"^Stop telegram failed after dimming K9/K10 — the actuator may still be moving$"
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(RuntimeError, match=failed):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False)]
+    assert (light._attr_brightness, light._attr_is_on) == (255, True)
+    light.async_write_ha_state.assert_called_once()
+    assert [record.getMessage() for record in caplog.records] == [
+        f"The stop telegram of dimming K9/K10 was not sent: {reason}"
+    ]
+
+
 def test_a_dimmer_whose_move_write_was_cancelled_is_stopped_before_the_cancellation_goes_on() -> None:
     # Comexio may have taken the move before the task was cancelled; the timed hold's finally has not started yet.
     set_value = AsyncMock(side_effect=[True, asyncio.CancelledError(), True])
