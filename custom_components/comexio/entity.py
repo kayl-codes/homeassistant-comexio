@@ -517,8 +517,7 @@ class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         A step code 1-7 starts a move relative to where the cover or dimmer stands, so it is sent once: repeated
         after a drop that came when Comexio had already taken it, it could move a second time (and a dimmer's
         timed stop would no longer fit). A dropped move fails instead. The stop code is a state, and a lost stop
-        is the worse outcome, so it stays repeatable — also while HA still shows the step marker at 0: nothing
-        says that 0 is not the one from before the move.
+        is the worse outcome, so it stays repeatable whatever HA's value of the step marker does meanwhile.
         """
         stop = stepcode == KNX_DPT3_STEPCODE_BREAK
         return await _async_write_via_bridge(

@@ -5237,7 +5237,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def cached_value(self, target_type: str, target_id: str | int) -> object:
         """HA's own live value of a write target (marker, KNX object or IO), None if it has none.
 
-        An IO's placeholder value (nothing read yet) is no value: a write of 0 must not look already done.
+        An IO's placeholder value (nothing read yet) is no value: the first real reading after it is one that came in.
         """
         key = str(target_id)
         if target_type == "marker":

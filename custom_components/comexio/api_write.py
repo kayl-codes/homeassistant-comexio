@@ -49,6 +49,32 @@ def is_same_value(cached: object, wanted: float | int) -> bool:
         return False
 
 
+def is_same_reading(before: object, now: object) -> bool:
+    """True if two cached live values are one reading: equal, or the same number however it is spelled (1, 1.0, "1")."""
+    if before == now:
+        return True
+    try:
+        number = float(before)  # type: ignore[arg-type]
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return is_same_value(now, number)
+
+
+def held_value_objection(before: object, now: object, wanted: float | int) -> str | None:
+    """Why HA's own value of a write target speaks against sending a dropped write again; None if it does not.
+
+    before is HA's value when the write was issued, now the one after the drop. Only a value that came in meanwhile
+    counts: the wanted one means Comexio took the write, another one is newer than the write, and a repetition would
+    overwrite it. A value that was there all along proves nothing (a stale cache, a value from before a move), and
+    setting a target to the value it holds changes nothing.
+    """
+    if is_same_reading(before, now):
+        return None
+    if is_same_value(now, wanted):
+        return "HA got the wanted value since the write was issued"
+    return "HA's value changed since the write was issued, a repetition could overwrite a newer one"
+
+
 @dataclass(frozen=True)
 class WriteFailure:
     """One failed API write: when, what it was meant for, and how it failed."""

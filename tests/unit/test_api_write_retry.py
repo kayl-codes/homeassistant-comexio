@@ -22,6 +22,8 @@ from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.api_write import (
     ApiWriteStats,
     connection_dropped,
+    held_value_objection,
+    is_same_reading,
     is_same_value,
 )
 from custom_components.comexio.button import ComexioKnxTriggerButton, ComexioMarkerTriggerButton
@@ -36,6 +38,9 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.light import ComexioKnxLight
 
 DROPPED_CLASS = "ComexioConnectionError (ServerDisconnectedError)"
+
+
+CHANGED_REASON = "HA's value changed since the write was issued, a repetition could overwrite a newer one"
 
 
 def _dropped() -> ComexioConnectionError:
@@ -87,16 +92,94 @@ def test_a_write_is_repeated_at_most_the_configured_number_of_times(api: Comexio
 
 
 @pytest.mark.parametrize("cached", [0, "0", 0.0])
-def test_a_drop_is_not_repeated_when_ha_already_holds_the_wanted_value(
-    api: ComexioAPI, client: MagicMock, cached: Any
+def test_a_drop_is_not_repeated_once_ha_got_the_wanted_value(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture, cached: Any
 ) -> None:
+    # The push of the wanted value came in while the write was under way: Comexio took it.
+    api.cached_value = lambda _type, _id: cached if client.set_marker_value.await_count else 1
+    client.set_marker_value.side_effect = _dropped()
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 0)) is False
+
+    assert client.set_marker_value.await_count == 1
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("(not sent again: HA got the wanted value since the write was issued)")
+
+
+TARGETS = [
+    ("marker", 5, None, None, "set_marker_value"),
+    ("knx", 9, None, None, "set_knx_value"),
+    ("io", "103", "LED-Dimmer A3", "Q5", "set_io_value"),
+]
+TARGET_ARGS = ("target_type", "target_id", "ext", "identifier", "method")
+
+
+@pytest.mark.parametrize("cached", [2, "2", None])
+@pytest.mark.parametrize(TARGET_ARGS, TARGETS)
+def test_a_drop_is_not_repeated_once_ha_got_another_value(
+    api: ComexioAPI,
+    client: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    cached: Any,
+    target_type: str,
+    target_id: str | int,
+    ext: str | None,
+    identifier: str | None,
+    method: str,
+) -> None:
+    # A value that came in after the write was issued is newer than it: a repetition would overwrite it.
+    send = getattr(client, method)
+    api.cached_value = lambda _type, _id: cached if send.await_count else 1
+    send.side_effect = _dropped()
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value(target_type, target_id, 0, ext, identifier)) is False
+
+    assert send.await_count == 1
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+    # The error line says why the drop was not sent again.
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith(f"(not sent again: {CHANGED_REASON})")
+
+
+@pytest.mark.parametrize("cached", [0, "0", 0.0])
+@pytest.mark.parametrize(TARGET_ARGS, TARGETS)
+def test_a_drop_is_repeated_although_ha_held_the_wanted_value_all_along(
+    api: ComexioAPI,
+    client: MagicMock,
+    cached: Any,
+    target_type: str,
+    target_id: str | int,
+    ext: str | None,
+    identifier: str | None,
+    method: str,
+) -> None:
+    # A value that was there before the write proves nothing: it may be stale (a set_value service write leaves the
+    # cache alone), and setting a target to the value it holds changes nothing.
     api.cached_value = lambda _type, _id: cached
+    send = getattr(client, method)
+    send.side_effect = [_dropped(), None]
+
+    assert _run(api.set_value(target_type, target_id, 0, ext, identifier)) is True
+
+    assert send.await_count == 2
+    assert (api.write_stats.failed, api.write_stats.retries, api.write_stats.recovered) == (0, 1, 1)
+
+
+@pytest.mark.parametrize("flip_at", [2, 3])
+def test_a_value_that_comes_in_between_two_repetitions_stops_them(
+    api: ComexioAPI, client: MagicMock, flip_at: int
+) -> None:
+    # The value HA held when the write was issued is the reference for every repetition, not only the first.
+    api.cached_value = lambda _type, _id: 2 if client.set_marker_value.await_count >= flip_at else 1
     client.set_marker_value.side_effect = _dropped()
 
     assert _run(api.set_value("marker", 5, 0)) is False
 
-    assert client.set_marker_value.await_count == 1
-    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+    assert client.set_marker_value.await_count == flip_at
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, flip_at - 1)
 
 
 @pytest.mark.parametrize("cached", [1, None, "unknown"])
@@ -105,6 +188,47 @@ def test_a_drop_is_repeated_while_ha_holds_another_or_no_value(api: ComexioAPI, 
     client.set_marker_value.side_effect = [_dropped(), None]
 
     assert _run(api.set_value("marker", 5, 0)) is True
+
+    assert client.set_marker_value.await_count == 2
+    assert (api.write_stats.failed, api.write_stats.retries, api.write_stats.recovered) == (0, 1, 1)
+
+
+@pytest.mark.parametrize(
+    ("before", "now", "same"),
+    [
+        (1, 1, True),
+        (1, 1.0, True),
+        ("1", 1, True),
+        (1, "1", True),
+        (None, None, True),
+        ("unknown", "unknown", True),
+        (1, 2, False),
+        (None, 1, False),
+        (1, None, False),
+        ("unknown", 1, False),
+    ],
+)
+def test_two_cached_values_are_one_reading_however_spelled(before: Any, now: Any, same: bool) -> None:
+    assert is_same_reading(before, now) is same
+
+
+@pytest.mark.parametrize(
+    ("before", "now", "reason"),
+    [
+        (0, 0, None),
+        (1, 1, None),
+        (None, None, None),
+        (1, "1.0", None),
+        (1, 0, "HA got the wanted value since the write was issued"),
+        (None, 0, "HA got the wanted value since the write was issued"),
+        (1, 2, CHANGED_REASON),
+        (1, None, CHANGED_REASON),
+    ],
+)
+def test_only_a_value_that_came_in_since_the_write_was_issued_objects(
+    before: Any, now: Any, reason: str | None
+) -> None:
+    assert held_value_objection(before, now, 0) == reason
 
 
 def test_the_value_lookup_gets_the_type_and_id_of_the_target(api: ComexioAPI, client: MagicMock) -> None:
@@ -118,7 +242,8 @@ def test_the_value_lookup_gets_the_type_and_id_of_the_target(api: ComexioAPI, cl
 
     _run(api.set_value("marker", 7, 1))
 
-    assert seen == [("marker", "7")]
+    # Once when the write is issued, once after the drop.
+    assert seen == [("marker", "7"), ("marker", "7")]
 
 
 def test_a_drop_that_came_back_late_is_not_repeated(
@@ -192,9 +317,11 @@ def test_a_knx_write_is_repeated(api: ComexioAPI, client: MagicMock) -> None:
 def test_the_value_lookup_gets_a_number_id_in_one_spelling(
     api: ComexioAPI, client: MagicMock, target_type: str, spelling: str | int
 ) -> None:
-    # The coordinator keys its values by "5": asked for "05", it would know none and the drop would be repeated.
-    api.cached_value = lambda kind, key: 1 if (kind, key) == (target_type, "5") else None
-    getattr(client, f"set_{target_type}_value").side_effect = _dropped()
+    # The coordinator keys its values by "5": asked for "05", it would never see the push of the wanted value, and
+    # the drop would be repeated.
+    send = getattr(client, f"set_{target_type}_value")
+    api.cached_value = lambda kind, key: 1 if (kind, key) == (target_type, "5") and send.await_count else None
+    send.side_effect = _dropped()
 
     assert _run(api.set_value(target_type, spelling, 1)) is False
 
@@ -304,9 +431,10 @@ def test_a_write_with_unchanged_connection_settings_is_sent(api: ComexioAPI, cli
     client.set_marker_value.assert_awaited_once_with(5, 1)
 
 
-def test_a_stop_is_repeated_even_if_ha_already_shows_the_wanted_value(api: ComexioAPI, client: MagicMock) -> None:
-    # A DPT3 stop: HA's 0 for the step marker can be the one from before the move.
-    api.cached_value = lambda _type, _id: 0
+@pytest.mark.parametrize("pushed", [0, 2])
+def test_a_stop_is_repeated_whatever_value_ha_gets_meanwhile(api: ComexioAPI, client: MagicMock, pushed: int) -> None:
+    # A DPT3 stop has to reach the actuator: neither a 0 nor another value coming in holds it back.
+    api.cached_value = lambda _type, _id: pushed if client.set_marker_value.await_count else 1
     client.set_marker_value.side_effect = [_dropped(), None]
 
     assert _run(api.set_value("marker", 5, 0, even_if_held=True)) is True
@@ -316,7 +444,7 @@ def test_a_stop_is_repeated_even_if_ha_already_shows_the_wanted_value(api: Comex
 
 
 def test_a_stop_is_repeated_no_more_often_than_any_other_write(api: ComexioAPI, client: MagicMock) -> None:
-    api.cached_value = lambda _type, _id: 0
+    api.cached_value = lambda _type, _id: 2 if client.set_marker_value.await_count else 1
     client.set_marker_value.side_effect = _dropped()
 
     assert _run(api.set_value("marker", 5, 0, even_if_held=True)) is False
@@ -333,10 +461,9 @@ def test_a_stop_is_repeated_no_more_often_than_any_other_write(api: ComexioAPI, 
     ],
 )
 def test_a_stop_is_not_repeated_where_no_write_is(api: ComexioAPI, attempt: Any, reason: str) -> None:
-    api.cached_value = lambda _type, _id: 0
     rule = api_module._RepeatRule(repeat=True, even_if_held=True)
 
-    assert (api._why_not_repeated(attempt, "marker", 5, 0, None, 0, rule) or "").startswith(reason)
+    assert (api._why_not_repeated(attempt, "marker", None, 0, rule) or "").startswith(reason)
 
 
 def test_a_write_sent_once_stays_sent_once_even_if_held_is_allowed(api: ComexioAPI, client: MagicMock) -> None:
@@ -730,7 +857,7 @@ def test_the_value_lookup_gets_io_and_knx_targets_too(
 
     _run(api.set_value(target_type, target_id, 1, ext, identifier))
 
-    assert seen == [expected]
+    assert seen == [expected, expected]
 
 
 @pytest.mark.parametrize(
@@ -745,9 +872,7 @@ def test_only_the_api_outputs_are_repeated(api: ComexioAPI, client: MagicMock, i
 
 
 def test_a_write_without_identifier_is_not_repeated_and_names_why(api: ComexioAPI) -> None:
-    reason = api._why_not_repeated(
-        api_module._WriteAttempt(_dropped()), "io", "103", 0, None, 0, api_module._RepeatRule()
-    )
+    reason = api._why_not_repeated(api_module._WriteAttempt(_dropped()), "io", None, 0, api_module._RepeatRule())
 
     assert reason == "not an /api/ write"
 
@@ -755,7 +880,7 @@ def test_a_write_without_identifier_is_not_repeated_and_names_why(api: ComexioAP
 def test_an_already_reported_failure_is_not_repeated_whatever_its_cause(api: ComexioAPI) -> None:
     attempt = api_module._WriteAttempt(_dropped(), reported=True)
 
-    reason = api._why_not_repeated(attempt, "marker", 5, 0, None, 0, api_module._RepeatRule())
+    reason = api._why_not_repeated(attempt, "marker", None, 0, api_module._RepeatRule())
 
     assert reason is not None
     assert reason.startswith("already reported")
@@ -954,7 +1079,8 @@ def test_a_drop_is_not_repeated_for_a_knx_object_or_io_that_already_holds_the_va
     ext: str | None,
     identifier: str | None,
 ) -> None:
-    api.cached_value = lambda _type, _id: 1
+    # The push of the wanted value came in while the write was under way.
+    api.cached_value = lambda _type, _id: 1 if client.set_knx_value.await_count + client.set_io_value.await_count else 0
     client.set_knx_value.side_effect = _dropped()
     client.set_io_value.side_effect = _dropped()
 
@@ -1039,7 +1165,9 @@ def test_a_knx_trigger_write_reaches_the_bridge_marker_without_repetition() -> N
         _knx_bridge_marker_by_k_id=lambda: {"9": "77"}, api=SimpleNamespace(set_value=set_value)
     )
 
-    assert _run(entity_module._async_write_via_bridge(coordinator, "KNX 9", "9", 1, repeat=False)) is True  # type: ignore[arg-type]
+    write = entity_module._async_write_via_bridge(coordinator, "KNX 9", "9", 1, repeat=False)  # type: ignore[arg-type]
+
+    assert _run(write) is True
 
     set_value.assert_awaited_once_with("marker", "77", 1, repeat=False, even_if_held=False)
 
