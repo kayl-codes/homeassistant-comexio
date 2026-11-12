@@ -1933,6 +1933,23 @@ def test_an_unrelated_runtime_error_of_a_write_racing_the_unload_is_not_swallowe
     assert not any(lock.locked() for lock in api._write_locks.values())
 
 
+def test_a_runtime_error_that_only_contains_the_session_closed_text_is_not_swallowed(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    # aiohttp raises exactly "Session is closed"; a different error that merely mentions it is a bug, not the unload.
+    async def unloaded_meanwhile(*_args: object) -> None:
+        api.close()
+        raise RuntimeError("Session is closed by a bug in our own code")
+
+    client.set_marker_value.side_effect = unloaded_meanwhile
+    write = api.set_value("marker", 5, 1, None, None)
+
+    with pytest.raises(RuntimeError, match="by a bug"):
+        _run(write)
+
+    assert not any(lock.locked() for lock in api._write_locks.values())
+
+
 def test_a_runtime_error_of_a_write_on_a_live_entry_is_not_swallowed(api: ComexioAPI, client: MagicMock) -> None:
     client.set_marker_value.side_effect = RuntimeError("a bug")
 

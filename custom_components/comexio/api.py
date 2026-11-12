@@ -6003,7 +6003,7 @@ class ComexioAPI:
 
     def _met_the_closed_session(self, err: RuntimeError) -> bool:
         """Whether the error is aiohttp's refusal of the session the unload detached (nothing else qualifies)."""
-        return self._closed and _AIOHTTP_SESSION_CLOSED in str(err)
+        return self._closed and str(err) == _AIOHTTP_SESSION_CLOSED
 
     async def _write_once(
         self,
