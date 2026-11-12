@@ -93,11 +93,11 @@ These are offline on the test installation, so **no live value or write has ever
 
 ### 1-Wire sensors
 
-The sensors of Comexio's 1-Wire bus are read-only. Their values arrive only by push, see [1-Wire sensors](../README.md#-1-wire-sensors) in the README. The test installation has only dummy sensors, so **no real sensor value has been seen yet**. What was checked: the device `<instance> 1-Wire`, the entities with their names and ids, and the *unavailable* state plus the diagnostic `1-Wire problem` sensor for a sensor that cannot be read.
+The sensors of Comexio's 1-Wire bus are read-only. Their values arrive only by push, see [1-Wire sensors](../README.md#-1-wire-sensors) in the README. The test installation has only dummy sensors, so on it no real sensor value has been seen. A user confirmed real temperature sensors (`OT`) working after the release of v0.40.0. What was checked here: the device `<instance> 1-Wire`, the entities with their names and ids, and the *unavailable* state plus the diagnostic `1-Wire problem` sensor for a sensor that cannot be read.
 
 | Prefix | Meaning | In Home Assistant | Result |
 | :--- | :--- | :--- | :--- |
-| `OT` | temperature | `sensor` temperature (°C) | entity ok, value awaiting a real sensor |
+| `OT` | temperature | `sensor` temperature (°C) | works, confirmed by a user with real sensors |
 | `OH` | humidity | `sensor` humidity (%) | entity ok, value awaiting a real sensor |
 | `OP`, `OILL`, `OVAD`, `OVDD`, `OIB`, other | air pressure, brightness, voltages, ... | `sensor` showing the bare number, without unit | entity ok, value awaiting a real sensor |
 | any, digital type | digital sensor | `binary_sensor` | not tested |
@@ -203,11 +203,11 @@ Diese sind auf der Testinstallation offline, deshalb **wurde noch nie ein Live-W
 
 ### 1-Wire-Sensoren
 
-Die Sensoren des 1-Wire-Busses von Comexio sind nur lesbar. Ihre Werte kommen ausschließlich per Push, siehe [1-Wire-Sensoren](../README.md#-1-wire-sensoren) in der README. Die Testinstallation hat nur Dummy-Sensoren, deshalb **wurde noch kein Wert eines echten Sensors beobachtet**. Geprüft sind: das Gerät `<Instanz> 1-Wire`, die Entitäten mit Namen und IDs sowie der Zustand *nicht verfügbar* samt Diagnose-Sensor `1-Wire-Problem` bei einem Sensor, der nicht lesbar ist.
+Die Sensoren des 1-Wire-Busses von Comexio sind nur lesbar. Ihre Werte kommen ausschließlich per Push, siehe [1-Wire-Sensoren](../README.md#-1-wire-sensoren) in der README. Die Testinstallation hat nur Dummy-Sensoren, auf ihr wurde also kein Wert eines echten Sensors beobachtet. Ein Nutzer hat nach dem Release von v0.40.0 bestätigt, dass echte Temperatursensoren (`OT`) funktionieren. Hier geprüft sind: das Gerät `<Instanz> 1-Wire`, die Entitäten mit Namen und IDs sowie der Zustand *nicht verfügbar* samt Diagnose-Sensor `1-Wire-Problem` bei einem Sensor, der nicht lesbar ist.
 
 | Präfix | Bedeutung | In Home Assistant | Ergebnis |
 | :--- | :--- | :--- | :--- |
-| `OT` | Temperatur | `sensor` Temperatur (°C) | Entität ok, Wert wartet auf einen echten Sensor |
+| `OT` | Temperatur | `sensor` Temperatur (°C) | funktioniert, von einem Nutzer mit echten Sensoren bestätigt |
 | `OH` | Feuchte | `sensor` Luftfeuchte (%) | Entität ok, Wert wartet auf einen echten Sensor |
 | `OP`, `OILL`, `OVAD`, `OVDD`, `OIB`, andere | Luftdruck, Helligkeit, Spannungen, ... | `sensor` mit der nackten Zahl, ohne Einheit | Entität ok, Wert wartet auf einen echten Sensor |
 | beliebig, digitaler Typ | digitaler Sensor | `binary_sensor` | nicht getestet |
