@@ -9,6 +9,7 @@ import socket
 from typing import Any
 from unittest.mock import MagicMock
 
+from aiocomexio import session_kwargs
 import aiohttp
 from aiohttp import web
 from aiohttp.abc import AbstractResolver, ResolveResult
@@ -16,6 +17,7 @@ from homeassistant import config_entries
 from homeassistant.helpers import aiohttp_client
 from homeassistant.util import ssl as ssl_util
 import pytest
+from yarl import URL
 
 from custom_components.comexio import http_session
 from custom_components.comexio.const import (
@@ -166,6 +168,8 @@ def test_the_session_is_built_like_home_assistants(home: _Home) -> None:
         context = ssl_util.client_context(ssl_util.SSLCipherList.PYTHON_DEFAULT, ssl_util.SSL_ALPN_HTTP11)
         assert session.connector._ssl is context
         assert session.timeout.total == 5  # the caller's kwargs reach the session
+        # The agreed keep-alive itself, not one a test patched in (#289); aiohttp has no public getter for it.
+        assert session.connector._keepalive_timeout == COMEXIO_KEEPALIVE_TIMEOUT_SEC
 
         assert await _get(session, server, host="comexio.local") == "ok"
         await session.close()
@@ -405,5 +409,47 @@ def test_discarding_an_unused_session_whose_connector_is_closed_already_does_not
 
         assert tasks == []
         assert home.timers == []
+
+    _with_server(scenario)
+
+
+def test_the_real_accessor_hands_out_the_resolver_the_connector_is_built_with(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Home Assistant's own accessor (its singleton wrapper included), only the resolver it makes is a stand-in (the
+    # `home` fixture is not used: it replaces the accessor): a changed signature or return type makes http_session
+    # fall back, which this test turns into a red one.
+    monkeypatch.setattr(http_session._FallbackNotice, "logged", False)
+    made = _Resolver()
+    makes = MagicMock(return_value=made)
+    monkeypatch.setattr(aiohttp_client, "_async_make_resolver", makes)
+    hass = MagicMock()
+    hass.data = {}
+
+    assert http_session._ha_resolver(hass) is made
+    assert http_session._ha_resolver(hass) is made
+    makes.assert_called_once_with(hass)  # Home Assistant's singleton: one resolver for everybody, not one per session
+
+    async def scenario(server: _Server) -> None:
+        session = async_create_session(hass, bind_to_entry=False)
+        assert isinstance(session.connector, ComexioConnector)
+        assert await _get(session, server, host="comexio.local") == "ok"
+        await session.close()
+
+        assert made.asked == ["comexio.local"]  # the lookup really went through the resolver Home Assistant handed out
+
+    _with_server(scenario)
+
+
+def test_the_sessions_cookie_jar_keeps_the_cookies_of_a_host_given_by_ip_address(home: _Home) -> None:
+    # aiohttp's default jar drops cookies from an IP address: aiocomexio's session_kwargs bring a jar that keeps them,
+    # and the dedicated session must carry it just as Home Assistant's own session would.
+    async def scenario(_server: _Server) -> None:
+        session = async_create_session(home.hass, bind_to_entry=False, **session_kwargs())
+        url = URL("http://192.168.0.50/")
+        session.cookie_jar.update_cookies({"session": "abc"}, url)
+
+        assert [cookie.key for cookie in session.cookie_jar.filter_cookies(url).values()] == ["session"]
+        await session.close()
 
     _with_server(scenario)
