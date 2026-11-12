@@ -14,7 +14,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 Covers everything since v0.40.0.
 
 ### ✨ New Features
-- **Diagnostic "API write errors" sensor:** counts every write to Comexio that failed since Home Assistant last started, and names the last three failures with their time, target and error class. A dropped connection is told apart from a refusal (#290).
+- **Diagnostic "API write errors" sensor:** counts every write to Comexio that failed since Home Assistant last started or the integration was reloaded, and names the last three failures with their time, target and error class. A dropped connection is told apart from a refusal (#290).
 - **Writes are sent again when Comexio drops the connection:** a write over `/api/` (markers, KNX objects, `Q*` and `DG*` outputs) that Comexio closed before it answered is sent again, up to three times. Only a drop that comes back within 0.5 s is repeated, only while Home Assistant does not already show the wanted value, and never for a trigger marker or a toggle, which could act twice. Rescued writes are counted in the sensor (#289, #291, #293).
 
 ### 🛠️ Core & Stability Improvements
@@ -28,7 +28,7 @@ Covers everything since v0.40.0.
 ### ⚠️ Requirements & Notes
 - **Restart required** after updating.
 - **Dependency:** `aiocomexio==0.13.0` (was 0.11.0, installed automatically by Home Assistant) (#292).
-- **New diagnostic entity:** the "API write errors" sensor appears after the restart; its counts start at zero and are not kept across restarts.
+- **New diagnostic entity:** the "API write errors" sensor appears after the restart; its counts start at zero after a restart or a reload of the integration and are not kept across them.
 - **3 s keep-alive depends on a Home Assistant internal:** Home Assistant has no public way to hand its DNS resolver (for `.local` names) to a session of the integration, so the 3 s keep-alive reads its resolver through an internal function. If a Home Assistant update removes or changes that function, the integration falls back to Home Assistant's shared connections (15 s keep-alive), logs one warning saying so, and the old dropped-connection behaviour returns; the write retry still covers a dropped write over `/api/`. A unit test fails on such a change as soon as the tests run against that Home Assistant version.
 
 ---
@@ -490,7 +490,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.40.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.41.0...HEAD
+[0.41.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.32.0...v0.40.0
 [0.32.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.31.0...v0.32.0
 [0.31.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.30.0...v0.31.0
