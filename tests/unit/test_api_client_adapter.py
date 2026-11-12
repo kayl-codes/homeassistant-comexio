@@ -2302,31 +2302,39 @@ def _is_session_name(node: ast.AST) -> bool:
 _SESSION_DROPS = frozenset({"close", "detach"})  # close() cuts a request off, detach() leaves the connector open
 
 
+def _alias_key(node: ast.AST) -> str | None:
+    """What an alias is called: the name of a plain name (`s`) or the attribute of an attribute (`self._s`)."""
+    if isinstance(node, ast.Name):
+        return node.id
+    return node.attr if isinstance(node, ast.Attribute) else None
+
+
 def _session_drop_lines(source: str) -> list[int]:
-    """Lines that close or detach a session: `x.session.close()` in any case, `getattr(session, "detach")` and a
-    plain-name alias of a session, however long the chain (`s = self.session; t = s; t.detach()`). Not caught: aliases
-    that are no plain name (`self._s = self.session`, unpacking, loop, walrus or `with` targets), a bound method taken
-    first (`cb = self.session.detach; cb()`), a computed `getattr` name, and the alias set is one per module."""
+    """Lines that close or detach a session: `x.session.close()` in any case, `getattr(session, "detach")` and an
+    alias of a session, a plain name or an attribute, however long the chain (`s = self.session; t = s; t.detach()`,
+    `self._s = self.session; self._s.close()`). Not caught: unpacking, loop, walrus or `with` targets, a bound method
+    taken first (`cb = self.session.detach; cb()`), a computed `getattr` name, and the alias set is one per module
+    (an attribute alias counts by its attribute name, whatever object it hangs off)."""
     tree = ast.parse(source)
     aliases: set[str] = set()
     assigned = [
-        (target.id, node.value)
+        (key, node.value)
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign | ast.AnnAssign) and node.value is not None
         for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-        if isinstance(target, ast.Name)
+        if (key := _alias_key(target)) is not None
     ]
     grew = True
     while grew:
         grew = False
         for name, value in assigned:
-            names_one = _is_session_name(value) or (isinstance(value, ast.Name) and value.id in aliases)
+            names_one = _is_session_name(value) or (_alias_key(value) in aliases)
             if name not in aliases and names_one:
                 aliases.add(name)
                 grew = True
 
     def names_a_session(node: ast.AST) -> bool:
-        return _is_session_name(node) or (isinstance(node, ast.Name) and node.id in aliases)
+        return _is_session_name(node) or (_alias_key(node) in aliases)
 
     lines: list[int] = []
     for node in ast.walk(tree):
@@ -2351,6 +2359,9 @@ def _session_drop_lines(source: str) -> list[int]:
         "s = self.session\ns.close()",
         "s: object = self.session\ns.close()",
         "s = self.session\nt = s\nt.close()",
+        "self._s = self.session\nself._s.close()",
+        "self._s = self.session\nself._t = self._s\nself._t.detach()",
+        "self._s = self.session\nother._s.close()",  # an attribute alias counts by its name, whatever it hangs off
         "getattr(self.session, 'close')",
         "self.session.detach()",
         "self._preview_session.detach()",
@@ -2369,7 +2380,9 @@ def test_the_check_against_dropping_a_session_sees_the_ways_around_it(source: st
         "self.close()",
         "connector.close()",
         "c = self.session.connector\nc.close()",
-        "client = self._new_client(self.session)\nclient.close()",
+        "self._c = self.session.connector\nself._c.close()",
+        "s = self.session\nt = s.connector\nt.close()",
+        "client =self._new_client(self.session)\nclient.close()",
         "c = self.session.connector\nc.detach()",
         "getattr(self.session.connector, 'detach')",
     ],
@@ -2426,6 +2439,9 @@ def test_a_preview_session_is_closed_at_once_when_its_login_or_its_client_raises
     assert comexio_api._preview_session is None
     assert discard.call_count == 1
     assert discard.call_args.kwargs == {"unused": True}
+    # The preview session was dropped, not the main one (only these two exist, each call of the fixture a new mock).
+    assert discard.call_args.args[0] is not comexio_api.session
+    assert api_module.async_create_session.call_count == 2  # type: ignore[attr-defined]
 
 
 def test_no_preview_session_is_created_once_the_entry_was_unloaded(comexio_api: ComexioAPI) -> None:
