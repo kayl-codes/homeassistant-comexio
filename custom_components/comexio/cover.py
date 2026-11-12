@@ -1,9 +1,11 @@
+import asyncio
 import logging
 from typing import Any
 
 from homeassistant.components.cover import CoverDeviceClass, CoverEntity, CoverEntityFeature
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -13,6 +15,7 @@ from .const import (
     KNX_DPT3_STEPCODE_BREAK,
     KNX_DPT3_STEPCODE_MOVE,
 )
+from .coordinator import ComexioCoordinator
 from .entity import ComexioKnxDpt3Entity, write_failed
 
 _LOGGER = logging.getLogger(__name__)
@@ -66,21 +69,53 @@ class ComexioKnxCover(ComexioKnxDpt3Entity, CoverEntity):
     _attr_supported_features = CoverEntityFeature.OPEN | CoverEntityFeature.CLOSE | CoverEntityFeature.STOP
     _attr_is_closed = None
 
+    def __init__(
+        self,
+        coordinator: ComexioCoordinator,
+        server_id: str,
+        direction_item: dict[str, Any],
+        stepcode_item: dict[str, Any],
+    ) -> None:
+        super().__init__(coordinator, server_id, direction_item, stepcode_item)
+        # One open or close at a time: two that overlap would otherwise interleave their direction and step writes
+        # (each target has its own lock in set_value), and a late move could start in the other command's
+        # direction. A repeated write after a dropped connection widens that gap.
+        self._move_lock = asyncio.Lock()
+        # A stop does not wait for that lock: the cover may still be moving from an earlier command. It counts
+        # itself here instead, and an open or close issued before it gives up ahead of its move telegram.
+        self._stops = 0
+
     async def async_open_cover(self, **kwargs: Any) -> None:
         """Move up: write direction=Up, then a non-zero step code to start moving."""
-        if not await self._async_write_direction(KNX_DPT3_COVER_DIRECTION_UP) or not await self._async_write_stepcode(
-            KNX_DPT3_STEPCODE_MOVE
-        ):
-            raise write_failed(self.coordinator, f"Failed to open cover K{self._direction_id}/K{self._stepcode_id}")
+        await self._async_move(KNX_DPT3_COVER_DIRECTION_UP, "open")
 
     async def async_close_cover(self, **kwargs: Any) -> None:
         """Move down: write direction=Down, then a non-zero step code to start moving."""
-        if not await self._async_write_direction(KNX_DPT3_COVER_DIRECTION_DOWN) or not await self._async_write_stepcode(
-            KNX_DPT3_STEPCODE_MOVE
-        ):
-            raise write_failed(self.coordinator, f"Failed to close cover K{self._direction_id}/K{self._stepcode_id}")
+        await self._async_move(KNX_DPT3_COVER_DIRECTION_DOWN, "close")
+
+    async def _async_move(self, direction: int, verb: str) -> None:
+        """Write the direction, then the move step code, as one command; a stop issued meanwhile cancels it.
+
+        A move step write already on its way when the stop comes holds the step marker's lock in set_value, so the
+        stop telegram goes out after it. Nothing awaits between the check and that write taking the lock.
+        """
+        stops = self._stops  # as of the call: a stop pressed while this command waits for its turn cancels it too
+        failed = f"Failed to {verb} cover K{self._direction_id}/K{self._stepcode_id}"
+        async with self._move_lock:
+            if self._stops == stops and not await self._async_write_direction(direction):
+                raise write_failed(self.coordinator, failed)
+            if self._stops != stops:
+                raise HomeAssistantError(f"{failed}: a stop came first")
+            # No await may come between the check above and this write taking the step marker's lock (docstring).
+            if not await self._async_write_stepcode(KNX_DPT3_STEPCODE_MOVE):
+                raise write_failed(self.coordinator, failed)
 
     async def async_stop_cover(self, **kwargs: Any) -> None:
-        """Break: a step code of 0 stops movement regardless of the direction bit's value."""
+        """Break: a step code of 0 stops movement regardless of the direction bit's value.
+
+        It does not wait for an open or close in progress (see __init__), only for a move telegram already on its
+        way: that one holds the step marker's lock in set_value, and the stop has to come after it.
+        """
+        self._stops += 1
         if not await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK):
             raise write_failed(self.coordinator, f"Failed to stop cover K{self._direction_id}/K{self._stepcode_id}")

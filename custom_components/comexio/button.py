@@ -3412,11 +3412,7 @@ class ComexioMarkerTriggerButton(ComexioMarkerEntity, ButtonEntity):
         reads coordinator.data as of the most recent poll — it narrows the staleness
         window to at most one poll interval, it does not eliminate it.
         """
-        data_key = SOURCE_CATEGORIES[self._SOURCE].data_key
-        source = next(
-            (s for s in self.coordinator.data.get(data_key, []) if str(s.get("id")) == self._marker_id),
-            None,
-        )
+        source = self._current_source
         if source is None or source.get("kind") != MarkerKind.TRIGGER:
             raise HomeAssistantError(
                 f"{self._source_label} {self._marker_id} is no longer a trigger "

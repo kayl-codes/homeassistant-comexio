@@ -124,7 +124,7 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         """Whether a write still goes where it went when settings were taken (api.write_settings)."""
         return self.coordinator.api.write_settings("marker") == settings
 
-    async def _async_stop(self, settings: tuple[str, ...]) -> bool:
+    async def _async_send_stop(self, settings: tuple[str, ...]) -> bool:
         """Write the stop of a move started with these connection settings; False if it did not get through.
 
         The stop belongs to the server the move went to: after a reconfigure in between it is not sent, the same
@@ -132,19 +132,40 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         """
         return self._same_server(settings) and await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
 
+    async def _async_stop(self, settings: tuple[str, ...]) -> bool:
+        """_async_send_stop; a cancellation while the stop is in flight gets one more stop before it goes on.
+
+        The cancelled request may not have reached Comexio, and a second stop telegram does no harm.
+        """
+        try:
+            return await self._async_send_stop(settings)
+        except asyncio.CancelledError:
+            await self._async_stop_after_cancel(settings)
+            raise
+
     async def _async_stop_after_cancel(self, settings: tuple[str, ...]) -> None:
         """The stop of a move that was cancelled; it logs what went wrong instead of raising.
 
-        The cancellation has to go on, so a bridge error (HomeAssistantError; set_value itself turns transport errors
-        into False) must not take its place, and nobody can be told otherwise: the warning is the only trace of a
-        dimmer that may still be moving.
+        The cancellation has to go on, so an error of the stop (a HomeAssistantError when the bridge Marker data is
+        gone, see _async_write_via_bridge; set_value itself turns transport errors into False) must not take its
+        place, and nobody can be told otherwise: the warning is the only trace of a dimmer that may still be moving.
+        A second cancellation during this stop is logged the same way and goes on.
         """
         try:
-            if await self._async_stop(settings):
+            if await self._async_send_stop(settings):
                 return
             reason = "" if self._same_server(settings) else " (not sent: the connection settings changed)"
+        except asyncio.CancelledError:
+            self._warn_still_moving(" (cancelled again)")
+            raise
         except HomeAssistantError as err:  # bridge Marker data gone meanwhile (_async_write_via_bridge)
             reason = f" ({err})"
+        except Exception as err:  # any other error: it would replace the cancellation going on
+            reason = f" ({err!r})"  # with its type: an unexpected error may carry no message
+        self._warn_still_moving(reason)
+
+    def _warn_still_moving(self, reason: str) -> None:
+        """Log that the stop after a cancelled move did not get through, for _async_stop_after_cancel."""
         _LOGGER.warning(
             "Dimming K%s/K%s was cancelled during its move, and the stop telegram after it did not get through%s "
             "— the actuator may still be moving",

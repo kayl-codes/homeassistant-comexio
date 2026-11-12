@@ -31,10 +31,15 @@ from custom_components.comexio.const import (
     API_WRITE_RETRY_MAX,
     API_WRITE_RETRY_WINDOW_SEC,
     CERTIFICATE_CHANGED_MSG,
+    KNX_DPT3_COVER_DIRECTION_DOWN,
+    KNX_DPT3_COVER_DIRECTION_UP,
+    KNX_DPT3_STEPCODE_BREAK,
+    KNX_DPT3_STEPCODE_MOVE,
     SOURCE_CATEGORIES,
     MarkerKind,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.cover import ComexioKnxCover
 from custom_components.comexio.light import ComexioKnxLight
 
 DROPPED_CLASS = "ComexioConnectionError (ServerDisconnectedError)"
@@ -698,6 +703,155 @@ def test_a_cancelled_direction_write_gets_no_stop() -> None:
     assert _sent(set_value) == [("77", 1, True)]
 
 
+def test_a_timed_stop_cancelled_in_flight_is_sent_once_more_before_the_cancellation_goes_on(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The cancelled stop request may not have reached Comexio; a second stop telegram does no harm.
+    monkeypatch.setattr(light_module.asyncio, "sleep", AsyncMock(return_value=None))
+    set_value = AsyncMock(side_effect=[True, True, asyncio.CancelledError(), True])
+    light = _dimmer(set_value)
+
+    move = light._async_move_to(255)
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True), ("78", 0, True)]
+    assert caplog.records == []
+    assert light._attr_brightness == 0  # the cancelled move never got to apply its target
+
+
+def _cover_whose_open_hangs(
+    with_stop: bool,
+) -> tuple[list[tuple[str, int]], list[tuple[str, int]], list[BaseException | None]]:
+    """Open a cover whose direction write hangs, then close it (and stop it) while the open waits.
+
+    Returns the writes sent while the open hung, all writes, and the outcome of open, close (and stop).
+    """
+    sent: list[tuple[str, int]] = []
+    while_hung: list[tuple[str, int]] = []
+
+    async def scenario() -> list[BaseException | None]:
+        open_direction_sent, release = asyncio.Event(), asyncio.Event()
+
+        async def write(_type: str, marker: str, value: int, **_kwargs: object) -> bool:
+            sent.append((marker, value))
+            if (marker, value) == ("77", KNX_DPT3_COVER_DIRECTION_UP):
+                open_direction_sent.set()
+                await release.wait()  # the open's direction write hangs, as when it is repeated
+            return True
+
+        coordinator = MagicMock()
+        coordinator.api.set_value = AsyncMock(side_effect=write)
+        coordinator._knx_bridge_marker_by_k_id.return_value = {"9": "77", "10": "78"}
+        cover = ComexioKnxCover(coordinator, "srv", {"id": 9}, {"id": 10, "ha_name": "Blind"})
+
+        commands = [asyncio.create_task(cover.async_open_cover())]
+        await open_direction_sent.wait()
+        commands.append(asyncio.create_task(cover.async_close_cover()))
+        if with_stop:
+            commands.append(asyncio.create_task(cover.async_stop_cover()))
+        for _ in range(3):
+            await asyncio.sleep(0)
+        while_hung.extend(sent)
+        release.set()
+        return await asyncio.gather(*commands, return_exceptions=True)
+
+    outcomes = asyncio.run(scenario())
+    return while_hung, sent, outcomes
+
+
+def test_overlapping_cover_commands_do_not_interleave_their_writes() -> None:
+    # Without one lock per cover, the close would set the direction while the open's move is on its way, and the
+    # late move would start in the close's direction.
+    _while_hung, sent, outcomes = _cover_whose_open_hangs(with_stop=False)
+
+    assert sent == [
+        ("77", KNX_DPT3_COVER_DIRECTION_UP),
+        ("78", KNX_DPT3_STEPCODE_MOVE),
+        ("77", KNX_DPT3_COVER_DIRECTION_DOWN),
+        ("78", KNX_DPT3_STEPCODE_MOVE),
+    ]
+    assert outcomes == [None, None]
+
+
+def test_a_stop_goes_out_at_once_and_cancels_the_moves_issued_before_it() -> None:
+    # The cover may still be moving from an earlier command: the stop must not wait for a hung open or close.
+    while_hung, sent, outcomes = _cover_whose_open_hangs(with_stop=True)
+
+    assert while_hung == [("77", KNX_DPT3_COVER_DIRECTION_UP), ("78", KNX_DPT3_STEPCODE_BREAK)]
+    assert sent == while_hung  # neither the open nor the queued close sends its move telegram afterwards
+    opened, closed, stopped = outcomes
+    assert [str(opened), str(closed), stopped] == [
+        "Failed to open cover K9/K10: a stop came first",
+        "Failed to close cover K9/K10: a stop came first",
+        None,
+    ]
+    assert isinstance(opened, HomeAssistantError)
+    assert isinstance(closed, HomeAssistantError)
+
+
+def _timed_stop_cancelled_then(monkeypatch: pytest.MonkeyPatch, second_stop: Any) -> tuple[ComexioKnxLight, AsyncMock]:
+    """A dimmer whose timed stop is cancelled in flight; second_stop is what the stop after it does."""
+    monkeypatch.setattr(light_module.asyncio, "sleep", AsyncMock(return_value=None))
+    return _dimmer(set_value := AsyncMock(side_effect=[True, True, asyncio.CancelledError(), second_stop])), set_value
+
+
+@pytest.mark.parametrize(
+    ("second_stop", "reason"),
+    [(asyncio.CancelledError(), " (cancelled again)"), (KeyError(), " (KeyError())")],
+    ids=["cancelled again", "unexpected error"],
+)
+def test_the_stop_after_a_cancelled_stop_is_sent_once_and_its_failure_does_not_replace_the_cancellation(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, second_stop: BaseException, reason: str
+) -> None:
+    light, set_value = _timed_stop_cancelled_then(monkeypatch, second_stop)
+
+    move = light._async_move_to(255)
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True), ("78", 0, True)]
+    assert [record.getMessage() for record in caplog.records] == [
+        f"Dimming K9/K10 was cancelled during its move, and the stop telegram after it did not get through{reason} "
+        "— the actuator may still be moving"
+    ]
+
+
+def test_a_bridge_error_in_the_stop_after_a_cancelled_stop_is_logged(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    light, set_value = _timed_stop_cancelled_then(monkeypatch, True)
+    light.coordinator._knx_bridge_marker_by_k_id.side_effect = [{"9": "77"}, {"10": "78"}, {"10": "78"}, None]
+
+    move = light._async_move_to(255)
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True)]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Dimming K9/K10 was cancelled during its move, and the stop telegram after it did not get through "
+        "(Comexio K10: bridge Marker data not loaded yet — try again shortly) — the actuator may still be moving"
+    ]
+
+
+def test_a_safety_stop_cancelled_in_flight_is_sent_once_more_and_a_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The move was not confirmed, its stop is cancelled on the way, and the stop after that does not get through.
+    set_value = AsyncMock(side_effect=[True, False, asyncio.CancelledError(), False])
+    light = _dimmer(set_value)
+
+    move = light._async_move_to(255)
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True), ("78", 0, True)]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Dimming K9/K10 was cancelled during its move, and the stop telegram after it did not get through — "
+        "the actuator may still be moving"
+    ]
+
+
 def test_a_dimmer_whose_direction_write_failed_is_not_moved_and_gets_no_stop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
     set_value = AsyncMock(return_value=False)
@@ -1103,8 +1257,16 @@ def test_the_same_target_under_another_id_type_shares_the_lock(
 
 
 def test_the_lock_of_a_target_is_dropped_with_its_last_write(api: ComexioAPI, client: MagicMock) -> None:
+    held_during_the_write: list[bool] = []
+
+    async def send(_marker: int, _value: int) -> None:
+        held_during_the_write.append([lock.locked() for lock in api._write_locks.values()] == [True])
+
+    client.set_marker_value.side_effect = send
+
     _run(api.set_value("marker", 5, 1))
 
+    assert held_during_the_write == [True]
     assert len(api._write_locks) == 0
 
 
@@ -1267,13 +1429,54 @@ def test_a_trigger_marker_is_written_once_because_it_toggles() -> None:
     set_value.assert_awaited_once_with("marker", "5", 1, repeat=False)
 
 
-def test_a_plain_marker_write_stays_repeatable() -> None:
+@pytest.mark.parametrize(
+    "data",
+    [{"markers": [{"id": 5, "kind": MarkerKind.NORMAL}]}, {"markers": []}, None],
+    ids=["no longer a trigger", "gone from the latest poll", "no poll data"],
+)
+def test_a_trigger_button_whose_marker_is_no_longer_a_trigger_writes_nothing(data: dict[str, Any] | None) -> None:
     set_value = AsyncMock(return_value=True)
     button = _trigger_button(set_value)
+    button.coordinator.data = data  # type: ignore[misc]
 
-    _run(button._async_source_write(1))
+    press = button.async_press()
+    with pytest.raises(HomeAssistantError, match="no longer a trigger"):
+        _run(press)
 
-    set_value.assert_awaited_once_with("marker", "5", 1, repeat=True)
+    set_value.assert_not_awaited()
+
+
+def _marker_entity(set_value: AsyncMock, data: dict[str, Any] | None) -> entity_module.ComexioMarkerEntity:
+    entity = entity_module.ComexioMarkerEntity.__new__(entity_module.ComexioMarkerEntity)
+    entity.coordinator = SimpleNamespace(data=data, api=SimpleNamespace(set_value=set_value))  # type: ignore[assignment]
+    entity._marker_id = "5"
+    return entity
+
+
+@pytest.mark.parametrize("repeat", [True, False])
+def test_a_plain_marker_write_is_repeatable_as_the_caller_asked(repeat: bool) -> None:
+    set_value = AsyncMock(return_value=True)
+    entity = _marker_entity(set_value, {"markers": [{"id": 5, "kind": MarkerKind.NORMAL}]})
+
+    # Parsed marker ids are ints, the entity keeps its id as a string.
+    _run(entity._async_source_write(1, repeat=repeat))
+
+    set_value.assert_awaited_once_with("marker", "5", 1, repeat=repeat)
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{"markers": [{"id": 5, "kind": MarkerKind.TRIGGER}]}, {"markers": []}, None],
+    ids=["has since become a trigger", "gone from the latest poll", "no poll data"],
+)
+def test_a_marker_write_is_sent_once_unless_the_latest_poll_shows_a_plain_marker(data: dict[str, Any] | None) -> None:
+    # The entity outlives the title edit that added [TRIG] until the next reload; the plan input toggles per edge.
+    # A marker the poll no longer has may be anything by now, so it is not repeated either.
+    set_value = AsyncMock(return_value=True)
+
+    _run(_marker_entity(set_value, data)._async_source_write(1))
+
+    set_value.assert_awaited_once_with("marker", "5", 1, repeat=False)
 
 
 def test_a_knx_trigger_write_reaches_the_bridge_marker_without_repetition() -> None:
@@ -1305,17 +1508,20 @@ def test_a_knx_trigger_button_writes_its_bridge_marker_once() -> None:
     set_value.assert_awaited_once_with("marker", "77", 1, repeat=False, even_if_held=False)
 
 
-def test_a_plain_knx_write_stays_repeatable() -> None:
+@pytest.mark.parametrize(("kind", "repeat"), [(MarkerKind.NORMAL, True), (MarkerKind.TRIGGER, False)])
+def test_a_knx_write_is_repeatable_unless_the_object_is_a_trigger_by_now(kind: MarkerKind, repeat: bool) -> None:
     set_value = AsyncMock(return_value=True)
-    button = ComexioKnxTriggerButton.__new__(ComexioKnxTriggerButton)
-    button.coordinator = SimpleNamespace(  # type: ignore[assignment]
-        _knx_bridge_marker_by_k_id=lambda: {"9": "77"}, api=SimpleNamespace(set_value=set_value)
+    entity = entity_module.ComexioKnxEntity.__new__(entity_module.ComexioKnxEntity)
+    entity.coordinator = SimpleNamespace(  # type: ignore[assignment]
+        data={SOURCE_CATEGORIES[entity._SOURCE].data_key: [{"id": "9", "kind": kind}]},
+        _knx_bridge_marker_by_k_id=lambda: {"9": "77"},
+        api=SimpleNamespace(set_value=set_value),
     )
-    button._marker_id = "9"
+    entity._marker_id = "9"
 
-    _run(button._async_source_write(1))
+    _run(entity._async_source_write(1))
 
-    set_value.assert_awaited_once_with("marker", "77", 1, repeat=True, even_if_held=False)
+    set_value.assert_awaited_once_with("marker", "77", 1, repeat=repeat, even_if_held=False)
 
 
 def test_a_write_to_another_target_does_not_wait_for_the_repetitions_of_this_one(
