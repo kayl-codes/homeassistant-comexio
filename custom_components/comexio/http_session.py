@@ -94,7 +94,8 @@ def _ha_resolver(hass: HomeAssistant) -> AbstractResolver | None:
         try:
             resolver = getter(hass)
             reason = f"it handed out a {type(resolver).__name__}"
-        except Exception as err:  # noqa: BLE001 - a private function of Home Assistant: whatever it raises, fall back
+        except Exception as err:
+            # A private function of Home Assistant: whatever it raises, fall back.
             failure = err
             reason = "the lookup raised"
     if isinstance(resolver, AbstractResolver):
