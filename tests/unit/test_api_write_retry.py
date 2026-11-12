@@ -8,9 +8,10 @@ import inspect
 import logging
 import re
 import textwrap
+import time
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError, ComexioRequestRejectedError
 import aiohttp
@@ -79,7 +80,7 @@ def test_a_dropped_write_is_sent_again_and_counted_as_recovered(api: ComexioAPI,
 
     assert _run(api.set_value("marker", 5, 0)) is True
 
-    assert client.set_marker_value.await_count == 2
+    assert client.set_marker_value.await_args_list == [call(5, 0)] * 2  # the repetition sends the same write
     stats = api.write_stats
     assert (stats.failed, stats.retries, stats.recovered) == (0, 1, 1)
 
@@ -293,7 +294,7 @@ def test_a_digital_output_is_repeated_like_a_marker(api: ComexioAPI, client: Mag
 
     assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "Q5")) is True
 
-    assert client.set_io_value.await_count == 2
+    assert client.set_io_value.await_args_list == [call("LED-Dimmer A3", "Q5", 0)] * 2
 
 
 def test_an_analog_output_over_the_admin_session_is_not_repeated_here(api: ComexioAPI, client: MagicMock) -> None:
@@ -311,7 +312,7 @@ def test_a_knx_write_is_repeated(api: ComexioAPI, client: MagicMock) -> None:
 
     assert _run(api.set_value("knx", 9, 1)) is True
 
-    assert client.set_knx_value.await_count == 2
+    assert client.set_knx_value.await_args_list == [call(9, 1)] * 2
     client.set_marker_value.assert_not_awaited()
     client.set_io_value.assert_not_awaited()
     assert (api.write_stats.failed, api.write_stats.retries, api.write_stats.recovered) == (0, 1, 1)
@@ -1190,6 +1191,35 @@ def test_the_window_is_measured_per_attempt(
     assert (api.write_stats.retries, api.write_stats.failed) == (1, 1)
 
 
+def test_quick_drops_are_repeated_even_when_together_they_take_longer_than_the_window(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Each send drops after 0.2 s, inside the 0.3 s window; counted from the first send, the second drop (0.4 s) is
+    # already past it. A fake clock instead of sleeping keeps the margin exact on a slow runner.
+    monkeypatch.setattr(api_module, "API_WRITE_RETRY_WINDOW_SEC", 0.3)
+    now = [1000.0]
+
+    class _Clock:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(time, name)
+
+        def monotonic(self) -> float:
+            return now[0]
+
+    monkeypatch.setattr(api_module, "time", _Clock())
+
+    async def drop_after_a_while(*_args: Any) -> None:
+        now[0] += 0.2
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_after_a_while
+
+    assert _run(api.set_value("marker", 5, 0)) is False
+
+    assert client.set_marker_value.await_count == 1 + API_WRITE_RETRY_MAX
+    assert (api.write_stats.retries, api.write_stats.failed) == (API_WRITE_RETRY_MAX, 1)
+
+
 def test_a_slow_certificate_probe_does_not_use_up_the_window(
     comexio_api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1531,19 +1561,28 @@ def test_a_write_to_another_target_does_not_wait_for_the_repetitions_of_this_one
 
     async def scenario() -> bool:
         release = asyncio.Event()
+        repeating = asyncio.Event()
+        sends_to_5 = 0
 
         async def send(marker: int, _value: int) -> None:
-            if marker == 5:
-                await release.wait()
+            nonlocal sends_to_5
+            if marker != 5:
+                return
+            sends_to_5 += 1
+            if sends_to_5 == 1:
+                raise _dropped()
+            repeating.set()  # marker 5 is now in its repetition, and that one hangs
+            await release.wait()
 
         client.set_marker_value.side_effect = send
         blocked = asyncio.create_task(api.set_value("marker", 5, 0))
-        await asyncio.sleep(0.01)
+        await asyncio.wait_for(repeating.wait(), 1)
         other = await asyncio.wait_for(api.set_value("marker", 6, 1), 1)
         release.set()
         return other and await blocked
 
     assert _run(scenario()) is True
+    assert api.write_stats.retries == 1
 
 
 def test_a_write_that_is_not_repeated_does_not_claim_a_repetition_in_its_error_line(
