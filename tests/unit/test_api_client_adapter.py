@@ -2299,10 +2299,14 @@ def _is_session_name(node: ast.AST) -> bool:
     return isinstance(node, ast.Attribute) and "session" in node.attr.lower()
 
 
-def _session_close_lines(source: str) -> list[int]:
-    """Lines that close a session: `x.session.close()` in any case, `getattr(session, "close")` and a plain-name alias
-    of a session, however long the chain (`s = self.session; t = s; t.close()`). Not caught: aliases that are no plain
-    name (`self._s = self.session`, unpacking, loop, walrus or `with` targets)."""
+_SESSION_DROPS = frozenset({"close", "detach"})  # close() cuts a request off, detach() leaves the connector open
+
+
+def _session_drop_lines(source: str) -> list[int]:
+    """Lines that close or detach a session: `x.session.close()` in any case, `getattr(session, "detach")` and a
+    plain-name alias of a session, however long the chain (`s = self.session; t = s; t.detach()`). Not caught: aliases
+    that are no plain name (`self._s = self.session`, unpacking, loop, walrus or `with` targets), a bound method taken
+    first (`cb = self.session.detach; cb()`), a computed `getattr` name, and the alias set is one per module."""
     tree = ast.parse(source)
     aliases: set[str] = set()
     assigned = [
@@ -2329,11 +2333,11 @@ def _session_close_lines(source: str) -> list[int]:
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if isinstance(func, ast.Attribute) and func.attr == "close" and names_a_session(func.value):
+        if isinstance(func, ast.Attribute) and func.attr in _SESSION_DROPS and names_a_session(func.value):
             lines.append(node.lineno)
         elif isinstance(func, ast.Name) and func.id == "getattr" and len(node.args) == 2:
             target, name = node.args
-            if isinstance(name, ast.Constant) and name.value == "close" and names_a_session(target):
+            if isinstance(name, ast.Constant) and name.value in _SESSION_DROPS and names_a_session(target):
                 lines.append(node.lineno)
     return lines
 
@@ -2348,10 +2352,15 @@ def _session_close_lines(source: str) -> list[int]:
         "s: object = self.session\ns.close()",
         "s = self.session\nt = s\nt.close()",
         "getattr(self.session, 'close')",
+        "self.session.detach()",
+        "self._preview_session.detach()",
+        "s = self.session\nt = s\nt.detach()",
+        "getattr(self.session, 'detach')()",
+        "getattr(self.session, 'detach')",
     ],
 )
-def test_the_check_against_closing_a_session_sees_the_ways_around_it(source: str) -> None:
-    assert _session_close_lines(source) != []
+def test_the_check_against_dropping_a_session_sees_the_ways_around_it(source: str) -> None:
+    assert _session_drop_lines(source) != []
 
 
 @pytest.mark.parametrize(
@@ -2361,10 +2370,12 @@ def test_the_check_against_closing_a_session_sees_the_ways_around_it(source: str
         "connector.close()",
         "c = self.session.connector\nc.close()",
         "client = self._new_client(self.session)\nclient.close()",
+        "c = self.session.connector\nc.detach()",
+        "getattr(self.session.connector, 'detach')",
     ],
 )
-def test_the_check_against_closing_a_session_leaves_other_closes_alone(source: str) -> None:
-    assert _session_close_lines(source) == []
+def test_the_check_against_dropping_a_session_leaves_other_calls_alone(source: str) -> None:
+    assert _session_drop_lines(source) == []
 
 
 def test_the_api_never_drops_a_session_on_its_own() -> None:
@@ -2373,8 +2384,8 @@ def test_the_api_never_drops_a_session_on_its_own() -> None:
     source = inspect.getsource(api_module)
     assert ".detach(" not in source
     assert "async_create_clientsession(" not in source
-    # No close() on a session either (a docstring may name it, a call may not).
-    assert _session_close_lines(source) == []
+    # Neither close() nor detach() on a session, however it is reached (a docstring may name them, a call may not).
+    assert _session_drop_lines(source) == []
 
 
 def _change_host(api: ComexioAPI) -> None:
