@@ -573,6 +573,13 @@ def _sent(set_value: AsyncMock) -> list[tuple[str, int, bool]]:
     return [(call.args[1], call.args[2], call.kwargs["repeat"]) for call in set_value.await_args_list]
 
 
+def _frozen_clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """light.py's clock, standing still until the test moves it: a cancelled hold is estimated from it."""
+    now = [100.0]
+    monkeypatch.setattr(light_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    return now
+
+
 def test_a_dimmer_whose_move_was_not_confirmed_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
     # The move is sent once; Comexio may have taken it before the connection dropped.
     monkeypatch.setattr(light_module, "write_failed", lambda _coordinator, message: RuntimeError(message))
@@ -661,6 +668,7 @@ def test_a_cancelled_move_write_gets_no_stop_once_the_connection_settings_change
 
 
 def test_a_dimmer_cancelled_while_it_holds_the_move_is_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    _frozen_clock(monkeypatch)  # cancelled before any time went by: the estimate stays
     monkeypatch.setattr(light_module.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError()))
     set_value = AsyncMock(return_value=True)
     light = _dimmer(set_value)
@@ -718,7 +726,81 @@ def test_a_timed_stop_cancelled_in_flight_is_sent_once_more_before_the_cancellat
 
     assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True), ("78", 0, True)]
     assert caplog.records == []
-    assert light._attr_brightness == 0  # the cancelled move never got to apply its target
+    assert (light._attr_brightness, light._attr_is_on) == (255, True)  # the whole hold went by before the stop
+    light.async_write_ha_state.assert_called_once()  # a restart restores the estimate
+
+
+@pytest.mark.parametrize(
+    ("start", "target", "stop_takes", "expected"),
+    [(0, 200, 0.25, 50), (200, 0, 0.25, 150), (100, 0, 0.5, 50), (0, 255, 2.0, 255), (255, 0, 2.0, 0)],
+)
+def test_a_dimmer_cancelled_during_its_hold_is_estimated_where_the_stop_after_it_caught_it(
+    monkeypatch: pytest.MonkeyPatch, start: int, target: int, stop_takes: float, expected: int
+) -> None:
+    # The hold is cancelled at once; the actuator moves on until the stop arrives, but not past its target.
+    # A later move is timed from this estimate, and a restart restores the state written from it.
+    duration = abs(target - start) / 255 * light_module.KNX_DPT3_LIGHT_FULL_RANGE_SECONDS
+    now = _frozen_clock(monkeypatch)
+
+    async def write(_type: str, marker: str, value: int, **_kwargs: object) -> bool:
+        if (marker, value) == ("78", 0):  # the stop after the cancel takes its share of the hold
+            now[0] += duration * stop_takes
+        return True
+
+    monkeypatch.setattr(light_module.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError()))
+    set_value = AsyncMock(side_effect=write)
+    light = _dimmer(set_value)
+    light._attr_brightness = start
+
+    move = light._async_move_to(target)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert _sent(set_value)[-1] == ("78", 0, True)  # stopped
+    assert (light._attr_brightness, light._attr_is_on) == (expected, expected > 0)
+    light.async_write_ha_state.assert_called_once()
+
+
+def test_a_second_cancellation_during_the_stop_after_a_cancelled_hold_still_moves_the_estimate(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    now = _frozen_clock(monkeypatch)
+
+    async def write(_type: str, marker: str, value: int, **_kwargs: object) -> bool:
+        if (marker, value) == ("78", 0):
+            now[0] += light_module.KNX_DPT3_LIGHT_FULL_RANGE_SECONDS / 4
+            raise asyncio.CancelledError
+        return True
+
+    monkeypatch.setattr(light_module.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError()))
+    light = _dimmer(AsyncMock(side_effect=write))
+
+    move = light._async_move_to(255)
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "Dimming K9/K10 was cancelled during its move, and the stop telegram after it did not get through "
+        "(cancelled again) — the actuator may still be moving"
+    ]
+    assert light._attr_brightness == 64  # a quarter of the way
+
+
+def test_a_state_write_that_fails_after_a_cancelled_hold_does_not_take_the_cancellations_place(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _frozen_clock(monkeypatch)
+    monkeypatch.setattr(light_module.asyncio, "sleep", AsyncMock(side_effect=asyncio.CancelledError()))
+    light = _dimmer(AsyncMock(return_value=True))
+    light.async_write_ha_state.side_effect = RuntimeError("entity gone")  # type: ignore[attr-defined]
+
+    move = light._async_move_to(255)
+    with caplog.at_level(logging.WARNING, logger=light_module.__name__), pytest.raises(asyncio.CancelledError):
+        asyncio.run(move)
+
+    assert [record.getMessage() for record in caplog.records] == [
+        "Dimming K9/K10 was cancelled; its estimated brightness 0 could not be written to the state"
+    ]
 
 
 def _cover_whose_open_hangs(
@@ -1330,6 +1412,7 @@ def test_a_write_to_another_target_does_not_stop_a_repetition(
 
     assert _run(both()) == [True, True]
 
+    assert [c for c in client.set_marker_value.await_args_list if c.args[0] == 6] == [call(6, 1)]  # really sent
     assert api.write_stats.recovered == 1
 
 
