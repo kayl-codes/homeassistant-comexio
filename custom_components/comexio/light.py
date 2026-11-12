@@ -1,10 +1,12 @@
 import asyncio
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.light import ATTR_BRIGHTNESS, ColorMode, LightEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -22,6 +24,9 @@ from .entity import ComexioKnxDpt3Entity, write_failed
 _LOGGER = logging.getLogger(__name__)
 
 _MAX_BRIGHTNESS = 255
+
+# The end of every message about a stop telegram that did not get through.
+_STILL_MOVING = " — the actuator may still be moving"
 
 
 # HA calls this with `await` — the async signature is a platform-setup contract requirement
@@ -119,33 +124,120 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         """Move all the way down — DPT3.007 has no dedicated 'off' telegram."""
         await self._async_move_to(0)
 
+    def _same_server(self, settings: tuple[str, ...]) -> bool:
+        """Whether a write still goes where it went when settings were taken (api.write_settings)."""
+        return self.coordinator.api.write_settings("marker") == settings
+
+    async def _async_send_stop(self, settings: tuple[str, ...]) -> bool:
+        """Write the stop of a move started with these connection settings; False if it did not get through.
+
+        The stop belongs to the server the move went to: after a reconfigure in between it is not sent, the same
+        marker may be another one there.
+        """
+        return self._same_server(settings) and await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
+
+    async def _async_stop(self, settings: tuple[str, ...]) -> bool:
+        """The stop of a move, as _async_send_stop; a cancellation while it is in flight gets one more stop after it.
+
+        The cancelled request may not have reached Comexio, and a second stop telegram does no harm. A stop that is
+        not sent (the connection settings changed, or the bridge Marker data is gone: _async_write_via_bridge) is a
+        stop that did not get through: the caller's error says the actuator may still be moving, the log says why.
+        """
+        try:
+            if self._same_server(settings):
+                return await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
+            reason = "the connection settings changed"
+        except asyncio.CancelledError:
+            await self._async_stop_after_cancel(settings)
+            raise
+        except HomeAssistantError as err:
+            reason = str(err)
+        _LOGGER.warning(
+            "The stop telegram of dimming K%s/K%s was not sent: %s", self._direction_id, self._stepcode_id, reason
+        )
+        return False
+
+    async def _async_stop_after_cancel(self, settings: tuple[str, ...]) -> None:
+        """The stop of a move that was cancelled; it logs what went wrong instead of raising.
+
+        The cancellation has to go on, so an error of the stop (a HomeAssistantError when the bridge Marker data is
+        gone, see _async_write_via_bridge; set_value itself turns transport errors into False) must not take its
+        place, and nobody can be told otherwise: the warning is the only trace of a dimmer that may still be moving.
+        A second cancellation during this stop is logged the same way and goes on.
+        """
+        try:
+            if await self._async_send_stop(settings):
+                return
+            reason = "" if self._same_server(settings) else " (not sent: the connection settings changed)"
+        except asyncio.CancelledError:
+            self._warn_still_moving(" (cancelled again)")
+            raise
+        except HomeAssistantError as err:  # bridge Marker data gone meanwhile (_async_write_via_bridge)
+            reason = f" ({err})"
+        except Exception as err:  # any other error: it would replace the cancellation going on
+            reason = f" ({err!r})"  # with its type: an unexpected error may carry no message
+        self._warn_still_moving(reason)
+
+    def _warn_still_moving(self, reason: str) -> None:
+        """Log that the stop after a cancelled move did not get through, for _async_stop_after_cancel."""
+        _LOGGER.warning(
+            "Dimming K%s/K%s was cancelled during its move, and the stop telegram after it did not get through%s"
+            + _STILL_MOVING,
+            self._direction_id,
+            self._stepcode_id,
+            reason,
+        )
+
+    async def _async_start_move(self, direction: int, settings: tuple[str, ...]) -> None:
+        """Write the direction, then the move step code; raises if the dimmer was not started.
+
+        The move is sent once (see _async_write_stepcode). Comexio may have taken it before the connection
+        dropped, so a failed move is followed by a stop: the dimmer must not ramp on with no stop ever sent.
+        If that stop does not get through either (_async_stop), the error says the actuator may still be moving.
+        A cancellation during the move write (HA shutdown, reload, a cancelled service call) gets the stop too,
+        before it goes on (_async_stop_after_cancel): the caller's handling of the timed hold only starts after it.
+        """
+        failed = f"Failed to dim K{self._direction_id}/K{self._stepcode_id}"
+        if not await self._async_write_direction(direction) or not self._same_server(settings):
+            # Not moved either when a reconfigure came during the direction write: the move would go elsewhere.
+            raise write_failed(self.coordinator, failed)
+        try:
+            moved = await self._async_write_stepcode(KNX_DPT3_STEPCODE_MOVE)
+        except asyncio.CancelledError:
+            await self._async_stop_after_cancel(settings)
+            raise
+        if moved:
+            return
+        # The two possible errors, built before the stop is written: write_failed names the cause of the write
+        # right before it, and that has to be the refused move, not the stop. One of them is raised.
+        stopped = write_failed(self.coordinator, failed)
+        still_moving = write_failed(
+            self.coordinator,
+            f"{failed}, and the stop telegram after it did not get through{_STILL_MOVING}",
+        )
+        if await self._async_stop(settings):
+            raise stopped
+        raise still_moving
+
     async def _async_move_to(self, target: int) -> None:
         """Hold a move telegram proportional to the estimated brightness delta, then break.
 
-        The break write runs in a finally so a cancelled sleep (HA shutdown, config-entry
-        reload/unload, a cancelled service call) still attempts to stop the actuator instead
-        of leaving it ramping with no stop signal ever sent (found in review 2026-09-20). The
-        brightness estimate is updated to target regardless of whether the break write itself
+        A cancelled sleep (HA shutdown, config-entry reload/unload, a cancelled service call)
+        still attempts to stop the actuator instead of leaving it ramping with no stop signal
+        ever sent (found in review 2026-09-20). It goes through _async_stop_after_cancel, so the
+        cancellation goes on whatever the stop does.
+
+        The brightness estimate is updated to target regardless of whether the break write itself
         succeeded — the actuator physically held the move for the full duration either way, so
         holding the estimate back would only make the eventual drift worse; a failed break is
         still surfaced via HomeAssistantError, just after the state update instead of instead
-        of it.
+        of it. A cancelled move leaves the estimate where the hold got to (_note_cancelled_hold).
         """
         async with self._move_lock:
             current = self._attr_brightness or 0
-            delta = target - current
             stop_ok = True
-            if delta != 0:
-                direction = KNX_DPT3_LIGHT_DIRECTION_INCREASE if delta > 0 else KNX_DPT3_LIGHT_DIRECTION_DECREASE
-                duration = abs(delta) / _MAX_BRIGHTNESS * KNX_DPT3_LIGHT_FULL_RANGE_SECONDS
-                if not await self._async_write_direction(direction) or not await self._async_write_stepcode(
-                    KNX_DPT3_STEPCODE_MOVE
-                ):
-                    raise write_failed(self.coordinator, f"Failed to dim K{self._direction_id}/K{self._stepcode_id}")
-                try:
-                    await asyncio.sleep(duration)
-                finally:
-                    stop_ok = await self._async_write_stepcode(KNX_DPT3_STEPCODE_BREAK)
+            if target != current:
+                stop_ok = await self._async_hold_move(current, target)
 
             self._attr_brightness = target
             self._attr_is_on = target > 0
@@ -153,6 +245,53 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
             if not stop_ok:
                 raise write_failed(
                     self.coordinator,
-                    f"Stop telegram failed after dimming K{self._direction_id}/K{self._stepcode_id} "
-                    "— the actuator may still be moving",
+                    f"Stop telegram failed after dimming K{self._direction_id}/K{self._stepcode_id}{_STILL_MOVING}",
                 )
+
+    async def _async_hold_move(self, current: int, target: int) -> bool:
+        """Start the move from current towards target, hold it for its share of the full range, then stop.
+
+        Returns whether the stop got through. A cancellation stops the dimmer (_async_stop_after_cancel, or
+        _async_stop's own handling during the timed stop) and goes on, with the estimate moved to where the hold got.
+        One during the move write itself (_async_start_move) leaves the estimate as it was: no hold had started.
+        """
+        delta = target - current
+        direction = KNX_DPT3_LIGHT_DIRECTION_INCREASE if delta > 0 else KNX_DPT3_LIGHT_DIRECTION_DECREASE
+        duration = abs(delta) / _MAX_BRIGHTNESS * KNX_DPT3_LIGHT_FULL_RANGE_SECONDS
+        settings = self.coordinator.api.write_settings("marker")
+        await self._async_start_move(direction, settings)
+        held_from = time.monotonic()
+        try:
+            await asyncio.sleep(duration)
+        except asyncio.CancelledError:
+            try:
+                await self._async_stop_after_cancel(settings)
+            finally:  # measured once the stop is out: the actuator moves on until it arrives
+                self._note_cancelled_hold(current, target, time.monotonic() - held_from, duration)
+            raise
+        try:
+            return await self._async_stop(settings)
+        except asyncio.CancelledError:
+            self._note_cancelled_hold(current, target, duration, duration)  # the whole hold went by
+            raise
+
+    def _note_cancelled_hold(self, current: int, target: int, held: float, duration: float) -> None:
+        """Move the brightness estimate as far towards target as a hold of held out of duration seconds got it.
+
+        Without it a later move would be timed from the brightness before the cancelled one, and a restart would
+        restore that one (RestoreEntity keeps the written state). The state write must not raise in place of the
+        cancellation going on, so an error of it is logged (HA itself skips the write for an entity removed meanwhile).
+        """
+        share = min(held / duration, 1.0) if duration > 0 else 1.0
+        self._attr_brightness = current + round((target - current) * share)
+        self._attr_is_on = self._attr_brightness > 0
+        try:
+            self.async_write_ha_state()
+        except Exception:  # it would replace the cancellation going on
+            _LOGGER.warning(
+                "Dimming K%s/K%s was cancelled; its estimated brightness %s could not be written to the state",
+                self._direction_id,
+                self._stepcode_id,
+                self._attr_brightness,
+                exc_info=True,
+            )

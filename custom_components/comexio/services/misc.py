@@ -150,7 +150,9 @@ def _resolve_set_value_marker_target(marker_id: str, value: float, data: dict) -
         return None, f"Trigger marker 'M{marker_id}' only accepts value 1 (press) — writes are rejected."
     if marker.get("type") == "digital" and value not in (0, 1):
         return None, f"Digital marker 'M{marker_id}' only accepts 0 or 1 (got {value})."
-    return {"target_type": "marker", "target_id": marker_id}, ""
+    # Sent again after a dropped connection (api.set_value) only for a plain marker, which takes the value as a state:
+    # a trigger marker's plan input toggles on every edge, and a KNX bridge marker may carry a relative DPT3 move step.
+    return {"target_type": "marker", "target_id": marker_id, "repeat": marker.get("kind") == MarkerKind.NORMAL}, ""
 
 
 def _resolve_set_value_io_target(
@@ -174,6 +176,7 @@ def _resolve_set_value_io_target(
             "target_id": io_id,
             "ext": io.get("ext_name"),
             "identifier": io.get("identifier"),
+            "repeat": True,  # an output takes the value as a state: sending it again sets the same state
         }, ""
     return None, f"Unknown IO '{target}' — not in the current Comexio configuration (or inactive)."
 
@@ -653,6 +656,9 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
         return {"success": False, "error": error}
 
     t_start = time.monotonic()
+    # kwargs carries repeat (_resolve_set_value_marker_target / _io_target): False for a write that may not be a state.
+    # A target that does not say is sent once: a repeated toggle would undo itself.
+    kwargs.setdefault("repeat", False)
     success = await api.set_value(**kwargs, value=value)
     duration = time.monotonic() - t_start
     if not success:

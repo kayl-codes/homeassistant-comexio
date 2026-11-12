@@ -14,9 +14,11 @@ from .const import (
     CERTIFICATE_CHANGED_MSG,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
+    KNX_DPT3_STEPCODE_BREAK,
     ONEWIRE_DATA_KEY,
     QUICKBUS_IO_DATA_KEY,
     SOURCE_CATEGORIES,
+    MarkerKind,
     WebioClass,
     extension_device_name,
     hub_era_object_id,
@@ -397,9 +399,31 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioC
         """Latest cached value for this source, or None if unknown."""
         return self.coordinator.source_states(self._SOURCE).get(self._marker_id)
 
-    async def _async_source_write(self, value: float | int) -> bool:
-        """Push a value to Comexio via the API (marker/KNX write path)."""
-        return await self.coordinator.api.set_value(self._SOURCE.value, self._marker_id, value)
+    @property
+    def _current_source(self) -> dict[str, Any] | None:
+        """This source as of the latest poll (not as it was when the entity was created), or None if it is gone."""
+        sources = (self.coordinator.data or {}).get(SOURCE_CATEGORIES[self._SOURCE].data_key, [])
+        return next((s for s in sources if str(s.get("id")) == self._marker_id), None)
+
+    def _repeatable(self, repeat: bool) -> bool:
+        """Whether a write may be sent again after a dropped connection (ComexioAPI.set_value).
+
+        Entities are built once per setup, so a switch or number may outlive the title edit that turned its source
+        into a trigger ([TRIG]/[TP]); its plan input toggles on every incoming edge, so such a write is sent once.
+        A source the latest poll no longer has is written once too: nothing says what it is now.
+        """
+        source = self._current_source
+        if repeat and source is None:
+            _LOGGER.debug(
+                "%s %s is not in the latest poll, its write is not repeated", self._source_label, self._marker_id
+            )
+        return repeat and source is not None and source.get("kind") != MarkerKind.TRIGGER
+
+    async def _async_source_write(self, value: float | int, *, repeat: bool = True) -> bool:
+        """Push a value to Comexio via the API (marker/KNX write path); repeat=False for a toggle or pulse."""
+        return await self.coordinator.api.set_value(
+            self._SOURCE.value, self._marker_id, value, repeat=self._repeatable(repeat)
+        )
 
     def _source_cache_update(self, value: float | int) -> None:
         """Optimistically update the coordinator's value cache after a write."""
@@ -415,7 +439,15 @@ class ComexioMarkerEntity(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioC
         )
 
 
-async def _async_write_via_bridge(coordinator: ComexioCoordinator, subject: str, k_id: str, value: float | int) -> bool:
+async def _async_write_via_bridge(
+    coordinator: ComexioCoordinator,
+    subject: str,
+    k_id: str,
+    value: float | int,
+    *,
+    repeat: bool = True,
+    even_if_held: bool = False,
+) -> bool:
     """Push a value to a K-element's bridge Marker — never to the K-element itself.
 
     Shared by ComexioKnxEntity (single K-element domains) and ComexioKnxDpt3Entity (DPT3.x
@@ -440,7 +472,7 @@ async def _async_write_via_bridge(coordinator: ComexioCoordinator, subject: str,
             f"Comexio {subject}: no bridge Marker wired yet — run Full Sync or the 'Create KNX bridge "
             "Markers + feedback loop' repair action first"
         )
-    return await coordinator.api.set_value("marker", bridge_marker_id, value)
+    return await coordinator.api.set_value("marker", bridge_marker_id, value, repeat=repeat, even_if_held=even_if_held)
 
 
 class ComexioKnxEntity(ComexioMarkerEntity):
@@ -453,10 +485,14 @@ class ComexioKnxEntity(ComexioMarkerEntity):
 
     _SOURCE = WebioClass.KNX
 
-    async def _async_source_write(self, value: float | int) -> bool:
+    async def _async_source_write(self, value: float | int, *, repeat: bool = True) -> bool:
         """Push a value to Comexio for a KNX object — via its bridge Marker (see _async_write_via_bridge)."""
         return await _async_write_via_bridge(
-            self.coordinator, f"{self._source_label} {self._marker_id}", self._marker_id, value
+            self.coordinator,
+            f"{self._source_label} {self._marker_id}",
+            self._marker_id,
+            value,
+            repeat=self._repeatable(repeat),
         )
 
     @property
@@ -503,8 +539,17 @@ class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         return await self._async_write_bridge(self._direction_id, direction)
 
     async def _async_write_stepcode(self, stepcode: int) -> bool:
-        """Write the step-code K-element's bridge Marker (see class docstring)."""
-        return await self._async_write_bridge(self._stepcode_id, stepcode)
+        """Write the step-code K-element's bridge Marker (see class docstring).
+
+        A step code 1-7 starts a move relative to where the cover or dimmer stands, so it is sent once: repeated
+        after a drop that came when Comexio had already taken it, it could move a second time (and a dimmer's
+        timed stop would no longer fit). A dropped move fails instead. The stop code is a state, and a lost stop
+        is the worse outcome, so it stays repeatable whatever HA's value of the step marker does meanwhile.
+        """
+        stop = stepcode == KNX_DPT3_STEPCODE_BREAK
+        return await _async_write_via_bridge(
+            self.coordinator, f"K{self._stepcode_id}", self._stepcode_id, stepcode, repeat=stop, even_if_held=stop
+        )
 
     async def _async_write_bridge(self, k_id: str, value: float | int) -> bool:
         """Write one K-element's bridge Marker (see _async_write_via_bridge)."""
