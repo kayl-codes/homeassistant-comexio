@@ -29,6 +29,7 @@ Covers everything since v0.40.0.
 - **Restart required** after updating.
 - **Dependency:** `aiocomexio==0.13.0` (was 0.11.0, installed automatically by Home Assistant) (#292).
 - **New diagnostic entity:** the "API write errors" sensor appears after the restart; its counts start at zero and are not kept across restarts.
+- **3 s keep-alive depends on a Home Assistant internal:** Home Assistant has no public way to hand its DNS resolver (for `.local` names) to a session of the integration, so the 3 s keep-alive reads its resolver through an internal function. If a Home Assistant update removes or changes that function, the integration falls back to Home Assistant's shared connections (15 s keep-alive), logs one warning saying so, and the old dropped-connection behaviour returns; the write retry still covers a dropped write over `/api/`. A unit test fails on such a change as soon as the tests run against that Home Assistant version.
 
 ---
 
