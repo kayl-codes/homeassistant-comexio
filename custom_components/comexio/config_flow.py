@@ -667,4 +667,5 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             raise
         finally:
             if api is not None:
-                api.close()
+                # Every request of the test login has ended (awaited or cancelled above): nothing to wait for.
+                api.close(immediately=True)

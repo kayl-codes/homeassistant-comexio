@@ -148,13 +148,13 @@ def test_the_agreed_keep_alive_stays_clear_of_comexios_close() -> None:
 def test_an_idle_connection_is_used_again_only_within_the_keep_alive(
     home: _Home, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(http_session, "COMEXIO_KEEPALIVE_TIMEOUT_SEC", 1.0)
+    monkeypatch.setattr(http_session, "COMEXIO_KEEPALIVE_TIMEOUT_SEC", 2.0)
 
     async def scenario(server: _Server) -> None:
         session = async_create_session(home.hass, bind_to_entry=False)
         await _get(session, server)
         await _get(session, server)  # at once: the same connection
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(2.5)
         await _get(session, server)  # idle for longer than the keep-alive: a new one
         await session.close()
 

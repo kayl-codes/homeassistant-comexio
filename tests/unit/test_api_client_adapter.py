@@ -2246,7 +2246,34 @@ def test_close_discards_the_main_and_the_preview_session(
 
     comexio_api.close()
 
-    assert discard.call_args_list == [call(main), call(preview)]
+    assert discard.call_args_list == [call(main, unused=False), call(preview, unused=False)]
+
+
+def test_close_immediately_closes_both_sessions_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The config flow's test login has ended every request: its connections need no grace period.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    main, preview = comexio_api.session, MagicMock()
+    _install_preview(comexio_api, preview, MagicMock())
+
+    comexio_api.close(immediately=True)
+
+    assert discard.call_args_list == [call(main, unused=True), call(preview, unused=True)]
+
+
+def test_close_immediately_without_a_preview_session_discards_the_main_one_only(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The common case of the config flow's test login: no preview session was ever opened.
+    discard = MagicMock()
+    monkeypatch.setattr(api_module, "discard_session", discard)
+    main = comexio_api.session
+
+    comexio_api.close(immediately=True)
+
+    assert discard.call_args_list == [call(main, unused=True)]
 
 
 def test_a_failed_preview_login_closes_its_unused_session_at_once(

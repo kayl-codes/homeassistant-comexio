@@ -126,6 +126,14 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 )
 
 
+_UNLOADED_NOT_SENT = "the entry was unloaded: not sent"
+
+
+def _unloaded_while_lapsed(err: BaseException) -> ComexioError:
+    """The error of an analog output write whose admin session lapsed while the entry was being unloaded."""
+    return ComexioError(f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated")
+
+
 class _WriteAttempt(NamedTuple):
     """The outcome of one send of an API write: the error (None: it went through), and whether it was logged already."""
 
@@ -6004,10 +6012,10 @@ class ComexioAPI:
 
         settings are the connection settings the write was issued with (write_settings): once they differ, nothing
         is sent, since self.client is then one for another server or user. Nor after close(): the session is gone,
-        and aiohttp answers a request on it with a RuntimeError no caller expects.
+        and aiohttp answers a request on it with a RuntimeError (caught below for a write that was under way).
         """
         if self._closed:
-            return _WriteAttempt(ComexioError("the entry was unloaded: not sent"))
+            return _WriteAttempt(ComexioError(_UNLOADED_NOT_SENT))
         if self.write_settings(target_type, identifier) != settings:
             return _WriteAttempt(ComexioError("connection settings changed since the write was issued: not sent"))
         started = time.monotonic()
@@ -6039,6 +6047,20 @@ class ComexioAPI:
         except (ComexioError, ValueError) as err:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             return _WriteAttempt(err)
+        except RuntimeError as err:
+            # aiohttp's "Session is closed": the entry was unloaded after the check above (a write that waited for
+            # the lock of its target, or a login on the detached session). Any other RuntimeError is a bug.
+            if not self._closed:
+                raise
+            _LOGGER.debug(
+                "Comexio API write (%s %s) met the closed session of the unloaded entry",
+                target_type,
+                one_line(str(target_id)),
+                exc_info=err,
+            )
+            unloaded = ComexioError(_UNLOADED_NOT_SENT)
+            unloaded.__cause__ = err  # kept for the traceback; the repetition rule looks for a dropped connection
+            return _WriteAttempt(unloaded)
         return _WriteAttempt(None)
 
     async def _set_io_value(self, ext: str, identifier: str, value: float | int) -> None:
@@ -6056,10 +6078,8 @@ class ComexioAPI:
         except ComexioAuthenticationError as err:
             if self._closed:
                 # Unloaded while the write was in flight: no login on the detached session (aiohttp would raise a
-                # RuntimeError no caller expects).
-                raise ComexioError(
-                    f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated"
-                ) from err
+                # RuntimeError, which _write_once only reports).
+                raise _unloaded_while_lapsed(err) from err
             _LOGGER.debug(
                 "Comexio admin session lapsed before writing %s %s — logging in again",
                 one_line(ext),
@@ -6069,9 +6089,7 @@ class ComexioAPI:
             if self._closed:
                 # Unloaded during the login (it then fails for that very reason, or succeeds on a session that is
                 # gone): the unload is the cause to name, and the repetition would meet the detached session.
-                raise ComexioError(
-                    f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated"
-                ) from err
+                raise _unloaded_while_lapsed(err) from err
             if not logged_in:
                 if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
                     # _login already raised the repair; the write error names the certificate as its cause.
@@ -6215,8 +6233,11 @@ class ComexioAPI:
             _LOGGER.warning("Extension firmware check failed: %s", err)
             return []
 
-    def close(self) -> None:
+    def close(self, *, immediately: bool = False) -> None:
         """Take the main session and the dedicated preview session, if one was ever opened, out of use.
+
+        immediately: no request of either session can be under way (the config flow's test login, awaited to its
+        end), so their connections close at once instead of after the request timeout.
 
         The main session is created during config entry setup, so it goes with the entry anyway
         (http_session.async_create_session registers that). The preview session (see
@@ -6233,8 +6254,8 @@ class ComexioAPI:
         never be detached (it was never visible here to begin with).
         """
         self._closed = True
-        discard_session(self.session)
+        discard_session(self.session, unused=immediately)
         if self._preview_session is not None:
-            discard_session(self._preview_session)
+            discard_session(self._preview_session, unused=immediately)
             self._preview_session = None
             self._preview_client = None
