@@ -127,6 +127,8 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 
 
 _UNLOADED_NOT_SENT = "the entry was unloaded: not sent"
+# What aiohttp raises on a session that was detached; any other RuntimeError of a write is a bug, unload or not.
+_AIOHTTP_SESSION_CLOSED = "Session is closed"
 
 
 def _unloaded_while_lapsed(err: BaseException) -> ComexioError:
@@ -5999,6 +6001,10 @@ class ComexioAPI:
             return None
         return self.cached_value(*_write_target_key(target_type, target_id))
 
+    def _met_the_closed_session(self, err: RuntimeError) -> bool:
+        """Whether the error is aiohttp's refusal of the session the unload detached (nothing else qualifies)."""
+        return self._closed and _AIOHTTP_SESSION_CLOSED in str(err)
+
     async def _write_once(
         self,
         target_type: str,
@@ -6050,7 +6056,7 @@ class ComexioAPI:
         except RuntimeError as err:
             # aiohttp's "Session is closed": the entry was unloaded after the check above (a write that waited for
             # the lock of its target, or a login on the detached session). Any other RuntimeError is a bug.
-            if not self._closed:
+            if not self._met_the_closed_session(err):
                 raise
             _LOGGER.debug(
                 "Comexio API write (%s %s) met the closed session of the unloaded entry",

@@ -413,8 +413,8 @@ def test_discarding_an_unused_session_whose_connector_is_closed_already_does_not
 
         discard_session(session, unused=True)
 
-        assert tasks == []
-        assert home.timers == []
+        assert not tasks
+        assert not home.timers
 
     _with_server(scenario)
 

@@ -1917,6 +1917,22 @@ def test_a_write_that_meets_the_session_closed_by_the_unload_is_reported_not_rai
     assert not any(lock.locked() for lock in api._write_locks.values())  # the next write to the target is not blocked
 
 
+def test_an_unrelated_runtime_error_of_a_write_racing_the_unload_is_not_swallowed(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    async def unloaded_meanwhile(*_args: object) -> None:
+        api.close()
+        raise RuntimeError("a bug")
+
+    client.set_marker_value.side_effect = unloaded_meanwhile
+    write = api.set_value("marker", 5, 1, None, None)
+
+    with pytest.raises(RuntimeError, match="a bug"):
+        _run(write)
+
+    assert not any(lock.locked() for lock in api._write_locks.values())
+
+
 def test_a_runtime_error_of_a_write_on_a_live_entry_is_not_swallowed(api: ComexioAPI, client: MagicMock) -> None:
     client.set_marker_value.side_effect = RuntimeError("a bug")
 
