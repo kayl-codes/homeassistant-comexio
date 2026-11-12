@@ -970,6 +970,7 @@ def _write_for_real(api: ComexioAPI) -> None:
     (_set_io_value, _replaced_certificate_behind) stay the fixture's mocks.
     """
     api.set_value = partial(ComexioAPI.set_value, api)  # type: ignore[method-assign]
+    api._write_and_repeat = partial(ComexioAPI._write_and_repeat, api)  # type: ignore[method-assign]
     api._write_once = partial(ComexioAPI._write_once, api)  # type: ignore[method-assign]
 
 

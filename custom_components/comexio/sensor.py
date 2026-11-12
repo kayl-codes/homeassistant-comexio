@@ -792,9 +792,10 @@ class ComexioApiWriteErrorsSensor(ComexioStableEntityIdMixin, SensorEntity):
     """Diagnostic counter of the value writes that failed since HA started (#289).
 
     Counts every failed write of ComexioAPI.set_value (marker, KNX object, IO) whatever the cause and whichever
-    way it goes: /api/, or the admin session for an IO like AO*. The attributes name the
-    latest three failures with time, target and error class. Kept in memory: HA restarting or the entry
-    reloading starts at 0. Not a CoordinatorEntity: a write fails between polls, so it follows the counter itself.
+    way it goes: /api/, or the admin session for an IO like AO*. The attributes name the sends repeated after a
+    dropped connection, the writes that repetition saved, and the latest three failures with time, target and
+    error class. Kept in memory: HA restarting or the entry reloading starts at 0. Not a
+    CoordinatorEntity: a write fails between polls, so it follows the counters themselves.
     """
 
     _attr_has_entity_name = True

@@ -653,7 +653,8 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
         return {"success": False, "error": error}
 
     t_start = time.monotonic()
-    success = await api.set_value(**kwargs, value=value)
+    # A typed one-shot command may hit a trigger marker (it toggles), so it is never sent again on a dropped connection.
+    success = await api.set_value(**kwargs, value=value, repeat=False)
     duration = time.monotonic() - t_start
     if not success:
         cause = f" {CERTIFICATE_CHANGED_MSG}" if api.last_write_met_another_certificate else ""

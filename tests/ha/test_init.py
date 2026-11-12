@@ -140,6 +140,18 @@ async def test_statistics_unit_fix_runs_in_background_and_stops_on_unload(
     assert cancelled.is_set()
 
 
+async def test_the_api_asks_the_coordinator_for_ha_s_value_of_a_write_target(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+) -> None:
+    """The write retry reads HA's own value through it (#289): unwired, a drop would be repeated whatever HA holds."""
+    await _setup(hass, mock_config_entry)
+
+    coordinator = hass.data[DOMAIN][mock_config_entry.entry_id]
+
+    assert coordinator.api is mock_comexio_api[-1]
+    assert coordinator.api.cached_value == coordinator.cached_value
+
+
 async def test_a_poll_drops_deleted_plans_from_the_snapshot_before_its_audits(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
 ) -> None:
