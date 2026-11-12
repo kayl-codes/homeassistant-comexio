@@ -1,5 +1,6 @@
 """ComexioAPI's adapters over aiocomexio.ComexioClient: each ComexioError onto the old return contract."""
 
+import ast
 import asyncio
 from collections.abc import Callable
 import contextlib
@@ -2263,12 +2264,28 @@ def test_a_failed_preview_login_closes_its_unused_session_at_once(
     assert discard.call_args.args[0] is not comexio_api.session
 
 
+def _closes_a_session(call: ast.Call) -> bool:
+    func = call.func
+    if isinstance(func, ast.Attribute):
+        return func.attr == "close" and "session" in ast.unparse(func.value).lower()
+    if isinstance(func, ast.Name) and func.id == "getattr" and len(call.args) == 2:
+        target, name = call.args
+        return isinstance(name, ast.Constant) and name.value == "close" and "session" in ast.unparse(target).lower()
+    return False
+
+
 def test_the_api_never_drops_a_session_on_its_own() -> None:
     # session.detach() would leave the session's connector open for good, session.close() would cut a request off:
     # every session is created and dropped through http_session.
     source = inspect.getsource(api_module)
     assert ".detach(" not in source
     assert "async_create_clientsession(" not in source
+    # No close() on a session either (a docstring may name it, a call may not). Catches `x.session.close()` in any
+    # case and `getattr(session, "close")()`; an alias (`s = self.session; s.close()`) is beyond a name check.
+    closes = [
+        node.lineno for node in ast.walk(ast.parse(source)) if isinstance(node, ast.Call) and _closes_a_session(node)
+    ]
+    assert closes == []
 
 
 def _change_host(api: ComexioAPI) -> None:

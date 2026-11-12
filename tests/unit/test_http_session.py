@@ -353,11 +353,21 @@ def test_a_session_that_never_got_into_use_closes_its_connections_at_once(home: 
     _with_server(scenario)
 
 
-def test_the_connector_is_closed_when_the_session_cannot_be_built(home: _Home) -> None:
+def test_the_connector_is_closed_when_the_session_cannot_be_built(home: _Home, monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[ComexioConnector] = []
+
+    class _Recorded(ComexioConnector):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            built.append(self)
+
+    monkeypatch.setattr(http_session, "ComexioConnector", _Recorded)
+
     async def scenario(_server: _Server) -> None:
         with pytest.raises(TypeError):
             async_create_session(home.hass, bind_to_entry=False, no_such_keyword=1)
-        await _until(lambda: home.unsub_ha_close.called)  # the connector built for it shut down
+        (connector,) = built
+        await _until(lambda: connector.closed)  # the connector built for it, itself, not only its listener
 
         home.unsub_ha_close.assert_called_once_with()
 
