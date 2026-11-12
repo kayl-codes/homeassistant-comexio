@@ -9,6 +9,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.41.0] — 2026-11-13
+
+Covers everything since v0.40.0.
+
+### ✨ New Features
+- **Diagnostic "API write errors" sensor:** counts every write to Comexio that failed since Home Assistant last started, and names the last three failures with their time, target and error class. A dropped connection is told apart from a refusal (#290).
+- **Writes are sent again when Comexio drops the connection:** a write over `/api/` (markers, KNX objects, `Q*` and `DG*` outputs) that Comexio closed before it answered is sent again, up to three times. Only a drop that comes back within 0.5 s is repeated, only while Home Assistant does not already show the wanted value, and never for a trigger marker or a toggle, which could act twice. Rescued writes are counted in the sensor (#289, #291, #293).
+
+### 🛠️ Core & Stability Improvements
+- **Connections to Comexio are kept for 3 s only:** Comexio closes an idle connection after about 6 s, while Home Assistant kept one for 15 s, so a request sent in between met the closed connection ("Server disconnected"). In the measurement of 2026-11-11, 6.6 % of the POSTs met one; with the 3 s keep-alive none did (#289, #295).
+- **Dimmers stop when a move is cancelled:** a shutdown or reload during a dimmer move now sends the stop to the server the move went to, and logs a warning when that stop does not get through. The brightness estimate stays where the move got (#289).
+
+### 🐛 Bug Fixes & Refactoring
+- **Covers no longer interleave commands:** overlapping open and close commands of a cover run one after the other, so their direction and move telegrams cannot mix. A stop cancels an open or close issued before it (#289).
+- **Analog output write during unload:** a write to `AO*` that was under way when the entry unloaded is reported as a failed write, instead of raising an error (#289).
+
+### ⚠️ Requirements & Notes
+- **Restart required** after updating.
+- **Dependency:** `aiocomexio==0.13.0` (was 0.11.0, installed automatically by Home Assistant) (#292).
+- **New diagnostic entity:** the "API write errors" sensor appears after the restart; its counts start at zero and are not kept across restarts.
+
+---
+
 ## [0.40.0] — 2026-11-10
 
 Covers everything since v0.32.0.
