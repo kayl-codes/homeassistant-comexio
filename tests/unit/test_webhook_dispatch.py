@@ -47,6 +47,8 @@ def test_a_missing_address_is_named_before_a_missing_value(payload: dict[str, ob
 
     _dispatch_push(coordinator, security, payload)
 
+    for updater in UPDATERS:
+        getattr(coordinator, updater).assert_not_called()
     security.warn_refused.assert_called_once()
     assert security.warn_refused.call_args.args[0] == kind
 

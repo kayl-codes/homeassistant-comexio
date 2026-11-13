@@ -149,6 +149,7 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
     return True
 
 
+_WEBHOOK_VALUE_KEY = "value"
 _WEBHOOK_MISSING_VALUE_LOG_MSG = "[%s] Webhook %s event without a value refused"
 _WEBHOOK_KIND_LABELS = {WebioClass.QUICKBUS: "Quickbus", WebioClass.KNX: "KNX", WebioClass.ONEWIRE: "1-Wire"}
 
@@ -163,7 +164,7 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
     # is a message about a reading that is none: it goes on. The coordinator stores it as unknown for an IO, a
     # Quickbus IO and a 1-Wire sensor, as it does for "nan" or "" (an unreadable value must not leave the last one
     # standing as if it were current); a marker or KNX object keeps None, which its entity shows as unknown.
-    val: Any = data.get("value")
+    val: Any = data.get(_WEBHOOK_VALUE_KEY)
     webhook_type = data.get("type")
     server_id = coordinator.server_id
     if webhook_type == WebioClass.IO:
@@ -171,7 +172,7 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
         io_id = data.get("io")
         if not ext or not io_id:
             security.warn_refused("missing-io", "[%s] Webhook IO event missing ext/io", server_id)
-        elif "value" not in data:
+        elif _WEBHOOK_VALUE_KEY not in data:
             security.warn_refused("missing-value-IO", _WEBHOOK_MISSING_VALUE_LOG_MSG, server_id, "IO")
         else:
             coordinator.update_io_by_name(ext, io_id, val)
@@ -180,7 +181,7 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
     if item_id is None:
         label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
         security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
-    elif "value" not in data:
+    elif _WEBHOOK_VALUE_KEY not in data:
         label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
         security.warn_refused(f"missing-value-{label}", _WEBHOOK_MISSING_VALUE_LOG_MSG, server_id, label)
     elif webhook_type == WebioClass.QUICKBUS:
