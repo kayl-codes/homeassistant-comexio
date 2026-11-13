@@ -178,11 +178,10 @@ def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, d
             coordinator.update_io_by_name(ext, io_id, val)
         return
     item_id = data.get("id")
+    label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
     if item_id is None:
-        label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
         security.warn_refused(f"missing-id-{label}", "[%s] Webhook %s event missing id", server_id, label)
     elif _WEBHOOK_VALUE_KEY not in data:
-        label = _WEBHOOK_KIND_LABELS.get(str(webhook_type), "marker")
         security.warn_refused(f"missing-value-{label}", _WEBHOOK_MISSING_VALUE_LOG_MSG, server_id, label)
     elif webhook_type == WebioClass.QUICKBUS:
         coordinator.update_quickbus_io(item_id, val)
