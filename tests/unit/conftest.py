@@ -19,7 +19,8 @@ def comexio_api(monkeypatch: pytest.MonkeyPatch) -> ComexioAPI:
     layer moves into its own library, only this fixture needs to follow the new constructor.
     """
     # A mock, so a test can ask how the sessions were asked for (api_module.async_create_session.call_args_list).
-    create_session = MagicMock(side_effect=lambda *_args, **_kwargs: MagicMock())
+    # closed=False: a MagicMock attribute is truthy, and a write asks the session whether it is still open.
+    create_session = MagicMock(side_effect=lambda *_args, **_kwargs: MagicMock(closed=False))
     monkeypatch.setattr(api_module, "async_create_session", create_session)
     # The real kwargs build an aiohttp CookieJar, which needs a running event loop.
     monkeypatch.setattr(ComexioAPI, "_build_session_kwargs", lambda _self: {})
