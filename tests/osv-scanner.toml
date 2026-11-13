@@ -214,6 +214,16 @@ id = "GHSA-xvh5-g6gv-559v"
 ignoreUntil = 2027-03-31
 reason = "Pillow==12.3.0 is pinned by homeassistant==2026.10.4 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
 
+[[IgnoredVulns]]
+id = "GHSA-xcvg-w56q-r89m"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.10.4 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
+[[IgnoredVulns]]
+id = "GHSA-wqgw-9xfh-qf2g"
+ignoreUntil = 2027-03-31
+reason = "Pillow==12.3.0 is pinned by homeassistant==2026.10.4 (test-only toolchain); fixed in 13.0.0 by HA's own bump"
+
 # --- anyio / idna / pygments: false positives. OSV-Scanner reports the dependency *lower bounds*
 # from HA's metadata (anyio 4.9.0, idna 3.9.0, pygments 2.9.0) as if they were installed versions;
 # pip actually resolves anyio 4.15.1, idna 3.20, pygments 2.21.0 (CI job log, PR #90), all past
