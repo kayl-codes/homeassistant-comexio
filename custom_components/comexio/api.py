@@ -126,14 +126,19 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 )
 
 
-_UNLOADED_NOT_SENT = "the entry was unloaded: not sent"
-# What aiohttp raises on a session that was detached; any other RuntimeError of a write is a bug, unload or not.
+# Why the main session is gone (_session_gone_reason); the callers add ": not sent" or " meanwhile".
+_GONE_UNLOADED = "the entry was unloaded"
+# Home Assistant closes the connections of its sessions when it stops, with the entry still loaded (no close() here).
+# Inferred from the closed session, hence "probably".
+_GONE_HA_CLOSED = "the connections to Comexio were closed (Home Assistant is probably stopping)"
+# What aiohttp raises on a session that was detached or whose connector is closed; any other RuntimeError of a
+# write is a bug, unload or not.
 _AIOHTTP_SESSION_CLOSED = "Session is closed"
 
 
-def _unloaded_while_lapsed(err: BaseException) -> ComexioError:
-    """The error of an analog output write whose admin session lapsed while the entry was being unloaded."""
-    return ComexioError(f"admin session lapsed ({err}), the entry was unloaded meanwhile: not repeated")
+def _gone_while_lapsed(err: BaseException, gone: str) -> ComexioError:
+    """The error of an analog output write whose admin session lapsed as its session went away (unload, stop)."""
+    return ComexioError(f"admin session lapsed ({err}), {gone} meanwhile: not repeated")
 
 
 class _WriteAttempt(NamedTuple):
@@ -5985,8 +5990,8 @@ class ComexioAPI:
         held_before is HA's own value of the target when the write was issued (_held_value), settings the connection
         settings it was issued with (write_settings).
         """
-        if self._closed:
-            return "the entry was unloaded meanwhile"
+        if (gone := self._session_gone_reason()) is not None:
+            return f"{gone} meanwhile"
         if not rule.even_if_held:
             objection = held_value_objection(held_before, self._held_value(target_type, target_id), value)
             if objection is not None:
@@ -6001,9 +6006,17 @@ class ComexioAPI:
             return None
         return self.cached_value(*_write_target_key(target_type, target_id))
 
-    def _met_the_closed_session(self, err: RuntimeError) -> bool:
-        """Whether the error is aiohttp's refusal of the session the unload detached (nothing else qualifies)."""
-        return self._closed and str(err) == _AIOHTTP_SESSION_CLOSED
+    def _session_gone_reason(self) -> str | None:
+        """Why no request can go over the main session any more (the error text of a write), None while it can.
+
+        Two ways to get there: the unload (close(): the session is detached), or Home Assistant stopping, which closes
+        the connector of every session while the entry is still loaded.
+        """
+        if self._closed:
+            return _GONE_UNLOADED
+        if self.session.closed:
+            return _GONE_HA_CLOSED
+        return None
 
     async def _write_once(
         self,
@@ -6017,11 +6030,12 @@ class ComexioAPI:
         """One send of a write: no error when it went through, else the error and whether it was reported already.
 
         settings are the connection settings the write was issued with (write_settings): once they differ, nothing
-        is sent, since self.client is then one for another server or user. Nor after close(): the session is gone,
-        and aiohttp answers a request on it with a RuntimeError (caught below for a write that was under way).
+        is sent, since self.client is then one for another server or user. Nor after close() or once Home Assistant
+        closed its connections (it is stopping): the session is gone, and aiohttp answers a request on it with a
+        RuntimeError (caught below for a write that was under way).
         """
-        if self._closed:
-            return _WriteAttempt(ComexioError(_UNLOADED_NOT_SENT))
+        if (gone := self._session_gone_reason()) is not None:
+            return _WriteAttempt(ComexioError(f"{gone}: not sent"))
         if self.write_settings(target_type, identifier) != settings:
             return _WriteAttempt(ComexioError("connection settings changed since the write was issued: not sent"))
         started = time.monotonic()
@@ -6054,20 +6068,28 @@ class ComexioAPI:
             # ValueError: a target id that is no number, or a nan/inf value, rejected before anything is sent.
             return _WriteAttempt(err)
         except RuntimeError as err:
-            # aiohttp's "Session is closed": the entry was unloaded after the check above (a write that waited for
-            # the lock of its target, or a login on the detached session). Any other RuntimeError is a bug.
-            if not self._met_the_closed_session(err):
-                raise
-            _LOGGER.debug(
-                "Comexio API write (%s %s) met the closed session of the unloaded entry",
-                target_type,
-                one_line(str(target_id)),
-                exc_info=err,
-            )
-            unloaded = ComexioError(_UNLOADED_NOT_SENT)
-            unloaded.__cause__ = err  # kept for the traceback; the repetition rule looks for a dropped connection
-            return _WriteAttempt(unloaded)
+            return self._write_met_the_closed_session(err, target_type, target_id)
         return _WriteAttempt(None)
+
+    def _write_met_the_closed_session(self, err: RuntimeError, target_type: str, target_id: str | int) -> _WriteAttempt:
+        """The outcome of a write that aiohttp refused with "Session is closed"; any other RuntimeError is a bug.
+
+        The entry was unloaded, or Home Assistant began to stop, after the check in _write_once (a write that waited
+        for the lock of its target, a repetition, or a login on the closed session).
+        """
+        gone = self._session_gone_reason()
+        if gone is None or str(err) != _AIOHTTP_SESSION_CLOSED:
+            raise err
+        _LOGGER.debug(
+            "Comexio API write (%s %s) met the closed session of the main connection (%s)",
+            target_type,
+            one_line(str(target_id)),
+            gone,
+            exc_info=err,
+        )
+        not_sent = ComexioError(f"{gone}: not sent")
+        not_sent.__cause__ = err  # kept for the traceback; the repetition rule looks for a dropped connection
+        return _WriteAttempt(not_sent)
 
     async def _set_io_value(self, ext: str, identifier: str, value: float | int) -> None:
         """client.set_io_value; an analog output goes over the admin session, so a lapsed login is renewed once.
@@ -6082,20 +6104,20 @@ class ComexioAPI:
         try:
             await self.client.set_io_value(ext, identifier, value)
         except ComexioAuthenticationError as err:
-            if self._closed:
-                # Unloaded while the write was in flight: no login on the detached session (aiohttp would raise a
-                # RuntimeError, which _write_once only reports).
-                raise _unloaded_while_lapsed(err) from err
+            if (gone := self._session_gone_reason()) is not None:
+                # Unloaded (or Home Assistant stopped) while the write was in flight: no login on the closed session
+                # (aiohttp would raise a RuntimeError, which _write_once only reports).
+                raise _gone_while_lapsed(err, gone) from err
             _LOGGER.debug(
                 "Comexio admin session lapsed before writing %s %s — logging in again",
                 one_line(ext),
                 one_line(identifier),
             )
             logged_in = await self._full_login(generation)
-            if self._closed:
-                # Unloaded during the login (it then fails for that very reason, or succeeds on a session that is
-                # gone): the unload is the cause to name, and the repetition would meet the detached session.
-                raise _unloaded_while_lapsed(err) from err
+            if (gone := self._session_gone_reason()) is not None:
+                # Gone during the login (it then fails for that very reason, or succeeds on a session that is gone):
+                # that is the cause to name, and the repetition would meet the closed session.
+                raise _gone_while_lapsed(err, gone) from err
             if not logged_in:
                 if self.last_login_error == LOGIN_ERROR_CERTIFICATE:
                     # _login already raised the repair; the write error names the certificate as its cause.

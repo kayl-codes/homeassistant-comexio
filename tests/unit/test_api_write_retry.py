@@ -1959,3 +1959,198 @@ def test_a_runtime_error_of_a_write_on_a_live_entry_is_not_swallowed(api: Comexi
         _run(write)
 
     assert not any(lock.locked() for lock in api._write_locks.values())
+
+
+# Home Assistant stopping: its CLOSE event closes the connector of every session while the entry is still loaded, so
+# api.close() never ran (_closed stays False) and only the session itself says it is gone (#289, open point ec).
+HA_CLOSED = "the connections to Comexio were closed (Home Assistant is probably stopping)"
+HA_CLOSING_NOT_SENT = f"{HA_CLOSED}: not sent"
+
+
+def _ha_closes_the_connections(api: ComexioAPI) -> None:
+    api.session.closed = True  # type: ignore[misc]
+
+
+def test_a_write_issued_after_home_assistant_closed_the_connections_is_not_sent(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    _ha_closes_the_connections(api)
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    assert client.set_marker_value.await_count == 0
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line == f"Comexio API write failed (marker 5): {HA_CLOSING_NOT_SENT}"
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    ("target_type", "target_id", "ext", "identifier", "method"),
+    [
+        ("marker", 5, None, None, "set_marker_value"),
+        ("knx", 9, None, None, "set_knx_value"),
+        ("io", "103", "LED-Dimmer A3", "Q5", "set_io_value"),
+        ("io", "103", "LED-Dimmer A3", "AO1", "set_io_value"),
+    ],
+)
+def test_a_write_that_meets_the_session_closed_by_home_assistant_is_reported_not_raised(
+    api: ComexioAPI,
+    client: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    target_type: str,
+    target_id: str | int,
+    ext: str | None,
+    identifier: str | None,
+    method: str,
+) -> None:
+    # The write was issued before the stop, then aiohttp refuses the request on the closed connector.
+    async def stopped_meanwhile(*_args: object) -> None:
+        _ha_closes_the_connections(api)
+        raise RuntimeError("Session is closed")
+
+    getattr(client, method).side_effect = stopped_meanwhile
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value(target_type, target_id, 1, ext, identifier)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith(HA_CLOSING_NOT_SENT)  # reported once, with the reason
+    assert api.write_stats.failed == 1
+    assert not any(lock.locked() for lock in api._write_locks.values())  # the next write to the target is not blocked
+
+
+def test_a_write_cut_off_by_the_stop_is_not_sent_again(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The connector closes under a request in flight (a drop that looks like Comexio's own): a repetition would meet
+    # the closed session.
+    async def dropped_by_the_stop(_marker: int, _value: int) -> None:
+        _ha_closes_the_connections(api)
+        raise _dropped()
+
+    client.set_marker_value.side_effect = dropped_by_the_stop
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith(f"(not sent again: {HA_CLOSED} meanwhile)")
+    assert client.set_marker_value.await_count == 1
+    assert (api.write_stats.failed, api.write_stats.retries) == (1, 0)
+
+
+def test_another_runtime_error_is_not_swallowed_while_home_assistant_stops(api: ComexioAPI, client: MagicMock) -> None:
+    # The session is gone, but the error is not aiohttp's refusal of it: that is a bug, not the stop.
+    async def stopped_meanwhile(*_args: object) -> None:
+        _ha_closes_the_connections(api)
+        raise RuntimeError("Session is closed by a bug in our own code")
+
+    client.set_marker_value.side_effect = stopped_meanwhile
+    write = api.set_value("marker", 5, 1, None, None)
+
+    with pytest.raises(RuntimeError, match="by a bug"):
+        _run(write)
+
+    assert not any(lock.locked() for lock in api._write_locks.values())
+
+
+def test_an_unload_is_named_before_the_stop_when_both_flags_are_set(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    # close() detaches the session, so after a real unload aiohttp reports it closed as well: the unload is the cause.
+    api.close()
+    _ha_closes_the_connections(api)
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("the entry was unloaded: not sent")
+
+
+def test_a_repetition_names_the_unload_before_the_stop_when_both_flags_are_set(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def drop_and_unload(_marker: int, _value: int) -> None:
+        api.close()
+        _ha_closes_the_connections(api)
+        raise _dropped()
+
+    client.set_marker_value.side_effect = drop_and_unload
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("marker", 5, 1)) is False
+
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith("(not sent again: the entry was unloaded meanwhile)")
+
+
+@pytest.mark.parametrize("login_result", [True, False], ids=["login went through", "login failed for the stop"])
+def test_an_analog_output_write_whose_login_ends_with_the_stop_is_reported_not_raised(
+    api: ComexioAPI,
+    client: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    login_result: bool,
+) -> None:
+    # The lapsed admin session is renewed while Home Assistant closes its connections (the entry is still loaded):
+    # the repetition would meet the closed session, and the stop is the cause to name, not a refused login.
+    client.set_io_value.side_effect = ComexioAuthenticationError("lapsed")
+
+    async def login_then_stop(_generation: int) -> bool:
+        _ha_closes_the_connections(api)
+        return login_result
+
+    monkeypatch.setattr(api, "_full_login", login_then_stop)
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "AO1")) is False
+
+    assert client.set_io_value.await_count == 1  # not sent again to the closed session
+    assert api.write_stats.failed == 1
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.endswith(f"admin session lapsed (lapsed), {HA_CLOSED} meanwhile: not repeated")
+
+
+def test_an_analog_output_write_lapsing_as_the_stop_begins_does_not_log_in_again(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def lapse_while_stopping(_ext: str, _identifier: str, _value: int) -> None:
+        _ha_closes_the_connections(api)
+        raise ComexioAuthenticationError("lapsed")
+
+    client.set_io_value.side_effect = lapse_while_stopping
+    full_login = AsyncMock(return_value=True)
+    monkeypatch.setattr(api, "_full_login", full_login)
+
+    assert _run(api.set_value("io", "103", 0, "LED-Dimmer A3", "AO1")) is False
+
+    full_login.assert_not_awaited()  # the closed session is not logged in on
+    assert api.write_stats.failed == 1
+
+
+def test_aiohttp_reports_a_session_with_a_closed_connector_closed_and_refuses_it_with_the_text_we_match() -> None:
+    # The fix rests on two aiohttp behaviours the mocks above only simulate (what HA's CLOSE event causes).
+    async def scenario(how: str) -> tuple[bool, bool, str]:
+        session = aiohttp.ClientSession(connector=aiohttp.TCPConnector())
+        connector = session.connector
+        assert connector is not None
+        try:
+            open_before = session.closed
+            if how == "connector closed":  # what Home Assistant's CLOSE event does
+                await connector.close()
+            else:  # what ComexioAPI.close() does through discard_session
+                session.detach()
+            with pytest.raises(RuntimeError) as refused:
+                await session.get("http://127.0.0.1:9/")
+            return open_before, session.closed, str(refused.value)
+        finally:
+            await connector.close()
+            await session.close()
+
+    for how in ("connector closed", "detached"):
+        open_before, closed_after, text = _run(scenario(how))
+
+        assert (open_before, closed_after) == (False, True), how
+        assert text == api_module._AIOHTTP_SESSION_CLOSED, how
