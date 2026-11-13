@@ -457,9 +457,11 @@ def test_a_quickbus_push_for_the_former_io_during_the_fetch_is_dropped(quickbus_
     assert "301" not in coordinator._io_real_value_ids
 
 
-@pytest.mark.parametrize("raw", ["nan", "inf", "abc", ""])
-def test_a_pushed_value_that_is_no_finite_number_does_not_outlive_a_failed_fetch(api: ComexioAPI, raw: str) -> None:
-    """Only a finite number counts as a reading: a junk push over a real one shows unknown after a failed fetch."""
+@pytest.mark.parametrize("raw", ["nan", "inf", "abc", "", None])
+def test_a_pushed_value_that_is_no_finite_number_does_not_outlive_a_failed_fetch(
+    api: ComexioAPI, raw: str | None
+) -> None:
+    """Only a finite number counts as a reading: a junk push (or an explicit null) over a real one shows unknown."""
     coordinator = _coordinator(api)
     _poll(coordinator, _config(), {"11": "1", "12": "1", "13": "74"})
     _index_scraped_ios(coordinator, _config())
