@@ -103,6 +103,9 @@ async def test_webhook_unknown_target_changes_nothing(
         ('{"type": "io", "ext": "BASE"}', "Webhook IO event missing ext/io"),
         ('{"type": "marker"}', "Webhook marker event missing id"),
         ('{"type": "knx"}', "Webhook KNX event missing id"),
+        ('{"type": "marker", "id": "1"}', "Webhook marker event without a value refused"),
+        ('{"type": "knx", "id": "1"}', "Webhook KNX event without a value refused"),
+        ('{"type": "io", "ext": "BASE", "io": "AI1"}', "Webhook IO event without a value refused"),
     ],
 )
 async def test_webhook_rejects_malformed_payload(
