@@ -208,6 +208,44 @@ def test_without_home_assistants_resolver_the_session_is_home_assistants_own(
     assert home.timers == []
 
 
+def test_discarding_the_fallback_session_leaves_home_assistants_shared_connector_open(
+    home: _Home, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delattr(aiohttp_client, "_async_get_or_create_resolver")
+
+    async def scenario(server: _Server) -> None:
+        # Like Home Assistant's sessions: every one runs on the shared connector, none of them owns it.
+        shared = aiohttp.TCPConnector()
+        monkeypatch.setattr(
+            aiohttp_client,
+            "async_create_clientsession",
+            lambda _hass, **kwargs: aiohttp.ClientSession(connector=shared, connector_owner=False),
+        )
+        ours = async_create_session(home.hass, bind_to_entry=False)
+        other = async_create_session(home.hass, bind_to_entry=False)  # another integration's session
+        assert ours.connector is shared
+
+        server.hold.clear()
+        in_flight = asyncio.ensure_future(_get(ours, server))
+        await _until(lambda: len(server.connections) == 1)
+
+        discard_session(ours)
+        discard_session(ours)  # twice is safe
+        assert ours.closed
+        assert shared.closed is False
+        assert home.timers == []  # the shared connector is not ours to close later either
+
+        server.hold.set()
+        assert await in_flight == "ok"  # a request in flight finishes
+        assert await _get(other, server) == "ok"  # the shared connector still serves the others
+
+        await other.close()
+        assert shared.closed is False
+        await shared.close()
+
+    _with_server(scenario)
+
+
 def test_a_resolver_of_another_kind_is_not_used(
     home: _Home, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
