@@ -20,7 +20,7 @@ Covers everything since v0.41.0.
 - **Dependency:** `aiocomexio==0.14.0` (was 0.13.0). It carries the 3 s keep-alive that the integration's own connections use (#303).
 
 ### 🐛 Bug Fixes & Refactoring
-- **Webhook push without a value is refused:** a push that carries no `value` is no longer passed on as `None` to the entity (#298).
+- **Webhook push without a value is refused:** a push without a `value` field is refused with one throttled log line per kind, and the last value is kept. Before, the entity's value was silently replaced by "unknown". An explicit `null` still goes through and shows the entity as unknown (#298).
 - **Write that meets a Home Assistant stop:** a write that is cut short by Home Assistant stopping is reported as a failed write instead of raising an error (#300).
 
 ### ⚠️ Requirements & Notes

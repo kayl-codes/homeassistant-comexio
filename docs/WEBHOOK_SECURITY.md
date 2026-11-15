@@ -121,6 +121,10 @@ reconfiguration writes commands again later, the notification returns and one mo
 - **Log lines `Webhook request refused` or `Webhook payload for server … dropped`:** a request reached Home Assistant
   with an ID that does not belong to its payload, or for another server. If you did not just change the switch-over, check who can reach your Home
   Assistant from outside.
+- **Log line `Webhook <kind> event without a value refused`:** a push reached Home Assistant with a valid ID but without a
+  `value` field. The integration ignored it and kept the last value. `<kind>` is `IO`, `Quickbus`, `1-Wire`, `KNX` or
+  `marker`. Check the Web-IO command of that kind in Comexio, and whether anything other than Comexio posts to the
+  webhook. A push with `"value": null` is not refused; it shows the entity as unknown.
 
 ---
 
@@ -251,3 +255,7 @@ Neustart steht an.
 - **Logzeilen `Webhook request refused` oder `Webhook payload for server … dropped`:** Eine Anfrage kam mit einer ID
   an, die nicht zu ihrem Inhalt passt, oder für einen anderen Server. Hast du nicht gerade die Umstellung laufen, prüfe, wer dein Home Assistant von außen
   erreicht.
+- **Logzeile `Webhook <kind> event without a value refused`:** Ein Push kam mit gültiger ID an, aber ohne das Feld
+  `value`. Die Integration hat ihn ignoriert und den letzten Wert behalten. `<kind>` ist `IO`, `Quickbus`, `1-Wire`,
+  `KNX` oder `marker`. Prüfe das Web-IO-Command dieser Art in Comexio und ob etwas anderes als Comexio an den Webhook
+  sendet. Ein Push mit `"value": null` wird nicht abgewiesen; er zeigt die Entität als unbekannt.
