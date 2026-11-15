@@ -6082,9 +6082,20 @@ class ComexioAPI:
         if held is not None and held[0] == settings and not held[1].done():
             return held[1]
         read = asyncio.ensure_future(self._read_api_settings())
-        read.add_done_callback(_mark_retrieved)
+        read.add_done_callback(self._release_settings_read)
         self._settings_read = (settings, read)
         return read
+
+    def _release_settings_read(self, read: "asyncio.Future[ApiSettings]") -> None:
+        """Done callback of the shared settings read: let go of it, so nothing here keeps its outcome alive.
+
+        A finished read is never joined (_shared_settings_read), and its result holds the API password of the
+        settings page, its error the frames that parsed the page. The waiting writes keep it as long as they need it;
+        _mismatch_noted_read may still name one that ended in a certificate mismatch, which holds no page.
+        """
+        _mark_retrieved(read)
+        if self._settings_read is not None and self._settings_read[1] is read:
+            self._settings_read = None
 
     async def _api_settings_text(
         self, target_type: str, target_id: str | int, identifier: str | None, settings: tuple[str, ...]

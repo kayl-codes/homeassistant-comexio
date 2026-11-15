@@ -716,6 +716,49 @@ def test_one_certificate_mismatch_of_a_shared_read_is_kept_once_but_named_by_eve
     assert (api.certificate_mismatch_count, kept) == (1, ["bb"])  # kept and handed to the repair once
 
 
+def test_a_finished_settings_read_is_not_kept(api: ComexioAPI, client: MagicMock) -> None:
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.return_value = _settings(active=False)
+
+    assert _write(api, "marker", 251, 1) == (False, "Comexio API settings: the API is switched off (access: inactive)")
+
+    client.get_api_settings.assert_awaited_once_with()
+    assert api._settings_read is None  # its result holds the API password of the page
+
+
+def test_a_read_that_finishes_after_a_newer_one_started_leaves_the_newer_one_to_be_joined(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> None:
+        started = [asyncio.Event(), asyncio.Event()]
+        released = [asyncio.Event(), asyncio.Event()]
+        calls = iter(range(2))
+
+        async def read() -> ApiSettings:
+            number = next(calls)
+            started[number].set()
+            await released[number].wait()
+            return _settings(active=False)
+
+        client.set_marker_value.side_effect = _timeout()
+        client.get_api_settings.side_effect = read
+        old = asyncio.create_task(api.set_value("marker", 251, 1))
+        await started[0].wait()
+        monkeypatch.setattr(api, "host", "other-comexio.example")  # a reconfigure: the next write reads on its own
+        newer = asyncio.create_task(api.set_value("marker", 252, 1))
+        await started[1].wait()
+        held = api._settings_read
+        released[0].set()
+        await old
+        assert held is not None
+        assert api._settings_read is held  # the old read's end did not clear the slot of the newer one
+        released[1].set()
+        await newer
+        assert api._settings_read is None
+
+    _run(scenario())
+
+
 def test_a_write_issued_under_new_connection_settings_does_not_join_the_read_of_the_old_ones(
     api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -775,6 +818,7 @@ def test_a_certificate_mismatch_of_the_old_server_is_not_kept_for_the_one_reconf
 
     assert _write(api, "marker", 251, 1) == (False, None)  # no text, no repair for the new configuration
 
+    client.get_api_settings.assert_awaited_once_with()  # the read ran, its result was discarded
     assert (api.certificate_mismatch_count, kept) == (0, [])
     assert api.write_stats.failed == 1
 
@@ -790,6 +834,7 @@ def test_settings_read_from_the_old_server_are_not_named_after_a_reconfigure(
     client.get_api_settings.side_effect = reconfigure_then_answer
 
     assert _write(api, "marker", 251, 1) == (False, None)
+    client.get_api_settings.assert_awaited_once_with()  # the read ran, its result was discarded
     assert api.write_stats.failed == 1
 
 
@@ -977,7 +1022,10 @@ def test_the_error_of_an_entity_is_unchanged_without_a_diagnosis() -> None:
 def test_another_certificate_stays_the_cause_an_entity_names() -> None:
     api = SimpleNamespace(last_write_met_another_certificate=True, last_write_diagnosis="Comexio API settings: x")
 
-    assert "Comexio API settings" not in str(write_failed(_coordinator(api), "Failed to set M251"))
+    message = str(write_failed(_coordinator(api), "Failed to set M251"))
+
+    assert CERTIFICATE_CHANGED_MSG in message
+    assert "Comexio API settings" not in message
 
 
 # ---- the notification of the set_value service ----------------------------------------------------------------
