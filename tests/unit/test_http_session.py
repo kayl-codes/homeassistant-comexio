@@ -208,20 +208,25 @@ def test_without_home_assistants_resolver_the_session_is_home_assistants_own(
     assert home.timers == []
 
 
+@pytest.mark.parametrize("bind_to_entry", [False, True])
 def test_discarding_the_fallback_session_leaves_home_assistants_shared_connector_open(
-    home: _Home, monkeypatch: pytest.MonkeyPatch
+    home: _Home, monkeypatch: pytest.MonkeyPatch, bind_to_entry: bool
 ) -> None:
     monkeypatch.delattr(aiohttp_client, "_async_get_or_create_resolver")
 
     async def scenario(server: _Server) -> None:
         # Like Home Assistant's sessions: every one runs on the shared connector, none of them owns it.
         shared = aiohttp.TCPConnector()
-        monkeypatch.setattr(
-            aiohttp_client,
-            "async_create_clientsession",
-            lambda _hass, **kwargs: aiohttp.ClientSession(connector=shared, connector_owner=False),
-        )
-        ours = async_create_session(home.hass, bind_to_entry=False)
+        entry_unload: list[Callable[[], None]] = []
+
+        def create_clientsession(_hass: Any, *, auto_cleanup: bool, **_kwargs: Any) -> aiohttp.ClientSession:
+            session = aiohttp.ClientSession(connector=shared, connector_owner=False)
+            if auto_cleanup:
+                entry_unload.append(session.detach)  # Home Assistant detaches it with the entry, too
+            return session
+
+        monkeypatch.setattr(aiohttp_client, "async_create_clientsession", create_clientsession)
+        ours = async_create_session(home.hass, bind_to_entry=bind_to_entry)
         other = async_create_session(home.hass, bind_to_entry=False)  # another integration's session
         assert ours.connector is shared
 
@@ -231,6 +236,9 @@ def test_discarding_the_fallback_session_leaves_home_assistants_shared_connector
 
         discard_session(ours)
         discard_session(ours)  # twice is safe
+        assert bool(entry_unload) is bind_to_entry  # only a session bound to the entry has Home Assistant's own
+        for detach in entry_unload:  # the entry unloads after ComexioAPI.close(): a third detach
+            detach()
         assert ours.closed
         assert shared.closed is False
         assert home.timers == []  # the shared connector is not ours to close later either
