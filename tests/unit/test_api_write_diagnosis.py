@@ -298,6 +298,7 @@ def test_every_write_over_the_api_is_diagnosed(
     assert written is False
     client.get_api_settings.assert_awaited_once_with()
     assert diagnosis is not None
+    assert "the API is switched off" in diagnosis  # the fixture's settings have the API switched off
 
 
 def test_a_write_over_the_admin_session_reads_no_api_settings(api: ComexioAPI, client: MagicMock) -> None:
