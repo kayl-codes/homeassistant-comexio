@@ -212,12 +212,14 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
         # The two possible errors, built before the stop is written: write_failed names the cause of the write
         # right before it, and that has to be the refused move, not the stop. One of them is raised.
         stopped = write_failed(self.coordinator, failed)
-        still_moving = write_failed(
-            self.coordinator,
-            f"{failed}, and the stop telegram after it did not get through{_STILL_MOVING}",
-        )
+        still_moving_message = f"{failed}, and the stop telegram after it did not get through{_STILL_MOVING}"
+        still_moving = write_failed(self.coordinator, still_moving_message)
         if await self._async_stop(settings):
             raise stopped
+        # The move asked for no look at the API settings (diagnose=False), so the error has no text of its own for
+        # them; the stop went to the same marker, and what its look found explains the move just as well.
+        if str(still_moving) == still_moving_message and (diagnosis := self.coordinator.api.last_write_diagnosis):
+            still_moving = HomeAssistantError(f"{still_moving_message}: {diagnosis}")
         raise still_moving
 
     async def _async_move_to(self, target: int) -> None:

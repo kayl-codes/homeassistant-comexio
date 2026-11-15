@@ -578,6 +578,7 @@ def _dimmer(set_value: AsyncMock) -> ComexioKnxLight:
     light = ComexioKnxLight.__new__(ComexioKnxLight)
     light.coordinator = MagicMock()
     light.coordinator.api.set_value = set_value
+    light.coordinator.api.last_write_diagnosis = None  # unbound, a MagicMock would be taken for a text
     light.coordinator._knx_bridge_marker_by_k_id.return_value = {"9": "77", "10": "78"}
     light._direction_id, light._stepcode_id = "9", "10"
     light._attr_brightness, light._move_lock = 0, asyncio.Lock()
@@ -635,6 +636,31 @@ def test_a_dimmer_whose_stop_fails_too_names_the_settings_text_of_the_move_not_o
     assert "the stop telegram after it did not get through" in str(raised.value)
     assert "move-diag" in str(raised.value)
     assert "stop-diag" not in str(raised.value)
+
+
+def test_a_dimmer_whose_move_asked_for_no_look_at_the_settings_names_the_text_of_the_failed_stop() -> None:
+    # The move runs with diagnose=False, so its error has no text; the stop's look at the same marker explains it.
+    api = SimpleNamespace(
+        last_write_met_another_certificate=False, last_write_diagnosis=None, write_settings=lambda *_: ("server",)
+    )
+    texts = iter([None, None, "stop-diag"])  # direction ok, move failed without text, stop failed with text
+
+    async def set_value(_type: str, marker: str, *_args: Any, **_kwargs: Any) -> bool:
+        api.last_write_diagnosis = next(texts)
+        return marker == "77"  # only the direction write goes through
+
+    set_value_mock = AsyncMock(side_effect=set_value)
+    light = _dimmer(set_value_mock)
+    light.coordinator.api = api
+    api.set_value = set_value_mock
+
+    move = light._async_move_to(255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(move)
+
+    message = str(raised.value)
+    assert message.startswith("Failed to dim K9/K10, and the stop telegram after it did not get through")
+    assert message.endswith(": stop-diag")
 
 
 def test_a_stop_the_bridge_data_cannot_send_after_a_refused_move_says_the_dimmer_may_still_be_moving(
