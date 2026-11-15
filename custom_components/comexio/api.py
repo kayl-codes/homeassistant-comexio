@@ -137,7 +137,8 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 _write_diagnosis: ContextVar["tuple[ComexioAPI, str] | None"] = ContextVar("comexio_write_diagnosis", default=None)
 
 
-# Why the main session is gone (_session_gone_reason); the callers add ": not sent" or " meanwhile".
+# Why the main session is gone (_session_gone_reason); the callers add ": not sent", " meanwhile" or
+# " meanwhile: not repeated".
 _GONE_UNLOADED = "the entry was unloaded"
 # Home Assistant closes the connections of its sessions when it stops, with the entry still loaded (no close() here).
 # Inferred from the closed session, hence "probably".
@@ -6064,7 +6065,7 @@ class ComexioAPI:
         return read
 
     async def _api_settings_text(self, target_type: str, target_id: str | int) -> "_SettingsNote":
-        """The settings read and put into words; no text when the entry was unloaded meanwhile.
+        """The settings read and put into words; no text when the session was gone meanwhile (unload, HA stopping).
 
         Best effort: whatever the read or the parsing raises (but a cancellation) becomes the note that the settings
         are unknown, so the write's own error line and counter are never lost to it. A mismatch of the certificate is
