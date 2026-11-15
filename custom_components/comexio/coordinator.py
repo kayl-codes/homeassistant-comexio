@@ -5161,7 +5161,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         self.hass.bus.async_fire(EVENT_PLAN_VALUE, {"server_id": self.server_id, "type": "system", "message": message})
 
-    def _fire_plan_event(self, kind: str, ref_id: str, label: str, value: float | int | str) -> None:
+    def _fire_plan_event(self, kind: str, ref_id: str, label: str, value: float | int | str | None) -> None:
         """Publish a value push on the HA bus IF it belongs to the live plan on display.
 
         The comexio-plan-card debug box subscribes to these events to show a timestamped
@@ -5200,7 +5200,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_update_success = True
         self.async_update_listeners()
 
-    def update_marker(self, marker_id: str | int, value: float | int | str) -> None:
+    def update_marker(self, marker_id: str | int, value: float | int | str | None) -> None:
         marker_id_str = str(marker_id)
         previous = self.marker_states.get(marker_id_str)
         self.marker_states[marker_id_str] = value
@@ -5217,7 +5217,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._fire_plan_event("marker", marker_id_str, label, value)
         self.schedule_plan_preview_refresh()
 
-    def update_knx(self, knx_id: str | int, value: float | int | str) -> None:
+    def update_knx(self, knx_id: str | int, value: float | int | str | None) -> None:
         knx_id_str = str(knx_id)
         previous = self.knx_states.get(knx_id_str)
         self.knx_states[knx_id_str] = value
@@ -5262,7 +5262,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         identity = _io_identity(io)
         return self._io_identities.get(io["id"], identity) != identity
 
-    def _store_pushed_io_value(self, io: dict[str, Any], value: float | int | str) -> Any:
+    def _store_pushed_io_value(self, io: dict[str, Any], value: float | int | str | None) -> Any:
         """Store an IO's webhook value as the live path does, and return the previous one.
 
         Only a finite number counts as a reading (#175) and is stored as such (decimal comma accepted); anything
@@ -5289,7 +5289,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._io_push_counts.get(io_id, 0)
 
     def update_io_by_name(
-        self, ext_name: str, identifier: str, value: float | int | str, *, pushed: bool = True
+        self, ext_name: str, identifier: str, value: float | int | str | None, *, pushed: bool = True
     ) -> None:
         """Store an IO value; pushed=False marks HA's own write, which does not count as a push (#259)."""
         key = (ext_name.lower(), identifier.lower())
@@ -5318,7 +5318,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._async_publish_pushed_value()
         self.schedule_plan_preview_refresh()
 
-    def update_quickbus_io(self, io_id: str | int, value: float | int | str) -> None:
+    def update_quickbus_io(self, io_id: str | int, value: float | int | str | None) -> None:
         """Webhook push for an IO of a Quickbus device, addressed by its unique IO Id."""
         io_id_str = str(io_id)
         if (io := self._quickbus_index.get(io_id_str)) and self._names_another_io_now(io):
@@ -5355,7 +5355,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """The data item of the 1-Wire sensor at address (exact match), None if the config has none."""
         return next((s for s in (self.data or {}).get(ONEWIRE_DATA_KEY, []) if s["address"] == address), None)
 
-    def update_onewire(self, address: str, value: float | int | str) -> None:
+    def update_onewire(self, address: str, value: float | int | str | None) -> None:
         """Store a 1-Wire sensor's pushed reading; its command pushes the sensor address as the id.
 
         Only a finite number counts as a reading, anything else as unknown (like an IO's push). A sensor the data

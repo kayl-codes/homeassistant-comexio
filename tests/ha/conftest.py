@@ -169,7 +169,8 @@ def mock_comexio_api(
 
     def _factory(*args: Any, **kwargs: Any) -> ComexioAPI:
         with (
-            patch.object(api_module, "async_create_session", return_value=MagicMock()),
+            # closed=False: a MagicMock attribute is truthy, and a write asks the session whether it is still open.
+            patch.object(api_module, "async_create_session", return_value=MagicMock(closed=False)),
             patch.object(ComexioAPI, "_build_session_kwargs", return_value={}),
         ):
             api = ComexioAPI(*args, **kwargs)

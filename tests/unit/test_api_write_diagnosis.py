@@ -380,6 +380,38 @@ def test_an_entry_unloaded_meanwhile_reads_no_settings(api: ComexioAPI, client: 
     client.get_api_settings.assert_not_awaited()
 
 
+def test_home_assistant_stopping_meanwhile_reads_no_settings(api: ComexioAPI, client: MagicMock) -> None:
+    # Its CLOSE event closes the connector of the session while the entry is still loaded (_closed stays False).
+    async def close_then_fail(*_args: Any) -> None:
+        api.session.closed = True  # type: ignore[misc]
+        raise _timeout()
+
+    client.set_marker_value.side_effect = close_then_fail
+
+    assert _run(api.set_value("marker", 251, 1)) is False
+
+    client.get_api_settings.assert_not_awaited()
+    assert api.write_stats.failed == 1
+
+
+def test_a_read_refused_by_a_session_home_assistant_closed_is_no_news(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    async def close_then_refuse() -> ApiSettings:
+        api.session.closed = True  # type: ignore[misc]
+        raise RuntimeError("Session is closed")
+
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = close_then_refuse
+
+    with caplog.at_level(logging.WARNING, logger=api_module.__name__):
+        written, diagnosis = _write(api, "marker", 251, 1)
+
+    assert (written, diagnosis) == (False, None)  # no note, not "could not be read"
+    assert api.write_stats.failed == 1
+    assert "failed unexpectedly" not in caplog.text
+
+
 def test_a_runtime_error_of_the_read_is_no_unload_while_the_entry_is_open(
     api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
