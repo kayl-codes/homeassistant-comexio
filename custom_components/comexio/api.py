@@ -16,6 +16,7 @@ from typing import Any, NamedTuple, NoReturn
 import weakref
 
 from aiocomexio import (
+    ApiSettings,
     ComexioAuthenticationError,
     ComexioCertificateMismatchError,
     ComexioClient,
@@ -46,8 +47,16 @@ from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
 # Mandatory DOMAIN import for Audit logic
-from .api_write import ApiWriteStats, connection_dropped, held_value_objection
+from .api_write import (
+    ApiWriteStats,
+    api_settings_diagnosis,
+    connection_dropped,
+    held_value_objection,
+    settings_check_failed,
+    worth_diagnosing,
+)
 from .const import (
+    API_SETTINGS_CHECK_TIMEOUT_SEC,
     API_WRITE_RETRY_MAX,
     API_WRITE_RETRY_WINDOW_SEC,
     COMEXIO_HTTP_TIMEOUT_SEC,
@@ -124,6 +133,8 @@ _LOGGER = logging.getLogger(__name__)
 _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
     "comexio_write_met_another_certificate", default=None
 )
+# The same for the API settings text of a failed write (ComexioAPI.last_write_diagnosis): the API and its text.
+_write_diagnosis: ContextVar["tuple[ComexioAPI, str] | None"] = ContextVar("comexio_write_diagnosis", default=None)
 
 
 _UNLOADED_NOT_SENT = "the entry was unloaded: not sent"
@@ -143,6 +154,28 @@ class _WriteAttempt(NamedTuple):
     reported: bool = False
     # Seconds from the send until the connection error came back (before any certificate probe).
     elapsed: float = 0.0
+
+
+class _WriteFailure(NamedTuple):
+    """A write that ended without going through: its last attempt, the repetitions sent and why none went on."""
+
+    attempt: _WriteAttempt
+    retries: int
+    not_sent: str
+
+
+class _SettingsNote(NamedTuple):
+    """What the look at the API settings of a failed write brought: the line text, and a cause for the counter."""
+
+    text: str = ""
+    # A certificate mismatch the read met: the cause the counter names, as for one the write itself met.
+    cause: BaseException | None = None
+
+
+def _mark_retrieved(read: "asyncio.Future[ApiSettings]") -> None:
+    """Done callback of the shared settings read: its error is the waiters' to handle, never "never retrieved"."""
+    if not read.cancelled():
+        read.exception()
 
 
 class _RepeatRule(NamedTuple):
@@ -825,6 +858,9 @@ class ComexioAPI:
         # One lock per target being written (dropped with its last user), so a repetition of an older write never
         # lands after a newer one.
         self._write_locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = weakref.WeakValueDictionary()
+        # The read of the API settings a failed write is waiting for (_api_settings_text): writes that fail while
+        # one is under way share it, so a burst of failures does not queue up requests Comexio serialises anyway.
+        self._settings_read: asyncio.Future[ApiSettings] | None = None
         # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
         # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
         # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
@@ -5854,15 +5890,16 @@ class ComexioAPI:
         that is not repeated because HA's value changed is still reported as failed.
         """
         _write_met_another_certificate.set(None)
-        settings = self.write_settings(target_type, identifier)
-        key = _write_target_key(target_type, target_id)
-        lock = self._write_locks.get(key)
-        if lock is None:
-            lock = self._write_locks[key] = asyncio.Lock()
-        async with lock:
-            return await self._write_and_repeat(
-                target_type, target_id, value, ext, identifier, _RepeatRule(repeat, even_if_held), settings
-            )
+        _write_diagnosis.set(None)
+        return await self._write_and_repeat(
+            target_type,
+            target_id,
+            value,
+            ext,
+            identifier,
+            _RepeatRule(repeat, even_if_held),
+            self.write_settings(target_type, identifier),
+        )
 
     def write_settings(self, target_type: str, identifier: str | None = None) -> tuple[str, ...]:
         """The connection settings a write to this target depends on: host, pinned certificate and its user.
@@ -5890,7 +5927,34 @@ class ComexioAPI:
         settings: tuple[str, ...],
     ) -> bool:
         """set_value for one target at a time: send, and send again while neither _why_not_repeated nor
-        _why_not_sent_again has an objection."""
+        _why_not_sent_again has an objection.
+
+        Only the sending holds the target's lock. A failed write is reported after it, so the look at the API settings
+        (up to API_SETTINGS_CHECK_TIMEOUT_SEC) never holds back a later write to the same target: a DPT3 stop must
+        not wait for it.
+        """
+        key = _write_target_key(target_type, target_id)
+        lock = self._write_locks.get(key)
+        if lock is None:
+            lock = self._write_locks[key] = asyncio.Lock()
+        async with lock:
+            failure = await self._send_until_done(target_type, target_id, value, ext, identifier, rule, settings)
+        if failure is None:
+            return True
+        await self._report_failed_write(failure, target_type, target_id, identifier, settings)
+        return False
+
+    async def _send_until_done(
+        self,
+        target_type: str,
+        target_id: str | int,
+        value: float | int,
+        ext: str | None,
+        identifier: str | None,
+        rule: "_RepeatRule",
+        settings: tuple[str, ...],
+    ) -> "_WriteFailure | None":
+        """The sends of one write, under the target's lock: None when it went through, else how it ended."""
         retries = 0
         held_before = self._held_value(target_type, target_id)
         while True:
@@ -5898,7 +5962,7 @@ class ComexioAPI:
             if attempt.error is None:
                 if retries:
                     self._note_write_recovered(target_type, target_id, retries)
-                return True
+                return None
             not_sent = ""
             reason = self._why_not_repeated(attempt, target_type, identifier, retries, rule)
             if reason is None:
@@ -5915,18 +5979,125 @@ class ComexioAPI:
                 break
             retries += 1
             self._note_write_repeated(target_type, target_id, attempt, retries)
-        # Logged before it is counted: the counter notifies a sensor, and the error must not depend on that.
-        if not attempt.reported:
-            _LOGGER.error(
-                "Comexio API write failed (%s %s)%s: %s%s",
-                target_type,
-                one_line(str(target_id)),
-                f" after {retries} repetition(s)" if retries else "",
-                attempt.error,
-                not_sent,
-            )
-        self.write_stats.record_failure(f"{target_type} {target_id}", attempt.error)
-        return False
+        return _WriteFailure(attempt, retries, not_sent)
+
+    async def _report_failed_write(
+        self,
+        failure: "_WriteFailure",
+        target_type: str,
+        target_id: str | int,
+        identifier: str | None,
+        settings: tuple[str, ...],
+    ) -> None:
+        """Log and count a failed write, the API settings text (if any) in the line.
+
+        The line and the counter are the write's own: they come whatever the look at the settings does, a cancellation
+        of the caller included (the finally). A cancellation while the write was still being sent is not covered:
+        that write is neither logged nor counted, as before. Logged before it is counted: the counter notifies a
+        sensor, and the error must not depend on that. The counter names the write's error, or the certificate
+        mismatch the read of the settings met.
+        """
+        attempt, retries, not_sent = failure
+        note = _SettingsNote()
+        try:
+            note = await self._diagnose_failed_write(attempt, target_type, target_id, identifier, settings)
+        finally:
+            if not attempt.reported:
+                _LOGGER.error(
+                    "Comexio API write failed (%s %s)%s: %s%s%s",
+                    target_type,
+                    one_line(str(target_id)),
+                    f" after {retries} repetition(s)" if retries else "",
+                    attempt.error,
+                    not_sent,
+                    f". {note.text}" if note.text else "",
+                )
+            self.write_stats.record_failure(f"{target_type} {target_id}", note.cause or attempt.error)
+
+    async def _diagnose_failed_write(
+        self,
+        attempt: "_WriteAttempt",
+        target_type: str,
+        target_id: str | int,
+        identifier: str | None,
+        settings: tuple[str, ...],
+    ) -> "_SettingsNote":
+        """For a /api/ write that failed without a clear answer: what the API settings of Comexio say, else nothing.
+
+        Reads the API settings page (client.get_api_settings, admin session, API_SETTINGS_CHECK_TIMEOUT_SEC; one
+        read serves every write that fails while it is under way) and names the setting that stops the write, or says
+        that none does. The text is also kept for the caller of
+        set_value (last_write_diagnosis). A write that went through never gets here, and a refusal ("Forbidden"), a
+        certificate mismatch or an unload needs no look at the settings. No second attempt, no login: a lapsed admin
+        session or a page that cannot be read is named as the reason the settings are not known, and the write's own
+        error stays the one that counts. Neither the page's user name nor its password reaches the text.
+        """
+        if (
+            attempt.reported
+            or attempt.error is None
+            or not worth_diagnosing(attempt.error)
+            or not self._written_over_api(target_type, identifier)
+            or self._closed
+            or self.write_settings(target_type, identifier) != settings
+        ):
+            return _SettingsNote()
+        note = await self._api_settings_text(target_type, target_id)
+        if note.text:
+            _write_diagnosis.set((self, note.text))
+        return note
+
+    async def _read_api_settings(self) -> ApiSettings:
+        async with asyncio.timeout(API_SETTINGS_CHECK_TIMEOUT_SEC):
+            return await self.client.get_api_settings()
+
+    def _shared_settings_read(self) -> "asyncio.Future[ApiSettings]":
+        """The read of the API settings under way, started if none is (see _settings_read)."""
+        read = self._settings_read
+        if read is None or read.done():
+            read = self._settings_read = asyncio.ensure_future(self._read_api_settings())
+            read.add_done_callback(_mark_retrieved)
+        return read
+
+    async def _api_settings_text(self, target_type: str, target_id: str | int) -> "_SettingsNote":
+        """The settings read and put into words; no text when the entry was unloaded meanwhile.
+
+        Best effort: whatever the read or the parsing raises (but a cancellation) becomes the note that the settings
+        are unknown, so the write's own error line and counter are never lost to it. A mismatch of the certificate is
+        also kept for the repair, like one met by the write itself, and named by the counter. The read is shielded:
+        a caller that is cancelled leaves it to the other writes waiting for it.
+        """
+        try:
+            found = await asyncio.shield(self._shared_settings_read())
+            return _SettingsNote(api_settings_diagnosis(found, target_type, target_id))
+        except ComexioCertificateMismatchError as err:
+            self._note_write_met_another_certificate(err, target_type, target_id)
+            return _SettingsNote(settings_check_failed(err), err)
+        except Exception as err:
+            if isinstance(err, RuntimeError) and self._met_the_closed_session(err):
+                return _SettingsNote()
+            if not isinstance(err, ComexioError | TimeoutError):
+                # A bug in the read or the parser, not Comexio's answer: visible in the normal log, by class only (the
+                # text may quote the page), the traceback at debug level.
+                _LOGGER.warning("Reading the Comexio API settings failed unexpectedly (%s)", type(err).__name__)
+                _LOGGER.debug("Unexpected error while reading the Comexio API settings", exc_info=err)
+            return _SettingsNote(settings_check_failed(err))
+
+    @staticmethod
+    def _written_over_api(target_type: str, identifier: str | None) -> bool:
+        """Whether a write to this target goes to /api/: markers, KNX objects and the IOs that are not written over the
+        admin session (an analog output AO*)."""
+        if target_type != "io":
+            return True
+        return identifier is not None and not io_written_over_admin_session(identifier)
+
+    @property
+    def last_write_diagnosis(self) -> str | None:
+        """What the API settings said about this task's last failed set_value here, None if they were not asked.
+
+        Read right after the write, like last_write_met_another_certificate.
+        """
+        held = _write_diagnosis.get()
+        return held[1] if held is not None and held[0] is self else None
 
     def _note_write_repeated(
         self, target_type: str, target_id: str | int, attempt: "_WriteAttempt", retries: int

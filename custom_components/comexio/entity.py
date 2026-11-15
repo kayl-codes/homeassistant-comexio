@@ -44,10 +44,13 @@ def write_failed(coordinator: ComexioCoordinator, message: str) -> HomeAssistant
     """The error for a write Comexio did not take; names another certificate than the pinned one as its cause (#250).
 
     The entities stay available while another certificate answers, so a write reaches the API and is refused there.
-    Called right after the refused set_value, with no await in between, so the flag is that write's own.
+    Called right after the refused set_value, with no await in between, so the flag is that write's own. A write that
+    got no clear answer from Comexio also carries what the API settings said about it (last_write_diagnosis).
     """
     if coordinator.api.last_write_met_another_certificate:
         return HomeAssistantError(f"{message}: {CERTIFICATE_CHANGED_MSG}")
+    if diagnosis := coordinator.api.last_write_diagnosis:
+        return HomeAssistantError(f"{message}: {diagnosis}")
     return HomeAssistantError(message)
 
 

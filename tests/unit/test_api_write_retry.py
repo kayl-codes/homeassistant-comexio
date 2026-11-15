@@ -71,6 +71,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     fake.set_knx_value = AsyncMock()
     fake.set_io_value = AsyncMock()
     monkeypatch.setattr(ComexioAPI, "client", property(lambda _self: fake))
+    # The check of the API settings after a failed write has tests of its own (test_api_write_diagnosis.py).
+    monkeypatch.setattr(ComexioAPI, "_diagnose_failed_write", AsyncMock(return_value=api_module._SettingsNote()))
     return fake
 
 
@@ -597,6 +599,31 @@ def test_a_dimmer_whose_move_was_not_confirmed_is_stopped(monkeypatch: pytest.Mo
 
     assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True)]
     assert light._attr_brightness == 0
+
+
+def test_a_dimmer_whose_stop_fails_too_names_the_settings_text_of_the_move_not_of_the_stop() -> None:
+    # write_failed reads the text of the write right before it: it has to be the one of the refused move.
+    api = SimpleNamespace(
+        last_write_met_another_certificate=False, last_write_diagnosis=None, write_settings=lambda *_: ("server",)
+    )
+    texts = iter([None, "move-diag", "stop-diag"])
+
+    async def set_value(*_args: Any, **_kwargs: Any) -> bool:
+        api.last_write_diagnosis = next(texts)
+        return api.last_write_diagnosis is None
+
+    set_value_mock = AsyncMock(side_effect=set_value)
+    light = _dimmer(set_value_mock)
+    light.coordinator.api = api
+    api.set_value = set_value_mock
+
+    move = light._async_move_to(255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(move)
+
+    assert "the stop telegram after it did not get through" in str(raised.value)
+    assert "move-diag" in str(raised.value)
+    assert "stop-diag" not in str(raised.value)
 
 
 def test_a_stop_the_bridge_data_cannot_send_after_a_refused_move_says_the_dimmer_may_still_be_moving(

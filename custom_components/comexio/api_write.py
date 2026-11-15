@@ -7,13 +7,23 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime
+from http import HTTPStatus
 import logging
 import math
 from typing import Any
 
-from aiocomexio import ComexioConnectionError
+from aiocomexio import (
+    WRITE_TARGET_MARKER,
+    ApiSettings,
+    ComexioAuthenticationError,
+    ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+    ComexioResponseError,
+)
 import aiohttp
 from homeassistant.util import dt as dt_util
 
@@ -37,6 +47,48 @@ def failure_class(err: BaseException) -> str:
 def connection_dropped(err: BaseException) -> bool:
     """True if Comexio (or something on the way) closed the connection before it answered the request."""
     return isinstance(err, ComexioConnectionError) and isinstance(err.__cause__, aiohttp.ServerDisconnectedError)
+
+
+def worth_diagnosing(err: BaseException) -> bool:
+    """Whether a failed /api/ write is worth a look at the API settings: it got no clear answer.
+
+    A timeout or a broken connection (ComexioConnectionError), an HTTP error status or an answer in an unexpected
+    shape. Not a refusal ("Forbidden": ComexioRequestRejectedError, or the HTTP status 403) or a rejected login, which
+    already say what is wrong, and not a certificate mismatch, an unload or a bad target, which the settings page
+    cannot explain.
+    """
+    if isinstance(err, ComexioResponseError):
+        return err.status != HTTPStatus.FORBIDDEN
+    return isinstance(err, ComexioConnectionError | ComexioDataError)
+
+
+def api_settings_diagnosis(settings: ApiSettings, target_type: str, target_id: str | int) -> str:
+    """What the API settings say about a failed write to this target: the setting that stops it, or that none does.
+
+    Only what ApiSettings.write_blockers and summary give: neither names the API user or password.
+    """
+    marker_id = None
+    if target_type == WRITE_TARGET_MARKER:
+        with suppress(TypeError, ValueError):
+            marker_id = int(target_id)
+    if blockers := settings.write_blockers(target_type, marker_id):
+        return "Comexio API settings: " + "; ".join(blockers)
+    return f"Comexio API settings do not explain it ({settings.summary()})"
+
+
+def settings_check_failed(err: BaseException) -> str:
+    """The note for a failed write whose API settings could not be read: why, without the error's text.
+
+    A timeout is named as such (not by the cancellation behind asyncio.timeout), a lapsed or refused admin login as
+    that; any other error by its class only, since its text may quote what Comexio answered.
+    """
+    if isinstance(err, TimeoutError):
+        reason = "timed out"
+    elif isinstance(err, ComexioAuthenticationError):
+        reason = "admin session not logged in"
+    else:
+        reason = failure_class(err) if isinstance(err, ComexioError) else type(err).__name__
+    return f"Comexio API settings could not be read ({reason})"
 
 
 def is_same_value(cached: object, wanted: float | int) -> bool:

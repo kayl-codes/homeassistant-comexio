@@ -620,11 +620,6 @@ COMEXIO_HTTP_TIMEOUT_SEC = 120
 # (see api.py's request trace config). Purely a UI/log-visibility knob, independent of the
 # actual timeout above.
 COMEXIO_PROGRESS_LOG_INTERVAL_SEC = 10
-# How long (seconds) an idle connection to Comexio is kept for the next request (#289). Comexio closes an idle
-# connection after about 6 s (measured 2026-11-11: a request sent on one idle for 5.5-6.5 s met the close, 51 of
-# 767 with aiohttp's 15 s); a POST that meets it fails with "Server disconnected", and whether Comexio took it is
-# unknown. 3 s stays well clear of that window (0 failures in the same measurement).
-COMEXIO_KEEPALIVE_TIMEOUT_SEC = 3
 # A session no longer used (entry unloaded, preview session replaced) closes its connections this long after
 # COMEXIO_HTTP_TIMEOUT_SEC: no request of it can still be under way then, so none is cut off.
 COMEXIO_CONNECTOR_CLOSE_MARGIN_SEC = 5
@@ -637,6 +632,10 @@ API_WRITE_RETRY_MAX = 3
 API_WRITE_RETRY_WINDOW_SEC = 0.5
 # The latest failed value writes the "API write errors" sensor names in its attributes.
 API_WRITE_FAILURES_KEPT = 3
+# A /api/ write that failed without a clear answer (a timeout, an unexpected reply) reads the API settings page of
+# Comexio once, to name the setting that explains it. The read has its own, short limit: it must not hold the
+# write's caller for as long as the write itself may have waited.
+API_SETTINGS_CHECK_TIMEOUT_SEC = 10
 # A refused webhook request is logged once per kind and this many seconds (the endpoint is open to anybody who
 # reaches HA); the refusals in between are counted and named in the next line.
 WEBHOOK_REFUSAL_LOG_INTERVAL_SEC = 60

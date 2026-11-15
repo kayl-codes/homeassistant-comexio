@@ -43,6 +43,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     fake.set_knx_value = AsyncMock()
     fake.set_io_value = AsyncMock()
     monkeypatch.setattr(ComexioAPI, "client", property(lambda _self: fake))
+    # The check of the API settings after a failed write has tests of its own (test_api_write_diagnosis.py).
+    monkeypatch.setattr(ComexioAPI, "_diagnose_failed_write", AsyncMock(return_value=api_module._SettingsNote()))
     return fake
 
 
