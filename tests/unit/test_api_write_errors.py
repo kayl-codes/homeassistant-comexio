@@ -146,36 +146,50 @@ def test_the_stats_keep_only_the_latest_failures_and_tell_their_listeners() -> N
 
 def test_a_failure_reported_late_keeps_its_place_by_the_time_it_failed() -> None:
     stats = ApiWriteStats()
-    start = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 
-    stats.record_failure("marker 2", ValueError("x"), start + timedelta(seconds=5))
-    stats.record_failure("marker 1", ValueError("x"), start)  # older, but its report (a settings check) came later
+    stats.record_failure("marker 2", ValueError("x"), order=5.0)
+    stats.record_failure("marker 1", ValueError("x"), order=0.0)  # older, but its report (a settings check) came later
 
     assert [f.target for f in stats.last_failures] == ["marker 1", "marker 2"]
 
 
 def test_failures_of_the_same_moment_keep_the_order_they_were_reported_in() -> None:
     stats = ApiWriteStats()
+
     moment = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
 
-    stats.record_failure("marker 2", ValueError("x"), moment)
-    stats.record_failure("marker 1", ValueError("x"), moment)
+    stats.record_failure("marker 2", ValueError("x"), moment, 7.0)
+    stats.record_failure("marker 1", ValueError("x"), moment - timedelta(seconds=1), 7.0)  # only `order` ranks
 
     assert [f.target for f in stats.last_failures] == ["marker 2", "marker 1"]
 
 
 def test_a_late_report_of_an_old_failure_does_not_displace_the_newest_ones() -> None:
     stats = ApiWriteStats()
-    start = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
     for number in range(API_WRITE_FAILURES_KEPT):
-        stats.record_failure(f"marker {number + 1}", ValueError("x"), start + timedelta(minutes=number + 1))
+        stats.record_failure(f"marker {number + 1}", ValueError("x"), order=float(number + 1))
 
-    stats.record_failure("marker old", ValueError("x"), start)
+    stats.record_failure("marker old", ValueError("x"), order=0.0)
 
     assert [f.target for f in stats.last_failures] == [
         f"marker {number + 1}" for number in range(API_WRITE_FAILURES_KEPT)
     ]
     assert stats.failed == API_WRITE_FAILURES_KEPT + 1
+
+
+def test_a_wall_clock_stepped_back_neither_reorders_nor_drops_the_newest_failure() -> None:
+    stats = ApiWriteStats()
+    start = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+    for number in range(API_WRITE_FAILURES_KEPT):
+        stats.record_failure(
+            f"marker {number + 1}", ValueError("x"), start + timedelta(minutes=number + 1), float(number + 1)
+        )
+
+    stats.record_failure("marker new", ValueError("x"), start - timedelta(hours=1), float(API_WRITE_FAILURES_KEPT + 1))
+
+    targets = [f.target for f in stats.last_failures]
+    assert targets[-1] == "marker new"
+    assert "marker 1" not in targets  # the oldest one made room, not the newest
 
 
 def test_the_stats_attributes_name_the_failures() -> None:

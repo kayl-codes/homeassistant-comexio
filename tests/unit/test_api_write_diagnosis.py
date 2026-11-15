@@ -726,10 +726,14 @@ def test_a_failure_is_dated_when_the_write_failed_not_when_the_settings_check_en
     ticks = itertools.count()
     base = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
     monkeypatch.setattr(dt_util, "utcnow", lambda: base + timedelta(seconds=next(ticks)))  # every call is later
+    clock = itertools.count()
+    monkeypatch.setattr(api_module, "time", SimpleNamespace(monotonic=lambda: float(next(clock))))  # so is this one
     read_at: list[datetime] = []
+    read_order: list[float] = []
 
     async def read() -> ApiSettings:
         read_at.append(dt_util.utcnow())
+        read_order.append(api_module.time.monotonic())
         return _settings(active=False)
 
     client.set_marker_value.side_effect = _timeout()
@@ -740,6 +744,7 @@ def test_a_failure_is_dated_when_the_write_failed_not_when_the_settings_check_en
     (failure,) = api.write_stats.last_failures
     assert len(read_at) == 1  # the check ran
     assert failure.at < read_at[0]  # dated before the check began, not after it ended
+    assert failure.order < read_order[0]  # and ranked by that moment, too
 
 
 def test_a_finished_settings_read_is_not_kept(api: ComexioAPI, client: MagicMock) -> None:
