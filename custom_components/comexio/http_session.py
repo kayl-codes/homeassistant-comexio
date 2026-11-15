@@ -147,6 +147,9 @@ def discard_session(session: aiohttp.ClientSession, *, unused: bool = False) -> 
     detach() and not close(): closing cuts a request in flight off with "Server disconnected", which reads like
     Comexio's own drop and would be asked or sent once more, on a session that is closed. Safe to call twice.
 
+    A session that is Home Assistant's own (the fallback, no resolver) is only detached: its connector is shared with
+    Home Assistant and stays open, and no close timer is set.
+
     unused: no request of the session can be under way (it was never handed out), so its connections close at once.
     """
     connector = session.connector
