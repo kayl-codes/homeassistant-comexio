@@ -663,6 +663,8 @@ async def _handle_set_value(hass: HomeAssistant, call: ServiceCall) -> dict | No
     duration = time.monotonic() - t_start
     if not success:
         cause = f" {CERTIFICATE_CHANGED_MSG}" if api.last_write_met_another_certificate else ""
+        if diagnosis := api.last_write_diagnosis:
+            cause += f" {diagnosis}."
         persistent_notification.async_create(
             hass,
             f"Write failed: {target} = {value}.{cause}\nDuration: {duration:.1f}s",

@@ -9,7 +9,7 @@ import socket
 from typing import Any
 from unittest.mock import MagicMock
 
-from aiocomexio import session_kwargs
+from aiocomexio import DEFAULT_KEEPALIVE_TIMEOUT_SEC, connector_kwargs, session_kwargs
 import aiohttp
 from aiohttp import web
 from aiohttp.abc import AbstractResolver, ResolveResult
@@ -20,11 +20,7 @@ import pytest
 from yarl import URL
 
 from custom_components.comexio import http_session
-from custom_components.comexio.const import (
-    COMEXIO_CONNECTOR_CLOSE_MARGIN_SEC,
-    COMEXIO_HTTP_TIMEOUT_SEC,
-    COMEXIO_KEEPALIVE_TIMEOUT_SEC,
-)
+from custom_components.comexio.const import COMEXIO_CONNECTOR_CLOSE_MARGIN_SEC, COMEXIO_HTTP_TIMEOUT_SEC
 from custom_components.comexio.http_session import ComexioConnector, async_create_session, discard_session
 
 
@@ -141,14 +137,16 @@ async def _get(session: aiohttp.ClientSession, server: _Server, host: str = "127
 
 
 def test_the_agreed_keep_alive_stays_clear_of_comexios_close() -> None:
-    # Comexio closes an idle connection after about 6 s; the measured failure window began at 5.5 s.
-    assert COMEXIO_KEEPALIVE_TIMEOUT_SEC == 3
+    # Comexio closes an idle connection after about 6 s; the measured failure window began at 5.5 s. The number
+    # lives in aiocomexio (connector_kwargs()): a library release that raised it past the window fails here.
+    assert connector_kwargs() == {"keepalive_timeout": DEFAULT_KEEPALIVE_TIMEOUT_SEC}
+    assert DEFAULT_KEEPALIVE_TIMEOUT_SEC <= 3
 
 
 def test_an_idle_connection_is_used_again_only_within_the_keep_alive(
     home: _Home, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(http_session, "COMEXIO_KEEPALIVE_TIMEOUT_SEC", 2.0)
+    monkeypatch.setattr(http_session, "connector_kwargs", lambda: {"keepalive_timeout": 2.0})
 
     async def scenario(server: _Server) -> None:
         session = async_create_session(home.hass, bind_to_entry=False)
@@ -174,7 +172,7 @@ def test_the_session_is_built_like_home_assistants(home: _Home) -> None:
         assert session.connector._ssl is context
         assert session.timeout.total == 5  # the caller's kwargs reach the session
         # The agreed keep-alive itself, not one a test patched in (#289); aiohttp has no public getter for it.
-        assert session.connector._keepalive_timeout == COMEXIO_KEEPALIVE_TIMEOUT_SEC
+        assert session.connector._keepalive_timeout == DEFAULT_KEEPALIVE_TIMEOUT_SEC
 
         assert await _get(session, server, host="comexio.local") == "ok"
         await session.close()

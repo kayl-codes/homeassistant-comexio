@@ -42,8 +42,10 @@ def _mismatch() -> ComexioCertificateMismatchError:
 
 
 @pytest.fixture
-def client(comexio_api: ComexioAPI) -> MagicMock:
+def client(comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     """Replace the main-session client with a mock (kept as long as the settings stay)."""
+    # The check of the API settings after a failed write has tests of its own (test_api_write_diagnosis.py).
+    monkeypatch.setattr(ComexioAPI, "_diagnose_failed_write", AsyncMock(return_value=api_module._SettingsNote()))
     fake = MagicMock()
     comexio_api._client = fake
     comexio_api._client_credentials = comexio_api._credentials()

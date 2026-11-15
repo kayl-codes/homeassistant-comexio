@@ -44,10 +44,13 @@ def write_failed(coordinator: ComexioCoordinator, message: str) -> HomeAssistant
     """The error for a write Comexio did not take; names another certificate than the pinned one as its cause (#250).
 
     The entities stay available while another certificate answers, so a write reaches the API and is refused there.
-    Called right after the refused set_value, with no await in between, so the flag is that write's own.
+    Called right after the refused set_value, with no await in between, so the flag is that write's own. A write that
+    got no clear answer from Comexio also carries what the API settings said about it (last_write_diagnosis).
     """
     if coordinator.api.last_write_met_another_certificate:
         return HomeAssistantError(f"{message}: {CERTIFICATE_CHANGED_MSG}")
+    if diagnosis := coordinator.api.last_write_diagnosis:
+        return HomeAssistantError(f"{message}: {diagnosis}")
     return HomeAssistantError(message)
 
 
@@ -447,6 +450,7 @@ async def _async_write_via_bridge(
     *,
     repeat: bool = True,
     even_if_held: bool = False,
+    diagnose: bool = True,
 ) -> bool:
     """Push a value to a K-element's bridge Marker — never to the K-element itself.
 
@@ -472,7 +476,9 @@ async def _async_write_via_bridge(
             f"Comexio {subject}: no bridge Marker wired yet — run Full Sync or the 'Create KNX bridge "
             "Markers + feedback loop' repair action first"
         )
-    return await coordinator.api.set_value("marker", bridge_marker_id, value, repeat=repeat, even_if_held=even_if_held)
+    return await coordinator.api.set_value(
+        "marker", bridge_marker_id, value, repeat=repeat, even_if_held=even_if_held, diagnose=diagnose
+    )
 
 
 class ComexioKnxEntity(ComexioMarkerEntity):
@@ -538,17 +544,27 @@ class ComexioKnxDpt3Entity(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         """Write the control-bit K-element's bridge Marker (see class docstring)."""
         return await self._async_write_bridge(self._direction_id, direction)
 
-    async def _async_write_stepcode(self, stepcode: int) -> bool:
+    async def _async_write_stepcode(self, stepcode: int, *, diagnose: bool = True) -> bool:
         """Write the step-code K-element's bridge Marker (see class docstring).
 
         A step code 1-7 starts a move relative to where the cover or dimmer stands, so it is sent once: repeated
         after a drop that came when Comexio had already taken it, it could move a second time (and a dimmer's
         timed stop would no longer fit). A dropped move fails instead. The stop code is a state, and a lost stop
         is the worse outcome, so it stays repeatable whatever HA's value of the step marker does meanwhile.
+
+        A caller that sends a stop the moment a failed move returns (the dimmer, _async_start_move) passes
+        diagnose=False for the move: the look at the API settings (up to API_SETTINGS_CHECK_TIMEOUT_SEC) would
+        hold that stop back. A cover sends no stop after a failed move and keeps the diagnosis.
         """
         stop = stepcode == KNX_DPT3_STEPCODE_BREAK
         return await _async_write_via_bridge(
-            self.coordinator, f"K{self._stepcode_id}", self._stepcode_id, stepcode, repeat=stop, even_if_held=stop
+            self.coordinator,
+            f"K{self._stepcode_id}",
+            self._stepcode_id,
+            stepcode,
+            repeat=stop,
+            even_if_held=stop,
+            diagnose=diagnose,
         )
 
     async def _async_write_bridge(self, k_id: str, value: float | int) -> bool:

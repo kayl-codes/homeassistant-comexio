@@ -7,13 +7,24 @@ from __future__ import annotations
 
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, field
 from datetime import datetime
+from http import HTTPStatus
 import logging
 import math
+import time
 from typing import Any
 
-from aiocomexio import ComexioConnectionError
+from aiocomexio import (
+    WRITE_TARGET_MARKER,
+    ApiSettings,
+    ComexioAuthenticationError,
+    ComexioConnectionError,
+    ComexioDataError,
+    ComexioError,
+    ComexioResponseError,
+)
 import aiohttp
 from homeassistant.util import dt as dt_util
 
@@ -37,6 +48,48 @@ def failure_class(err: BaseException) -> str:
 def connection_dropped(err: BaseException) -> bool:
     """True if Comexio (or something on the way) closed the connection before it answered the request."""
     return isinstance(err, ComexioConnectionError) and isinstance(err.__cause__, aiohttp.ServerDisconnectedError)
+
+
+def worth_diagnosing(err: BaseException) -> bool:
+    """Whether a failed /api/ write is worth a look at the API settings: it got no clear answer.
+
+    A timeout or a broken connection (ComexioConnectionError), an HTTP error status or an answer in an unexpected
+    shape. Not a refusal ("Forbidden": ComexioRequestRejectedError, or the HTTP status 403) or a rejected login, which
+    already say what is wrong, and not a certificate mismatch, an unload or a bad target, which the settings page
+    cannot explain.
+    """
+    if isinstance(err, ComexioResponseError):
+        return err.status != HTTPStatus.FORBIDDEN
+    return isinstance(err, ComexioConnectionError | ComexioDataError)
+
+
+def api_settings_diagnosis(settings: ApiSettings, target_type: str, target_id: str | int) -> str:
+    """What the API settings say about a failed write to this target: the setting that stops it, or that none does.
+
+    Only what ApiSettings.write_blockers and summary give: neither names the API user or password.
+    """
+    marker_id = None
+    if target_type == WRITE_TARGET_MARKER:
+        with suppress(TypeError, ValueError):
+            marker_id = int(target_id)
+    if blockers := settings.write_blockers(target_type, marker_id):
+        return "Comexio API settings: " + "; ".join(blockers)
+    return f"Comexio API settings do not explain it ({settings.summary()})"
+
+
+def settings_check_failed(err: BaseException) -> str:
+    """The note for a failed write whose API settings could not be read: why, without the error's text.
+
+    A timeout is named as such (not by the cancellation behind asyncio.timeout), a lapsed or refused admin login as
+    that; any other error by its class only, since its text may quote what Comexio answered.
+    """
+    if isinstance(err, TimeoutError):
+        reason = "timed out"
+    elif isinstance(err, ComexioAuthenticationError):
+        reason = "admin session not logged in"
+    else:
+        reason = failure_class(err) if isinstance(err, ComexioError) else type(err).__name__
+    return f"Comexio API settings could not be read ({reason})"
 
 
 def is_same_value(cached: object, wanted: float | int) -> bool:
@@ -82,6 +135,9 @@ class WriteFailure:
     at: datetime
     target: str
     error: str
+    # Where the failure stands among the others: the monotonic clock, so a wall clock stepped back (NTP) neither
+    # reorders the failures nor drops a newer one. Not shown, not compared.
+    order: float = field(default=0.0, compare=False, repr=False)
 
     def as_attribute(self) -> dict[str, str]:
         return {"at": self.at.isoformat(), "target": self.target, "error": self.error}
@@ -107,11 +163,23 @@ class ApiWriteStats:
         """The latest failures, oldest first."""
         return tuple(self._last_failures)
 
-    def record_failure(self, target: str, err: BaseException) -> None:
+    def record_failure(
+        self, target: str, err: BaseException, at: datetime | None = None, order: float | None = None
+    ) -> None:
+        """Count a failed write; `at` (timezone-aware, shown) and `order` (time.monotonic(), ranks) say when it failed.
+
+        Both default to now. A report that comes late (after a look at the API settings) passes the values taken when
+        the write failed, so it keeps its place among the failures.
+        """
         self.failed += 1
-        self._last_failures.append(
-            WriteFailure(dt_util.utcnow(), one_line(target)[:_TARGET_MAX_LEN], failure_class(err))
+        failure = WriteFailure(
+            at or dt_util.utcnow(),
+            one_line(target)[:_TARGET_MAX_LEN],
+            failure_class(err),
+            time.monotonic() if order is None else order,
         )
+        failures = sorted([*self._last_failures, failure], key=lambda kept: kept.order)  # stable: ties keep their order
+        self._last_failures = deque(failures[-API_WRITE_FAILURES_KEPT:], maxlen=API_WRITE_FAILURES_KEPT)
         self._notify()
 
     def record_retry(self) -> None:

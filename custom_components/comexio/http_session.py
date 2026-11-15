@@ -3,14 +3,15 @@
 Comexio closes an idle connection after about 6 s, aiohttp keeps one for 15 s: a request sent in between meets a
 closed connection ("Server disconnected"). How long a connection is kept is a setting of the connector, and
 Home Assistant's async_create_clientsession always uses its shared one. So a session here gets a connector of its
-own (COMEXIO_KEEPALIVE_TIMEOUT_SEC), built like Home Assistant's: its TLS context, its DNS resolver (the one that
-answers ".local" names over zeroconf) and its User-Agent.
+own, with the keep-alive aiocomexio's connector_kwargs() names, built like Home Assistant's: its TLS context, its
+DNS resolver (the one that answers ".local" names over zeroconf) and its User-Agent.
 """
 
 from datetime import datetime
 import logging
 from typing import Any
 
+from aiocomexio import connector_kwargs
 import aiohttp
 from aiohttp.abc import AbstractResolver
 from homeassistant import config_entries
@@ -20,7 +21,7 @@ from homeassistant.helpers import aiohttp_client
 from homeassistant.helpers.event import async_call_later
 from homeassistant.util import ssl as ssl_util
 
-from .const import COMEXIO_CONNECTOR_CLOSE_MARGIN_SEC, COMEXIO_HTTP_TIMEOUT_SEC, COMEXIO_KEEPALIVE_TIMEOUT_SEC
+from .const import COMEXIO_CONNECTOR_CLOSE_MARGIN_SEC, COMEXIO_HTTP_TIMEOUT_SEC
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,7 +39,7 @@ class ComexioConnector(aiohttp.TCPConnector):
 
     def __init__(self, hass: HomeAssistant, resolver: AbstractResolver) -> None:
         super().__init__(
-            keepalive_timeout=COMEXIO_KEEPALIVE_TIMEOUT_SEC,
+            **connector_kwargs(),
             ssl=ssl_util.client_context(ssl_util.SSLCipherList.PYTHON_DEFAULT, ssl_util.SSL_ALPN_HTTP11),
             resolver=resolver,
         )
@@ -116,7 +117,7 @@ def _ha_resolver(hass: HomeAssistant) -> AbstractResolver | None:
 
 
 def async_create_session(hass: HomeAssistant, *, bind_to_entry: bool, **kwargs: Any) -> aiohttp.ClientSession:
-    """A session for one ComexioClient: connections of its own, kept COMEXIO_KEEPALIVE_TIMEOUT_SEC while idle.
+    """A session for one ComexioClient: connections of its own, kept only briefly while idle.
 
     kwargs go to aiohttp.ClientSession (aiocomexio's session_kwargs). Drop the session with discard_session, never
     with close() or detach(). Must be called in the event loop.

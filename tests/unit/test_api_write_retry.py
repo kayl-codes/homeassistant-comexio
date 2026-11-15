@@ -71,6 +71,8 @@ def client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     fake.set_knx_value = AsyncMock()
     fake.set_io_value = AsyncMock()
     monkeypatch.setattr(ComexioAPI, "client", property(lambda _self: fake))
+    # The check of the API settings after a failed write has tests of its own (test_api_write_diagnosis.py).
+    monkeypatch.setattr(ComexioAPI, "_diagnose_failed_write", AsyncMock(return_value=api_module._SettingsNote()))
     return fake
 
 
@@ -560,13 +562,23 @@ def test_a_dpt3_move_step_is_written_once_because_it_moves_from_where_the_target
 
     assert _run(_dpt3_entity(set_value)._async_write_stepcode(stepcode)) is True
 
-    set_value.assert_awaited_once_with("marker", "78", stepcode, repeat=False, even_if_held=False)
+    # A cover sends no stop after a failed move, so its move keeps the look at the API settings.
+    set_value.assert_awaited_once_with("marker", "78", stepcode, repeat=False, even_if_held=False, diagnose=True)
+
+
+def test_a_caller_can_ask_a_dpt3_move_for_no_look_at_the_api_settings() -> None:
+    set_value = AsyncMock(return_value=True)
+
+    assert _run(_dpt3_entity(set_value)._async_write_stepcode(1, diagnose=False)) is True
+
+    set_value.assert_awaited_once_with("marker", "78", 1, repeat=False, even_if_held=False, diagnose=False)
 
 
 def _dimmer(set_value: AsyncMock) -> ComexioKnxLight:
     light = ComexioKnxLight.__new__(ComexioKnxLight)
     light.coordinator = MagicMock()
     light.coordinator.api.set_value = set_value
+    light.coordinator.api.last_write_diagnosis = None  # unbound, a MagicMock would be taken for a text
     light.coordinator._knx_bridge_marker_by_k_id.return_value = {"9": "77", "10": "78"}
     light._direction_id, light._stepcode_id = "9", "10"
     light._attr_brightness, light._move_lock = 0, asyncio.Lock()
@@ -597,6 +609,58 @@ def test_a_dimmer_whose_move_was_not_confirmed_is_stopped(monkeypatch: pytest.Mo
 
     assert _sent(set_value) == [("77", 1, True), ("78", 1, False), ("78", 0, True)]
     assert light._attr_brightness == 0
+    # The stop goes out at once: the failed move asks for no look at the API settings, the stop keeps it.
+    assert [call.kwargs["diagnose"] for call in set_value.await_args_list] == [True, False, True]
+
+
+def test_a_dimmer_whose_stop_fails_too_names_the_settings_text_of_the_move_not_of_the_stop() -> None:
+    # write_failed reads the text of the write right before it: it has to be the one of the refused move.
+    api = SimpleNamespace(
+        last_write_met_another_certificate=False, last_write_diagnosis=None, write_settings=lambda *_: ("server",)
+    )
+    texts = iter([None, "move-diag", "stop-diag"])
+
+    async def set_value(*_args: Any, **_kwargs: Any) -> bool:
+        api.last_write_diagnosis = next(texts)
+        return api.last_write_diagnosis is None
+
+    set_value_mock = AsyncMock(side_effect=set_value)
+    light = _dimmer(set_value_mock)
+    light.coordinator.api = api
+    api.set_value = set_value_mock
+
+    move = light._async_move_to(255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(move)
+
+    assert "the stop telegram after it did not get through" in str(raised.value)
+    assert "move-diag" in str(raised.value)
+    assert "stop-diag" not in str(raised.value)
+
+
+def test_a_dimmer_whose_move_asked_for_no_look_at_the_settings_names_the_text_of_the_failed_stop() -> None:
+    # The move runs with diagnose=False, so its error has no text; the stop's look at the same marker explains it.
+    api = SimpleNamespace(
+        last_write_met_another_certificate=False, last_write_diagnosis=None, write_settings=lambda *_: ("server",)
+    )
+    texts = iter([None, None, "stop-diag"])  # direction ok, move failed without text, stop failed with text
+
+    async def set_value(_type: str, marker: str, *_args: Any, **_kwargs: Any) -> bool:
+        api.last_write_diagnosis = next(texts)
+        return marker == "77"  # only the direction write goes through
+
+    set_value_mock = AsyncMock(side_effect=set_value)
+    light = _dimmer(set_value_mock)
+    light.coordinator.api = api
+    api.set_value = set_value_mock
+
+    move = light._async_move_to(255)
+    with pytest.raises(HomeAssistantError) as raised:
+        asyncio.run(move)
+
+    message = str(raised.value)
+    assert message.startswith("Failed to dim K9/K10, and the stop telegram after it did not get through")
+    assert message.endswith(": stop-diag")
 
 
 def test_a_stop_the_bridge_data_cannot_send_after_a_refused_move_says_the_dimmer_may_still_be_moving(
@@ -1148,8 +1212,8 @@ def test_a_dpt3_stop_and_a_dpt3_direction_stay_repeatable() -> None:
     _run(entity._async_write_direction(1))
 
     assert [(call.args, call.kwargs) for call in set_value.await_args_list] == [
-        (("marker", "78", 0), {"repeat": True, "even_if_held": True}),
-        (("marker", "77", 1), {"repeat": True, "even_if_held": False}),
+        (("marker", "78", 0), {"repeat": True, "even_if_held": True, "diagnose": True}),
+        (("marker", "77", 1), {"repeat": True, "even_if_held": False, "diagnose": True}),
     ]
 
 
@@ -1669,7 +1733,7 @@ def test_a_knx_trigger_write_reaches_the_bridge_marker_without_repetition() -> N
 
     assert _run(write) is True
 
-    set_value.assert_awaited_once_with("marker", "77", 1, repeat=False, even_if_held=False)
+    set_value.assert_awaited_once_with("marker", "77", 1, repeat=False, even_if_held=False, diagnose=True)
 
 
 def test_a_knx_trigger_button_writes_its_bridge_marker_once() -> None:
@@ -1685,7 +1749,7 @@ def test_a_knx_trigger_button_writes_its_bridge_marker_once() -> None:
 
     _run(button.async_press())
 
-    set_value.assert_awaited_once_with("marker", "77", 1, repeat=False, even_if_held=False)
+    set_value.assert_awaited_once_with("marker", "77", 1, repeat=False, even_if_held=False, diagnose=True)
 
 
 @pytest.mark.parametrize(("kind", "repeat"), [(MarkerKind.NORMAL, True), (MarkerKind.TRIGGER, False)])
@@ -1701,7 +1765,7 @@ def test_a_knx_write_is_repeatable_unless_the_object_is_a_trigger_by_now(kind: M
 
     _run(entity._async_source_write(1))
 
-    set_value.assert_awaited_once_with("marker", "77", 1, repeat=repeat, even_if_held=False)
+    set_value.assert_awaited_once_with("marker", "77", 1, repeat=repeat, even_if_held=False, diagnose=True)
 
 
 def test_a_write_to_another_target_does_not_wait_for_the_repetitions_of_this_one(
