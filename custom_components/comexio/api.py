@@ -12,6 +12,7 @@ import logging
 import math
 import re
 import time
+import traceback
 from typing import Any, NamedTuple, NoReturn
 import weakref
 
@@ -185,10 +186,15 @@ def _mark_retrieved(read: "asyncio.Future[ApiSettings]") -> None:
 
 
 class _RepeatRule(NamedTuple):
-    """What the caller of set_value allows after a drop: a repetition at all, and one whatever HA's value does."""
+    """What the caller of set_value allows after a drop (a repetition at all, one whatever HA's value does) and wants.
+
+    diagnose is False where the caller acts on the result at once and every second counts (a stop after a failed
+    DPT3 move): the look at the API settings (up to API_SETTINGS_CHECK_TIMEOUT_SEC) would hold it back.
+    """
 
     repeat: bool = True
     even_if_held: bool = False
+    diagnose: bool = True
 
 
 def _write_target_key(target_type: str, target_id: str | int) -> tuple[str, str]:
@@ -864,9 +870,14 @@ class ComexioAPI:
         # One lock per target being written (dropped with its last user), so a repetition of an older write never
         # lands after a newer one.
         self._write_locks: weakref.WeakValueDictionary[tuple[str, str], asyncio.Lock] = weakref.WeakValueDictionary()
-        # The read of the API settings a failed write is waiting for (_api_settings_text): writes that fail while
-        # one is under way share it, so a burst of failures does not queue up requests Comexio serialises anyway.
-        self._settings_read: asyncio.Future[ApiSettings] | None = None
+        # The read of the API settings a failed write is waiting for (_api_settings_text), with the connection settings
+        # it was started under: writes that fail while one is under way share it, so a burst of failures does not
+        # queue up requests Comexio serialises anyway. A write issued under other settings (a reconfigure came
+        # between) starts a read of its own: the old one asked another server, or the same one as another user.
+        self._settings_read: tuple[tuple[str, ...], asyncio.Future[ApiSettings]] | None = None
+        # The shared read whose certificate mismatch is already kept: its other waiters name it as their cause but do
+        # not keep it again (one request, one mismatch).
+        self._mismatch_noted_read: asyncio.Future[ApiSettings] | None = None
         # Grows with every mismatch kept (a request the client and its caller both report counts twice) and
         # is never reset, so a poll tells whether one came up while it ran even when a login or config fetch
         # alongside it cleared certificate_mismatch; last_certificate_mismatch is not cleared either.
@@ -5870,6 +5881,7 @@ class ComexioAPI:
         *,
         repeat: bool = True,
         even_if_held: bool = False,
+        diagnose: bool = True,
     ) -> bool:
         """Write a value; False if Comexio refused it or could not be reached.
 
@@ -5884,7 +5896,10 @@ class ComexioAPI:
         failure, whichever of the two ways the write went, and every repetition is counted in write_stats. A caller
         whose write toggles or pulses its target (a trigger marker, a relative KNX step) passes repeat=False. A
         caller whose write must reach its target whatever HA's value does meanwhile (a DPT3 stop: the actuator has to
-        stop) passes even_if_held=True, so HA's value is not consulted.
+        stop) passes even_if_held=True, so HA's value is not consulted. A caller that must act the moment a failed
+        write returns (a stop after a failed DPT3 move) passes diagnose=False: the failure is logged and counted as
+        always, but the API settings are not read (up to API_SETTINGS_CHECK_TIMEOUT_SEC), so last_write_diagnosis
+        stays empty.
 
         The connection settings the write depends on (write_settings) are taken when it is issued: a write that
         waited for its turn or is due for a repetition after a reconfigure changed them is not sent to the new
@@ -5903,7 +5918,7 @@ class ComexioAPI:
             value,
             ext,
             identifier,
-            _RepeatRule(repeat, even_if_held),
+            _RepeatRule(repeat, even_if_held, diagnose),
             self.write_settings(target_type, identifier),
         )
 
@@ -5947,7 +5962,7 @@ class ComexioAPI:
             failure = await self._send_until_done(target_type, target_id, value, ext, identifier, rule, settings)
         if failure is None:
             return True
-        await self._report_failed_write(failure, target_type, target_id, identifier, settings)
+        await self._report_failed_write(failure, target_type, target_id, identifier, settings, rule.diagnose)
         return False
 
     async def _send_until_done(
@@ -5994,6 +6009,7 @@ class ComexioAPI:
         target_id: str | int,
         identifier: str | None,
         settings: tuple[str, ...],
+        diagnose: bool = True,
     ) -> None:
         """Log and count a failed write, the API settings text (if any) in the line.
 
@@ -6006,7 +6022,8 @@ class ComexioAPI:
         attempt, retries, not_sent = failure
         note = _SettingsNote()
         try:
-            note = await self._diagnose_failed_write(attempt, target_type, target_id, identifier, settings)
+            if diagnose:
+                note = await self._diagnose_failed_write(attempt, target_type, target_id, identifier, settings)
         finally:
             if not attempt.reported:
                 _LOGGER.error(
@@ -6047,7 +6064,10 @@ class ComexioAPI:
             or self.write_settings(target_type, identifier) != settings
         ):
             return _SettingsNote()
-        note = await self._api_settings_text(target_type, target_id)
+        note = await self._api_settings_text(target_type, target_id, identifier, settings)
+        if self.write_settings(target_type, identifier) != settings:
+            # A reconfigure came while the settings were read: they are those of the old server (or user).
+            return _SettingsNote()
         if note.text:
             _write_diagnosis.set((self, note.text))
         return note
@@ -6056,15 +6076,19 @@ class ComexioAPI:
         async with asyncio.timeout(API_SETTINGS_CHECK_TIMEOUT_SEC):
             return await self.client.get_api_settings()
 
-    def _shared_settings_read(self) -> "asyncio.Future[ApiSettings]":
-        """The read of the API settings under way, started if none is (see _settings_read)."""
-        read = self._settings_read
-        if read is None or read.done():
-            read = self._settings_read = asyncio.ensure_future(self._read_api_settings())
-            read.add_done_callback(_mark_retrieved)
+    def _shared_settings_read(self, settings: tuple[str, ...]) -> "asyncio.Future[ApiSettings]":
+        """The read of the API settings under way for these connection settings, started if none is."""
+        held = self._settings_read
+        if held is not None and held[0] == settings and not held[1].done():
+            return held[1]
+        read = asyncio.ensure_future(self._read_api_settings())
+        read.add_done_callback(_mark_retrieved)
+        self._settings_read = (settings, read)
         return read
 
-    async def _api_settings_text(self, target_type: str, target_id: str | int) -> "_SettingsNote":
+    async def _api_settings_text(
+        self, target_type: str, target_id: str | int, identifier: str | None, settings: tuple[str, ...]
+    ) -> "_SettingsNote":
         """The settings read and put into words; no text when the session was gone meanwhile (unload, HA stopping).
 
         Best effort: whatever the read or the parsing raises (but a cancellation) becomes the note that the settings
@@ -6072,20 +6096,34 @@ class ComexioAPI:
         also kept for the repair, like one met by the write itself, and named by the counter. The read is shielded:
         a caller that is cancelled leaves it to the other writes waiting for it.
         """
+        read = self._shared_settings_read(settings)
         try:
-            found = await asyncio.shield(self._shared_settings_read())
+            found = await asyncio.shield(read)
             return _SettingsNote(api_settings_diagnosis(found, target_type, target_id))
         except ComexioCertificateMismatchError as err:
-            self._note_write_met_another_certificate(err, target_type, target_id)
+            if self.write_settings(target_type, identifier) != settings:
+                # The certificate of the old server (a reconfigure came meanwhile) is no news for the new one.
+                return _SettingsNote()
+            if self._mismatch_noted_read is read:
+                _write_met_another_certificate.set(self)
+            else:
+                self._mismatch_noted_read = read
+                self._note_write_met_another_certificate(err, target_type, target_id)
             return _SettingsNote(settings_check_failed(err), err)
         except Exception as err:
-            if isinstance(err, RuntimeError) and self._met_the_closed_session(err):
+            if self._read_ended_with_the_session(err):
+                _LOGGER.debug("The read of the Comexio API settings ended with the session (%s)", type(err).__name__)
                 return _SettingsNote()
             if not isinstance(err, ComexioError | TimeoutError):
                 # A bug in the read or the parser, not Comexio's answer: visible in the normal log, by class only (the
-                # text may quote the page), the traceback at debug level.
+                # text may quote the page, which holds the API password). The debug line names the places only: the
+                # frames, never the text of the error or of its cause, and no locals.
                 _LOGGER.warning("Reading the Comexio API settings failed unexpectedly (%s)", type(err).__name__)
-                _LOGGER.debug("Unexpected error while reading the Comexio API settings", exc_info=err)
+                _LOGGER.debug(
+                    "Unexpected error while reading the Comexio API settings (%s), raised at: %s",
+                    type(err).__name__,
+                    "".join(traceback.format_tb(err.__traceback__)),
+                )
             return _SettingsNote(settings_check_failed(err))
 
     @staticmethod
@@ -6189,6 +6227,18 @@ class ComexioAPI:
         if self.session.closed:
             return _GONE_HA_CLOSED
         return None
+
+    def _read_ended_with_the_session(self, err: Exception) -> bool:
+        """Whether the settings read failed because the main session went away under it (unload, HA stopping).
+
+        A request in flight when the connector closes may fail as a transport error or a timeout instead of aiohttp's
+        refusal of a closed session; neither says anything about Comexio's settings. Any other error stays visible.
+        """
+        if self._session_gone_reason() is None:
+            return False
+        if isinstance(err, RuntimeError):
+            return str(err) == _AIOHTTP_SESSION_CLOSED
+        return isinstance(err, ComexioConnectionError | TimeoutError)
 
     def _met_the_closed_session(self, err: RuntimeError) -> bool:
         """Whether err is aiohttp's refusal of a request on a main session that is gone (unload, HA stopping)."""

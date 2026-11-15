@@ -412,6 +412,79 @@ def test_a_read_refused_by_a_session_home_assistant_closed_is_no_news(
     assert "failed unexpectedly" not in caplog.text
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(ComexioConnectionError("Server disconnected"), id="transport-error"),
+        pytest.param(TimeoutError(), id="timeout"),
+    ],
+)
+def test_a_read_cut_off_by_the_stop_is_no_news_about_the_settings(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture, failure: BaseException
+) -> None:
+    # Home Assistant closes the connector while the settings request is in flight: it ends as a transport error.
+    async def close_then_fail() -> ApiSettings:
+        api.session.closed = True  # type: ignore[misc]
+        raise failure
+
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = close_then_fail
+
+    with caplog.at_level(logging.DEBUG, logger=api_module.__name__):
+        written, diagnosis = _write(api, "marker", 251, 1)
+
+    assert (written, diagnosis) == (False, None)  # no "could not be read" note in the line
+    assert api.write_stats.failed == 1
+    assert "failed unexpectedly" not in caplog.text
+    assert f"ended with the session ({type(failure).__name__})" in caplog.text  # a trace for the debug log
+
+
+@pytest.mark.parametrize(
+    ("gone", "failure", "expected_note", "warned"),
+    [
+        pytest.param(
+            None,
+            _dropped(),
+            "Comexio API settings could not be read (ComexioConnectionError (ServerDisconnectedError))",
+            False,
+            id="session-open-transport-error",
+        ),
+        pytest.param(
+            "closed", ValueError("x"), "Comexio API settings could not be read (ValueError)", True, id="closed-foreign"
+        ),
+        pytest.param("unloaded", _dropped(), None, False, id="unloaded-transport-error"),
+        pytest.param("unloaded", TimeoutError(), None, False, id="unloaded-timeout"),
+    ],
+)
+def test_only_a_read_that_ended_with_the_session_is_no_news(
+    api: ComexioAPI,
+    client: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    gone: str | None,
+    failure: BaseException,
+    expected_note: str | None,
+    warned: bool,
+) -> None:
+    # A transport error on an open session is the read's own failure and is named; a bug stays visible whatever the
+    # session does; the unloaded entry (_closed) ends the read as quietly as Home Assistant stopping does.
+    async def end_the_read() -> ApiSettings:
+        if gone == "closed":
+            api.session.closed = True  # type: ignore[misc]
+        elif gone == "unloaded":
+            api._closed = True
+        raise failure
+
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = end_the_read
+
+    with caplog.at_level(logging.WARNING, logger=api_module.__name__):
+        written, diagnosis = _write(api, "marker", 251, 1)
+
+    assert (written, diagnosis) == (False, expected_note)
+    assert api.write_stats.failed == 1
+    assert ("failed unexpectedly" in caplog.text) is warned
+
+
 def test_a_runtime_error_of_the_read_is_no_unload_while_the_entry_is_open(
     api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -444,6 +517,27 @@ def test_an_unexpected_error_of_the_read_is_visible_in_the_log_by_class_only(
     [warning] = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert warning.getMessage() == "Reading the Comexio API settings failed unexpectedly (ValueError)"
     assert PAGE_PASSWORD not in caplog.text
+
+
+def test_the_debug_line_of_an_unexpected_error_names_the_places_but_never_the_text(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    client.set_marker_value.side_effect = _timeout()
+
+    async def parser_bug() -> ApiSettings:
+        # The error and its cause both quote the page, as a parser bug might.
+        raise ValueError(f"page said {PAGE_PASSWORD}") from ValueError(f"cause said {PAGE_PASSWORD}")
+
+    client.get_api_settings.side_effect = parser_bug
+
+    with caplog.at_level(logging.DEBUG, logger=api_module.__name__):
+        _write(api, "marker", 251, 1)
+
+    [debug] = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG and "raised at" in r.getMessage()]
+    assert "(ValueError)" in debug
+    assert "_api_settings_text" in debug  # the frames are there: the place is named, the text is not
+    assert PAGE_PASSWORD not in caplog.text
+    assert all(record.exc_info is None for record in caplog.records)
 
 
 def test_failed_writes_in_a_burst_share_one_read_of_the_settings(api: ComexioAPI, client: MagicMock) -> None:
@@ -588,6 +682,154 @@ def test_connection_settings_changed_during_the_write_read_no_settings_of_the_ne
     assert api.write_stats.failed == 1
 
 
+def test_one_certificate_mismatch_of_a_shared_read_is_kept_once_but_named_by_every_waiting_write(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    kept: list[str] = []
+    api.on_certificate_mismatch = kept.append
+
+    async def scenario() -> list[bool]:
+        reading = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_mismatch() -> ApiSettings:
+            reading.set()
+            await release.wait()
+            raise ComexioCertificateMismatchError("foreign", expected="aa", actual="bb")
+
+        async def write(marker_id: int) -> bool:
+            await api.set_value("marker", marker_id, 1)
+            return api.last_write_met_another_certificate
+
+        client.set_marker_value.side_effect = _timeout()
+        client.get_api_settings.side_effect = slow_mismatch
+        tasks = [asyncio.create_task(write(251))]
+        await reading.wait()
+        tasks += [asyncio.create_task(write(252)), asyncio.create_task(write(253))]
+        for _ in range(20):  # the other two fail while the read is under way
+            await asyncio.sleep(0)
+        release.set()
+        return list(await asyncio.gather(*tasks))
+
+    assert _run(scenario()) == [True, True, True]  # each write names the certificate as its own cause
+    client.get_api_settings.assert_awaited_once_with()
+    assert (api.certificate_mismatch_count, kept) == (1, ["bb"])  # kept and handed to the repair once
+
+
+def test_a_write_issued_under_new_connection_settings_does_not_join_the_read_of_the_old_ones(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def scenario() -> list[bool]:
+        reading = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_read() -> ApiSettings:
+            reading.set()
+            await release.wait()
+            return _settings(active=False)
+
+        client.set_marker_value.side_effect = _timeout()
+        client.get_api_settings.side_effect = slow_read
+        old = asyncio.create_task(api.set_value("marker", 251, 1))
+        await reading.wait()
+        monkeypatch.setattr(api, "host", "other-comexio.example")  # a reconfigure while the read is under way
+        reading.clear()
+        new = asyncio.create_task(api.set_value("marker", 252, 1))
+        await asyncio.wait_for(reading.wait(), timeout=1)  # the new write reads for itself
+        release.set()
+        return list(await asyncio.gather(old, new))
+
+    assert _run(scenario()) == [False, False]
+    assert client.get_api_settings.await_count == 2
+
+
+def test_a_later_certificate_mismatch_is_kept_again_not_taken_for_the_one_already_kept(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    kept: list[str] = []
+    api.on_certificate_mismatch = kept.append
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = [
+        ComexioCertificateMismatchError("foreign", expected="aa", actual="bb"),
+        ComexioCertificateMismatchError("foreign", expected="aa", actual="cc"),
+    ]
+
+    _write(api, "marker", 251, 1)
+    _write(api, "marker", 251, 1)
+
+    assert (api.certificate_mismatch_count, kept) == (2, ["bb", "cc"])
+
+
+def test_a_certificate_mismatch_of_the_old_server_is_not_kept_for_the_one_reconfigured_meanwhile(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kept: list[str] = []
+    api.on_certificate_mismatch = kept.append
+
+    async def reconfigure_then_mismatch() -> ApiSettings:
+        monkeypatch.setattr(api, "host", "other-comexio.example")
+        raise ComexioCertificateMismatchError("foreign", expected="aa", actual="bb")
+
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = reconfigure_then_mismatch
+
+    assert _write(api, "marker", 251, 1) == (False, None)  # no text, no repair for the new configuration
+
+    assert (api.certificate_mismatch_count, kept) == (0, [])
+    assert api.write_stats.failed == 1
+
+
+def test_settings_read_from_the_old_server_are_not_named_after_a_reconfigure(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def reconfigure_then_answer() -> ApiSettings:
+        monkeypatch.setattr(api, "host", "other-comexio.example")
+        return _settings(active=False)
+
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = reconfigure_then_answer
+
+    assert _write(api, "marker", 251, 1) == (False, None)
+    assert api.write_stats.failed == 1
+
+
+def test_a_waiting_write_that_is_cancelled_leaves_the_shared_read_to_the_others(
+    api: ComexioAPI, client: MagicMock
+) -> None:
+    async def scenario() -> list[tuple[bool, str | None]]:
+        reading = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow_read() -> ApiSettings:
+            reading.set()
+            await release.wait()
+            return _settings(active=False)
+
+        async def write(marker_id: int) -> tuple[bool, str | None]:
+            return await api.set_value("marker", marker_id, 1), api.last_write_diagnosis
+
+        client.set_marker_value.side_effect = _timeout()
+        client.get_api_settings.side_effect = slow_read
+        starter = asyncio.create_task(write(251))
+        await reading.wait()
+        others = [asyncio.create_task(write(252)), asyncio.create_task(write(253))]
+        for _ in range(20):  # the other two fail while the read is under way
+            await asyncio.sleep(0)
+        starter.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(*others), timeout=5)
+        with pytest.raises(asyncio.CancelledError):
+            await starter
+        return list(results)
+
+    results = _run(scenario())
+
+    assert [written for written, _ in results] == [False, False]
+    assert all(diagnosis is not None and "the API is switched off" in diagnosis for _, diagnosis in results)
+    client.get_api_settings.assert_awaited_once_with()
+
+
 def test_a_certificate_mismatch_met_by_the_read_is_the_cause_the_caller_names(
     api: ComexioAPI, client: MagicMock
 ) -> None:
@@ -636,6 +878,23 @@ def test_the_look_at_the_settings_does_not_hold_back_the_next_write_to_the_same_
         return sent, stop_done and not held_back
 
     assert _run(scenario()) == ([1, 0], True)
+
+
+def test_a_write_that_asks_for_no_diagnosis_reads_no_settings_but_is_still_logged_and_counted(
+    api: ComexioAPI, client: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The move of a DPT3 step: the stop after it must not wait for the look at the settings (up to 10 s)."""
+    client.set_marker_value.side_effect = _timeout()
+
+    with caplog.at_level(logging.ERROR, logger=api_module.__name__):
+        written, diagnosis = _write(api, "marker", 251, 1, repeat=False, diagnose=False)
+
+    assert (written, diagnosis) == (False, None)
+    client.get_api_settings.assert_not_awaited()
+    assert api.write_stats.failed == 1
+    (line,) = [record.getMessage() for record in caplog.records if record.levelno == logging.ERROR]
+    assert line.startswith("Comexio API write failed (marker 251)")
+    assert SETTINGS_ERROR not in line
 
 
 def test_the_next_write_does_not_inherit_the_diagnosis_of_the_last(api: ComexioAPI, client: MagicMock) -> None:

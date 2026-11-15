@@ -963,15 +963,27 @@ async def _restart_meeting_another_certificate(
     return entity_ids
 
 
+# set_value and the coroutines it awaits one after the other (send, repeat, report the failure and look at the API
+# settings); _diagnose_failed_write ends at once for the certificate mismatch these tests send.
+_REAL_WRITE_PATH = (
+    "set_value",
+    "_write_and_repeat",
+    "_send_until_done",
+    "_write_once",
+    "_report_failed_write",
+    "_diagnose_failed_write",
+)
+
+
 def _write_for_real(api: ComexioAPI) -> None:
     """set_value and its send to the client run as in production, for a marker or KNX write.
 
     The client underneath stays the test's; the coroutines an IO write or a connection error would reach
     (_set_io_value, _replaced_certificate_behind) stay the fixture's mocks.
     """
-    api.set_value = partial(ComexioAPI.set_value, api)  # type: ignore[method-assign]
-    api._write_and_repeat = partial(ComexioAPI._write_and_repeat, api)  # type: ignore[method-assign]
-    api._write_once = partial(ComexioAPI._write_once, api)  # type: ignore[method-assign]
+    # Every coroutine of the write path: the fixture stubs each of them, and a stubbed one would swallow the refusal.
+    for name in _REAL_WRITE_PATH:
+        setattr(api, name, partial(getattr(ComexioAPI, name), api))
 
 
 def _comexio_answers_again(api_returns: dict, api_attributes: dict, api: ComexioAPI) -> None:

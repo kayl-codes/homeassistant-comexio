@@ -202,7 +202,8 @@ class ComexioKnxLight(ComexioKnxDpt3Entity, LightEntity, RestoreEntity):
             # Not moved either when a reconfigure came during the direction write: the move would go elsewhere.
             raise write_failed(self.coordinator, failed)
         try:
-            moved = await self._async_write_stepcode(KNX_DPT3_STEPCODE_MOVE)
+            # No look at the API settings after a failure: the stop below must go out at once.
+            moved = await self._async_write_stepcode(KNX_DPT3_STEPCODE_MOVE, diagnose=False)
         except asyncio.CancelledError:
             await self._async_stop_after_cancel(settings)
             raise
