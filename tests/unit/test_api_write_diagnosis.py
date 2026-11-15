@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import copy
+from datetime import UTC, datetime, timedelta
+import itertools
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -26,6 +28,7 @@ from aiocomexio import (
 from aiocomexio.client import parse_api_settings
 import aiohttp
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.util import dt as dt_util
 import pytest
 
 from custom_components.comexio import api as api_module
@@ -714,6 +717,28 @@ def test_one_certificate_mismatch_of_a_shared_read_is_kept_once_but_named_by_eve
     assert _run(scenario()) == [True, True, True]  # each write names the certificate as its own cause
     client.get_api_settings.assert_awaited_once_with()
     assert (api.certificate_mismatch_count, kept) == (1, ["bb"])  # kept and handed to the repair once
+
+
+def test_a_failure_is_dated_when_the_write_failed_not_when_the_settings_check_ended(
+    api: ComexioAPI, client: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ticks = itertools.count()
+    base = datetime(2026, 11, 15, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(dt_util, "utcnow", lambda: base + timedelta(seconds=next(ticks)))  # every call is later
+    read_at: list[datetime] = []
+
+    async def read() -> ApiSettings:
+        read_at.append(dt_util.utcnow())
+        return _settings(active=False)
+
+    client.set_marker_value.side_effect = _timeout()
+    client.get_api_settings.side_effect = read
+
+    assert _write(api, "marker", 251, 1)[0] is False
+
+    (failure,) = api.write_stats.last_failures
+    assert len(read_at) == 1  # the check ran
+    assert failure.at < read_at[0]  # dated before the check began, not after it ended
 
 
 def test_a_finished_settings_read_is_not_kept(api: ComexioAPI, client: MagicMock) -> None:

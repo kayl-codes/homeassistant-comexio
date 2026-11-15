@@ -6020,6 +6020,7 @@ class ComexioAPI:
         mismatch the read of the settings met.
         """
         attempt, retries, not_sent = failure
+        failed_at = dt_util.utcnow()  # the failure's own time: the look at the settings below can take seconds
         note = _SettingsNote()
         try:
             if diagnose:
@@ -6035,7 +6036,7 @@ class ComexioAPI:
                     not_sent,
                     f". {note.text}" if note.text else "",
                 )
-            self.write_stats.record_failure(f"{target_type} {target_id}", note.cause or attempt.error)
+            self.write_stats.record_failure(f"{target_type} {target_id}", note.cause or attempt.error, failed_at)
 
     async def _diagnose_failed_write(
         self,

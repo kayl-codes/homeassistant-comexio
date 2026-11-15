@@ -159,11 +159,12 @@ class ApiWriteStats:
         """The latest failures, oldest first."""
         return tuple(self._last_failures)
 
-    def record_failure(self, target: str, err: BaseException) -> None:
+    def record_failure(self, target: str, err: BaseException, at: datetime | None = None) -> None:
+        """Count a failed write; `at` (timezone-aware) is when it failed, default now: a late report keeps its place."""
         self.failed += 1
-        self._last_failures.append(
-            WriteFailure(dt_util.utcnow(), one_line(target)[:_TARGET_MAX_LEN], failure_class(err))
-        )
+        failure = WriteFailure(at or dt_util.utcnow(), one_line(target)[:_TARGET_MAX_LEN], failure_class(err))
+        failures = sorted([*self._last_failures, failure], key=lambda kept: kept.at)  # stable: ties keep their order
+        self._last_failures = deque(failures[-API_WRITE_FAILURES_KEPT:], maxlen=API_WRITE_FAILURES_KEPT)
         self._notify()
 
     def record_retry(self) -> None:
