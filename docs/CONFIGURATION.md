@@ -34,6 +34,23 @@ Navigate to **Settings → Devices & Services → Add Integration** and search f
 | **⑨ Device class name** | Name of the Web-IO device class created in Comexio (default: `HomeAssistant`). |
 | **⑩ Polling interval** | Background polling interval in minutes. |
 
+#### Comexio API settings (fields ⑤ and ⑥)
+
+The API user and password must match the Comexio **Api** page (in the Comexio Studio). Writes over the API fail with the message “Forbidden” or a timeout if that page does not allow them, so set it up like this:
+
+<img src="assets/ui/api_config_comexio_de.png" width="640">
+
+| Setting on the Comexio page | Value for Home Assistant |
+|---|---|
+| **Apizugriff** | **Aktiv**. With **Inaktiv** Comexio does not answer `/api/` at all: a write waits 120 s and then fails with a timeout. |
+| **Verwende Login** | On, with the user and password from fields ⑤ and ⑥. |
+| **Ein- und Ausgänge** | **Lesen und Schreiben**, otherwise digital outputs `Q*` and `DG*` cannot be written. |
+| **Merker** | **Lesen und Schreiben**. With **Lesen** only, Comexio answers every write with “Forbidden”. **Einzelauswahl** allows only the markers listed. |
+| **1-Wire** | **Lesen** is enough: 1-Wire values reach Home Assistant by push, not by the API. |
+| **TCP-Schnittstelle / Port** | Leave as it is (default 1574). Changing the port did not change the behaviour of `/api/` in our tests. |
+
+If a write fails, the log line names the cause when Comexio can be asked: the API inactive, or the access level of the data type. A failure with HTTP 503 (“Service Unavailable”) means Comexio itself did not answer correctly; the integration does not repeat that write, because it cannot tell whether Comexio already executed it.
+
 After a successful login test, a second step asks for the **ignore lists** of every category whose import is on (Markers, KNX objects): the IDs listed there get no entity, no Web-IO command and no function plan connection. Leave the fields empty to import everything — the lists can be changed later in the [Settings](#3-settings), where each field only shows while its import is on. Without Marker and KNX import this step is skipped.
 
 HA then confirms the new device:
@@ -179,6 +196,23 @@ Navigiere zu **Einstellungen → Geräte & Dienste → Integration hinzufügen**
 | **⑧ Ein- und Ausgänge anlegen** | Physische IOs als HA-Entitäten importieren. |
 | **⑨ Name der Geräteklasse** | Name der Web-IO-Geräteklasse in Comexio (Standard: `HomeAssistant`). |
 | **⑩ Abfrageintervall** | Hintergrund-Polling-Intervall in Minuten. |
+
+#### Comexio-API-Einstellungen (Felder ⑤ und ⑥)
+
+Benutzer und Passwort müssen zur Seite **Api** in der Comexio Studio passen. Schreibzugriffe über die API schlagen mit „Forbidden“ oder einem Timeout fehl, wenn diese Seite sie nicht erlaubt. So ist sie einzurichten:
+
+<img src="assets/ui/api_config_comexio_de.png" width="640">
+
+| Einstellung in Comexio | Wert für Home Assistant |
+|---|---|
+| **Apizugriff** | **Aktiv**. Bei **Inaktiv** antwortet Comexio auf `/api/` gar nicht: ein Schreibzugriff wartet 120 s und scheitert dann mit einem Timeout. |
+| **Verwende Login** | An, mit Benutzer und Passwort aus den Feldern ⑤ und ⑥. |
+| **Ein- und Ausgänge** | **Lesen und Schreiben**, sonst lassen sich die digitalen Ausgänge `Q*` und `DG*` nicht schreiben. |
+| **Merker** | **Lesen und Schreiben**. Bei **Lesen** allein beantwortet Comexio jeden Schreibzugriff mit „Forbidden“. **Einzelauswahl** erlaubt nur die markierten Merker. |
+| **1-Wire** | **Lesen** genügt: 1-Wire-Werte kommen per Push, nicht über die API. |
+| **TCP-Schnittstelle / Port** | So lassen (Standard 1574). Ein geänderter Port hat das Verhalten von `/api/` in unseren Tests nicht verändert. |
+
+Ein Fehler mit HTTP 503 („Service Unavailable“) heißt, dass Comexio selbst nicht korrekt geantwortet hat. Die Integration wiederholt diesen Schreibzugriff nicht, weil nicht feststellbar ist, ob Comexio ihn bereits ausgeführt hat.
 
 Nach erfolgreichem Login-Test fragt ein zweiter Schritt nach den **Ignorier-Listen** jeder Kategorie, deren Import eingeschaltet ist (Merker, KNX-Objekte): Die dort eingetragenen IDs bekommen keine Entität, keinen Web-IO-Befehl und keine Logikplan-Verbindung. Leer lassen, um alles zu importieren — die Listen lassen sich später in den [Einstellungen](#3-einstellungen) ändern; dort erscheint jedes Feld nur, solange sein Import eingeschaltet ist. Ohne Merker- und KNX-Import entfällt dieser Schritt.
 

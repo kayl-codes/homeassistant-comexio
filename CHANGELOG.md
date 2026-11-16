@@ -9,6 +9,26 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ---
 
+## [0.42.0] — 2026-11-16
+
+Covers everything since v0.41.0.
+
+### ✨ New Features
+- **A failed `/api/` write names the setting behind it:** the error log line and the `set_value` notification say what Comexio's API settings explain, for example the API being switched off, a marker or IO being read only or forbidden, or a login user or password that differs. The integration reads Comexio's API page once after the last failed attempt; a write that cannot be explained keeps the plain error (#303).
+
+### 🛠️ Core & Stability Improvements
+- **Dependency:** `aiocomexio==0.14.0` (was 0.13.0). It carries the 3 s keep-alive that the integration's own connections use (#303).
+
+### 🐛 Bug Fixes & Refactoring
+- **Webhook push without a value is refused:** a push without a `value` field is refused with one throttled log line per kind, and the last value is kept. Before, the entity's value was silently replaced by "unknown". An explicit `null` still goes through and shows the entity as unknown (#298).
+- **Write that meets a Home Assistant stop:** a write that is cut short by Home Assistant stopping is reported as a failed write instead of raising an error (#300).
+
+### ⚠️ Requirements & Notes
+- **Restart required** after updating.
+- **Dependency:** `aiocomexio==0.14.0` (was 0.13.0), installed automatically by Home Assistant (#303).
+
+---
+
 ## [0.41.0] — 2026-11-13
 
 Covers everything since v0.40.0.
@@ -490,7 +510,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.41.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.42.0...HEAD
+[0.42.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.32.0...v0.40.0
 [0.32.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.31.0...v0.32.0
