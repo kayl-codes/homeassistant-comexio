@@ -6155,8 +6155,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         are found through it, so `webio_commands` would be empty although they exist) leaves the question open for
         the next one, a Comexio with any Web-IO device (an entry created anew on one that still holds commands of an
         earlier entry, a pre-split device) keeps the migration, and so does a store that was recorded for another
-        host (`host_changed`): the commands of that host may still push to the old id, and the new host's empty
-        `$WebDevices` says nothing about them. A save that fails is tried again at the next poll. Both
+        host (`host_changed`, persisted): the commands of that host may still push to the old id, and the new host's
+        empty `$WebDevices` says nothing about them. A save that fails is tried again at the next poll. Both
         retries last only as long as this run: the config is saved after the poll, and an entry with a saved config is
         not decided any more (it keeps the old id, the safe side).
         """

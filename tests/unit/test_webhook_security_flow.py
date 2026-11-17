@@ -1113,7 +1113,40 @@ def test_only_a_ledger_recorded_for_another_host_counts_as_a_host_change(
     assert security.host_changed is expected
 
 
-def test_a_host_change_found_at_load_keeps_the_old_id_on_through_the_first_poll_but_is_not_persisted(
+def test_a_recorded_host_change_stays_recorded_when_the_host_is_the_same_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    security = _hosted(monkeypatch, {**_switched_off_ledger("new.local"), "host_changed": True}, "new.local")
+
+    _run(security.async_load())
+
+    assert security.host_changed is True
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param({"secret": 5, "host_changed": True}, id="secret-unreadable"),
+        pytest.param({"host_changed": True}, id="secret-missing"),
+    ],
+)
+def test_a_recorded_host_change_survives_a_lost_secret(monkeypatch: pytest.MonkeyPatch, stored: dict) -> None:
+    """(silent-failure-hunter, #307) A new secret does not wipe the host change: the old id must stay on."""
+    security = _hosted(monkeypatch, stored, "new.local")
+
+    _run(security.async_load())
+
+    assert security.host_changed is True
+    assert security._store.stored["host_changed"] is True
+
+
+def test_a_recorded_host_change_is_read_back_for_an_entry_without_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    security = _hosted(monkeypatch, {**_switched_off_ledger("old.local"), "host_changed": True}, "")
+
+    _run(security.async_load())
+
+    assert security.host_changed is True
+
+
+def test_a_host_change_found_at_load_keeps_the_old_id_on_through_the_first_poll_and_a_restart_before_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """(Sourcery, #307) The whole chain: the load finds another host, the settle of the poll leaves the old id on."""
@@ -1121,18 +1154,23 @@ def test_a_host_change_found_at_load_keeps_the_old_id_on_through_the_first_poll_
     ledger = {"secret": "abc", "legacy": False, "host": "old.local"}
     security = _hosted(monkeypatch, ledger, "new.local")
     _run(security.async_load())
+    assert security._store.stored["host_changed"] is True  # persisted with the switch-on
+
+    # Home Assistant restarts before the first scraped poll: the next load sees the host recorded already.
+    again = _hosted(monkeypatch, security._store.stored, "new.local")
+    _run(again.async_load())
+    assert again.host_changed is True
+    assert again.legacy_enabled
+
     coordinator = _fresh_coordinator(monkeypatch)
-    coordinator.api.webhook_security = security
-    security.async_save = AsyncMock()
+    coordinator.api.webhook_security = again
+    again.async_save = AsyncMock()
 
     _run(coordinator._async_settle_legacy_webhook_id())
 
-    assert security.legacy_enabled
-    security.async_save.assert_not_awaited()
+    assert again.legacy_enabled
+    again.async_save.assert_not_awaited()
     assert coordinator._never_polled is False
-    again = _hosted(monkeypatch, security._store.stored, "new.local")  # the next start: host recorded already
-    _run(again.async_load())
-    assert again.host_changed is False
 
 
 @pytest.mark.parametrize("security_present", [True, False])

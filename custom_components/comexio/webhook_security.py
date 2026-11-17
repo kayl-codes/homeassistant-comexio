@@ -46,6 +46,7 @@ _KEY_MIGRATED = "migrated"
 _KEY_LEGACY = "legacy"
 _KEY_WRITTEN = "last_write"
 _KEY_HOST = "host"
+_KEY_HOST_CHANGED = "host_changed"
 
 
 def legacy_webhook_id(server_id: str) -> str:
@@ -148,8 +149,10 @@ class WebhookSecurity:
         self.host = host
         self.secret = ""  # nosec B105 - filled by async_load
         self.legacy_enabled = True
-        # True when this load found the ledger recorded for another host: the old id is on again for that reason, and
-        # no poll of the new host may switch it off before the migration verified every command (in memory only).
+        # True once a load found the ledger recorded for another host: the old id is on again for that reason, and
+        # no poll of the new host may switch it off on the strength of its own empty device list. Persisted, so a
+        # restart before the first scraped poll does not forget it; it stays set, as it only matters while the entry
+        # has no saved config (see ComexioCoordinator._async_settle_legacy_webhook_id).
         self.host_changed = False
         self.migrated: set[str] = set()
         self.last_write: datetime | None = None
@@ -186,11 +189,15 @@ class WebhookSecurity:
                     "already moved to their own webhook id are refused until the nightly migration rewrites them",
                     self.server_id,
                 )
+                # The recorded host change is no part of the secret: an entry that has not polled yet must not
+                # lose it with the ledger (the new host's empty device list would switch the old id off).
+                self.host_changed = isinstance(stored, dict) and stored.get(_KEY_HOST_CHANGED) is True
             self.secret = webhook.async_generate_id()
             await self._async_save()
             return
         self.secret = stored[_KEY_SECRET]
         self.legacy_enabled = bool(stored.get(_KEY_LEGACY, True))
+        self.host_changed = bool(stored.get(_KEY_HOST_CHANGED, False))
         migrated = stored.get(_KEY_MIGRATED)
         self.migrated = {name for name in migrated if isinstance(name, str)} if isinstance(migrated, list) else set()
         written = stored.get(_KEY_WRITTEN)
@@ -238,6 +245,7 @@ class WebhookSecurity:
             _KEY_MIGRATED: sorted(self.migrated),
             _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
             _KEY_HOST: self.host or None,
+            _KEY_HOST_CHANGED: self.host_changed,
         }
 
     async def _async_save(self) -> None:
