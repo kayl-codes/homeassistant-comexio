@@ -344,6 +344,9 @@ def _coordinator(monkeypatch: pytest.MonkeyPatch, *, boot: datetime | None, writ
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.server_id = SERVER
     coordinator.hass = MagicMock()
+    coordinator.config_entry = SimpleNamespace(entry_id="entry-1")  # the repairs of the migration belong to it
+    coordinator._last_poll_scraped = False
+    coordinator._web_device_count = None  # as before the first poll: nothing is known about the Web-IO devices
     security = _security(monkeypatch)
     security.last_write = written
     security.async_save = AsyncMock()  # type: ignore[method-assign]

@@ -798,6 +798,18 @@ WEBHOOK_MIGRATION_HOUR = 1
 WEBHOOK_MIGRATION_MINUTE = 30
 WEBHOOK_MIGRATION_BUDGET_SEC = 3.5 * 3600
 WEBHOOK_MIGRATION_SAVE_EVERY = 20  # commands between two saves of the ledger
+# The two things the migration can wait on for good: repairs raised (not fixable, they only say what to do) while the
+# old id is still on, and deleted when it goes off or the cause is gone; id "{key}_{server_id}".
+ISSUE_WEBHOOK_COMMANDS_STUCK = "webhook_commands_stuck"
+ISSUE_WEBHOOK_RESTART = "webhook_restart_needed"
+WEBHOOK_STUCK_LISTED = 10  # command names a log line or the repair of the stuck commands names
+
+
+def webhook_restart_notification_id(server_id: str) -> str:
+    """Id of the notification that asks for a Comexio restart (raised, dismissed and dropped with the entry)."""
+    return f"{DOMAIN}_{server_id}_webhook_restart"
+
+
 # Before the old id goes off, every command is read back from Comexio (path and body). The reads start at the same
 # nightly time as the rewrites, after them; a run that cannot finish them in its budget switches nothing off.
 WEBHOOK_VERIFY_BUDGET_SEC = 1.5 * 3600

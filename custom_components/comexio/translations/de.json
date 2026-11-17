@@ -425,6 +425,14 @@
       "title": "Comexio Erweiterungsmodul offline ({server_id})",
       "description": "Das Erweiterungsmodul **{extensions}** ist während des Betriebs ausgefallen. Dies kann auf einen Hardwareausfall oder ein Verbindungsproblem hinweisen. Falls das Modul absichtlich außer Betrieb genommen wurde, kann diese Meldung ignoriert werden."
     },
+    "webhook_commands_stuck": {
+      "title": "Comexio: Web-IO-Commands lassen sich nicht auf eine eigene Webhook-ID umstellen ({server_id})",
+      "description": "{count} Web-IO-Command(s) von **{server_id}** senden noch an die alte Webhook-ID, und der Nachtlauf kann sie nicht umschreiben (keine Command-ID oder Geräte-ID gefunden): {commands}.\n\nDie alte Webhook-ID bleibt deshalb eingeschaltet. Ein Sync (die Web-IO-Sync-Taste) kann das beheben; diese Meldung verschwindet beim nächsten Nachtlauf, sobald kein solches Command mehr übrig ist."
+    },
+    "webhook_restart_needed": {
+      "title": "Comexio: Comexio-Server neu starten ({server_id})",
+      "description": "Alle Web-IO-Commands von **{server_id}** nutzen jetzt eine eigene Webhook-ID, aber Comexio sendet ein geändertes Command erst nach einem Neustart. **Starte den Comexio-Server neu.** Die alte Webhook-ID wird danach beim nächsten Nachtlauf abgeschaltet, und diese Meldung verschwindet."
+    },
     "uninstall_cleanup": {
       "title": "Comexio Deinstallations-Bereinigung ({server_id})",
       "fix_flow": {

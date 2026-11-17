@@ -147,6 +147,8 @@ from .const import (
     IO_PLAN_KINDS,
     ISSUE_IMPORT_DISABLED,
     ISSUE_KNX_PRERELEASE_CLEANUP,
+    ISSUE_WEBHOOK_COMMANDS_STUCK,
+    ISSUE_WEBHOOK_RESTART,
     KNX_DPT_AUTOTAG_MAX_RETRIES,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
@@ -187,6 +189,7 @@ from .const import (
     WEBHOOK_MIGRATION_PENDING,
     WEBHOOK_MIGRATION_SAVE_EVERY,
     WEBHOOK_MIGRATION_SKIPPED,
+    WEBHOOK_STUCK_LISTED,
     WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
     WEBHOOK_UNKNOWN_IO_LOG_MSG,
@@ -254,6 +257,7 @@ from .const import (
     trigger_pair_categories,
     unreadable_plan_keys,
     watchdog_user_plan_pick,
+    webhook_restart_notification_id,
     webio_class_label,
     webio_class_name,
     webio_quickbus_ios,
@@ -5951,17 +5955,34 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             name for name in self.data.get("webio_commands", {}) if name in targets and name not in security.migrated
         ]
 
-    def _warn_unrewritable_webhooks(self, unmigrated: list[str]) -> None:
-        """Name the commands the run cannot rewrite (no command id or device id): they keep the old id switched on."""
+    def _report_unrewritable_webhooks(self, unmigrated: list[str]) -> None:
+        """Name the commands the run cannot rewrite (no command id or device id): they keep the old id switched on.
+
+        In the log and as a repair, which stays until a run finds none left (a sync recreates such a command with
+        its ids); a night without any takes it away again.
+        """
         pending = {name for name, *_ in self._pending_webhook_migrations()}
-        if stuck := [name for name in unmigrated if name not in pending]:
-            _LOGGER.warning(
-                "[%s] %d Web-IO commands cannot be moved to their own webhook id (no command or device id found, a "
-                "sync may fix it), so the old id stays on: %s",
-                self.server_id,
-                len(stuck),
-                ", ".join(one_line(name) for name in stuck[:10]),
-            )
+        issue_id = f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{self.server_id}"
+        if not (stuck := [name for name in unmigrated if name not in pending]):
+            ir.async_delete_issue(self.hass, DOMAIN, issue_id)
+            return
+        named = ", ".join(one_line(name) for name in stuck[:WEBHOOK_STUCK_LISTED])
+        _LOGGER.warning(
+            "[%s] %d Web-IO commands cannot be moved to their own webhook id (no command or device id found, a "
+            "sync may fix it), so the old id stays on: %s",
+            self.server_id,
+            len(stuck),
+            named,
+        )
+        async_create_entry_issue(
+            self.hass,
+            self.config_entry.entry_id,
+            issue_id,
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_WEBHOOK_COMMANDS_STUCK,
+            translation_placeholders={"server_id": self.server_id, "count": str(len(stuck)), "commands": named},
+        )
 
     async def _async_webhook_migration_tick(self, _now: datetime | None = None) -> str:
         """Rewrite the Web-IO commands that still POST to the old webhook id, within the nightly budget.
@@ -5985,11 +6006,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _LOGGER.exception("[%s] The webhook ledger could not be saved", self.server_id)
         unmigrated = self._unmigrated_webhook_commands(security)
         remaining = len(unmigrated)
-        self._warn_unrewritable_webhooks(unmigrated)
+        self._report_unrewritable_webhooks(unmigrated)
         _LOGGER.info(
             "[%s] Webhook id migration: %d rewritten, %d failed, %d left", self.server_id, written, failed, remaining
         )
         if remaining:
+            # "All commands are rewritten, restart Comexio" is not true (any more): a sync or a deviating read-back
+            # put a command back. The request comes again when every command is rewritten.
+            self._dismiss_webhook_restart()
             return WEBHOOK_MIGRATION_FAILED if failed and not written else WEBHOOK_MIGRATION_PENDING
         return await self._async_finish_webhook_migration()
 
@@ -6095,11 +6119,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._notify_webhook_restart()
             return WEBHOOK_MIGRATION_NEEDS_RESTART
         # Comexio restarted since the last write: an earlier "restart needed" notice is out of date.
-        persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.server_id}_webhook_restart")
+        self._dismiss_webhook_restart()
         if self._webio_range_targets() and not self.data.get("webio_commands"):
-            # No stored command at all although targets exist: an incomplete scrape, nothing was verified.
-            _LOGGER.warning("[%s] The old webhook id stays on: no Web-IO command is known to verify", self.server_id)
-            return WEBHOOK_MIGRATION_PENDING
+            return await self._async_finish_without_stored_commands(security)
         deviating, unreadable, complete = await self._async_verify_webhook_commands(security)
         if deviating:
             # Out of the ledger: the next run rewrites them, and Comexio has to restart after that again.
@@ -6119,10 +6141,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.system_info.boot_time,
             security.last_write,
         )
-        security.legacy_enabled = False
-        if not await self._async_save_webhook_security(security):
+        if not await self._async_switch_legacy_webhook_id_off(security):
             # Not persisted: after a restart the old id would be on again, so do not run on a state that is lost.
-            security.legacy_enabled = True
             return WEBHOOK_MIGRATION_PENDING
         if self._restart_pending(security):
             # A sync wrote a command while the switch was being saved: it still posts to its old path.
@@ -6136,10 +6156,30 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 security.schedule_save()
             self._notify_webhook_restart()
             return WEBHOOK_MIGRATION_NEEDS_RESTART
-        persistent_notification.async_dismiss(self.hass, f"{DOMAIN}_{self.server_id}_webhook_restart")
+        self._clear_webhook_migration_notices()
         self.sync_webhooks()
         _LOGGER.info("[%s] Old webhook id switched off: every Web-IO command uses its own", self.server_id)
         return WEBHOOK_MIGRATION_DONE
+
+    async def _async_finish_without_stored_commands(self, security: WebhookSecurity) -> str:
+        """End of a run that found targets but no stored command: switched off when no Web-IO device exists at all.
+
+        Every night an entry that never synced ends here, and nothing exists that could push to the old id. Otherwise
+        Comexio may still hold commands this scrape did not show (a poll that did not read `$WebDevices`, a device
+        that does not show as ours): an incomplete scrape, nothing was verified, the old id stays on.
+        """
+        if self._legacy_webhook_id_unneeded(security):
+            if await self._async_switch_legacy_webhook_id_off(security):
+                _LOGGER.info("[%s] No Web-IO device exists: the old webhook id is switched off", self.server_id)
+                self.sync_webhooks()
+                return WEBHOOK_MIGRATION_DONE
+            _LOGGER.warning(
+                "[%s] The old webhook id stays on: switching it off could not be saved, the next run tries again",
+                self.server_id,
+            )
+            return WEBHOOK_MIGRATION_PENDING
+        _LOGGER.warning("[%s] The old webhook id stays on: no Web-IO command is known to verify", self.server_id)
+        return WEBHOOK_MIGRATION_PENDING
 
     async def _async_settle_legacy_webhook_id(self) -> None:
         """Switch the old webhook id off at the first scraped poll that proves Comexio has no Web-IO device at all.
@@ -6162,20 +6202,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._never_polled:
             return
-        if self._web_device_count is None:
+        if self._web_device_count is None or not self._last_poll_scraped:
             _LOGGER.debug(
-                "[%s] $WebDevices was not read: the old webhook id is decided at a later poll", self.server_id
+                "[%s] $WebDevices was not read from a scraped config: the old webhook id is decided at a later poll",
+                self.server_id,
             )
             return
         security = self.api.webhook_security
-        if (
-            self._web_device_count
-            or security is None
-            or not security.legacy_enabled
-            or security.migrated
-            or security.last_write is not None
-            or security.host_changed
-        ):
+        if security is None or not self._legacy_webhook_id_unneeded(security):
             _LOGGER.debug(
                 "[%s] The old webhook id is kept for the migration (%d Web-IO devices)",
                 self.server_id,
@@ -6183,15 +6217,57 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self._never_polled = False
             return
-        security.legacy_enabled = False
-        if not await self._async_save_webhook_security(security):
-            # Not persisted: after a restart the old id would be on again, so do not run on a state that is lost.
-            security.legacy_enabled = True
+        if not await self._async_switch_legacy_webhook_id_off(security):
             return
         self._never_polled = False
         _LOGGER.info(
             "[%s] Comexio has no Web-IO device yet: the old webhook id is not needed and stays off", self.server_id
         )
+
+    def _legacy_webhook_id_unneeded(self, security: WebhookSecurity | None) -> bool:
+        """True when the last poll scraped the config and read `$WebDevices` empty: no command could push to the old id.
+
+        Not when this entry rewrote or recorded a command (`migrated`, `last_write`) or the ledger was recorded for
+        another host (`host_changed`): those commands may still push to it, and the new host's empty list says
+        nothing about them. A command a sync creates later carries its own id from the start.
+        """
+        return (
+            security is not None
+            and security.legacy_enabled
+            and self._last_poll_scraped
+            and self._web_device_count == 0
+            and not security.migrated
+            and security.last_write is None
+            and not security.host_changed
+        )
+
+    async def _async_switch_legacy_webhook_id_off(self, security: WebhookSecurity) -> bool:
+        """Switch the old webhook id off and persist it; False (kept on) when the store refuses.
+
+        While the save runs the old id is already refused (`accepts` reads the flag): a push in that one store write
+        is dropped, and a failing store reverts the flag at once.
+        """
+        security.legacy_enabled = False
+        saved = False
+        try:
+            saved = await self._async_save_webhook_security(security)
+        finally:
+            if not saved:
+                # Not persisted (a refused save, or the save cut short by an unload): after a restart the old id
+                # would be on again, so do not run on a state that is lost (a cancel after the write went through
+                # leaves the store off and memory on: the old id is gone at the next start, the intended end).
+                security.legacy_enabled = True
+        return saved
+
+    def _dismiss_webhook_restart(self) -> None:
+        """Take back the request to restart Comexio: its notification and its repair."""
+        persistent_notification.async_dismiss(self.hass, webhook_restart_notification_id(self.server_id))
+        ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_WEBHOOK_RESTART}_{self.server_id}")
+
+    def _clear_webhook_migration_notices(self) -> None:
+        """Take back everything the migration asked of the user: the old id is off, there is nothing left to do."""
+        self._dismiss_webhook_restart()
+        ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{self.server_id}")
 
     def _restart_pending(self, security: WebhookSecurity) -> bool:
         """True while Comexio has not restarted since the last command write (it sends a changed command only then)."""
@@ -6201,14 +6277,27 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return boot_time is None or dt_util.as_utc(boot_time) <= security.last_write
 
     def _notify_webhook_restart(self) -> None:
-        """Ask the user to restart Comexio so it sends the rewritten commands."""
+        """Ask the user to restart Comexio so it sends the rewritten commands: a notification and a repair.
+
+        The repair stays until the old id is off or a run finds Comexio restarted (the same places that take the
+        notification back), so it does not depend on the notification having been seen.
+        """
+        async_create_entry_issue(
+            self.hass,
+            self.config_entry.entry_id,
+            f"{ISSUE_WEBHOOK_RESTART}_{self.server_id}",
+            is_fixable=False,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key=ISSUE_WEBHOOK_RESTART,
+            translation_placeholders={"server_id": self.server_id},
+        )
         persistent_notification.async_create(
             self.hass,
             f"All Web-IO commands of {self.server_id} now use a webhook id of their own, but Comexio only sends "
             "a changed command after a restart. Restart the Comexio server; the old webhook id is switched off "
             "at the next nightly run after that.",
             title="Comexio: restart needed",
-            notification_id=f"{DOMAIN}_{self.server_id}_webhook_restart",
+            notification_id=webhook_restart_notification_id(self.server_id),
         )
 
     async def async_force_webio_range_check(self) -> dict[str, int]:

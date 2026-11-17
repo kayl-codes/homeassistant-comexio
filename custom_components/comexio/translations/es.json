@@ -425,6 +425,14 @@
       "title": "Módulo de extensión Comexio sin conexión ({server_id})",
       "description": "El/los módulo(s) de extensión **{extensions}** se desconectaron durante el funcionamiento. Esto puede indicar un fallo de hardware o un problema de conexión. Si el módulo fue retirado intencionalmente, puede descartar esta notificación."
     },
+    "webhook_commands_stuck": {
+      "title": "Comexio: los comandos Web-IO no se pueden pasar a su propio ID de webhook ({server_id})",
+      "description": "{count} comando(s) Web-IO de **{server_id}** siguen enviando al ID de webhook antiguo, y la migración nocturna no puede reescribirlos (no se encontró ID de comando ni de dispositivo): {commands}.\n\nPor eso el ID de webhook antiguo sigue activado. Una sincronización (el botón de sincronización Web-IO) puede solucionarlo; esta reparación desaparece en la próxima ejecución nocturna cuando no quede ninguno."
+    },
+    "webhook_restart_needed": {
+      "title": "Comexio: reinicia el servidor Comexio ({server_id})",
+      "description": "Todos los comandos Web-IO de **{server_id}** usan ya su propio ID de webhook, pero Comexio solo envía un comando modificado tras un reinicio. **Reinicia el servidor Comexio.** El ID de webhook antiguo se desactiva en la siguiente ejecución nocturna, y esta reparación desaparece."
+    },
     "uninstall_cleanup": {
       "title": "Limpieza de desinstalación de Comexio ({server_id})",
       "fix_flow": {

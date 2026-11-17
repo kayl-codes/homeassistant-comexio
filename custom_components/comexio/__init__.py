@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from aiocomexio import __version__ as AIOCOMEXIO_VERSION
-from homeassistant.components import webhook
+from homeassistant.components import persistent_notification, webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import Event, HomeAssistant, callback
@@ -36,6 +36,8 @@ from .const import (
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
     ISSUE_KNX_PRERELEASE_CLEANUP,
+    ISSUE_WEBHOOK_COMMANDS_STUCK,
+    ISSUE_WEBHOOK_RESTART,
     LOGIN_ERROR_CONNECTION,
     MOBILE_APP_NOTIFICATION_ACTION_EVENT,
     ONEWIRE_DATA_KEY,
@@ -65,6 +67,7 @@ from .const import (
     quickbus_io_platform,
     quickbus_io_unique_id,
     stable_object_id,
+    webhook_restart_notification_id,
     webio_range_check_entity_id,
 )
 from .coordinator import (
@@ -1109,26 +1112,38 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
     await coordinator.async_reload_entry("options changed")
 
 
-async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Drop the entry's repairs with nothing left to fix, the certificate push on the phones, its saved config and
-    its last plan preview."""
+async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the repairs, the notification and the certificate push an entry leaves behind."""
     async_remove_certificate_pushes(hass, entry)
     if (server_id := entry.data.get(CONF_SERVER_ID)) is not None:
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
         # The one persistent repair: raised once and kept across restarts, so one raised before the config entry
         # link existed (issue_owner) never gets it, and its dialog has no coordinator left to run on.
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_KNX_PRERELEASE_CLEANUP}_{server_id}")
+        # Linked to the entry only from Home Assistant 2026.11: an older one keeps these until its restart.
+        ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{server_id}")
+        ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_RESTART}_{server_id}")
+        persistent_notification.async_dismiss(hass, webhook_restart_notification_id(server_id))
         # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).
         await async_remove_legacy_plan_preview(hass, server_id)
-    # Nothing else reads them once the entry is gone: a new entry gets a new entry id (#250).
-    # finally: a failed delete of one must not keep the others, the preview names the user's wiring.
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the entry's repairs with nothing left to fix, the certificate push on the phones, its saved config and
+    its last plan preview."""
+    # Nothing else reads the stores once the entry is gone: a new entry gets a new entry id (#250).
+    # finally: a failed delete of one must not keep the others, the webhook secret and the preview name the user's
+    # wiring, and a failing cleanup above them must not keep any store either.
     try:
-        try:
-            await saved_config_store(hass, entry.entry_id).async_remove()
-        finally:
-            await webhook_security_store(hass, entry.entry_id).async_remove()
+        await _async_drop_entry_leftovers(hass, entry)
     finally:
-        await plan_preview_store(hass, entry.entry_id).async_remove()
+        try:
+            try:
+                await saved_config_store(hass, entry.entry_id).async_remove()
+            finally:
+                await webhook_security_store(hass, entry.entry_id).async_remove()
+        finally:
+            await plan_preview_store(hass, entry.entry_id).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
