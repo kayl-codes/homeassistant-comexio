@@ -1374,6 +1374,17 @@ def test_the_pre_split_device_follows_the_configured_class_name() -> None:
     assert count_own_web_devices(raw_config, "Other") == 1
 
 
+def test_a_device_with_the_configured_class_name_counts_even_when_it_is_the_loopback_name() -> None:
+    """A device named like the configured class name is the pre-split device: in doubt it is ours (old id stays on).
+
+    Only reachable when the user types the reserved loopback name as class name; the loopback device cannot be told
+    apart from the pre-split device then, and counting it errs on the safe side.
+    """
+    raw_config = _web_devices(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
+
+    assert count_own_web_devices(raw_config, WEBIO_DEVICE_NAME_KNX_LOOPBACK) == 1
+
+
 def test_a_class_name_with_blanks_and_brackets_is_compared_as_text() -> None:
     raw_config = _web_devices("My [Home]", "My [Home] [M]", "My")
 
