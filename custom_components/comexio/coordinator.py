@@ -189,6 +189,7 @@ from .const import (
     WEBHOOK_MIGRATION_PENDING,
     WEBHOOK_MIGRATION_SAVE_EVERY,
     WEBHOOK_MIGRATION_SKIPPED,
+    WEBHOOK_RESTORE_ATTEMPTS,
     WEBHOOK_STUCK_LISTED,
     WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
@@ -1544,6 +1545,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # True once the migration's repairs were raised again after the start (see
         # _restore_webhook_migration_notices): they are not persistent, so a restart of Home Assistant drops them.
         self._webhook_notices_restored = False
+        self._webhook_restore_failures = 0
         # Number of Web-IO devices in the last poll's $WebDevices; None while it was not read.
         self._web_device_count: int | None = None
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
@@ -6312,30 +6314,46 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         a restart still to come) and only reports: nothing is rewritten, verified or switched off here, that stays
         with the nightly run, and the same stocktake that run ends with decides what is raised. Nothing is decided
         from a poll that did not scrape the config (its `webio_commands` may be empty or incomplete, which would
-        take a stuck repair away or raise a restart request wrongly): the next uptime reading tries again. A start
-        from the saved config runs no uptime reading; the full setup that follows does.
+        take a stuck repair away or raise a restart request wrongly): the next uptime reading tries again, and
+        so it does after a failure, as the run counts as done only once it went through. A start from the saved
+        config runs no uptime reading (the entry is read only and writes nothing, so there is no migration to
+        report on); the full setup that follows does.
         """
         security = self.api.webhook_security
-        if (
-            self._webhook_notices_restored
-            or self.unloading
-            or not self.data
-            or not self._last_poll_scraped
-            or security is None
-            or self.system_info.boot_time is None
-        ):
+        if self._webhook_notices_restored or self.unloading or security is None:
             return
-        self._webhook_notices_restored = True
         if not security.legacy_enabled:
+            self._webhook_notices_restored = True  # decided: the old id is off, nothing is left to ask for
+            return
+        if self.system_info.boot_time is None or not self._webhook_stocktake_readable(security):
             return
         unmigrated = self._unmigrated_webhook_commands(security)
         self._report_unrewritable_webhooks(unmigrated)
         if not unmigrated and self._restart_pending(security):
             self._notify_webhook_restart()
         else:
-            # A reload of the entry (not only a restart) comes through here, too: a request to restart Comexio that
-            # an earlier run raised is out of date once a command is left to rewrite or Comexio has restarted.
+            # A reload of the entry (not only a restart) comes through here, too: a request to restart Comexio
+            # that an earlier run raised is out of date once a command is left to rewrite or Comexio restarted.
             self._dismiss_webhook_restart()
+        self._webhook_notices_restored = True
+
+    def _webhook_stocktake_readable(self, security: WebhookSecurity) -> bool:
+        """True when `self.data` is a committed, complete read of the Web-IO side, so a stocktake may rely on it.
+
+        Not while a poll is under way (it sets `_last_poll_scraped` and `_web_device_count` before it commits its
+        result, so they would belong to data not yet in `self.data`) nor after a poll that failed. `$WebDevices` must
+        have been read (without it the commands of our classes are not found), and a ledger that names migrated
+        commands next to no stored command at all means the commands were not decoded: either would take a stuck
+        repair away and dismiss a restart request that is due.
+        """
+        return (
+            bool(self.data)
+            and self.last_update_success
+            and not self._full_poll_running
+            and self._last_poll_scraped
+            and self._web_device_count is not None
+            and not (security.migrated and not self.data.get("webio_commands"))
+        )
 
     async def async_force_webio_range_check(self) -> dict[str, int]:
         """Force-run the Web-IO analog range check outside its nightly window (manual trigger)."""
@@ -6387,9 +6405,19 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             self._restore_webhook_migration_notices()
         except Exception:
-            # The uptime is applied already; a failing restore (flag set first) is not tried again before the nightly
-            # run, which raises what is due, and must not end this task as an unretrieved exception.
-            _LOGGER.exception("[%s] The webhook migration notices could not be raised again", self.server_id)
+            # The uptime is applied already; a failing restore stays undone and is tried again at the next reading,
+            # WEBHOOK_RESTORE_ATTEMPTS times (the nightly run raises what is due anyway), and must not end this task
+            # as an unretrieved exception.
+            self._webhook_restore_failures += 1
+            gave_up = self._webhook_restore_failures >= WEBHOOK_RESTORE_ATTEMPTS
+            self._webhook_notices_restored = gave_up
+            _LOGGER.exception(
+                "[%s] The webhook migration notices could not be raised again (attempt %d of %d%s)",
+                self.server_id,
+                self._webhook_restore_failures,
+                WEBHOOK_RESTORE_ATTEMPTS,
+                ", giving up: the nightly run raises what is due" if gave_up else "",
+            )
 
     async def _async_refresh_system_info_storage(self) -> None:
         """Fetch free storage and time server settings; called by each config poll that fetched.
