@@ -241,6 +241,7 @@ class _FakeCoordinator(SimpleNamespace):
     _note_comexio_reachable = ComexioCoordinator._note_comexio_reachable
     _async_refresh_system_info_storage = AsyncMock()
     _async_refresh_onewire_status = AsyncMock()
+    _async_refresh_doorstations = AsyncMock()
     _merge_onewire_values = ComexioCoordinator._merge_onewire_values
     update_onewire = ComexioCoordinator.update_onewire
     _pending_onewire_values = ComexioCoordinator._pending_onewire_values
@@ -3870,6 +3871,7 @@ def test_a_poll_that_scraped_nothing_still_refreshes_the_system_info_storage(
     coordinator = _certificate_coordinator(api)
     coordinator._async_refresh_system_info_storage = AsyncMock()
     coordinator._async_refresh_onewire_status = AsyncMock()
+    coordinator._async_refresh_doorstations = AsyncMock()
 
     async def not_scraped() -> dict:
         coordinator._last_poll_scraped = False
@@ -3880,6 +3882,7 @@ def test_a_poll_that_scraped_nothing_still_refreshes_the_system_info_storage(
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     coordinator._async_refresh_system_info_storage.assert_awaited_once()
     coordinator._async_refresh_onewire_status.assert_awaited_once()
+    coordinator._async_refresh_doorstations.assert_awaited_once()
 
 
 def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
@@ -3889,6 +3892,7 @@ def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
     coordinator = _certificate_coordinator(api)
     coordinator._async_refresh_system_info_storage = AsyncMock()
     coordinator._async_refresh_onewire_status = AsyncMock()
+    coordinator._async_refresh_doorstations = AsyncMock()
 
     async def skipped_for_sync() -> dict:
         coordinator.in_sync = True
@@ -3900,6 +3904,7 @@ def test_a_poll_skipped_for_a_sync_does_not_refresh_the_system_info_storage(
     asyncio.run(ComexioCoordinator._async_update_data(coordinator))
     coordinator._async_refresh_system_info_storage.assert_not_awaited()
     coordinator._async_refresh_onewire_status.assert_not_awaited()
+    coordinator._async_refresh_doorstations.assert_not_awaited()
 
 
 def _poll_fetching_a_new_onewire_status(coordinator: _FakeCoordinator, fetched: dict) -> None:

@@ -264,6 +264,7 @@ from .const import (
     webio_class_name,
     webio_quickbus_ios,
 )
+from .doorstation import DoorstationTracker
 from .function_plan_backup import (
     FunctionPlanBackupManager,
     PlanBackupsNotMovedError,
@@ -1315,6 +1316,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # 1-Wire read status by address, fetched with the config poll (never a value source); None while unknown.
         self.onewire_status: dict[str, OneWireStatus] | None = None
         self._onewire_status_warned = False
+        # The Doorstations of the IO home page and the cameras offered for them (see doorstation.py).
+        self.doorstations = DoorstationTracker()
+        self._doorstations_warned = False
         self.audit_ignored: bool = False
         self.last_audit_failed: bool = False
         self.last_summary_hash: str | None = None
@@ -1611,6 +1615,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if not self.in_sync:
                 await self._async_refresh_system_info_storage()
                 await self._async_refresh_onewire_status(data.get(ONEWIRE_DATA_KEY, []))
+                await self._async_refresh_doorstations()
         except _PollMetAnotherCertificate as err:
             return self._keep_data_through_certificate_change(err)
         except UNREACHABLE_ERRORS as err:
@@ -5506,6 +5511,31 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning(
                 "[%s] 1-Wire status not fetched, read errors of 1-Wire sensors unknown: %s", self.server_id, error
             )
+
+    async def _async_refresh_doorstations(self) -> None:
+        """Read the Doorstations from the IO home page with the config poll, for their cameras.
+
+        A failed read keeps the known Doorstations and warns once until a read works again; an empty result is
+        kept through a few polls (DoorstationTracker). Never raises into the config poll, ConfigEntryAuthFailed aside.
+        """
+        try:
+            found, error = await self.api.get_doorstations()
+        except ConfigEntryAuthFailed:
+            raise
+        except Exception as err:
+            # A bug, not a lapsed connection: logged with its traceback every time, like the 1-Wire status fetch.
+            _LOGGER.exception("[%s] Doorstation fetch failed unexpectedly", self.server_id)
+            found, error = None, f"unexpected error ({type(err).__name__})"
+        if found is not None:
+            if self._doorstations_warned:
+                self._doorstations_warned = False
+                _LOGGER.info("[%s] Doorstations fetched again", self.server_id)
+            self.doorstations.update(found)
+            return
+        # The certificate repair is already raised; the cameras stay as they were, without a warning.
+        if error != SYSTEM_INFO_CERTIFICATE_CHANGED and not self._doorstations_warned:
+            self._doorstations_warned = True
+            _LOGGER.warning("[%s] Doorstations not fetched, keeping the known cameras: %s", self.server_id, error)
 
     def _log_unknown_webhook_io(self, warn_key: tuple[str, ...], msg: str, *args: Any) -> None:
         """Warn about the first push of an unknown IO, log every later push of it at DEBUG only.
