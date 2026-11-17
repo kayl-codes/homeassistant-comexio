@@ -14,7 +14,8 @@ import pytest
 from custom_components import comexio as comexio_init
 from custom_components.comexio import _setup_webhooks, webhook as ha_webhook, webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.coordinator import ComexioCoordinator, count_web_devices
+from custom_components.comexio.const import WEBIO_DEVICE_NAME_KNX_LOOPBACK
+from custom_components.comexio.coordinator import ComexioCoordinator, count_own_web_devices
 from custom_components.comexio.services import misc as services_misc
 from tests.unit.test_api_helpers import PARSED
 from tests.unit.test_webhook_security import (
@@ -1039,7 +1040,7 @@ def _fresh_coordinator(
         coordinator.api.webhook_security = _security(monkeypatch)
     coordinator._never_polled = never_polled
     coordinator._last_poll_scraped = True  # the poll that read `$WebDevices` scraped the config
-    coordinator._web_device_count = web_devices
+    coordinator._own_web_device_count = web_devices
     return coordinator
 
 
@@ -1062,7 +1063,7 @@ def test_an_entry_without_a_saved_config_and_without_web_devices_switches_the_ol
     ("never_polled", "web_devices", "migrated", "written"),
     [
         pytest.param(False, 0, set(), None, id="entry-with-a-saved-config"),
-        pytest.param(True, 3, set(), None, id="web-devices-in-comexio"),
+        pytest.param(True, 3, set(), None, id="own-web-devices-in-comexio"),
         pytest.param(True, 0, {"HA M5"}, None, id="ledger-not-empty"),
         pytest.param(True, 0, set(), NOW, id="a-write-is-recorded"),
     ],
@@ -1271,7 +1272,7 @@ def test_a_poll_that_did_not_read_the_web_devices_decides_nothing_and_the_next_o
     security.async_save.assert_not_awaited()
     assert coordinator._never_polled is True
 
-    coordinator._web_device_count = 0  # a later poll read it, and it is empty
+    coordinator._own_web_device_count = 0  # a later poll read it, and it is empty
     _run(coordinator._async_settle_legacy_webhook_id())
 
     assert security.legacy_enabled is False
@@ -1302,7 +1303,7 @@ def test_only_the_poll_that_found_web_devices_decides_the_migration_stays(monkey
     security = coordinator.api.webhook_security
 
     _run(coordinator._async_settle_legacy_webhook_id())
-    coordinator._web_device_count = 0  # a later poll sees none: no decision any more
+    coordinator._own_web_device_count = 0  # a later poll sees none: no decision any more
     _run(coordinator._async_settle_legacy_webhook_id())
 
     assert security.legacy_enabled
@@ -1328,6 +1329,13 @@ def test_a_switch_that_cannot_be_saved_is_not_kept_in_memory_and_tried_again_at_
     assert coordinator._never_polled is False
 
 
+_OWN_WEBIO_NAME = "HA"
+
+
+def _web_devices(*names: Any) -> dict[str, Any]:
+    return {"WebDevices": {str(i): {"Name": name} for i, name in enumerate(names, 1)}}
+
+
 @pytest.mark.parametrize(
     ("raw_config", "expected"),
     [
@@ -1336,26 +1344,85 @@ def test_a_switch_that_cannot_be_saved_is_not_kept_in_memory_and_tried_again_at_
         pytest.param({"WebDevices": "garbage"}, None, id="not-a-group"),
         pytest.param({"WebDevices": []}, None, id="raw-list-is-no-id-mapping"),
         pytest.param({"WebDevices": {}}, 0, id="read-and-empty"),
-        pytest.param({"WebDevices": {"1": {"Name": "HA [M]"}, "2": {"Name": "Other"}}}, 2, id="two-devices"),
+        pytest.param(_web_devices("HA [M]", "HA [IO]"), 2, id="two-devices-of-ours"),
+        pytest.param(_web_devices("HA [M]", "Other"), 1, id="a-device-of-the-user-is-not-counted"),
+        pytest.param(_web_devices("Other", "Garage lights"), 0, id="only-devices-of-the-user"),
+        pytest.param(_web_devices("HA"), 1, id="the-pre-split-device-is-ours"),
+        pytest.param(_web_devices("HA [1Wire]", "HA [QB]", "HA [KNX]"), 3, id="every-class-is-ours"),
+        pytest.param(_web_devices(" ha [m] "), 1, id="blanks-and-case-are-ignored-in-doubt-it-is-ours"),
+        pytest.param(_web_devices(" Ha "), 1, id="the-pre-split-name-too"),
+        pytest.param(_web_devices("Earlier [IO]"), 1, id="a-class-suffix-under-another-base-name-is-ours"),
+        pytest.param(_web_devices("Other [x]", "Lights [M] 2"), 0, id="a-suffix-only-counts-at-the-end"),
+        pytest.param(_web_devices("Heizung[IO]", "[M]"), 0, id="a-suffix-needs-its-blank-and-a-base-name"),
+        pytest.param(_web_devices("Sensors [IO]"), 1, id="a-user-device-named-like-a-class-is-ours-in-doubt"),
+        pytest.param(_web_devices(WEBIO_DEVICE_NAME_KNX_LOOPBACK), 0, id="the-knx-loopback-pushes-to-comexio"),
+        pytest.param(_web_devices("HA [M]", None), None, id="a-name-that-is-none-decides-nothing"),
+        pytest.param(_web_devices("HA [M]", ["list"]), None, id="a-name-that-is-no-text-decides-nothing"),
+        pytest.param({"WebDevices": {"1": {"Name": "Other"}, "2": "garbage"}}, None, id="an-entry-that-is-no-device"),
+        pytest.param({"WebDevices": {"1": {"Ip": "10.0.0.1"}}}, None, id="an-entry-without-a-name"),
     ],
 )
-def test_only_a_read_web_device_group_counts_and_a_missing_one_is_never_zero(
+def test_only_our_own_web_devices_count_and_what_was_not_read_is_never_zero(
     raw_config: dict[str, Any], expected: int | None
 ) -> None:
-    assert count_web_devices(raw_config) == expected
+    assert count_own_web_devices(raw_config, _OWN_WEBIO_NAME) == expected
+
+
+def test_the_pre_split_device_follows_the_configured_class_name() -> None:
+    raw_config = _web_devices("Other", "HomeAssistant")
+
+    assert count_own_web_devices(raw_config, "Other") == 1
+
+
+def test_a_device_with_the_configured_class_name_counts_even_when_it_is_the_loopback_name() -> None:
+    """A device named like the configured class name is the pre-split device: in doubt it is ours (old id stays on).
+
+    Only reachable when the user types the reserved loopback name as class name; the loopback device cannot be told
+    apart from the pre-split device then, and counting it errs on the safe side.
+    """
+    raw_config = _web_devices(WEBIO_DEVICE_NAME_KNX_LOOPBACK)
+
+    assert count_own_web_devices(raw_config, WEBIO_DEVICE_NAME_KNX_LOOPBACK) == 1
+
+
+def test_a_class_name_with_blanks_and_brackets_is_compared_as_text() -> None:
+    raw_config = _web_devices("My [Home]", "My [Home] [M]", "My")
+
+    assert count_own_web_devices(raw_config, "My [Home]") == 2
+
+
+@pytest.mark.parametrize(
+    ("devices", "kept_on"),
+    [
+        pytest.param(("Garage lights", "Heating"), False, id="only-devices-of-the-user"),
+        pytest.param(("Garage lights", "HA [IO]"), True, id="a-device-of-ours-beside-them"),
+        pytest.param(("Garage lights", None), True, id="a-device-that-was-not-read"),
+    ],
+)
+def test_the_decision_for_a_fresh_entry_follows_the_devices_read_from_comexio(
+    monkeypatch: pytest.MonkeyPatch, devices: tuple[Any, ...], kept_on: bool
+) -> None:
+    """The count and the decision together: a device of the user's own alone does not keep the old id on (ek)."""
+    count = count_own_web_devices(_web_devices(*devices), _OWN_WEBIO_NAME)
+    coordinator = _fresh_coordinator(monkeypatch, web_devices=count)
+    security = coordinator.api.webhook_security
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled is kept_on
 
 
 @pytest.mark.parametrize(
     ("literal", "expected"),
-    [("[]", 0), ("{}", 0), ('[{"Name": "HA [M]"}]', 1), ('{"3": {"Name": "HA [M]"}}', 1)],
-    ids=["php-empty-array", "empty-object", "gap-free-array", "object"],
+    [("[]", 0), ("{}", 0), ('[{"Name": "HA [M]"}]', 1), ('{"3": {"Name": "HA [M]"}}', 1), ('[{"Name": "Mine"}]', 0)],
+    ids=["php-empty-array", "empty-object", "gap-free-array", "object", "a-device-of-the-user"],
 )
 def test_a_web_device_group_as_the_scrape_delivers_it_counts_whatever_shape_comexio_sent(
     literal: str, expected: int
 ) -> None:
     page = f"<script>var $WebDevices = {literal};</script>"
 
-    assert count_web_devices(scrape_js_vars(page, page_label="function module")) == expected
+    assert count_own_web_devices(scrape_js_vars(page, page_label="function module"), _OWN_WEBIO_NAME) == expected
 
 
 def test_the_switch_survives_a_reload_and_the_old_id_stays_refused_after_a_later_write(

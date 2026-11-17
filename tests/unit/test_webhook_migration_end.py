@@ -21,6 +21,7 @@ from custom_components.comexio.const import (
     ISSUE_WEBHOOK_RESTART,
     WEBHOOK_STUCK_LISTED,
 )
+from custom_components.comexio.coordinator import count_own_web_devices
 from tests.unit.test_webhook_security import NOW, SERVER, _coordinator, _run
 from tests.unit.test_webhook_security_flow import (
     _TARGET,
@@ -90,7 +91,7 @@ def test_an_entry_that_never_synced_switches_the_old_id_off_at_the_nightly_run(
     [
         pytest.param({"web_devices": None}, id="web-devices-not-read-by-the-last-poll"),
         pytest.param({"scraped": False}, id="the-last-poll-did-not-scrape-the-config"),
-        pytest.param({"web_devices": 2}, id="web-devices-exist-that-are-not-recognised-as-ours"),
+        pytest.param({"web_devices": 1}, id="a-web-device-of-ours-exists"),
         pytest.param({"migrated": {"HA m"}}, id="a-command-was-rewritten"),
         pytest.param({"host_changed": True}, id="ledger-recorded-for-another-host"),
         pytest.param({"written": NOW}, id="a-command-was-written"),
@@ -113,6 +114,26 @@ def test_the_nightly_run_keeps_the_old_id_on_unless_nothing_can_push_to_it(
     security.async_save.assert_not_awaited()
     assert "no Web-IO command is known to verify" in caplog.text
     assert _deleted(issues) == {_RESTART_ID}  # Comexio restarted, so only the request to restart is out of date
+
+
+@pytest.mark.parametrize(
+    ("devices", "expected", "switched_off"),
+    [
+        pytest.param(("Garage lights", "Heating"), "done", True, id="only-devices-of-the-user"),
+        pytest.param(("Garage lights", "HomeAssistant [IO]"), _PENDING, False, id="a-device-of-ours-beside-them"),
+    ],
+)
+def test_the_nightly_run_ignores_the_web_devices_of_the_user(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, devices: tuple[str, ...], expected: str, switched_off: bool
+) -> None:
+    """(ek) The count comes from the devices as Comexio lists them, not from a number set by hand."""
+    raw_config = {"WebDevices": {str(i): {"Name": name} for i, name in enumerate(devices, 1)}}
+    coordinator = _without_web_devices(monkeypatch, web_devices=count_own_web_devices(raw_config, "HomeAssistant"))
+    security = coordinator.api.webhook_security
+
+    assert _run(coordinator._async_finish_webhook_migration()) == expected
+
+    assert security.legacy_enabled is not switched_off
 
 
 def test_a_switch_that_cannot_be_saved_keeps_the_old_id_on_at_the_nightly_run(

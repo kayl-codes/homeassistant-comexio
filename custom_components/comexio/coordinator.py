@@ -95,6 +95,7 @@ from .const import (
     CONF_USERNAME,
     CONF_WEBHOOK_ADDRESS_MODE,
     CONF_WEBHOOK_URL,
+    CONF_WEBIO_NAME,
     DEFAULT_BUS_WATCHDOG_AUTO_REBOOT,
     DEFAULT_BUS_WATCHDOG_ENABLED,
     DEFAULT_COVER_KEYWORDS,
@@ -102,6 +103,7 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_BACKUP_RETENTION_MONTHS,
     DEFAULT_FUNCTION_PLAN_MAX_PAIRS_PER_PLAN,
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
+    DEFAULT_WEBIO_NAME,
     DOMAIN,
     EMERGENCY_REBOOT_COOLDOWN_SEC,
     EMERGENCY_REBOOT_THRESHOLD_PCT,
@@ -529,14 +531,42 @@ def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str
     return ids
 
 
-def count_web_devices(raw_config: Mapping[str, Any]) -> int | None:
-    """The number of Web-IO devices in $WebDevices, or None when it was not read (missing or undecodable).
+# The class suffixes of our Web-IO devices (" [m]", " [io]", ...), as `_is_own_web_device_name` compares them.
+_OWN_WEB_DEVICE_SUFFIXES = tuple(webio_class_name("", cls).casefold() for cls in WEBIO_CLASSES)
+
+
+def _is_own_web_device_name(name: str, webio_name: str) -> bool:
+    """Whether a Web-IO device of that name is one this integration creates (`<webio_name> [M]`, ... or `<webio_name>`).
+
+    Compared without surrounding blanks and case, and a class suffix counts under any base name: a device is
+    taken for ours when in doubt, as that only keeps the old webhook id on, the safe side. An entry created anew
+    under another `webio_name` therefore still sees the devices of the earlier one.
+    """
+    normalized = name.strip().casefold()
+    return normalized == webio_name.strip().casefold() or normalized.endswith(_OWN_WEB_DEVICE_SUFFIXES)
+
+
+def count_own_web_devices(raw_config: Mapping[str, Any], webio_name: str) -> int | None:
+    """The number of this entry's Web-IO devices in $WebDevices, or None when it was not read (missing or undecodable).
+
+    Only devices this integration creates count (`_is_own_web_device_name`): a device the user made for something
+    else holds no command that pushes to a webhook id of ours. That is the `<webio_name> [M]` / `[IO]` / `[KNX]` /
+    `[QB]` / `[1Wire]` class devices and the pre-split device named exactly `<webio_name>` (its commands may still
+    point to the old id). The device that carries the KNX write-path loopback commands
+    (`WEBIO_DEVICE_NAME_KNX_LOOPBACK`) writes to the Comexio API, not to Home Assistant, so it does not count.
+    A device the user renamed in Comexio no longer shows as ours (the integration does not manage it either).
 
     An empty group arrives as `{}` (aiocomexio turns PHP's `[]` into an id mapping), so 0 is a read, empty list; None
-    proves nothing about Web-IO devices and must never be taken for 0.
+    proves nothing about Web-IO devices and must never be taken for 0 — that goes for an entry without a readable
+    `Name` as well (a partial scrape): the devices are then not known, so nothing is counted.
     """
     web_devices = raw_config.get("WebDevices")
-    return len(web_devices) if isinstance(web_devices, Mapping) else None
+    if not isinstance(web_devices, Mapping) or not isinstance(webio_name, str):
+        return None
+    names = [device.get("Name") if isinstance(device, Mapping) else None for device in web_devices.values()]
+    if not all(isinstance(name, str) for name in names):
+        return None
+    return sum(_is_own_web_device_name(name, webio_name) for name in names)
 
 
 def _count_by_ref(by_ref: dict[int, list[int]]) -> int:
@@ -1541,8 +1571,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # True from the seed of a setup that found no saved config at all (an entry that never had a scraped poll)
         # until a poll decided about the old webhook id (see _async_settle_legacy_webhook_id).
         self._never_polled = False
-        # Number of Web-IO devices in the last poll's $WebDevices; None while it was not read.
-        self._web_device_count: int | None = None
+        # Number of this entry's own Web-IO devices in the last poll's $WebDevices; None while it was not read.
+        self._own_web_device_count: int | None = None
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -1814,14 +1844,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
         mismatches_before = self.api.certificate_mismatch_count
-        self._web_device_count = None
+        self._own_web_device_count = None
         raw_config = await self.api.get_raw_config()
         # Taken before anything yields: the tables of the page raw_config is — or, when a newer fetch failed
         # meanwhile, of the last applied page, as such a fetch applies nothing (see get_raw_config).
         io_type_tables = IoTypeTableSnapshot.of(self.api)
         self._fail_poll_on_certificate_mismatch(mismatches_before)
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
-        self._web_device_count = count_web_devices(raw_config)
+        self._own_web_device_count = count_own_web_devices(raw_config, conf.get(CONF_WEBIO_NAME, DEFAULT_WEBIO_NAME))
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
             self.note_comexio_unreachable()
@@ -3909,7 +3939,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 skipped[cls] = reason
             return devices, classes, failed_classes, skipped
         webio_devices = self._parsed_webio_devices()
-        webio_name = self.config_entry.data.get("webio_name", "HomeAssistant")
+        webio_name = self.config_entry.data.get(CONF_WEBIO_NAME, DEFAULT_WEBIO_NAME)
         for cls in webio_classes:
             dev = webio_devices.get(cls) or {}
             name = webio_class_name(webio_name, cls)
@@ -6162,15 +6192,18 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return WEBHOOK_MIGRATION_DONE
 
     async def _async_finish_without_stored_commands(self, security: WebhookSecurity) -> str:
-        """End of a run that found targets but no stored command: switched off when no Web-IO device exists at all.
+        """End of a run that found targets but no stored command: switched off when none of our Web-IO devices exists.
 
-        Every night an entry that never synced ends here, and nothing exists that could push to the old id. Otherwise
-        Comexio may still hold commands this scrape did not show (a poll that did not read `$WebDevices`, a device
-        that does not show as ours): an incomplete scrape, nothing was verified, the old id stays on.
+        Every night an entry that never synced ends here, and nothing of ours exists that could push to the old id
+        (a device of the user's own, under another name, holds no command of this entry). Otherwise Comexio may still
+        hold commands this scrape did not show (a poll that did not read `$WebDevices`): an incomplete scrape,
+        nothing was verified, the old id stays on.
         """
         if self._legacy_webhook_id_unneeded(security):
             if await self._async_switch_legacy_webhook_id_off(security):
-                _LOGGER.info("[%s] No Web-IO device exists: the old webhook id is switched off", self.server_id)
+                _LOGGER.info(
+                    "[%s] No Web-IO device of this entry exists: the old webhook id is switched off", self.server_id
+                )
                 self.sync_webhooks()
                 return WEBHOOK_MIGRATION_DONE
             _LOGGER.warning(
@@ -6182,19 +6215,20 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return WEBHOOK_MIGRATION_PENDING
 
     async def _async_settle_legacy_webhook_id(self) -> None:
-        """Switch the old webhook id off at the first scraped poll that proves Comexio has no Web-IO device at all.
+        """Switch the old webhook id off at the first scraped poll that proves Comexio has no Web-IO device of ours.
 
         A new store starts with the old id on, for the commands of an installation from before the per-command ids.
         A missing saved config only says that no poll of this entry ran before (it is no proof either: a jump from a
         version before the saved config, or a restored `.storage`, leaves it missing, too). The proof is the poll:
-        `$WebDevices` was read and is empty, so no command exists anywhere that could push to the old id, and the
-        commands a sync creates later carry their own id from the start. Left on, the old id would stay open until
+        `$WebDevices` was read and holds no device under one of our names (`count_own_web_devices`; the user's own
+        devices do not count), so no command exists that could push to the old id, and the commands a sync creates
+        later carry their own id from the start. Left on, the old id would stay open until
         the first sync, a Comexio restart and the verification of the nightly migration, accepting any marker or IO
         value on a guessable path.
         Nothing is decided without that proof: a poll that did not read `$WebDevices` (the commands of our classes
         are found through it, so `webio_commands` would be empty although they exist) leaves the question open for
-        the next one, a Comexio with any Web-IO device (an entry created anew on one that still holds commands of an
-        earlier entry, a pre-split device) keeps the migration, and so does a store that was recorded for another
+        the next one, a Comexio with a Web-IO device of ours (an entry created anew on one that still holds commands
+        of an earlier entry, a pre-split device) keeps the migration, and so does a store that was recorded for another
         host (`host_changed`, persisted): the commands of that host may still push to the old id, and the new host's
         empty `$WebDevices` says nothing about them. A save that fails is tried again at the next poll. Both
         retries last only as long as this run: the config is saved after the poll, and an entry with a saved config is
@@ -6202,7 +6236,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if not self._never_polled:
             return
-        if self._web_device_count is None or not self._last_poll_scraped:
+        if self._own_web_device_count is None or not self._last_poll_scraped:
             _LOGGER.debug(
                 "[%s] $WebDevices was not read from a scraped config: the old webhook id is decided at a later poll",
                 self.server_id,
@@ -6211,9 +6245,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         security = self.api.webhook_security
         if security is None or not self._legacy_webhook_id_unneeded(security):
             _LOGGER.debug(
-                "[%s] The old webhook id is kept for the migration (%d Web-IO devices)",
+                "[%s] The old webhook id is kept for the migration (%d Web-IO devices of this entry)",
                 self.server_id,
-                self._web_device_count,
+                self._own_web_device_count,
             )
             self._never_polled = False
             return
@@ -6221,11 +6255,12 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         self._never_polled = False
         _LOGGER.info(
-            "[%s] Comexio has no Web-IO device yet: the old webhook id is not needed and stays off", self.server_id
+            "[%s] Comexio has no Web-IO device of this entry yet: the old webhook id is not needed and stays off",
+            self.server_id,
         )
 
     def _legacy_webhook_id_unneeded(self, security: WebhookSecurity | None) -> bool:
-        """True when the last poll scraped the config and read `$WebDevices` empty: no command could push to the old id.
+        """True when the last poll scraped the config and found no Web-IO device of ours: nothing pushes to the old id.
 
         Not when this entry rewrote or recorded a command (`migrated`, `last_write`) or the ledger was recorded for
         another host (`host_changed`): those commands may still push to it, and the new host's empty list says
@@ -6235,7 +6270,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             security is not None
             and security.legacy_enabled
             and self._last_poll_scraped
-            and self._web_device_count == 0
+            and self._own_web_device_count == 0
             and not security.migrated
             and security.last_write is None
             and not security.host_changed
