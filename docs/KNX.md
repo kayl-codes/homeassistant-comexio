@@ -5,7 +5,7 @@
 This guide covers **KNX object support** — importing Comexio's KNX/EIB gateway objects ("K-Elements") as Home Assistant entities, automatic unit/device-class detection, dimmer/blind handling, and how the integration classifies ambiguous digital datapoint types. For general setup and options, see the [Configuration Guide](CONFIGURATION.md); for the full action list, see the [README](../README.md).
 
 > [!WARNING]
-> **KNX support is a Pre-Release feature (`v0.10.0-rc*`) and not yet field-verified.** It was built and tested against a synthetic KNX test rig, without access to a real KNX installation — see [Known Limitations](#9-known-limitations). HACS does not offer pre-releases to regular users; if you're reading this, you opted in deliberately. Expect rough edges and report anything unexpected on [GitHub Issues](https://github.com/kayl-codes/homeassistant-comexio/issues).
+> **KNX support has been verified on a real installation:** KNX push buttons that operate roller shutters, triggered from Home Assistant via button presses. Other KNX object types were tested against a synthetic test rig — see [Known Limitations](#9-known-limitations). Feedback from real installations is welcome: report your experience, including what works, on [GitHub Issues](https://github.com/kayl-codes/homeassistant-comexio/issues).
 
 ---
 
@@ -165,7 +165,7 @@ Just like Markers, a KNX object's `[RO]`/`[TRIG]` (or legacy `[TP]`) suffix can 
 Diese Anleitung beschreibt die **KNX-Objekt-Unterstützung** — den Import von Comexios KNX/EIB-Gateway-Objekten ("K-Elemente") als Home-Assistant-Entitäten, die automatische Einheiten-/Device-Class-Erkennung, die Behandlung von Dimmern/Jalousien sowie die Klassifizierung mehrdeutiger digitaler Datenpunkttypen. Für die allgemeine Einrichtung siehe die [Konfigurationsanleitung](CONFIGURATION.md), für die vollständige Aktionsliste siehe die [README](../README.md).
 
 > [!WARNING]
-> **Die KNX-Unterstützung ist ein Pre-Release-Feature (`v0.10.0-rc*`) und noch nicht feldverifiziert.** Sie wurde gegen einen synthetischen KNX-Testaufbau entwickelt und getestet, ohne Zugriff auf eine echte KNX-Installation — siehe [Bekannte Einschränkungen](#9-bekannte-einschränkungen). HACS bietet Pre-Releases normalen Nutzern nicht an; wer das hier liest, hat sich bewusst dafür entschieden. Rauhe Kanten sind zu erwarten — Auffälligkeiten bitte über [GitHub Issues](https://github.com/kayl-codes/homeassistant-comexio/issues) melden.
+> **Die KNX-Unterstützung wurde auf einer echten Installation verifiziert:** KNX-Taster, die Rollläden steuern, werden in Home Assistant über Tastendrücke ausgelöst. Andere KNX-Objekttypen wurden gegen einen synthetischen Testaufbau getestet — siehe [Bekannte Einschränkungen](#9-bekannte-einschränkungen). Rückmeldungen aus echten Installationen sind willkommen: Bitte berichte, was funktioniert und was nicht, über [GitHub Issues](https://github.com/kayl-codes/homeassistant-comexio/issues).
 
 ---
 
