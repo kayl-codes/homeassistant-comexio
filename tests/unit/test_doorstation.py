@@ -103,7 +103,7 @@ def _camera(
     if tracker is None:
         coordinator.doorstations.update({14: _doorstation()})
     coordinator.api = MagicMock(get_doorstation_snapshot=snapshot or AsyncMock(return_value=(FRAME, None)))
-    with patch("custom_components.comexio.camera.Camera.__init__", lambda _self: None):
+    with patch("custom_components.comexio.camera.Camera.__init__", autospec=True, return_value=None):
         camera = ComexioDoorstationCamera(coordinator, 14)
     return camera, coordinator
 
@@ -310,17 +310,121 @@ def test_a_young_frame_is_not_handed_out_for_a_doorstation_that_is_gone() -> Non
     assert snapshot.await_count == 1
 
 
+def test_a_young_frame_of_another_camera_is_not_handed_out() -> None:
+    frames = {1: b"old", 2: b"new"}
+    snapshot = AsyncMock(side_effect=lambda camera_id: (frames[camera_id], None))
+    camera, coordinator = _camera(snapshot=snapshot)
+
+    async def _change_camera_then_ask() -> bytes | None:
+        await camera.async_camera_image()
+        coordinator.doorstations.update({14: _doorstation(camera_id=2)})
+        return await camera.async_camera_image()
+
+    assert asyncio.run(_change_camera_then_ask()) == b"new"
+    assert [call.args for call in snapshot.await_args_list] == [(1,), (2,)]
+
+
+def test_a_failed_read_does_not_hold_back_the_first_read_of_a_new_camera() -> None:
+    snapshot = AsyncMock(side_effect=lambda camera_id: (None, "boom") if camera_id == 1 else (FRAME, None))
+    camera, coordinator = _camera(snapshot=snapshot)
+
+    async def _fail_change_ask() -> tuple[bytes | None, bytes | None]:
+        first = await camera.async_camera_image()
+        coordinator.doorstations.update({14: _doorstation(camera_id=2)})
+        return first, await camera.async_camera_image()
+
+    assert asyncio.run(_fail_change_ask()) == (None, FRAME)
+
+
+def test_an_answer_for_a_doorstation_that_went_meanwhile_is_not_handed_out_or_kept() -> None:
+    camera, coordinator = _camera()
+
+    async def _drop_during_read(_camera_id: int) -> tuple[bytes, None]:
+        for _ in range(DOORSTATION_EMPTY_POLLS_BEFORE_DROP):
+            coordinator.doorstations.update({})
+        return FRAME, None
+
+    coordinator.api.get_doorstation_snapshot = AsyncMock(side_effect=_drop_during_read)
+
+    assert asyncio.run(camera.async_camera_image()) is None
+    assert camera._frame is None
+
+
+def test_an_answer_for_a_camera_that_changed_meanwhile_is_not_handed_out_or_kept() -> None:
+    camera, coordinator = _camera()
+
+    async def _change_during_the_first_read(_camera_id: int) -> tuple[bytes, None]:
+        if _camera_id == 1:
+            coordinator.doorstations.update({14: _doorstation(camera_id=2)})
+        return FRAME, None
+
+    coordinator.api.get_doorstation_snapshot = AsyncMock(side_effect=_change_during_the_first_read)
+
+    async def _ask_twice() -> tuple[bytes | None, bytes | None]:
+        return await camera.async_camera_image(), await camera.async_camera_image()
+
+    assert asyncio.run(_ask_twice()) == (None, FRAME)
+    assert camera._failed_at is None
+    assert camera._warned is False
+
+
+def test_a_failed_read_that_is_stale_is_neither_a_failure_nor_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    camera, coordinator = _camera()
+
+    async def _change_during_a_failed_read(_camera_id: int) -> tuple[None, str]:
+        coordinator.doorstations.update({14: _doorstation(camera_id=2)})
+        return None, "boom"
+
+    coordinator.api.get_doorstation_snapshot = AsyncMock(side_effect=_change_during_a_failed_read)
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.comexio.camera"):
+        assert asyncio.run(camera.async_camera_image()) is None
+
+    assert camera._failed_at is None
+    assert camera._warned is False
+    assert [r.levelno for r in caplog.records] == [logging.DEBUG]
+
+
+def test_the_extension_name_last_seen_stays_when_the_name_is_lost_later() -> None:
+    camera, coordinator = _camera(snapshot=AsyncMock(return_value=(FRAME, None)))
+    assert camera._ext_name == "DOOR"
+
+    coordinator.data = {"io": []}
+    coordinator.doorstations.update({14: _doorstation(name=None)})
+    coordinator.offline_extensions = {"DOOR"}
+
+    coordinator.last_update_success = True
+    assert camera._ext_name == "DOOR"
+    assert asyncio.run(camera.async_camera_image()) is None
+    with patch("custom_components.comexio.camera.CoordinatorEntity.available", True):
+        assert camera.available is False
+
+
+def test_an_answer_for_an_extension_that_went_offline_meanwhile_is_not_handed_out() -> None:
+    camera, coordinator = _camera()
+
+    async def _offline_during_read(_camera_id: int) -> tuple[bytes, None]:
+        coordinator.offline_extensions = {"DOOR"}
+        return FRAME, None
+
+    coordinator.api.get_doorstation_snapshot = AsyncMock(side_effect=_offline_during_read)
+
+    assert asyncio.run(camera.async_camera_image()) is None
+    assert camera._frame is None
+
+
 # --- the platform listener ----------------------------------------------------------------------------------------
 
 
 def test_a_camera_is_added_once_per_doorstation_also_when_it_comes_later() -> None:
     coordinator = MagicMock(spec=ComexioCoordinator)
     coordinator.server_id = SERVER
+    coordinator.data = {"io": []}
     coordinator.doorstations = DoorstationTracker()
     added: list[ComexioDoorstationCamera] = []
     sync = _DoorstationCameraSync(coordinator, added.extend)
 
-    with patch("custom_components.comexio.camera.Camera.__init__", lambda _self: None):
+    with patch("custom_components.comexio.camera.Camera.__init__", autospec=True, return_value=None):
         sync()
         assert not added
         coordinator.doorstations.update({14: _doorstation()})
@@ -339,6 +443,52 @@ def test_a_camera_is_added_once_per_doorstation_also_when_it_comes_later() -> No
         doorstation_camera_unique_id(SERVER, 14),
         doorstation_camera_unique_id(SERVER, 15),
     ]
+
+
+def test_a_camera_waits_for_the_extension_name_and_the_wait_is_warned_about_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    coordinator = MagicMock(spec=ComexioCoordinator)
+    coordinator.server_id = SERVER
+    coordinator.data = {"io": []}
+    coordinator.doorstations = DoorstationTracker()
+    coordinator.doorstations.update({14: _doorstation(name=None)})
+    added: list[ComexioDoorstationCamera] = []
+    sync = _DoorstationCameraSync(coordinator, added.extend)
+
+    with caplog.at_level(logging.WARNING, logger="custom_components.comexio.camera"):
+        sync()
+        sync()
+    assert not added
+    assert [r.getMessage() for r in caplog.records].count(
+        f"[{SERVER}] Doorstation 14 has no extension name on the IO home page and no IO to take it from: "
+        "its camera is added once a name is known"
+    ) == 1
+
+    coordinator.data = {"io": [{"ext_id": "14", "ext_name": "DOOR"}]}
+    with (
+        caplog.at_level(logging.INFO, logger="custom_components.comexio.camera"),
+        patch("custom_components.comexio.camera.Camera.__init__", autospec=True, return_value=None),
+    ):
+        sync()
+
+    assert [camera.unique_id for camera in added] == [doorstation_camera_unique_id(SERVER, 14)]
+    assert f"[{SERVER}] Doorstation 14 has an extension name now, adding its camera" in caplog.messages
+
+
+def test_only_the_named_doorstation_gets_a_camera_and_no_data_yet_is_no_failure() -> None:
+    coordinator = MagicMock(spec=ComexioCoordinator)
+    coordinator.server_id = SERVER
+    coordinator.data = None
+    coordinator.doorstations = DoorstationTracker()
+    coordinator.doorstations.update({14: _doorstation(name="Tuer"), 15: _doorstation(15, 2, name=None)})
+    added: list[ComexioDoorstationCamera] = []
+    sync = _DoorstationCameraSync(coordinator, added.extend)
+
+    with patch("custom_components.comexio.camera.Camera.__init__", autospec=True, return_value=None):
+        sync()
+
+    assert [camera.unique_id for camera in added] == [doorstation_camera_unique_id(SERVER, 14)]
 
 
 @pytest.mark.parametrize("server_id", [SERVER, "IOSrv1"])
@@ -384,6 +534,46 @@ def test_the_snapshot_fetch_returns_the_frame(comexio_api: ComexioAPI) -> None:
 
     assert asyncio.run(comexio_api.get_doorstation_snapshot(1)) == (FRAME, None)
     comexio_api._client.get_doorstation_snapshot.assert_awaited_once_with(1)
+
+
+def test_reads_of_different_cameras_run_one_after_the_other(comexio_api: ComexioAPI) -> None:
+    running = 0
+    most = 0
+
+    async def _read(_camera_id: int) -> bytes:
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return FRAME
+
+    comexio_api._client = MagicMock(get_doorstation_snapshot=AsyncMock(side_effect=_read))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    async def _together() -> list[tuple[bytes | None, str | None]]:
+        return list(await asyncio.gather(*(comexio_api.get_doorstation_snapshot(i) for i in range(3))))
+
+    assert asyncio.run(_together()) == [(FRAME, None)] * 3
+    assert most == 1
+
+
+def test_a_failed_read_does_not_keep_the_next_camera_waiting_for_good(comexio_api: ComexioAPI) -> None:
+    async def _read(camera_id: int) -> bytes:
+        if camera_id == 0:
+            raise ComexioConnectionError("timed out")
+        return FRAME
+
+    comexio_api._client = MagicMock(get_doorstation_snapshot=AsyncMock(side_effect=_read))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    async def _together() -> list[tuple[bytes | None, str | None]]:
+        return list(await asyncio.gather(*(comexio_api.get_doorstation_snapshot(i) for i in range(3))))
+
+    results = asyncio.run(_together())
+
+    assert results[0][0] is None
+    assert results[1:] == [(FRAME, None)] * 2
 
 
 def test_the_snapshot_fetch_reports_a_changed_certificate_without_raising(comexio_api: ComexioAPI) -> None:

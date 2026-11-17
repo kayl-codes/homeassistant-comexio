@@ -83,7 +83,8 @@ async def test_an_installation_without_doorstation_gets_no_camera(
 
     await _setup(hass, entry)
 
-    assert er.async_get(hass).async_get(CAMERA_ENTITY_ID) is None
+    registry = er.async_get(hass)
+    assert not [e for e in er.async_entries_for_config_entry(registry, entry.entry_id) if e.domain == "camera"]
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -100,3 +101,15 @@ async def test_a_page_without_doorstation_keeps_the_registered_camera_unavailabl
     assert er.async_get(hass).async_get(CAMERA_ENTITY_ID) is not None
     state = hass.states.get(CAMERA_ENTITY_ID)
     assert state is None or state.state == STATE_UNAVAILABLE
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_doorstation_without_any_extension_name_gets_no_camera(
+    hass: HomeAssistant, entry: MockConfigEntry, api_returns: dict[str, Any]
+) -> None:
+    api_returns["get_doorstations"] = ({9: Doorstation(ext_id=9, camera_id=3, name=None)}, None)
+
+    await _setup(hass, entry)
+
+    registry = er.async_get(hass)
+    assert not [e for e in er.async_entries_for_config_entry(registry, entry.entry_id) if e.domain == "camera"]

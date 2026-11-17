@@ -940,6 +940,9 @@ class ComexioAPI:
         # cadence (debug box active) multiple ticks can see _preview_session is None before
         # the first login() completes — each would otherwise start its own redundant login.
         self._preview_session_lock = asyncio.Lock()
+        # One camera image at a time: aiocomexio's deadline for a read also counts a wait behind another request,
+        # so the reads of several cameras that start together would each use up the time of the others.
+        self._doorstation_snapshot_lock = asyncio.Lock()
         # Set by close(); lets a login() already in flight inside the lock above notice
         # the instance was torn down while it was waiting and give up instead of leaking
         # a freshly-authenticated session past unload (see close() for the full race).
@@ -1963,13 +1966,14 @@ class ComexioAPI:
 
         The first frame of the camera's stream, read with the admin session (see aiocomexio's
         get_doorstation_snapshot). The caller logs a failure, so it is only debug-logged here. A lapsed admin session
-        is logged in again once.
+        is logged in again once. Reads of different cameras run one after the other.
         """
         try:
-            return await self._system_info_part(
-                lambda: self.client.get_doorstation_snapshot(camera_id),
-                [],
-            )
+            async with self._doorstation_snapshot_lock:
+                return await self._system_info_part(
+                    lambda: self.client.get_doorstation_snapshot(camera_id),
+                    [],
+                )
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, "Doorstation snapshot not fetched")
             return None, SYSTEM_INFO_CERTIFICATE_CHANGED
