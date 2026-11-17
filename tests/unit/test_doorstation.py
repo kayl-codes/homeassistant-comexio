@@ -582,9 +582,20 @@ def test_the_orphan_cleanup_keeps_every_registered_camera_and_doorbell_of_the_se
     ]
 
     with patch("custom_components.comexio.er.async_entries_for_config_entry", return_value=[*cameras, *bells, *others]):
-        uids = _doorstation_entity_uids(MagicMock(), MagicMock(entry_id="entry"), server_id)
+        uids = _doorstation_entity_uids(MagicMock(), MagicMock(entry_id="entry"), server_id, import_ios=True)
 
     assert uids == {entity.unique_id for entity in (*cameras, *bells)}
+
+
+def test_the_orphan_cleanup_lets_the_doorbells_go_once_the_io_import_is_off_but_keeps_the_cameras() -> None:
+    """event.py creates no doorbell without the IO import: their entries would stay as dead entities for good."""
+    camera = SimpleNamespace(domain="camera", unique_id=doorstation_camera_unique_id(SERVER, 14))
+    bell = SimpleNamespace(domain="event", unique_id=doorstation_doorbell_unique_id(SERVER, 14, "DI1"))
+
+    with patch("custom_components.comexio.er.async_entries_for_config_entry", return_value=[camera, bell]):
+        uids = _doorstation_entity_uids(MagicMock(), MagicMock(entry_id="entry"), SERVER, import_ios=False)
+
+    assert uids == {camera.unique_id}
 
 
 # --- api and poll -------------------------------------------------------------------------------------------------

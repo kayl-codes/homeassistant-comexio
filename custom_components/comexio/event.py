@@ -57,7 +57,8 @@ class _DoorbellSync:
     The Doorstations come with a poll of their own (DoorstationTracker), later than the IOs on the first setup of an
     entry, and a failed read of them leaves none known: the buttons are picked up with the poll that brings both.
     An entity is never removed here: it turns unavailable with its Doorstation (see ComexioDoorbellEvent), and the
-    orphan cleanup in async_setup_entry keeps its registry entry, like the camera's.
+    orphan cleanup in async_setup_entry keeps its registry entry, like the camera's (except while the IO import is
+    off: no event is created then, so the cleanup removes the entries).
     """
 
     def __init__(

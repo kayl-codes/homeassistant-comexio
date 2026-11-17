@@ -242,6 +242,21 @@ async def test_an_installation_without_imported_ios_gets_no_doorbell_event(
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_doorbells_leave_the_registry_once_the_io_import_is_switched_off(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    await _setup(hass, entry)
+    assert {e.entity_id for e in _events(hass, entry)} == {BELL_1_ENTITY_ID, BELL_2_ENTITY_ID}
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, "import_ios": False})
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert _events(hass, entry) == []
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_an_installation_without_doorstation_gets_no_doorbell_event(
     hass: HomeAssistant, entry: MockConfigEntry, api_returns: dict[str, Any]
 ) -> None:
