@@ -155,6 +155,33 @@ def test_the_poll_keeps_the_type_tables_its_config_page_came_with(api: ComexioAP
     assert api.io_types == {"81": "NEW-FETCH"}  # the rebinding did happen
 
 
+@pytest.mark.parametrize(
+    ("conf", "web_devices", "expected"),
+    [
+        pytest.param({}, {"1": {"Name": "HomeAssistant"}, "2": {"Name": "Garage lights"}}, 1, id="default-class-name"),
+        pytest.param({"webio_name": "Mine"}, {"1": {"Name": "HomeAssistant"}}, 0, id="configured-class-name"),
+        pytest.param({"webio_name": "Mine"}, {"1": {"Name": "Mine"}}, 1, id="configured-class-name-found"),
+        pytest.param({}, {"2": {"Name": "Garage lights"}}, 0, id="only-a-device-of-the-user"),
+        pytest.param({}, None, None, id="web-devices-not-read"),
+    ],
+)
+def test_the_poll_counts_only_the_web_devices_under_the_configured_class_name(
+    api: ComexioAPI, conf: dict[str, Any], web_devices: dict[str, Any] | None, expected: int | None
+) -> None:
+    """A Web-IO device of the user's own does not hold the old webhook id open (ek); an unread list stays None."""
+    coordinator = _coordinator(api)
+    raw_config = {key: value for key, value in _config().items() if key != "WebDevices"}
+    if web_devices is not None:
+        raw_config["WebDevices"] = web_devices
+    api.get_raw_config = AsyncMock(return_value=raw_config)
+    api.get_live_states = AsyncMock(return_value=({}, {}))
+    api.get_io_live_states = AsyncMock(return_value={})
+
+    asyncio.run(coordinator._async_fetch_parsed_config(conf))
+
+    assert coordinator._own_web_device_count == expected
+
+
 def test_live_values_replace_the_config_page_default(api: ComexioAPI) -> None:
     """The config page's 0 for Q1 is no reading: the live "1" counts; "74" on an analog IO is 74.0."""
     coordinator = _coordinator(api)
