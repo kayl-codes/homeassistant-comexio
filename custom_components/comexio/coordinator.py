@@ -1541,6 +1541,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # True from the seed of a setup that found no saved config at all (an entry that never had a scraped poll)
         # until a poll decided about the old webhook id (see _async_settle_legacy_webhook_id).
         self._never_polled = False
+        # True once the migration's repairs were raised again after the start (see
+        # _restore_webhook_migration_notices): they are not persistent, so a restart of Home Assistant drops them.
+        self._webhook_notices_restored = False
         # Number of Web-IO devices in the last poll's $WebDevices; None while it was not read.
         self._web_device_count: int | None = None
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
@@ -6300,6 +6303,40 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             notification_id=webhook_restart_notification_id(self.server_id),
         )
 
+    def _restore_webhook_migration_notices(self) -> None:
+        """After a start, raise again what the last nightly run asked of the user, once.
+
+        The two repairs and the notification are not persistent, so a restart of Home Assistant drops them while
+        the old id stays on, and they would come back only at the next 01:30 run. This runs with the first uptime
+        reading that gives Comexio's boot time (before that `_restart_pending` would take an unknown boot time for
+        a restart still to come) and only reports: nothing is rewritten, verified or switched off here, that stays
+        with the nightly run, and the same stocktake that run ends with decides what is raised. Nothing is decided
+        from a poll that did not scrape the config (its `webio_commands` may be empty or incomplete, which would
+        take a stuck repair away or raise a restart request wrongly): the next uptime reading tries again. A start
+        from the saved config runs no uptime reading; the full setup that follows does.
+        """
+        security = self.api.webhook_security
+        if (
+            self._webhook_notices_restored
+            or self.unloading
+            or not self.data
+            or not self._last_poll_scraped
+            or security is None
+            or self.system_info.boot_time is None
+        ):
+            return
+        self._webhook_notices_restored = True
+        if not security.legacy_enabled:
+            return
+        unmigrated = self._unmigrated_webhook_commands(security)
+        self._report_unrewritable_webhooks(unmigrated)
+        if not unmigrated and self._restart_pending(security):
+            self._notify_webhook_restart()
+        else:
+            # A reload of the entry (not only a restart) comes through here, too: a request to restart Comexio that
+            # an earlier run raised is out of date once a command is left to rewrite or Comexio has restarted.
+            self._dismiss_webhook_restart()
+
     async def async_force_webio_range_check(self) -> dict[str, int]:
         """Force-run the Web-IO analog range check outside its nightly window (manual trigger)."""
         return await self._async_webio_range_check_tick()
@@ -6347,6 +6384,12 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fetch the uptime into self.system_info and notify its entities."""
         reading = await self.api.get_system_info(storage=False)
         self._note_system_info_dropped(self.system_info.apply_uptime(reading.uptime, dt_util.utcnow()), reading)
+        try:
+            self._restore_webhook_migration_notices()
+        except Exception:
+            # The uptime is applied already; a failing restore (flag set first) is not tried again before the nightly
+            # run, which raises what is due, and must not end this task as an unretrieved exception.
+            _LOGGER.exception("[%s] The webhook migration notices could not be raised again", self.server_id)
 
     async def _async_refresh_system_info_storage(self) -> None:
         """Fetch free storage and time server settings; called by each config poll that fetched.

@@ -131,6 +131,10 @@ reconfiguration writes commands again later, the notification returns and one mo
   commands it names (Comexio gave no command ID or device ID for them), and they still push to the old ID, which
   therefore stays on. Run a sync (the Web-IO sync button): it creates such a command again with its IDs. The repair
   disappears at the next nightly run once none is left.
+- **The repairs are gone after a Home Assistant restart:** they are not stored, so Home Assistant forgets them with a
+  restart. The integration raises both again (and the restart notification) with the first uptime reading after the
+  start, within a few seconds after Comexio answers; it only reports, the rewriting and the switch-off stay with the
+  nightly run.
 - **`failed` commands in the log:** Comexio refused or did not answer a rewrite (busy, offline). The next night tries
   again.
 - **Values arrive late after a Comexio restart:** that is expected for a moment; the integration polls the current
@@ -285,6 +289,10 @@ Neustart steht an.
   die genannten Commands nicht umschreiben (Comexio lieferte keine Command-ID oder Geräte-ID dafür), und sie pushen
   noch an die alte ID, die deshalb an bleibt. Führe einen Sync aus (die Web-IO-Sync-Taste): Er legt ein solches Command
   mit seinen IDs neu an. Die Meldung verschwindet beim nächsten Nachtlauf, sobald keines mehr übrig ist.
+- **Die Reparaturen sind nach einem Home-Assistant-Neustart weg:** Sie werden nicht gespeichert, Home Assistant
+  vergisst sie mit einem Neustart. Die Integration erhebt beide (und die Neustart-Benachrichtigung) mit der ersten
+  Uptime-Messung nach dem Start wieder, wenige Sekunden nachdem Comexio antwortet; sie meldet nur, das Umschreiben und
+  das Abschalten bleiben beim Nachtlauf.
 - **`failed`-Commands im Log:** Comexio hat ein Umschreiben abgelehnt oder nicht geantwortet (beschäftigt, offline). Die
   nächste Nacht versucht es erneut.
 - **Werte kommen nach einem Comexio-Neustart verspätet:** Das ist für einen Moment normal; die Integration fragt die
