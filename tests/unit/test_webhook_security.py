@@ -46,6 +46,9 @@ class _Store:
 
 
 class _NoLock:
+    def locked(self) -> bool:
+        return False
+
     async def __aenter__(self) -> None:
         return None
 

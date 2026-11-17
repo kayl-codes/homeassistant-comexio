@@ -6386,6 +6386,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._webhook_notices_restored = True
             return
         if self.system_info.boot_time is None or not self._webhook_stocktake_readable(security):
+            _LOGGER.debug("[%s] The webhook migration notices wait for a readable stocktake", self.server_id)
             return
         unmigrated = self._unmigrated_webhook_commands(security)
         self._report_unrewritable_webhooks(unmigrated)
@@ -6404,7 +6405,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         `_own_web_device_count` before it commits its result, and keeps awaiting afterwards, so they would belong to
         data not yet in `self.data`), nor after polls that overlapped (the flags then belong to the poll that fetched
         last, the data to the one that returned last) until a poll ran alone, nor while a sync changes the Web-IO
-        commands (the reload that closes it starts the restore again), nor after a poll that failed.
+        commands (the reload that closes it starts the restore again; `in_sync` is cleared before that reload, so
+        the sync lock, which is held until the reload is through, counts too), nor after a poll that failed.
         `$WebDevices` must have been read (without it the commands of our classes are not found), and a ledger that
         names migrated commands next to no stored command at all means the commands were not decoded: either would
         take a stuck repair away and dismiss a restart request that is due.
@@ -6415,6 +6417,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             and not self._polls_open
             and not self._poll_overlap
             and not self.in_sync
+            and not self._sync_lock.locked()
             and self._last_poll_scraped
             and self._own_web_device_count is not None
             and not (security.migrated and not self.data.get("webio_commands"))

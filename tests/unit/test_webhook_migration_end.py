@@ -848,6 +848,11 @@ def _sync_running(coordinator: Any) -> None:
     coordinator.in_sync = True  # the sync changes the Web-IO commands; the reload that closes it restores again
 
 
+def _sync_closing(coordinator: Any) -> None:
+    # `in_sync` is cleared first, the sync lock is held until the closing reload is through: the data are pre-sync
+    coordinator._sync_lock = SimpleNamespace(locked=lambda: True)
+
+
 def _web_devices_unread(coordinator: Any) -> None:
     coordinator._own_web_device_count = None  # reset at the start of a poll, set once `$WebDevices` was read
 
@@ -864,6 +869,7 @@ def _commands_not_decoded(coordinator: Any) -> None:
         pytest.param(_poll_awaiting_its_commit, id="poll-awaiting-its-commit"),
         pytest.param(_poll_failed, id="poll-failed"),
         pytest.param(_sync_running, id="sync-running"),
+        pytest.param(_sync_closing, id="sync-closing-reload-pending"),
         pytest.param(_web_devices_unread, id="web-devices-not-read"),
         pytest.param(_commands_not_decoded, id="ledger-without-stored-commands"),
     ],
@@ -898,6 +904,7 @@ def _healthy_after_a_rewrite(coordinator: Any) -> None:
     coordinator._full_poll_running = False
     coordinator._polls_open = 0
     coordinator.in_sync = False
+    coordinator._sync_lock = SimpleNamespace(locked=lambda: False)
     coordinator.last_update_success = True
     coordinator._own_web_device_count = 0
     coordinator.api.webhook_security.migrated = {"HA m"}

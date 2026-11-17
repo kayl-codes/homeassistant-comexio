@@ -1534,38 +1534,47 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         # The finally guarantees the release on every path; the inner guards make sure a
         # failing reset step can never skip the reload that covers every reload
         # coordinator.async_reload_entry skipped during this sync.
+        step_1_reached = False
         try:
             # The reload below closes the API session: wait for a restore that runs now and keep
             # new ones out until it is done. A sync and a restore refuse to start while the other
             # runs, so this only guards the reload. in_sync stays True while waiting, so the
             # restore's own reload request is skipped (async_reload_entry) — this reload covers it.
             async with self.coordinator.restores_held_off():
+                step_1_reached = True  # step 1 is its first statement, nothing is awaited before it
                 await self._reset_sync_state_and_reload()
         finally:
-            # A cancel while waiting for a restore never reaches step 1 and no reload follows:
-            # the coordinator must not stay "in sync" (the sync button, the busy state and the
-            # webhook stocktake would stay blocked until the next reload).
-            # A cancel while waiting for a restore never reaches step 1 and no reload follows:
-            # the coordinator must not stay "in sync" (the sync button, the busy state and the
-            # webhook stocktake would stay blocked until the next reload).
-            self.coordinator.in_sync = False
+            try:
+                # A cancel while waiting for a restore never reaches step 1 and no reload follows: the sync
+                # must not stay "busy" (the sync button, its progress and the webhook stocktake would stay
+                # blocked until the next reload), so the same reset runs here, published like step 1 does.
+                # (in_sync is no marker for it: a failed sync clears it before it gets here.)
+                if not step_1_reached:
+                    self._reset_sync_flags()
+            except Exception:
+                # Not into the cancel or error that is on its way out, and never before the lock is released.
+                _LOGGER.exception("[%s] Resetting the sync state after a cancelled finish failed", self.server_id)
             # 6. Release the (old) coordinator's lock — the reload built a new coordinator
             #    with its own lock; a press that waited on this one is dropped by
             #    async_handle_press' coordinator-identity check.
             self.coordinator._sync_lock.release()
 
+    def _reset_sync_flags(self) -> None:
+        """Step 1 of _finalize_sync: the sync is over for the coordinator, the button and the sensor; publish it."""
+        self.coordinator.in_sync = False
+        self.coordinator.cancel_sync = False
+        # An aborted or partial run keeps its report as the sensor's progress_details.
+        if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
+            self.coordinator.sync_progress_text = "Idle"
+        self.coordinator.sync_progress_pct = None
+        self.coordinator.sync_current_step = None
+        self.coordinator.async_set_updated_data(self.coordinator.data)
+
     async def _reset_sync_state_and_reload(self) -> None:
         """Steps 1-5 of _finalize_sync: reset the sync state and the button, then reload the integration."""
         try:
             # 1. Flag reset
-            self.coordinator.in_sync = False
-            self.coordinator.cancel_sync = False
-            # An aborted or partial run keeps its report as the sensor's progress_details.
-            if not (self.coordinator.sync_error or self.coordinator.sync_failed_writes):
-                self.coordinator.sync_progress_text = "Idle"
-            self.coordinator.sync_progress_pct = None
-            self.coordinator.sync_current_step = None
-            self.coordinator.async_set_updated_data(self.coordinator.data)
+            self._reset_sync_flags()
 
             # 2. Reset audit_ignored. Set the skip flag first so the update_listener
             #    suppresses its reload — the explicit reload below is the single reload (R2).
