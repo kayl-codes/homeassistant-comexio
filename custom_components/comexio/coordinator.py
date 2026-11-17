@@ -525,6 +525,16 @@ def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str
     return ids
 
 
+def count_web_devices(raw_config: Mapping[str, Any]) -> int | None:
+    """The number of Web-IO devices in $WebDevices, or None when it was not read (missing or undecodable).
+
+    An empty group arrives as `{}` (aiocomexio turns PHP's `[]` into an id mapping), so 0 is a read, empty list; None
+    proves nothing about Web-IO devices and must never be taken for 0.
+    """
+    web_devices = raw_config.get("WebDevices")
+    return len(web_devices) if isinstance(web_devices, Mapping) else None
+
+
 def _count_by_ref(by_ref: dict[int, list[int]]) -> int:
     """Total id count across all source categories of a per-ref_type trigger-audit map."""
     return sum(len(ids) for ids in by_ref.values())
@@ -1524,6 +1534,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._scraped_config: Mapping[str, Any] | None = None
         self.started_from_saved_config = False
         self._full_setup_due = False
+        # True from the seed of a setup that found no saved config at all (an entry that never had a scraped poll)
+        # until a poll decided about the old webhook id (see _async_settle_legacy_webhook_id).
+        self._never_polled = False
+        # Number of Web-IO devices in the last poll's $WebDevices; None while it was not read.
+        self._web_device_count: int | None = None
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -1585,6 +1600,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # also when a login or config fetch alongside it cleared certificate_mismatch since.
             if self.api.certificate_mismatch is None and self.api.certificate_mismatch_count == mismatches_before:
                 self._clear_certificate_changed()
+            await self._async_settle_legacy_webhook_id()
             await self._async_save_config_or_keep_onewire_status(onewire_status_before)
         # _polled_plan_ids is set only once $Fubs was read, and a failing poll raises before this,
         # so it does not depend on _last_poll_scraped ($FubModules, which the audit needs).
@@ -1794,12 +1810,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # while this poll runs keeps that state over the older Active flag in raw_config.
         run_state_mark = self.api.run_state_mark()
         mismatches_before = self.api.certificate_mismatch_count
+        self._web_device_count = None
         raw_config = await self.api.get_raw_config()
         # Taken before anything yields: the tables of the page raw_config is — or, when a newer fetch failed
         # meanwhile, of the last applied page, as such a fetch applies nothing (see get_raw_config).
         io_type_tables = IoTypeTableSnapshot.of(self.api)
         self._fail_poll_on_certificate_mismatch(mismatches_before)
         self._last_poll_scraped = bool(raw_config.get("FubModules"))
+        self._web_device_count = count_web_devices(raw_config)
         if self.api.config_relogin_unreachable:
             # The re-login after a lapsed session (e.g. a reboot) got no reply.
             self.note_comexio_unreachable()
@@ -5572,6 +5590,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER.warning(ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG, self.server_id, repr(err))
             return
         if stored is None:
+            # Not for an unreadable store (above and below): it proves nothing about an earlier poll.
+            self._never_polled = True
             return
         if not is_saved_config(stored):
             _LOGGER.warning(ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG, self.server_id, "not a saved config")
@@ -6120,6 +6140,55 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.sync_webhooks()
         _LOGGER.info("[%s] Old webhook id switched off: every Web-IO command uses its own", self.server_id)
         return WEBHOOK_MIGRATION_DONE
+
+    async def _async_settle_legacy_webhook_id(self) -> None:
+        """Switch the old webhook id off at the first scraped poll that proves Comexio has no Web-IO device at all.
+
+        A new store starts with the old id on, for the commands of an installation from before the per-command ids.
+        A missing saved config only says that no poll of this entry ran before (it is no proof either: a jump from a
+        version before the saved config, or a restored `.storage`, leaves it missing, too). The proof is the poll:
+        `$WebDevices` was read and is empty, so no command exists anywhere that could push to the old id, and the
+        commands a sync creates later carry their own id from the start. Left on, the old id would stay open until
+        the first sync, a Comexio restart and the verification of the nightly migration, accepting any marker or IO
+        value on a guessable path.
+        Nothing is decided without that proof: a poll that did not read `$WebDevices` (the commands of our classes
+        are found through it, so `webio_commands` would be empty although they exist) leaves the question open for
+        the next one, a Comexio with any Web-IO device (an entry created anew on one that still holds commands of an
+        earlier entry, a pre-split device) keeps the migration. A save that fails is tried again at the next poll. Both
+        retries last only as long as this run: the config is saved after the poll, and an entry with a saved config is
+        not decided any more (it keeps the old id, the safe side).
+        """
+        if not self._never_polled:
+            return
+        if self._web_device_count is None:
+            _LOGGER.debug(
+                "[%s] $WebDevices was not read: the old webhook id is decided at a later poll", self.server_id
+            )
+            return
+        security = self.api.webhook_security
+        if (
+            self._web_device_count
+            or security is None
+            or not security.legacy_enabled
+            or security.migrated
+            or security.last_write is not None
+        ):
+            _LOGGER.debug(
+                "[%s] The old webhook id is kept for the migration (%d Web-IO devices)",
+                self.server_id,
+                self._web_device_count,
+            )
+            self._never_polled = False
+            return
+        security.legacy_enabled = False
+        if not await self._async_save_webhook_security(security):
+            # Not persisted: after a restart the old id would be on again, so do not run on a state that is lost.
+            security.legacy_enabled = True
+            return
+        self._never_polled = False
+        _LOGGER.info(
+            "[%s] Comexio has no Web-IO device yet: the old webhook id is not needed and stays off", self.server_id
+        )
 
     def _restart_pending(self, security: WebhookSecurity) -> bool:
         """True while Comexio has not restarted since the last command write (it sends a changed command only then)."""

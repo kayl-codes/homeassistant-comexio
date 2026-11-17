@@ -8,12 +8,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from aiocomexio.scrape import scrape_js_vars
 import pytest
 
 from custom_components import comexio as comexio_init
 from custom_components.comexio import _setup_webhooks, webhook as ha_webhook, webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
-from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.coordinator import ComexioCoordinator, count_web_devices
 from custom_components.comexio.services import misc as services_misc
 from tests.unit.test_api_helpers import PARSED
 from tests.unit.test_webhook_security import (
@@ -1027,3 +1028,201 @@ def test_nothing_is_awaited_between_the_first_refresh_and_the_webhook_ids_of_eve
     assert len(synced) == 1
     assert connect[0] < synced[0]
     assert [line for line in awaited if connect[0] < line < synced[0]] == []
+
+
+def _fresh_coordinator(
+    monkeypatch: pytest.MonkeyPatch, *, never_polled: bool = True, web_devices: int | None = 0, real_store: bool = False
+) -> Any:
+    coordinator = _coordinator(monkeypatch, boot=None, written=None)
+    if real_store:
+        coordinator.api.webhook_security = _security(monkeypatch)
+    coordinator._never_polled = never_polled
+    coordinator._web_device_count = web_devices
+    return coordinator
+
+
+def test_an_entry_without_a_saved_config_and_without_web_devices_switches_the_old_id_off_at_its_first_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _fresh_coordinator(monkeypatch)
+    security = coordinator.api.webhook_security
+    assert security.legacy_enabled  # a new store starts with it on
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled is False
+    security.async_save.assert_awaited_once()
+    assert security.accepts("comexio_srv", {"type": "marker", "id": "5", "value": 1}) is False
+    assert coordinator._never_polled is False
+
+
+@pytest.mark.parametrize(
+    ("never_polled", "web_devices", "migrated", "written"),
+    [
+        pytest.param(False, 0, set(), None, id="entry-with-a-saved-config"),
+        pytest.param(True, 3, set(), None, id="web-devices-in-comexio"),
+        pytest.param(True, 0, {"HA M5"}, None, id="ledger-not-empty"),
+        pytest.param(True, 0, set(), NOW, id="a-write-is-recorded"),
+    ],
+)
+def test_every_other_entry_keeps_the_old_id_on_for_the_migration(
+    monkeypatch: pytest.MonkeyPatch, never_polled: bool, web_devices: int, migrated: set[str], written: Any
+) -> None:
+    coordinator = _fresh_coordinator(monkeypatch, never_polled=never_polled, web_devices=web_devices)
+    security = coordinator.api.webhook_security
+    security.migrated = migrated
+    security.last_write = written
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+    security.async_save.assert_not_awaited()
+    assert coordinator._never_polled is False  # decided: the migration stays
+
+
+@pytest.mark.parametrize("security_present", [True, False])
+def test_an_old_id_that_is_off_already_or_a_missing_ledger_saves_nothing(
+    monkeypatch: pytest.MonkeyPatch, security_present: bool
+) -> None:
+    coordinator = _fresh_coordinator(monkeypatch)
+    security = coordinator.api.webhook_security
+    security.legacy_enabled = False
+    if not security_present:
+        coordinator.api.webhook_security = None
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    security.async_save.assert_not_awaited()
+    assert coordinator._never_polled is False
+
+
+def test_a_poll_that_did_not_read_the_web_devices_decides_nothing_and_the_next_one_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An undecodable $WebDevices leaves webio_commands empty although commands of ours may exist.
+    coordinator = _fresh_coordinator(monkeypatch, web_devices=None)
+    security = coordinator.api.webhook_security
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+    security.async_save.assert_not_awaited()
+    assert coordinator._never_polled is True
+
+    coordinator._web_device_count = 0  # a later poll read it, and it is empty
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled is False
+
+
+def test_only_the_poll_that_found_web_devices_decides_the_migration_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _fresh_coordinator(monkeypatch, web_devices=2)
+    security = coordinator.api.webhook_security
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+    coordinator._web_device_count = 0  # a later poll sees none: no decision any more
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+
+
+def test_a_switch_that_cannot_be_saved_is_not_kept_in_memory_and_tried_again_at_the_next_poll(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # After a restart the stored switch would be on again: running on a state that is lost helps nobody.
+    coordinator = _fresh_coordinator(monkeypatch)
+    security = coordinator.api.webhook_security
+    security.async_save.side_effect = OSError("disk full")
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+    assert coordinator._never_polled is True
+
+    security.async_save.side_effect = None
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled is False
+    assert coordinator._never_polled is False
+
+
+@pytest.mark.parametrize(
+    ("raw_config", "expected"),
+    [
+        pytest.param({}, None, id="missing"),
+        pytest.param({"WebDevices": None}, None, id="none"),
+        pytest.param({"WebDevices": "garbage"}, None, id="not-a-group"),
+        pytest.param({"WebDevices": []}, None, id="raw-list-is-no-id-mapping"),
+        pytest.param({"WebDevices": {}}, 0, id="read-and-empty"),
+        pytest.param({"WebDevices": {"1": {"Name": "HA [M]"}, "2": {"Name": "Other"}}}, 2, id="two-devices"),
+    ],
+)
+def test_only_a_read_web_device_group_counts_and_a_missing_one_is_never_zero(
+    raw_config: dict[str, Any], expected: int | None
+) -> None:
+    assert count_web_devices(raw_config) == expected
+
+
+@pytest.mark.parametrize(
+    ("literal", "expected"),
+    [("[]", 0), ("{}", 0), ('[{"Name": "HA [M]"}]', 1), ('{"3": {"Name": "HA [M]"}}', 1)],
+    ids=["php-empty-array", "empty-object", "gap-free-array", "object"],
+)
+def test_a_web_device_group_as_the_scrape_delivers_it_counts_whatever_shape_comexio_sent(
+    literal: str, expected: int
+) -> None:
+    page = f"<script>var $WebDevices = {literal};</script>"
+
+    assert count_web_devices(scrape_js_vars(page, page_label="function module")) == expected
+
+
+def test_the_switch_survives_a_reload_and_the_old_id_stays_refused_after_a_later_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _fresh_coordinator(monkeypatch, real_store=True)
+    security = coordinator.api.webhook_security
+    secret = security.secret
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+    again = _security(monkeypatch, security._store.stored)
+    _run(again.async_load())
+
+    assert again.legacy_enabled is False
+    assert again.secret == secret
+    assert again.accepts("comexio_srv", {"type": "marker", "id": "5", "value": 1}) is False
+    again.mark_written("HA M5", NOW)  # a sync writing a command later does not turn the old id on
+    assert again.legacy_enabled is False
+
+
+@pytest.mark.parametrize(
+    ("stored", "load_error", "expected"),
+    [
+        pytest.param(None, None, True, id="no-saved-config"),
+        pytest.param({"markers": []}, None, False, id="a-saved-config"),
+        pytest.param({"unrelated": 1}, None, False, id="unreadable-layout-proves-nothing"),
+        pytest.param(None, OSError("denied"), False, id="store-that-cannot-be-read-proves-nothing"),
+    ],
+)
+def test_only_a_missing_saved_config_marks_the_entry_as_never_polled(
+    stored: Any, load_error: Exception | None, expected: bool
+) -> None:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = SERVER
+    coordinator._never_polled = False
+    coordinator.api = SimpleNamespace(seed_onewire_items=MagicMock())
+    coordinator._saved_config_store = SimpleNamespace(async_load=AsyncMock(return_value=stored, side_effect=load_error))
+
+    _run(coordinator.async_seed_saved_onewire_sensors())
+
+    assert coordinator._never_polled is expected
+
+
+def test_the_poll_decides_before_it_saves_the_config() -> None:
+    # Saved first, a crash in between would make the entry look polled while the old id is still on.
+    source = inspect.getsource(ComexioCoordinator._async_update_data)
+
+    assert (
+        0
+        < source.index("_async_settle_legacy_webhook_id(")
+        < source.index("_async_save_config_or_keep_onewire_status(")
+    )
