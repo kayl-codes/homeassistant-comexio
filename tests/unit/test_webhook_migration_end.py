@@ -355,6 +355,7 @@ def test_a_save_cut_short_by_an_unload_puts_the_old_id_back(monkeypatch: pytest.
     coordinator = _without_web_devices(monkeypatch)
     security = coordinator.api.webhook_security
     security.async_save.side_effect = asyncio.CancelledError
+    coordinator._webhook_notices_restored = True  # a reading during the save had counted the restore as decided
 
     migration = coordinator._async_finish_webhook_migration()
 
@@ -362,6 +363,7 @@ def test_a_save_cut_short_by_an_unload_puts_the_old_id_back(monkeypatch: pytest.
         _run(migration)
 
     assert security.legacy_enabled  # the store may still hold "on": memory must not run ahead of it
+    assert coordinator._webhook_notices_restored is False  # and the restore is open again with it
 
 
 def test_a_command_put_back_takes_the_restart_request_back_at_the_nightly_run(
@@ -455,6 +457,7 @@ def _after_a_start(monkeypatch: pytest.MonkeyPatch, *, boot: Any, written: Any =
     coordinator._own_web_device_count = 0  # ... including `$WebDevices`
     coordinator.last_update_success = True  # ... and committed it
     coordinator._full_poll_running = False
+    coordinator._polls_open = 0
     return coordinator
 
 
@@ -554,6 +557,141 @@ def test_a_start_raises_nothing_once_the_old_id_is_off(
     assert coordinator._webhook_notices_restored is True  # decided, nothing to come back for
 
 
+def test_a_start_with_the_old_id_off_takes_back_what_a_run_cut_short_left_standing(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
+) -> None:
+    """(Sourcery, #313) A run that persisted the switch-off and was cancelled before it cleared its notices: a reload
+    of the entry (no restart of Home Assistant) keeps the repair and the notification, so the reload takes them back."""
+    coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
+    coordinator.api.webhook_security.legacy_enabled = False
+
+    coordinator._restore_webhook_migration_notices()
+
+    assert {_STUCK_ID, _RESTART_ID} <= _deleted(issues)
+    assert notifications.async_dismiss.call_args.args[1] == f"comexio_{SERVER}_webhook_restart"
+    issues.async_create_issue.assert_not_called()
+    assert coordinator._webhook_notices_restored is True
+
+
+def test_a_save_that_fails_while_a_reading_saw_the_old_id_off_opens_the_restore_again(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
+) -> None:
+    """(Sourcery, #313) The old id is off in memory while the switch-off is saved. A reading in that window counts the
+    restore as decided; the failed save puts the old id back on, so the restore has to run again."""
+    coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
+    security = coordinator.api.webhook_security
+    observed: list[bool] = []
+
+    async def save_met_by_a_reading(*_: Any) -> None:
+        coordinator._restore_webhook_migration_notices()  # the uptime tick, while the store is written
+        observed.append(coordinator._webhook_notices_restored)
+        raise OSError("disk full")
+
+    security.async_save.side_effect = save_met_by_a_reading
+
+    assert _run(coordinator._async_switch_legacy_webhook_id_off(security)) is False
+
+    assert observed == [True]  # the reading did latch, or the check below proves nothing
+    assert security.legacy_enabled
+    assert coordinator._webhook_notices_restored is False
+
+    coordinator._restore_webhook_migration_notices()  # the next reading, with the old id on again
+
+    assert _RESTART_ID in _raised(issues)
+    assert coordinator._webhook_notices_restored is True
+
+
+def test_a_save_that_goes_through_leaves_the_restore_decided(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
+) -> None:
+    coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
+    security = coordinator.api.webhook_security
+
+    coordinator._webhook_notices_restored = True  # a restore that was decided before the night's switch-off
+
+    assert _run(coordinator._async_switch_legacy_webhook_id_off(security)) is True
+
+    assert security.legacy_enabled is False
+    assert coordinator._webhook_notices_restored is True  # only a save that failed opens it again
+    issues.async_create_issue.assert_not_called()
+
+
+_POLL_RESULT = {"sentinel": 1}
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(None, id="returns"),
+        pytest.param(OSError("save"), id="raises"),
+        pytest.param(asyncio.CancelledError(), id="cancelled"),
+    ],
+)
+def test_a_poll_counts_as_open_up_to_the_moment_it_returns_its_data(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock, failure: BaseException | None
+) -> None:
+    """(Sourcery, #313) After the fetch the poll still awaits (settling the old id, saving the config) while its scrape
+    flags already describe data that `self.data` does not hold yet: the stocktake may not run in that stretch."""
+    coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
+    seen: list[tuple[int, bool]] = []
+
+    async def fetch_then_settle() -> dict[str, Any]:
+        coordinator._full_poll_running = False  # the fetch is over, the awaits after it follow
+        security = coordinator.api.webhook_security
+        seen.append((coordinator._polls_open, coordinator._webhook_stocktake_readable(security)))
+        if failure is not None:
+            raise failure
+        return _POLL_RESULT
+
+    coordinator._async_run_update = fetch_then_settle
+
+    poll = coordinator._async_update_data()
+    if failure is None:
+        assert _run(poll) is _POLL_RESULT  # what Home Assistant stores is what the body returned
+    else:
+        with pytest.raises(type(failure)):
+            _run(poll)
+
+    assert seen == [(1, False)]  # open, and not readable although every other guard is open
+    assert coordinator._polls_open == 0  # closed again on every way out, a cancel included
+    assert coordinator._webhook_stocktake_readable(coordinator.api.webhook_security) is True
+
+
+def test_a_poll_that_ends_while_another_is_still_under_way_does_not_open_the_stocktake(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
+) -> None:
+    """(silent-failure-hunter, #313) A direct refresh can overlap the scheduled poll: the one that ends first may not
+    count the other one out."""
+    coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
+    security = coordinator.api.webhook_security
+    readable_when_first_ended: list[bool] = []
+
+    async def overlapping_polls() -> None:
+        release = asyncio.Event()
+
+        async def quick() -> dict[str, Any]:
+            return {}
+
+        async def slow() -> dict[str, Any]:
+            await release.wait()
+            return {}
+
+        coordinator._async_run_update = slow
+        slow_poll = asyncio.ensure_future(coordinator._async_update_data())
+        await asyncio.sleep(0)  # the slow poll is under way
+        coordinator._async_run_update = quick
+        await coordinator._async_update_data()  # the second poll ends first
+        readable_when_first_ended.append(coordinator._webhook_stocktake_readable(security))
+        release.set()
+        await slow_poll
+
+    _run(overlapping_polls())
+
+    assert readable_when_first_ended == [False]
+    assert coordinator._polls_open == 0
+    assert coordinator._webhook_stocktake_readable(security) is True
+
+
 def test_an_unknown_boot_time_waits_instead_of_asking_for_a_restart_that_may_not_be_due(
     monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
 ) -> None:
@@ -624,7 +762,12 @@ def test_a_poll_that_did_not_scrape_the_config_decides_nothing_until_a_later_rea
 
 
 def _poll_in_flight(coordinator: Any) -> None:
-    coordinator._full_poll_running = True  # set by _async_update_data for the whole poll
+    coordinator._polls_open = 1  # counted by _async_update_data for the whole poll ...
+    coordinator._full_poll_running = True  # ... and, for its fetch, this one
+
+
+def _poll_awaiting_its_commit(coordinator: Any) -> None:
+    coordinator._polls_open = 1  # the fetch is over (`_full_poll_running` cleared), settling and saving still await
 
 
 def _poll_failed(coordinator: Any) -> None:
@@ -644,6 +787,7 @@ def _commands_not_decoded(coordinator: Any) -> None:
     "unreadable",
     [
         pytest.param(_poll_in_flight, id="poll-under-way"),
+        pytest.param(_poll_awaiting_its_commit, id="poll-awaiting-its-commit"),
         pytest.param(_poll_failed, id="poll-failed"),
         pytest.param(_web_devices_unread, id="web-devices-not-read"),
         pytest.param(_commands_not_decoded, id="ledger-without-stored-commands"),
@@ -677,6 +821,7 @@ def test_a_stocktake_that_cannot_be_relied_on_decides_nothing_and_stays_open(
 def _healthy_after_a_rewrite(coordinator: Any) -> None:
     """Every guard open, the ledger names a command and the data holds it: the state after the first nightly rewrite."""
     coordinator._full_poll_running = False
+    coordinator._polls_open = 0
     coordinator.last_update_success = True
     coordinator._own_web_device_count = 0
     coordinator.api.webhook_security.migrated = {"HA m"}

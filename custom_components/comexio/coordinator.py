@@ -1559,6 +1559,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Set while _async_update_data runs: its $Fubs read brings the run states anyway, and
         # Comexio serializes requests, so the run-state poll stays out of its way.
         self._full_poll_running = False
+        # Number of _async_update_data runs under way, their awaits after the fetch included (settling the old webhook
+        # id, saving the config): until the last one returns, the scrape flags already describe data that `self.data`
+        # does not hold yet. A count, not a flag: a direct async_refresh() can overlap the scheduled poll.
+        self._polls_open = 0
         # Set while polls keep the last data because another certificate answers; the warning goes out once.
         self._reading_through_certificate_change = False
         # The config of the last scraped poll, saved for a setup that meets another certificate (#250), and whether
@@ -1600,6 +1604,15 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
+        self._polls_open += 1
+        try:
+            return await self._async_run_update()
+        finally:
+            # No await between this and Home Assistant storing the returned data in `self.data`.
+            self._polls_open -= 1
+
+    async def _async_run_update(self) -> dict[str, Any]:
+        """Body of _async_update_data, run while _polls_open counts it."""
         self._full_poll_running = True
         # Only this poll's config may be saved, never one a failed poll left behind.
         self._scraped_config = None
@@ -1701,7 +1714,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
     async def _async_fetch_and_audit(self) -> dict[str, Any]:
-        """Body of _async_update_data, run while _full_poll_running is set."""
+        """Fetch and audit part of _async_run_update, run while _full_poll_running is set."""
         self._last_poll_scraped = False
         self._polled_plan_ids = None
         if self.in_sync:
@@ -6298,6 +6311,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # would be on again, so do not run on a state that is lost (a cancel after the write went through
                 # leaves the store off and memory on: the old id is gone at the next start, the intended end).
                 security.legacy_enabled = True
+                # An uptime reading during the save saw the old id off and counted the restore as decided.
+                self._webhook_notices_restored = False
         return saved
 
     def _dismiss_webhook_restart(self) -> None:
@@ -6359,7 +6374,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._webhook_notices_restored or self.unloading or security is None:
             return
         if not security.legacy_enabled:
-            self._webhook_notices_restored = True  # decided: the old id is off, nothing is left to ask for
+            # Decided: the old id is off, nothing is left to ask for. A run that persisted that and ended before it
+            # took its notices back (an unload cancelled it) leaves them standing in this process: take them back.
+            self._clear_webhook_migration_notices()
+            self._webhook_notices_restored = True
             return
         if self.system_info.boot_time is None or not self._webhook_stocktake_readable(security):
             return
@@ -6376,8 +6394,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _webhook_stocktake_readable(self, security: WebhookSecurity) -> bool:
         """True when `self.data` is a committed, complete read of the Web-IO side, so a stocktake may rely on it.
 
-        Not while a poll is under way (it sets `_last_poll_scraped` and `_own_web_device_count` before it commits its
-        result, so they would belong to data not yet in `self.data`) nor after a poll that failed. `$WebDevices` must
+        Not while a poll is under way, up to the moment it returns (it sets `_last_poll_scraped` and
+        `_own_web_device_count` before it commits its result, and keeps awaiting afterwards, so they would belong to
+        data not yet in `self.data`) nor after a poll that failed. `$WebDevices` must
         have been read (without it the commands of our classes are not found), and a ledger that names migrated
         commands next to no stored command at all means the commands were not decoded: either would take a stuck
         repair away and dismiss a restart request that is due.
@@ -6385,7 +6404,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return (
             bool(self.data)
             and self.last_update_success
-            and not self._full_poll_running
+            and not self._polls_open
             and self._last_poll_scraped
             and self._own_web_device_count is not None
             and not (security.migrated and not self.data.get("webio_commands"))

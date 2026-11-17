@@ -1468,7 +1468,7 @@ def test_only_a_missing_saved_config_marks_the_entry_as_never_polled(
 
 def test_the_poll_decides_before_it_saves_the_config() -> None:
     # Saved first, a crash in between would make the entry look polled while the old id is still on.
-    source = inspect.getsource(ComexioCoordinator._async_update_data)
+    source = inspect.getsource(ComexioCoordinator._async_run_update)
 
     assert (
         0
