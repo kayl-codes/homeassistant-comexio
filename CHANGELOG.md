@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### 🐛 Bug Fixes & Refactoring
+- **Fresh install without a Web-IO device no longer leaves the old webhook id open:** the old webhook id `comexio_<server_id>` is now switched off at the first poll of a new entry whose Comexio has no Web-IO device at all, so it no longer accepts marker or IO values on a guessable path until the first sync. An entry that has polled before, a Comexio that already holds Web-IO devices, and an entry whose stored Comexio host changed keep the old id for the nightly migration as before (#307).
+
 ---
 
 ## [0.42.0] — 2026-11-16
