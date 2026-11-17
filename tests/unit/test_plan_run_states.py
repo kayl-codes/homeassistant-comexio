@@ -679,7 +679,9 @@ def test_only_a_full_poll_that_read_fubs_publishes_the_plan_list(
 def test_the_first_scraped_poll_without_web_devices_switches_the_old_webhook_id_off_before_it_saves_the_config(
     api: ComexioAPI, scraped: bool, web_devices: int | None, off: bool
 ) -> None:
-    security = SimpleNamespace(legacy_enabled=True, migrated=set(), last_write=None, async_save=AsyncMock())
+    security = SimpleNamespace(
+        legacy_enabled=True, host_changed=False, migrated=set(), last_write=None, async_save=AsyncMock()
+    )
     api.webhook_security = security
     coordinator = _coordinator(api, _never_polled=True)
     order: list[str] = []

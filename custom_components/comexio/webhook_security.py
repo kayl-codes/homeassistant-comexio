@@ -148,6 +148,9 @@ class WebhookSecurity:
         self.host = host
         self.secret = ""  # nosec B105 - filled by async_load
         self.legacy_enabled = True
+        # True when this load found the ledger recorded for another host: the old id is on again for that reason, and
+        # no poll of the new host may switch it off before the migration verified every command (in memory only).
+        self.host_changed = False
         self.migrated: set[str] = set()
         self.last_write: datetime | None = None
         # kind of refusal -> (time of its last log line, refusals since then that were not logged)
@@ -223,6 +226,7 @@ class WebhookSecurity:
                 self.server_id,
             )
             self.legacy_enabled = True
+            self.host_changed = True
             if self.migrated:
                 self.last_write = dt_util.utcnow()
         await self._async_save()

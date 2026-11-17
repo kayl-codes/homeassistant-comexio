@@ -1080,6 +1080,61 @@ def test_every_other_entry_keeps_the_old_id_on_for_the_migration(
     assert coordinator._never_polled is False  # decided: the migration stays
 
 
+def test_a_store_recorded_for_another_host_keeps_the_old_id_on_although_the_new_host_has_no_web_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(Sourcery, #307) The commands of the earlier host may still push to the old id."""
+    coordinator = _fresh_coordinator(monkeypatch)
+    security = coordinator.api.webhook_security
+    security.host_changed = True
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+    security.async_save.assert_not_awaited()
+    assert coordinator._never_polled is False  # decided: the migration decides the old id from here on
+
+
+@pytest.mark.parametrize(
+    ("stored_host", "expected"),
+    [
+        pytest.param("old.local", True, id="recorded-for-another-host"),
+        pytest.param("new.local", False, id="same-host"),
+        pytest.param(None, False, id="no-host-recorded-yet"),
+    ],
+)
+def test_only_a_ledger_recorded_for_another_host_counts_as_a_host_change(
+    monkeypatch: pytest.MonkeyPatch, stored_host: str | None, expected: bool
+) -> None:
+    security = _hosted(monkeypatch, _switched_off_ledger(stored_host), "new.local")
+
+    _run(security.async_load())
+
+    assert security.host_changed is expected
+
+
+def test_a_host_change_found_at_load_keeps_the_old_id_on_through_the_first_poll_but_is_not_persisted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(Sourcery, #307) The whole chain: the load finds another host, the settle of the poll leaves the old id on."""
+    # No migrated commands and no write stamp: only the host change can keep the old id on here.
+    ledger = {"secret": "abc", "legacy": False, "host": "old.local"}
+    security = _hosted(monkeypatch, ledger, "new.local")
+    _run(security.async_load())
+    coordinator = _fresh_coordinator(monkeypatch)
+    coordinator.api.webhook_security = security
+    security.async_save = AsyncMock()
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+    security.async_save.assert_not_awaited()
+    assert coordinator._never_polled is False
+    again = _hosted(monkeypatch, security._store.stored, "new.local")  # the next start: host recorded already
+    _run(again.async_load())
+    assert again.host_changed is False
+
+
 @pytest.mark.parametrize("security_present", [True, False])
 def test_an_old_id_that_is_off_already_or_a_missing_ledger_saves_nothing(
     monkeypatch: pytest.MonkeyPatch, security_present: bool
