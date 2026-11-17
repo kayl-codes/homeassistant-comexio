@@ -783,6 +783,56 @@ def test_an_unknown_boot_time_waits_instead_of_asking_for_a_restart_that_may_not
     assert coordinator._webhook_notices_restored is True
 
 
+def test_a_stuck_command_is_reported_although_comexios_boot_time_is_unknown(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
+) -> None:
+    """(Sourcery, #313) The stuck repair does not depend on the uptime: with commands left to rewrite there is no
+    restart to ask for, so an unreadable uptime must not hold it back until the nightly run."""
+    coordinator = _after_a_start(monkeypatch, boot=None, written=NOW)
+    _stuck_command(coordinator, cmd_id="")
+
+    coordinator._restore_webhook_migration_notices()
+
+    assert _raised(issues)[_STUCK_ID]["translation_placeholders"]["commands"] == "HA m"
+    assert _RESTART_ID not in _raised(issues)  # whatever the boot time turns out to be
+    notifications.async_create.assert_not_called()
+    assert _RESTART_ID in _deleted(issues)  # an earlier request to restart is out of date: commands are left
+    assert notifications.async_dismiss.call_args.args[1] == f"comexio_{SERVER}_webhook_restart"
+    assert coordinator._webhook_notices_restored is True  # decided ...
+    coordinator.api.webhook_security.async_save.assert_not_awaited()
+
+    coordinator.system_info = SimpleNamespace(boot_time=NOW - timedelta(hours=1))  # ... a later reading changes nothing
+    coordinator._restore_webhook_migration_notices()
+
+    assert issues.async_create_issue.call_count == 1
+    notifications.async_create.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        pytest.param({"_own_web_device_count": None}, id="web-devices-not-read"),
+        pytest.param({"_last_poll_scraped": False}, id="poll-without-scrape"),
+    ],
+)
+def test_an_unknown_boot_time_still_waits_for_the_stocktake_before_reporting_a_stuck_command(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock, unreadable: dict[str, Any]
+) -> None:
+    """The stocktake comes first: an unreadable one decides nothing, the boot time does not make it readable."""
+    coordinator = _after_a_start(monkeypatch, boot=None, written=NOW)
+    _stuck_command(coordinator, cmd_id="")
+    for name, value in unreadable.items():
+        setattr(coordinator, name, value)
+
+    coordinator._restore_webhook_migration_notices()
+
+    issues.async_create_issue.assert_not_called()
+    issues.async_delete_issue.assert_not_called()
+    notifications.async_create.assert_not_called()
+    notifications.async_dismiss.assert_not_called()  # an earlier request to restart stands until the stocktake reads
+    assert coordinator._webhook_notices_restored is False
+
+
 @pytest.mark.parametrize(
     ("data", "unloading"),
     [pytest.param({}, False, id="no-data-yet"), pytest.param({"webio_commands": {}}, True, id="entry-unloading")],

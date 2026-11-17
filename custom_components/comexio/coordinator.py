@@ -6407,10 +6407,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """After a start, raise again what the last nightly run asked of the user, once.
 
         The two repairs and the notification are not persistent, so a restart of Home Assistant drops them while
-        the old id stays on, and they would come back only at the next 01:30 run. This runs with the first uptime
-        reading that gives Comexio's boot time (before that `_restart_pending` would take an unknown boot time for
-        a restart still to come) and only reports: nothing is rewritten, verified or switched off here, that stays
-        with the nightly run, and the same stocktake that run ends with decides what is raised. Nothing is decided
+        the old id stays on, and they would come back only at the next 01:30 run. This runs with every uptime
+        reading and only reports: nothing is rewritten, verified or switched off here, that stays with the nightly
+        run, and the same stocktake that run ends with decides what is raised. The restart request waits for the
+        first reading that gives Comexio's boot time (before that `_restart_pending` would take an unknown boot
+        time for a restart still to come); the stuck repair does not need it. Nothing is decided
         from a poll that did not scrape the config (its `webio_commands` may be empty or incomplete, which would
         take a stuck repair away or raise a restart request wrongly): the next uptime reading tries again, and
         so it does after a failure, as the run counts as done only once it went through. A start from the saved
@@ -6426,11 +6427,18 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._clear_webhook_migration_notices()
             self._webhook_notices_restored = True
             return
-        if self.system_info.boot_time is None or not self._webhook_stocktake_readable(security):
+        if not self._webhook_stocktake_readable(security):
             _LOGGER.debug("[%s] The webhook migration notices wait for a readable stocktake", self.server_id)
             return
         unmigrated = self._unmigrated_webhook_commands(security)
+        # The stuck repair needs no boot time, so an unreadable uptime holds back neither raising it nor taking it away.
         self._report_unrewritable_webhooks(unmigrated)
+        if not unmigrated and self.system_info.boot_time is None:
+            # Only the restart request depends on Comexio's boot time (`_restart_pending` takes an unknown one for a
+            # restart still to come): with commands left to rewrite there is none to make, so it waits only when
+            # nothing is left.
+            _LOGGER.debug("[%s] The webhook migration notices wait for Comexio's boot time", self.server_id)
+            return
         if not unmigrated and self._restart_pending(security):
             self._notify_webhook_restart()
         else:
