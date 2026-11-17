@@ -39,6 +39,7 @@ from aiocomexio import (
 )
 from aiocomexio.config import ParseOptions, iter_group
 from aiocomexio.const import WebioClass
+from aiocomexio.doorstation import Doorstation
 from aiocomexio.onewire import OneWireSensor, OneWireStatus, parse_onewire_config
 from aiocomexio.reference_catalog import KIND_FUB_BASE, ReferenceCheck
 from aiocomexio.session import session_kwargs
@@ -1942,6 +1943,35 @@ class ComexioAPI:
             return await self._system_info_part(lambda: self.client.get_onewire_status(), [])  # noqa: PLW0108
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, "1-Wire status not fetched")
+            return None, SYSTEM_INFO_CERTIFICATE_CHANGED
+
+    async def get_doorstations(self) -> tuple[dict[int, Doorstation] | None, str | None]:
+        """The Doorstations of the IO home page by extension id, or None and the failure cause.
+
+        Rides the config poll (see coordinator._async_refresh_doorstations), which warns about failures, so they are
+        logged at debug level here. A lapsed admin session is logged in again once. A page aiocomexio takes for a
+        changed one (ComexioDataError) is a failure here, not an empty result.
+        """
+        try:
+            return await self._system_info_part(lambda: self.client.get_doorstations(), [])  # noqa: PLW0108
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "Doorstations not fetched")
+            return None, SYSTEM_INFO_CERTIFICATE_CHANGED
+
+    async def get_doorstation_snapshot(self, camera_id: int) -> tuple[bytes | None, str | None]:
+        """The current image of a Doorstation camera as JPEG bytes, or None and the failure cause.
+
+        The first frame of the camera's stream, read with the admin session (see aiocomexio's
+        get_doorstation_snapshot). The caller logs a failure, so it is only debug-logged here. A lapsed admin session
+        is logged in again once.
+        """
+        try:
+            return await self._system_info_part(
+                lambda: self.client.get_doorstation_snapshot(camera_id),
+                [],
+            )
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "Doorstation snapshot not fetched")
             return None, SYSTEM_INFO_CERTIFICATE_CHANGED
 
     def _load_config_names(self) -> tuple[str, str, str, str, str]:

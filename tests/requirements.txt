@@ -6,6 +6,11 @@ homeassistant==2026.10.4
 # certifi: homeassistant only sets a floor (>=2021.5.30); this one keeps out the emSign roots with
 # compromised intermediates (PYSEC-2026-4320), so OSV-Scanner resolves a fixed version too.
 certifi>=2026.10.19
+# camera.py imports homeassistant.components.camera, which imports the stream component: its requirements
+# (pins of homeassistant 2026.10.4, components/stream/manifest.json and camera/manifest.json) must be importable.
+av==19.0.0
+numpy==2.3.2
+PyTurboJPEG==1.8.3
 # The integration's own runtime library (manifest.json requirements), kept at the same pin.
 aiocomexio==0.14.1
 # Cognitive complexity before the push (tests/unit/test_cognitive_complexity.py, SonarCloud S3776).

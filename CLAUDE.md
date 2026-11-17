@@ -109,6 +109,7 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 | `repairs.py` | HA Repairs flow — lets user pick audit fix action from the UI |
 | `config_flow.py` | Config entry setup wizard with auto-discovery (DNS `comexio.*`) |
 | `options_flow.py` | Reconfigure existing entry (credentials, schema, intervals, flags) |
+| `camera.py` | One still-image `camera` per Doorstation (`get_doorstation_snapshot`, admin session), on its extension's device; `doorstation.py` keeps the Doorstations the polls report (`DoorstationTracker`: failed reads and up to `DOORSTATION_EMPTY_POLLS_BEFORE_DROP`-1 empty polls keep the cameras) |
 | `sensor.py` | Analog IOs as `SensorEntity` + `ComexioSyncStatusSensor` (diagnostic) |
 | `switch.py` | Digital markers/IOs as switches |
 | `binary_sensor.py` | Digital IOs as binary sensors |
@@ -160,6 +161,7 @@ Column plans — IO extensions (`{prefix} - IO [A,B]`, option `logikplan_io_exte
 | IO entity | `comexio_{server_id}_{ext_name}_{identifier}` | `{domain}.{server_id}_{ext_name}_{identifier}` |
 | 1-Wire sensor (read-only) | `comexio_{server_id}_onewire_{address}` (lowercase) | `{sensor|binary_sensor}.{server_id}_onewire_{address}` |
 | 1-Wire problem sensor | `comexio_{server_id}_onewire_problem` | `binary_sensor.{server_id}_onewire_problem` |
+| Doorstation camera (still image) | `comexio_{server_id}_doorstation{ext_id}_camera` | `camera.{server_id}_doorstation{ext_id}_camera` |
 | Function plan run state | `comexio_{server_id}_fub{id}` | `sensor.{server_id}_fub{id}` |
 | Orphaned backups sensor | `comexio_{server_id}_orphaned_backups` | `sensor.{server_id}_orphaned_backups` |
 | Function plan problem sensor | `comexio_{server_id}_managed_plans_problem` | `binary_sensor.{server_id}_managed_plans_problem` |

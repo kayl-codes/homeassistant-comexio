@@ -215,6 +215,13 @@ ONEWIRE_DATA_KEY = "onewire"
 ONEWIRE_PREFIX_TEMPERATURE = "OT"
 ONEWIRE_PREFIX_HUMIDITY = "OH"
 
+# Doorstation cameras: the IO home page that lists the Doorstations reads as "none" when it changes (aiocomexio
+# cannot tell the two apart), so the known cameras stay until this many polls in a row have shown none.
+DOORSTATION_EMPTY_POLLS_BEFORE_DROP = 3
+# A camera snapshot is the first frame of the stream, which Comexio opens for each request (it serves one request at
+# a time): a frame younger than this is handed to a second request instead of opening the stream again.
+DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC = 5.0
+
 # parse_config() output key of the stored Web-IO commands whose name an earlier command already
 # has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
 # as orphans, so one sync deletes them all.
@@ -1081,6 +1088,11 @@ MOBILE_APP_NOTIFICATION_ACTION_EVENT = "mobile_app_notification_action"
 def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
     """unique_id of a function plan's run-state binary sensor — the plan id only, never its name."""
     return f"comexio_{server_id}_fub{fub_id}".lower()
+
+
+def doorstation_camera_unique_id(server_id: str, ext_id: int | str) -> str:
+    """unique_id of a Doorstation's camera — the extension id only, never its name."""
+    return f"comexio_{server_id}_doorstation{ext_id}_camera".lower()
 
 
 def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:

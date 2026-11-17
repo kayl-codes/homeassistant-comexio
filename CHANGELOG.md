@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### ✨ New Features
+- **Doorstation camera:** every Doorstation of the IO-Server gets a `camera` entity (`camera.<instance>_doorstation<extension id>_camera`) on the device of its extension, next to its IOs (`PIR1`, `DI1`–`DI3`, ...). It shows a still image: the first frame of the camera's stream, read with the admin session and handed out again for 5 s, so several viewers cost one read. There is no live stream. The Doorstations are read from the IO home page with the configuration poll; a failed read or a page that shows none keeps the known cameras (unavailable after 3 empty polls in a row, never removed).
+
 ### 🐛 Bug Fixes & Refactoring
 - **The switch-over to per-command webhook ids no longer ends nowhere:** an entry that never synced, on a Comexio that showed no Web-IO device at all in the last read, now has the old webhook id switched off at the nightly run instead of re-checking it every night for ever. The two cases that still keep it on now raise a repair instead of a log line only: **"Comexio: Web-IO commands cannot be moved to their own webhook ID"** (commands the run cannot rewrite because Comexio gave no command or device ID, named in the repair) and **"Comexio: restart the Comexio server"** (shown beside the existing notification). Both disappear on their own once the cause is gone or the old id is off.
 - **Fresh install without a Web-IO device no longer leaves the old webhook id open:** the old webhook id `comexio_<server_id>` is now switched off at the first poll of a new entry whose Comexio has no Web-IO device at all, so it no longer accepts marker or IO values on a guessable path until the first sync. An entry that has polled before, a Comexio that already holds Web-IO devices, and an entry whose stored Comexio host changed keep the old id for the nightly migration as before (#307).

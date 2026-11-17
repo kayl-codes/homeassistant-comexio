@@ -93,6 +93,7 @@ PLATFORMS = [
     "binary_sensor",
     "select",
     "image",
+    "camera",
     "update",
     "cover",
     "light",
@@ -562,6 +563,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         }
     active_unique_ids |= plan_uids
 
+    active_unique_ids |= _doorstation_camera_uids(ent_reg, entry, server_id)
+
     # Bus-Load-Watchdog diagnostic sensors (always active, independent of extension/marker state)
     active_unique_ids.update(
         {
@@ -759,6 +762,22 @@ def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: 
     entry.async_on_unload(
         hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, coordinator.async_handle_notification_action)
     )
+
+
+def _doorstation_camera_uids(ent_reg: er.EntityRegistry, entry: ConfigEntry, server_id: str) -> set[str]:
+    """The unique_ids of the Doorstation cameras (camera.py) that are registered: the orphan cleanup keeps them.
+
+    A camera turns unavailable while the IO home page shows no Doorstation (a changed page reads like that, and a
+    page that is only partly understood would drop some), so its registry entry stays and the camera comes back
+    with the page. The cleanup never decides that a Doorstation is gone for good: the camera of a removed one stays
+    unavailable until it is deleted by hand, which costs nothing, where a wrong removal would cost its history.
+    """
+    prefix = f"comexio_{server_id}_doorstation".lower()
+    return {
+        e.unique_id
+        for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+        if e.domain == "camera" and e.unique_id.startswith(prefix)
+    }
 
 
 def _quickbus_entity_uids(

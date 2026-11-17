@@ -354,6 +354,11 @@
       "function_plan_auto_start_user": {
         "name": "Inicio automático de planes (planes de usuario)"
       }
+    },
+    "camera": {
+      "doorstation_camera": {
+        "name": "Cámara"
+      }
     }
   },
   "issues": {

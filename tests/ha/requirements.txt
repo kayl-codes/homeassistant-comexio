@@ -4,6 +4,11 @@
 # homeassistant==2026.10.4, the same version as tests/requirements.txt (which the CI mypy job type-checks against).
 # Runs on Linux only (CI, WSL): pytest tests/ha -o asyncio_mode=auto
 pytest-homeassistant-custom-component==0.13.375
+# camera.py imports homeassistant.components.camera, which imports the stream component; the test plugin installs
+# no integration requirements, so these (pins of homeassistant 2026.10.4) must be there.
+av==19.0.0
+numpy==2.3.2
+PyTurboJPEG==1.8.3
 # The integration's own runtime requirements (manifest.json), at the same pins.
 aiocomexio==0.14.1
 idna>=3.15
