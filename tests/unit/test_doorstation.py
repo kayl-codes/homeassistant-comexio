@@ -11,13 +11,14 @@ from aiocomexio.doorstation import Doorstation
 from homeassistant.exceptions import ConfigEntryAuthFailed
 import pytest
 
-from custom_components.comexio import _doorstation_camera_uids
+from custom_components.comexio import _doorstation_entity_uids
 from custom_components.comexio.api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI
 from custom_components.comexio.camera import ComexioDoorstationCamera, _DoorstationCameraSync
 from custom_components.comexio.const import (
     DOORSTATION_EMPTY_POLLS_BEFORE_DROP,
     DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC,
     doorstation_camera_unique_id,
+    doorstation_doorbell_unique_id,
 )
 from custom_components.comexio.coordinator import ComexioCoordinator
 from custom_components.comexio.doorstation import DoorstationTracker, doorstation_ext_name
@@ -565,20 +566,25 @@ def test_only_the_named_doorstation_gets_a_camera_and_no_data_yet_is_no_failure(
 
 
 @pytest.mark.parametrize("server_id", [SERVER, "IOSrv1"])
-def test_the_orphan_cleanup_keeps_every_registered_camera_of_the_server(server_id: str) -> None:
-    registered = [
+def test_the_orphan_cleanup_keeps_every_registered_camera_and_doorbell_of_the_server(server_id: str) -> None:
+    cameras = [
         SimpleNamespace(domain="camera", unique_id=doorstation_camera_unique_id(server_id, ext_id))
         for ext_id in (14, 15)
+    ]
+    bells = [
+        SimpleNamespace(domain="event", unique_id=doorstation_doorbell_unique_id(server_id, 14, identifier))
+        for identifier in ("DI1", "DI2")
     ]
     others = [
         SimpleNamespace(domain="sensor", unique_id=f"comexio_{server_id}_doorstation14_other".lower()),
         SimpleNamespace(domain="camera", unique_id="comexio_other_doorstation14_camera"),
+        SimpleNamespace(domain="event", unique_id="comexio_other_doorstation14_di1_doorbell"),
     ]
 
-    with patch("custom_components.comexio.er.async_entries_for_config_entry", return_value=registered + others):
-        uids = _doorstation_camera_uids(MagicMock(), MagicMock(entry_id="entry"), server_id)
+    with patch("custom_components.comexio.er.async_entries_for_config_entry", return_value=[*cameras, *bells, *others]):
+        uids = _doorstation_entity_uids(MagicMock(), MagicMock(entry_id="entry"), server_id)
 
-    assert uids == {doorstation_camera_unique_id(server_id, ext_id) for ext_id in (14, 15)}
+    assert uids == {entity.unique_id for entity in (*cameras, *bells)}
 
 
 # --- api and poll -------------------------------------------------------------------------------------------------

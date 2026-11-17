@@ -4,7 +4,7 @@ import asyncio
 import copy
 import logging
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError
 from homeassistant.exceptions import HomeAssistantError
@@ -12,7 +12,7 @@ import pytest
 
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.binary_sensor import ComexioBinarySensor
-from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY
+from custom_components.comexio.const import QUICKBUS_IO_DATA_KEY, io_push_signal
 from custom_components.comexio.coordinator import (
     ComexioCoordinator,
     _io_identity,
@@ -49,6 +49,7 @@ def _coordinator(
     io_states = dict(io_states or {})
     attrs: dict[str, Any] = {
         "api": api,
+        "hass": MagicMock(),
         "server_id": "iosrv1",
         "marker_states": {},
         "knx_states": {},
@@ -949,6 +950,23 @@ def test_only_a_webhook_push_counts_as_one(api: ComexioAPI) -> None:
 
     assert (own_write, coordinator.io_push_count("12"), coordinator.io_push_count("11")) == (0, 2, 0)
     assert coordinator._io_push_counts == {"12": 2}
+
+
+def test_only_a_webhook_push_rings_the_event_entities_of_an_io(api: ComexioAPI) -> None:
+    """The doorbell event rings on a push, never on HA's own write, a junk push or an unknown IO."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+
+    with patch("custom_components.comexio.coordinator.async_dispatcher_send") as send:
+        coordinator.update_io_by_name("BASE", "Q1", 1, pushed=False)
+        coordinator.update_io_by_name("BASE", "ZZ9", 1)  # unknown IO
+        assert send.call_count == 0
+        coordinator.update_io_by_name("BASE", "Q1", 1)
+        coordinator.update_io_by_name("BASE", "Q1", "nan")  # junk: the signal carries "unknown", which never rings
+
+    signal = io_push_signal("iosrv1", "BASE", "Q1")
+    assert send.call_args_list == [call(coordinator.hass, signal, 1.0), call(coordinator.hass, signal, None)]
 
 
 def _io_switch(coordinator: Any) -> ComexioIOSwitch:

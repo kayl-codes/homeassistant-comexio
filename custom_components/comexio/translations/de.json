@@ -359,6 +359,18 @@
       "doorstation_camera": {
         "name": "Kamera"
       }
+    },
+    "event": {
+      "doorbell": {
+        "name": "Klingel {button}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Klingeln"
+            }
+          }
+        }
+      }
     }
   },
   "issues": {

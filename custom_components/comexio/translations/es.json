@@ -359,6 +359,18 @@
       "doorstation_camera": {
         "name": "Cámara"
       }
+    },
+    "event": {
+      "doorbell": {
+        "name": "Timbre {button}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Llamada"
+            }
+          }
+        }
+      }
     }
   },
   "issues": {

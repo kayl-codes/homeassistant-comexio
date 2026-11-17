@@ -72,7 +72,7 @@ These are offline on the test installation, so **no live value or write has ever
 | **Multibridge** | `Q1` | % | `number` 0–100 | ok |
 | | `I1`, `OVC1`, `OTMP` | digital | `binary_sensor` | ok |
 | | `QI1` | W | `sensor` power | ok |
-| **Doorstation** | `PIR1`, `DI1`–`DI3` | digital | `binary_sensor` | ok |
+| **Doorstation** | `PIR1`, `DI1`–`DI3` | digital | `binary_sensor`; `DI1`–`DI3` also as doorbell `event` | ok |
 | | `NameLED1` | digital | `switch` | ok |
 | | `Screenshot1` | 131 | `binary_sensor` | read-only, although Comexio writes it |
 | **Touchpanel**, **Touchpanel-2G** | `DisplayOn1` | digital | `switch` | ok |
@@ -182,7 +182,7 @@ Diese sind auf der Testinstallation offline, deshalb **wurde noch nie ein Live-W
 | **Multibridge** | `Q1` | % | `number` 0–100 | ok |
 | | `I1`, `OVC1`, `OTMP` | digital | `binary_sensor` | ok |
 | | `QI1` | W | `sensor` Leistung | ok |
-| **Doorstation** | `PIR1`, `DI1`–`DI3` | digital | `binary_sensor` | ok |
+| **Doorstation** | `PIR1`, `DI1`–`DI3` | digital | `binary_sensor`; `DI1`–`DI3` zusätzlich als Klingel-`event` | ok |
 | | `NameLED1` | digital | `switch` | ok |
 | | `Screenshot1` | 131 | `binary_sensor` | nur lesbar, obwohl Comexio ihn beschreibt |
 | **Touchpanel**, **Touchpanel-2G** | `DisplayOn1` | digital | `switch` | ok |

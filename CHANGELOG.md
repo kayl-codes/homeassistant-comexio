@@ -8,6 +8,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 ## [Unreleased]
 
 ### ✨ New Features
+- **Doorstation doorbell:** the bell buttons `DI1`–`DI3` of every Doorstation get an `event` entity of the device class `doorbell` (`event.<instance>_doorstation<extension id>_di<n>_doorbell`) on the device of its extension, next to the binary sensor of the same button. It rings (event type `ring`) once for every webhook push that reports the button down, so an automation gets the press itself, also when it ends between two reads of the binary sensor. A poll or HA's own write never rings. Comexio pushes an IO when its value changes, so a duplicate push of the value 1 would ring twice. Not yet confirmed on a real doorbell. The entity is unavailable with its extension (offline) or a Doorstation the polls no longer report.
 - **Doorstation camera:** every Doorstation of the IO-Server gets a `camera` entity (`camera.<instance>_doorstation<extension id>_camera`) on the device of its extension, next to its IOs (`PIR1`, `DI1`–`DI3`, ...). It shows a still image: the first frame of the camera's stream, read with the admin session and handed out again for 5 s, so several viewers cost one read. There is no live stream. The Doorstations are read from the IO home page with the configuration poll; a failed read or a page that shows none keeps the known cameras (unavailable after 3 empty polls in a row, never removed).
 
 ### 🐛 Bug Fixes & Refactoring

@@ -240,6 +240,7 @@ from .const import (
     io_plan_member_origins,
     io_plan_overflow,
     io_plan_shifted,
+    io_push_signal,
     one_line,
     onewire_entity_name,
     parse_ignored_ids,
@@ -5363,6 +5364,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
+            if pushed:
+                # The event entities (a doorstation's bell) ring on a push, never on a poll or on HA's own write.
+                async_dispatcher_send(
+                    self.hass, io_push_signal(self.server_id, ext_name, identifier), self.io_states.get(io["id"])
+                )
             self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         else:
             self._log_unknown_webhook_io(
