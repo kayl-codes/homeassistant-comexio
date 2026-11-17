@@ -191,6 +191,7 @@ from .const import (
     WEBHOOK_MIGRATION_PENDING,
     WEBHOOK_MIGRATION_SAVE_EVERY,
     WEBHOOK_MIGRATION_SKIPPED,
+    WEBHOOK_RESTORE_ATTEMPTS,
     WEBHOOK_STUCK_LISTED,
     WEBHOOK_UNKNOWN_IO_CAP_LOG_MSG,
     WEBHOOK_UNKNOWN_IO_KEY_MAX_LEN,
@@ -1562,6 +1563,13 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Set while _async_update_data runs: its $Fubs read brings the run states anyway, and
         # Comexio serializes requests, so the run-state poll stays out of its way.
         self._full_poll_running = False
+        # Number of _async_update_data runs under way, their awaits after the fetch included (settling the old webhook
+        # id, saving the config): until the last one returns, the scrape flags already describe data that `self.data`
+        # does not hold yet. A count, not a flag: a direct async_refresh() can overlap the scheduled poll.
+        self._polls_open = 0
+        # True once a poll started while another was under way, until a poll starts alone: the flags then come from
+        # the poll that fetched last, `self.data` from the one that returned last, and the two need not be the same.
+        self._poll_overlap = False
         # Set while polls keep the last data because another certificate answers; the warning goes out once.
         self._reading_through_certificate_change = False
         # The config of the last scraped poll, saved for a setup that meets another certificate (#250), and whether
@@ -1575,8 +1583,13 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # True from the seed of a setup that found no saved config at all (an entry that never had a scraped poll)
         # until a poll decided about the old webhook id (see _async_settle_legacy_webhook_id).
         self._never_polled = False
+        # True once the migration's repairs were raised again after the start (see
+        # _restore_webhook_migration_notices): they are not persistent, so a restart of Home Assistant drops them.
+        self._webhook_notices_restored = False
+        self._webhook_restore_failures = 0
         # Number of this entry's own Web-IO devices in the last poll's $WebDevices; None while it was not read.
         self._own_web_device_count: int | None = None
+
         # Bus-Load-Watchdog: rolling sample buffer feeding rise/emergency detection (see
         # _evaluate_bus_load_watchdog), trimmed to the longer of the two detection windows.
         # The lock also blocks a concurrent cascade and emergency reboot from overlapping.
@@ -1598,6 +1611,16 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
+        self._poll_overlap = bool(self._polls_open)
+        self._polls_open += 1
+        try:
+            return await self._async_run_update()
+        finally:
+            # No await between this and Home Assistant storing the returned data in `self.data`.
+            self._polls_open -= 1
+
+    async def _async_run_update(self) -> dict[str, Any]:
+        """Body of _async_update_data, run while _polls_open counts it."""
         self._full_poll_running = True
         # Only this poll's config may be saved, never one a failed poll left behind.
         self._scraped_config = None
@@ -1700,7 +1723,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
 
     async def _async_fetch_and_audit(self) -> dict[str, Any]:
-        """Body of _async_update_data, run while _full_poll_running is set."""
+        """Fetch and audit part of _async_run_update, run while _full_poll_running is set."""
         self._last_poll_scraped = False
         self._polled_plan_ids = None
         if self.in_sync:
@@ -6322,6 +6345,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # would be on again, so do not run on a state that is lost (a cancel after the write went through
                 # leaves the store off and memory on: the old id is gone at the next start, the intended end).
                 security.legacy_enabled = True
+                # An uptime reading during the save saw the old id off and counted the restore as decided.
+                self._webhook_notices_restored = False
+                # A restore that gave up (or failed) before starts over with its full number of attempts.
+                self._webhook_restore_failures = 0
         return saved
 
     def _dismiss_webhook_restart(self) -> None:
@@ -6363,6 +6390,67 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "at the next nightly run after that.",
             title="Comexio: restart needed",
             notification_id=webhook_restart_notification_id(self.server_id),
+        )
+
+    def _restore_webhook_migration_notices(self) -> None:
+        """After a start, raise again what the last nightly run asked of the user, once.
+
+        The two repairs and the notification are not persistent, so a restart of Home Assistant drops them while
+        the old id stays on, and they would come back only at the next 01:30 run. This runs with the first uptime
+        reading that gives Comexio's boot time (before that `_restart_pending` would take an unknown boot time for
+        a restart still to come) and only reports: nothing is rewritten, verified or switched off here, that stays
+        with the nightly run, and the same stocktake that run ends with decides what is raised. Nothing is decided
+        from a poll that did not scrape the config (its `webio_commands` may be empty or incomplete, which would
+        take a stuck repair away or raise a restart request wrongly): the next uptime reading tries again, and
+        so it does after a failure, as the run counts as done only once it went through. A start from the saved
+        config runs no uptime reading (the entry is read only and writes nothing, so there is no migration to
+        report on); the full setup that follows does.
+        """
+        security = self.api.webhook_security
+        if self._webhook_notices_restored or self.unloading or security is None:
+            return
+        if not security.legacy_enabled:
+            # Decided: the old id is off, nothing is left to ask for. A run that persisted that and ended before it
+            # took its notices back (an unload cancelled it) leaves them standing in this process: take them back.
+            self._clear_webhook_migration_notices()
+            self._webhook_notices_restored = True
+            return
+        if self.system_info.boot_time is None or not self._webhook_stocktake_readable(security):
+            _LOGGER.debug("[%s] The webhook migration notices wait for a readable stocktake", self.server_id)
+            return
+        unmigrated = self._unmigrated_webhook_commands(security)
+        self._report_unrewritable_webhooks(unmigrated)
+        if not unmigrated and self._restart_pending(security):
+            self._notify_webhook_restart()
+        else:
+            # A reload of the entry (not only a restart) comes through here, too: a request to restart Comexio
+            # that an earlier run raised is out of date once a command is left to rewrite or Comexio restarted.
+            self._dismiss_webhook_restart()
+        self._webhook_notices_restored = True
+
+    def _webhook_stocktake_readable(self, security: WebhookSecurity) -> bool:
+        """True when `self.data` is a committed, complete read of the Web-IO side, so a stocktake may rely on it.
+
+        Not while a poll is under way, up to the moment it returns (it sets `_last_poll_scraped` and
+        `_own_web_device_count` before it commits its result, and keeps awaiting afterwards, so they would belong to
+        data not yet in `self.data`), nor after polls that overlapped (the flags then belong to the poll that fetched
+        last, the data to the one that returned last) until a poll ran alone, nor while a sync changes the Web-IO
+        commands (the reload that closes it starts the restore again; `in_sync` is cleared before that reload, so
+        the sync lock, which is held until the reload is through, counts too), nor after a poll that failed.
+        `$WebDevices` must have been read (without it the commands of our classes are not found), and a ledger that
+        names migrated commands next to no stored command at all means the commands were not decoded: either would
+        take a stuck repair away and dismiss a restart request that is due.
+        """
+        return (
+            bool(self.data)
+            and self.last_update_success
+            and not self._polls_open
+            and not self._poll_overlap
+            and not self.in_sync
+            and not self._sync_lock.locked()
+            and self._last_poll_scraped
+            and self._own_web_device_count is not None
+            and not (security.migrated and not self.data.get("webio_commands"))
         )
 
     async def async_force_webio_range_check(self) -> dict[str, int]:
@@ -6412,6 +6500,22 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Fetch the uptime into self.system_info and notify its entities."""
         reading = await self.api.get_system_info(storage=False)
         self._note_system_info_dropped(self.system_info.apply_uptime(reading.uptime, dt_util.utcnow()), reading)
+        try:
+            self._restore_webhook_migration_notices()
+        except Exception:
+            # The uptime is applied already; a failing restore stays undone and is tried again at the next reading,
+            # WEBHOOK_RESTORE_ATTEMPTS times (the nightly run raises what is due anyway), and must not end this task
+            # as an unretrieved exception.
+            self._webhook_restore_failures += 1
+            gave_up = self._webhook_restore_failures >= WEBHOOK_RESTORE_ATTEMPTS
+            self._webhook_notices_restored = gave_up
+            _LOGGER.exception(
+                "[%s] The webhook migration notices could not be raised again (attempt %d of %d%s)",
+                self.server_id,
+                self._webhook_restore_failures,
+                WEBHOOK_RESTORE_ATTEMPTS,
+                ", giving up: the nightly run raises what is due" if gave_up else "",
+            )
 
     async def _async_refresh_system_info_storage(self) -> None:
         """Fetch free storage and time server settings; called by each config poll that fetched.

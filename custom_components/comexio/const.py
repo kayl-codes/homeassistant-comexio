@@ -813,6 +813,9 @@ WEBHOOK_MIGRATION_SAVE_EVERY = 20  # commands between two saves of the ledger
 ISSUE_WEBHOOK_COMMANDS_STUCK = "webhook_commands_stuck"
 ISSUE_WEBHOOK_RESTART = "webhook_restart_needed"
 WEBHOOK_STUCK_LISTED = 10  # command names a log line or the repair of the stuck commands names
+# Uptime readings that try to raise the migration's repairs again after a start (one every UPTIME_POLL_INTERVAL_SEC);
+# a restore that failed every time leaves them to the nightly run instead of logging a traceback for as long as it runs.
+WEBHOOK_RESTORE_ATTEMPTS = 3
 
 
 def webhook_restart_notification_id(server_id: str) -> str:

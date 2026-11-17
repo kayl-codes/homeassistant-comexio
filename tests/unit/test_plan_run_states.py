@@ -305,6 +305,8 @@ class _FakeCoordinator(SimpleNamespace):
     _schedule_full_setup = ComexioCoordinator._schedule_full_setup
     _async_full_setup = ComexioCoordinator._async_full_setup
     _keep_data_through_certificate_change = ComexioCoordinator._keep_data_through_certificate_change
+    _async_run_update = ComexioCoordinator._async_run_update  # _async_update_data hands its body to it
+    _polls_open = 0  # and counts itself in it
     _async_save_config = ComexioCoordinator._async_save_config
     _async_save_config_or_keep_onewire_status = ComexioCoordinator._async_save_config_or_keep_onewire_status
     _async_settle_legacy_webhook_id = ComexioCoordinator._async_settle_legacy_webhook_id

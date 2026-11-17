@@ -209,6 +209,7 @@ def _coordinator(info: SystemInfo | None, uptime: timedelta | None) -> ComexioCo
     coordinator.system_info = SystemInfoState()
     coordinator.unloading = False
     coordinator._system_info_task = None
+    coordinator._webhook_notices_restored = True  # not what these tests are about (see test_webhook_migration_end)
     return coordinator
 
 
