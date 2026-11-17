@@ -190,8 +190,9 @@ class WebhookSecurity:
                     self.server_id,
                 )
                 # The recorded host change is no part of the secret: an entry that has not polled yet must not
-                # lose it with the ledger (the new host's empty device list would switch the old id off).
-                self.host_changed = isinstance(stored, dict) and stored.get(_KEY_HOST_CHANGED) is True
+                # lose it with the ledger (the new host's empty device list would switch the old id off). A host
+                # that differs from the stored one counts the same, as in the intact ledger (_async_adopt_host).
+                self.host_changed = self._host_change_in_lost_ledger(stored)
             self.secret = webhook.async_generate_id()
             await self._async_save()
             return
@@ -211,6 +212,15 @@ class WebhookSecurity:
             # switched off after a Comexio restart that happens from here on.
             self.last_write = dt_util.utcnow()
         await self._async_adopt_host(stored.get(_KEY_HOST))
+
+    def _host_change_in_lost_ledger(self, stored: Any) -> bool:
+        """Whether a ledger without a usable secret still tells that the host changed (recorded, or another host)."""
+        if not isinstance(stored, dict):
+            return False
+        stored_host = stored.get(_KEY_HOST)
+        return stored.get(_KEY_HOST_CHANGED) is True or (
+            bool(self.host) and stored_host is not None and stored_host != self.host
+        )
 
     async def _async_adopt_host(self, stored_host: Any) -> None:
         """Bind the ledger to the host it was written for; another host may still hold commands on the old id.

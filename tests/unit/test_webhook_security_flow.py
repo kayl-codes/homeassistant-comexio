@@ -1126,16 +1126,83 @@ def test_a_recorded_host_change_stays_recorded_when_the_host_is_the_same_again(m
     [
         pytest.param({"secret": 5, "host_changed": True}, id="secret-unreadable"),
         pytest.param({"host_changed": True}, id="secret-missing"),
+        pytest.param({"secret": 5, "host": "old.local"}, id="another-host-without-the-flag"),
+        pytest.param({"secret": 5, "host": ""}, id="empty-host-recorded-counts-like-in-an-intact-ledger"),
     ],
 )
-def test_a_recorded_host_change_survives_a_lost_secret(monkeypatch: pytest.MonkeyPatch, stored: dict) -> None:
-    """(silent-failure-hunter, #307) A new secret does not wipe the host change: the old id must stay on."""
+def test_a_host_change_survives_a_lost_secret(monkeypatch: pytest.MonkeyPatch, stored: dict) -> None:
+    """(silent-failure-hunter, Sourcery, #307) A new secret does not wipe the host change: the old id must stay on."""
     security = _hosted(monkeypatch, stored, "new.local")
 
     _run(security.async_load())
 
     assert security.host_changed is True
     assert security._store.stored["host_changed"] is True
+    # The reset ledger and the old id belong together: the new secret is in, the old id is on, nothing is migrated.
+    assert security.secret
+    assert security.legacy_enabled
+    assert not security.migrated
+
+
+def test_a_host_change_found_with_a_lost_secret_is_still_there_after_a_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    security = _hosted(monkeypatch, {"secret": 5, "host": "old.local"}, "new.local")
+    _run(security.async_load())
+
+    # The stored host is the new one by now: only the persisted flag can tell the change on the next load.
+    again = _hosted(monkeypatch, security._store.stored, "new.local")
+    _run(again.async_load())
+
+    assert again.host_changed is True
+    assert again.legacy_enabled
+
+
+@pytest.mark.parametrize(
+    ("stored", "flag"),
+    [
+        pytest.param({"secret": 5, "host": "old.local"}, False, id="another-host-but-no-host-to-compare"),
+        pytest.param(
+            {"secret": 5, "host": "old.local", "host_changed": True}, True, id="the-flag-survives-without-a-host"
+        ),
+    ],
+)
+def test_a_lost_secret_of_an_entry_without_a_host_keeps_only_the_recorded_flag(
+    monkeypatch: pytest.MonkeyPatch, stored: dict, flag: bool
+) -> None:
+    security = _hosted(monkeypatch, stored, "")
+
+    _run(security.async_load())
+
+    assert security.host_changed is flag
+
+
+@pytest.mark.parametrize(
+    "stored", [pytest.param(["x"], id="list"), pytest.param("garbage", id="str"), pytest.param(5, id="int")]
+)
+def test_a_store_that_is_no_dict_is_reported_and_is_no_host_change(
+    monkeypatch: pytest.MonkeyPatch, stored: object
+) -> None:
+    security = _hosted(monkeypatch, stored, "new.local")
+
+    _run(security.async_load())
+
+    assert security.host_changed is False
+    assert security.secret
+
+
+@pytest.mark.parametrize(
+    "stored",
+    [
+        pytest.param({"secret": 5, "host": "new.local"}, id="same-host"),
+        pytest.param({"secret": 5}, id="no-host-recorded"),
+        pytest.param({"secret": 5, "host": None}, id="host-recorded-as-none"),
+    ],
+)
+def test_a_lost_secret_alone_is_no_host_change(monkeypatch: pytest.MonkeyPatch, stored: dict) -> None:
+    security = _hosted(monkeypatch, stored, "new.local")
+
+    _run(security.async_load())
+
+    assert security.host_changed is False
 
 
 def test_a_recorded_host_change_is_read_back_for_an_entry_without_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
