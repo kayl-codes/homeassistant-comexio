@@ -181,6 +181,15 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   keeps receiving (webhook pushes) — the poll that normally corrects it does not run there, so the flag would
   otherwise stay stale for good. Flag a restored flag that only the poll can clear (#260:
   `coordinator._store_pushed_io_value`).
+- **State that guards a persisted decision is persisted itself:** a flag or marker that keeps a persisted decision from
+  being taken (e.g. `WebhookSecurity.host_changed`, which keeps the old webhook id on) belongs in the same store as
+  that decision and is written by the same save. An instance attribute is gone after a restart that comes before the
+  next check, and a value recomputed at load time compares against what the earlier run already overwrote (the host
+  was saved as the new one, so the next load sees no change). Check the paths that rebuild the store, too: a lost or
+  unreadable secret, a reset ledger. Flag a guard that exists only in memory, or a save or reset path that drops it
+  (#307: the flag was in memory only, and the lost-secret branch dropped it). A field that only gates a decision
+  which is recomputed from persisted inputs on every run (`coordinator._never_polled`) may stay in memory, do not flag
+  it.
 - **User-entered URLs are masked before logging:** a URL the user types (an HA address, a push target) can carry
   credentials as `user:password@`. Before it goes into a log line, a notification or a repair text, mask the user
   info (`ha_address._without_user_info`). Flag new code that logs or shows such a URL unmasked (#222).
