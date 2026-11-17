@@ -51,6 +51,7 @@ def _coordinator(
         "api": api,
         "hass": MagicMock(),
         "server_id": "iosrv1",
+        "config_entry": MagicMock(options={}),
         "marker_states": {},
         "knx_states": {},
         "io_states": io_states,

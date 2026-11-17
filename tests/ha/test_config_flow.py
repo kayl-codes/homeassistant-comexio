@@ -17,6 +17,7 @@ from custom_components.comexio.const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_HOST,
+    CONF_IGNORED_IO_TYPES,
     CONF_IGNORED_KNX,
     CONF_IGNORED_MARKERS,
     CONF_PASSWORD,
@@ -24,6 +25,7 @@ from custom_components.comexio.const import (
     CONF_SERVER_ID,
     CONF_USERNAME,
     DEFAULT_HOST,
+    DEFAULT_IGNORED_IO_TYPES,
     DOMAIN,
     KNOWN_DOMAINS,
 )
@@ -84,7 +86,8 @@ async def test_user_flow_creates_entry(hass: HomeAssistant, mock_comexio_api: li
     assert result["title"] == f"Comexio iosrv2 ({HOST})"
     # The rest of data are the form's defaults for the fields the user left alone.
     assert {**USER_INPUT, CONF_SERVER_ID: "iosrv2", "scan_interval": 15}.items() <= result["data"].items()
-    assert result["options"] == {}  # nothing typed: nothing ignored
+    # Nothing typed: no ID ignored, and the IO types field emptied (HA sends no key for it), so none left out.
+    assert result["options"] == {CONF_IGNORED_IO_TYPES: []}
     assert len(mock_comexio_api) == 1  # the ignore lists step does not log in again
 
 
@@ -112,14 +115,16 @@ async def test_ignore_lists_step_asks_only_for_imported_categories(
     """The step shows the ignore list of every imported category, and only those; typed lists become options."""
     result = await _submit(hass, {**USER_INPUT, **imports})
     assert result["step_id"] == "ignore_lists"
-    assert _form_fields(result) == fields
+    assert _form_fields(result) == [*fields, CONF_IGNORED_IO_TYPES]  # the IOs are imported by default
 
-    result = await hass.config_entries.flow.async_configure(result["flow_id"], dict.fromkeys(fields, "3; 1-2, 5"))
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {**dict.fromkeys(fields, "3; 1-2, 5"), CONF_IGNORED_IO_TYPES: ["qi", "TL", "Qi"]}
+    )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     # Normalised as in the options flow; a stored ignore list belongs in options, where the coordinator reads it.
-    assert result["options"] == dict.fromkeys(fields, "1-2,3,5")
-    assert not set(fields) & result["data"].keys()
+    assert result["options"] == {**dict.fromkeys(fields, "1-2,3,5"), CONF_IGNORED_IO_TYPES: ["QI", "TL"]}
+    assert not {*fields, CONF_IGNORED_IO_TYPES} & result["data"].keys()
 
 
 @pytest.mark.parametrize("knx_field", [{CONF_IGNORED_KNX: "  "}, {}], ids=["blank", "absent"])
@@ -135,16 +140,50 @@ async def test_an_empty_ignore_list_is_not_stored(hass: HomeAssistant, knx_field
         result["flow_id"], {CONF_IGNORED_MARKERS: "M7", **knx_field}
     )
 
-    assert result["options"] == {CONF_IGNORED_MARKERS: "7"}
+    assert result["options"] == {CONF_IGNORED_MARKERS: "7", CONF_IGNORED_IO_TYPES: []}
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
-async def test_without_markers_and_knx_the_entry_is_created_at_once(hass: HomeAssistant) -> None:
-    """No imported category has an ignore list: no second step."""
-    result = await _submit(hass, {**USER_INPUT, "import_markers": False, "import_knx": False})
+async def test_without_markers_knx_and_ios_the_entry_is_created_at_once(hass: HomeAssistant) -> None:
+    """Nothing imported that has an ignore list or IO types: no second step."""
+    result = await _submit(hass, {**USER_INPUT, "import_markers": False, "import_knx": False, "import_ios": False})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
     assert result["options"] == {}
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_the_ios_alone_lead_to_the_step_with_the_io_types(hass: HomeAssistant) -> None:
+    """With only the IOs imported the step asks for the IO types and for nothing else (#317)."""
+    result = await _submit(hass, {**USER_INPUT, "import_markers": False, "import_knx": False})
+
+    assert result["step_id"] == "ignore_lists"
+    assert _form_fields(result) == [CONF_IGNORED_IO_TYPES]
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_the_io_types_start_with_the_defaults_and_the_form_value_is_saved(hass: HomeAssistant) -> None:
+    """The field starts with QI, TL and UL (#317); what the form sends, not the default, becomes the option."""
+    result = await _submit(hass, dict(USER_INPUT))
+    assert _form_suggested(result, CONF_IGNORED_IO_TYPES) == list(DEFAULT_IGNORED_IO_TYPES)
+
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_IGNORED_IO_TYPES: list(DEFAULT_IGNORED_IO_TYPES)}
+    )
+
+    assert result["options"] == {CONF_IGNORED_IO_TYPES: ["QI", "TL", "UL"]}
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_an_invalid_io_type_shows_the_step_again_with_the_input(hass: HomeAssistant) -> None:
+    result = await _submit(hass, dict(USER_INPUT))
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_IGNORED_IO_TYPES: ["QI", "QI4"]})
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["errors"] == {CONF_IGNORED_IO_TYPES: "invalid_ignored_io_types"}  # a translation key
+    assert _form_suggested(result, CONF_IGNORED_IO_TYPES) == ["QI", "QI4"]  # as typed, to correct it
+    assert hass.config_entries.async_entries(DOMAIN) == []
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
@@ -162,7 +201,7 @@ async def test_an_invalid_ignore_list_shows_the_step_again_with_the_input(hass: 
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_IGNORED_MARKERS: "3"})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY  # the corrected list completes the same setup
-    assert result["options"] == {CONF_IGNORED_MARKERS: "3"}
+    assert result["options"] == {CONF_IGNORED_MARKERS: "3", CONF_IGNORED_IO_TYPES: []}
 
 
 @pytest.mark.parametrize(
@@ -247,7 +286,7 @@ async def test_an_entry_added_during_the_login_aborts_the_setup(
 
     certificate_handshake.side_effect = handshake_while_another_flow_finishes
 
-    result = await _submit(hass, {**USER_INPUT, "import_markers": False})
+    result = await _submit(hass, {**USER_INPUT, "import_markers": False, "import_ios": False})
 
     assert result["type"] is FlowResultType.ABORT
     assert result["reason"] == "already_configured"

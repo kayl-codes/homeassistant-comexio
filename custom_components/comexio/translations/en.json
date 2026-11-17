@@ -10,7 +10,8 @@
       "certificate_changed": "Comexio presents another certificate than the pinned one. Check it under Settings → Repairs.",
       "certificate_unstable": "Comexio presented another certificate at the login test than a moment before. Something in the network may answer in its place — check it and try again.",
       "invalid_host": "This is not a host name or IP address (optionally with :port) — leave out http://, paths and the like.",
-      "invalid_ignored_ids": "Invalid ID list. Enter numbers (e.g. 3, M12 or K12), ranges (e.g. 8-12) or lists (e.g. 1, 3, 5)."
+      "invalid_ignored_ids": "Invalid ID list. Enter numbers (e.g. 3, M12 or K12), ranges (e.g. 8-12) or lists (e.g. 1, 3, 5).",
+      "invalid_ignored_io_types": "Invalid IO type. A type consists of letters only (e.g. QI, TL, UL), without a number."
     },
     "step": {
       "user": {
@@ -37,11 +38,13 @@
         "description": "Optional: the IDs listed here are left out — no entity in Home Assistant, no Web-IO command, no function plan connection. Leave the fields empty to import everything; you can change the lists later in the integration's options.",
         "data": {
           "ignored_markers": "Marker IDs to exclude from function plan connection",
-          "ignored_knx": "KNX object IDs to exclude from function plan connection"
+          "ignored_knx": "KNX object IDs to exclude from function plan connection",
+          "ignored_io_types": "IO types to leave out"
         },
         "data_description": {
           "ignored_markers": "Comma-, semicolon-, space- or dot-separated marker IDs and ranges, with or without 'M' prefix (e.g. '123, 456; 789' or 'M123, M456' or '8-12'). Only markers with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later.",
-          "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later."
+          "ignored_knx": "Comma-, semicolon-, space- or dot-separated KNX object IDs and ranges, with or without 'K' prefix (e.g. '123, 456; 789' or 'K123, K456' or '8-12'). Only KNX objects with a description can be ignored. A single ID that no longer exists is removed automatically; a range stays as written and also covers IDs created later.",
+          "ignored_io_types": "IO types (the letters of the IO name, e.g. QI for QI4) that are not imported: no entity in Home Assistant, no Web-IO command, no function plan connection. Each type counts once; type your own and confirm with Enter. New installations start with QI, TL and UL: the power inputs (QI), the board temperature (TL) and the supply voltage (UL) report a new value about once per second. Each of them sends a Web-IO message per second, more than the Comexio queue can work off, and the bus load builds up. An installation that existed before this option leaves nothing out until you pick types here. After a change, run a Web-IO sync to remove the commands Comexio already has."
         }
       },
       "reconfigure": {
@@ -198,7 +201,8 @@
           "bus_watchdog_auto_reboot": "Allow automatic Comexio reboot on emergency bus load",
           "function_plan_watchdog_notify": "Function plan watchdog: push to",
           "function_plan_watchdog_user_plans": "Function plan watchdog: also watch user plans",
-          "webhook_address_mode": "Webhook address (Comexio → HA push)"
+          "webhook_address_mode": "Webhook address (Comexio → HA push)",
+          "ignored_io_types": "IO types to leave out"
         },
         "data_description": {
           "schema_marker": "Available variables: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -216,7 +220,8 @@
           "bus_watchdog_auto_reboot": "If the bus load averages above 90% for 5 minutes, trigger an IMMEDIATE, unconfirmed full Comexio system reboot. Off by default — enable only once you trust the watchdog.",
           "function_plan_watchdog_notify": "Notify services (e.g. notify.mobile_app_your_phone) that get a push when a watched function plan stops (HA-managed, or a user plan picked below). The push has a 'Start plan' button, and is removed again once the plan runs. A watched user plan deleted in Comexio gets a push too, with 'Restore' (its newest backup, as a new plan) and 'Stop watching' buttons; if its ID now holds another plan (renamed, or the ID reused), only 'Stop watching' — restore it or take the rename over in its repair. They also get an urgent push when Comexio presents another TLS certificate than the pinned one. Leave empty for no push; the repair is raised either way.",
           "function_plan_watchdog_user_plans": "User plans (not managed by Home Assistant) that should always run. The watchdog treats them like the HA plans: repair, problem sensor and push when one stops. The Plan Auto-Start (user plans) switch starts them again on its own. A picked plan deleted in Comexio is not started: its repair and push offer to restore it from its newest backup or to stop watching it. A plan renamed in Comexio with its content unchanged is followed on its own (its pick and backups take the new name). If its ID now holds another plan (renamed, or the ID reused), the repair also offers to watch that plan instead or, its content matching the last backup, to take it over as the plan renamed (its backups move along). Leave plans you stop on purpose (tests) out.",
-          "webhook_address_mode": "Where Comexio sends live values. Automatic: HA's local address. External HA URL: host and port of the external URL from HA's network settings (https without a port means 443). Custom address: a URL you enter in the next step. With an external or custom address, the push leaves your network and goes over the internet. Run a Web-IO sync afterwards."
+          "webhook_address_mode": "Where Comexio sends live values. Automatic: HA's local address. External HA URL: host and port of the external URL from HA's network settings (https without a port means 443). Custom address: a URL you enter in the next step. With an external or custom address, the push leaves your network and goes over the internet. Run a Web-IO sync afterwards.",
+          "ignored_io_types": "IO types (the letters of the IO name, e.g. QI for QI4) that are not imported: no entity in Home Assistant, no Web-IO command, no function plan connection. Each type counts once; type your own and confirm with Enter. New installations start with QI, TL and UL: the power inputs (QI), the board temperature (TL) and the supply voltage (UL) report a new value about once per second. Each of them sends a Web-IO message per second, more than the Comexio queue can work off, and the bus load builds up. An installation that existed before this option leaves nothing out until you pick types here. After a change, run a Web-IO sync to remove the commands Comexio already has."
         }
       },
       "webhook_url": {
@@ -238,7 +243,8 @@
       "insecure_external_url": "The external URL of Home Assistant is a plain http:// address outside the local network: the values would cross the internet unencrypted. Set an https:// external URL first.",
       "no_external_url": "Home Assistant has no usable external URL. Set one under Settings → System → Network first.",
       "invalid_ignored_ids": "Invalid ID list. Enter numbers (e.g. 3, M12 or K12), ranges (e.g. 8-12) or lists (e.g. 1, 3, 5).",
-      "unknown": "An unexpected error occurred."
+      "unknown": "An unexpected error occurred.",
+      "invalid_ignored_io_types": "Invalid IO type. A type consists of letters only (e.g. QI, TL, UL), without a number."
     }
   },
   "entity": {

@@ -10,7 +10,8 @@
       "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
       "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
       "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches.",
-      "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben."
+      "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben.",
+      "invalid_ignored_io_types": "Ungültiger IO-Typ. Ein Typ besteht nur aus Buchstaben (z. B. QI, TL, UL), ohne Zahl."
     },
     "step": {
       "user": {
@@ -37,11 +38,13 @@
         "description": "Optional: Die hier eingetragenen IDs werden ausgelassen — keine Entität in Home Assistant, kein Web-IO-Befehl, keine Logikplan-Verbindung. Leer lassen, um alles zu importieren; die Listen lassen sich später in den Optionen der Integration ändern.",
         "data": {
           "ignored_markers": "Merker-IDs von der Logikplan-Verbindung ausschließen",
-          "ignored_knx": "KNX-Objekt-IDs von der Logikplan-Verbindung ausschließen"
+          "ignored_knx": "KNX-Objekt-IDs von der Logikplan-Verbindung ausschließen",
+          "ignored_io_types": "IO-Typen, die nicht importiert werden"
         },
         "data_description": {
           "ignored_markers": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte Merker-IDs und Bereiche, mit oder ohne 'M'-Präfix (z.B. '123, 456; 789' oder 'M123, M456' oder '8-12'). Nur Merker mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
-          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs."
+          "ignored_knx": "Komma-, Semikolon-, Leerzeichen- oder Punkt-getrennte KNX-Objekt-IDs und Bereiche, mit oder ohne 'K'-Präfix (z.B. '123, 456; 789' oder 'K123, K456' oder '8-12'). Nur KNX-Objekte mit Beschreibung können ignoriert werden. Eine einzelne ID, die nicht mehr existiert, wird automatisch entfernt; ein Bereich bleibt wie eingegeben und gilt auch für später angelegte IDs.",
+          "ignored_io_types": "IO-Typen (die Buchstaben des IO-Namens, z. B. QI bei QI4), die nicht importiert werden: keine Entität in Home Assistant, kein Web-IO-Command, keine Funktionsplan-Anbindung. Jeder Typ zählt einmal; eigene Typen eintippen und mit Enter bestätigen. Neue Installationen starten mit QI, TL und UL: Die Stromeingänge (QI), die Board-Temperatur (TL) und die Versorgungsspannung (UL) melden etwa einmal pro Sekunde einen neuen Wert. Jeder davon sendet eine Web-IO-Meldung pro Sekunde, mehr als die Comexio-Warteschlange abarbeiten kann, und die Buslast schaukelt sich auf. Eine Installation, die vor dieser Option bestand, lässt nichts aus, bis hier Typen gewählt werden. Nach einer Änderung einen Web-IO-Sync ausführen, damit die Commands, die Comexio schon hat, entfernt werden."
         }
       },
       "reconfigure": {
@@ -198,7 +201,8 @@
           "bus_watchdog_auto_reboot": "Automatischen Comexio-Neustart bei Notfall-Busauslastung erlauben",
           "function_plan_watchdog_notify": "Logikplan-Watchdog: Push an",
           "function_plan_watchdog_user_plans": "Logikplan-Watchdog: zusätzlich überwachte Pläne",
-          "webhook_address_mode": "Webhook-Adresse (Comexio → HA Push)"
+          "webhook_address_mode": "Webhook-Adresse (Comexio → HA Push)",
+          "ignored_io_types": "IO-Typen, die nicht importiert werden"
         },
         "data_description": {
           "schema_marker": "Verfügbare Variablen: '{{MarkerId}}', '{{MarkerTitle}}'",
@@ -216,7 +220,8 @@
           "bus_watchdog_auto_reboot": "Liegt die Busauslastung im Schnitt über 90 % für 5 Minuten, wird ein SOFORTIGER, unbestätigter kompletter Comexio-Neustart ausgelöst. Standardmäßig aus — erst aktivieren, wenn du dem Mechanismus vertraust.",
           "function_plan_watchdog_notify": "Benachrichtigungsdienste (z. B. notify.mobile_app_dein_handy), die eine Push-Meldung bekommen, wenn ein überwachter Logikplan stoppt (von HA verwaltet oder unten als eigener Plan gewählt). Die Meldung hat einen Knopf „Plan starten“ und verschwindet wieder, sobald der Plan läuft. Wird ein überwachter eigener Plan in Comexio gelöscht, kommt ebenfalls ein Push, mit den Knöpfen „Wiederherstellen“ (aus seinem neuesten Backup, als neuer Plan) und „Nicht mehr überwachen“; trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), nur „Nicht mehr überwachen“ — Wiederherstellen oder Umbenennung übernehmen dann in der Reparaturmeldung. Zeigt Comexio ein anderes TLS-Zertifikat als das gepinnte, bekommen sie außerdem einen dringenden Push. Leer lassen für keinen Push; die Reparaturmeldung kommt in jedem Fall.",
           "function_plan_watchdog_user_plans": "Eigene Logikpläne (nicht von Home Assistant verwaltet), die immer laufen sollen. Der Watchdog behandelt sie wie die HA-Pläne: Reparaturmeldung, Problem-Sensor und Push, wenn einer stoppt. Der Schalter Plan Auto-Start (User-Pläne) startet sie selbst wieder. Ein gewählter Plan, der in Comexio gelöscht wurde, wird nicht gestartet: Reparaturmeldung und Push bieten an, ihn aus seinem neuesten Backup wiederherzustellen oder ihn nicht mehr zu überwachen. Ein in Comexio umbenannter Plan mit unverändertem Inhalt wird von selbst übernommen (Auswahl und Backups folgen dem neuen Namen). Trägt seine ID inzwischen einen anderen Plan (umbenannt oder ID neu vergeben), bietet die Reparaturmeldung zusätzlich an, stattdessen diesen Plan zu überwachen oder – wenn sein Inhalt dem letzten Backup entspricht – die Umbenennung zu übernehmen (die Backups ziehen mit). Absichtlich gestoppte Pläne (Tests) hier nicht auswählen.",
-          "webhook_address_mode": "Wohin Comexio die Live-Werte sendet. Automatisch: die lokale Adresse von HA. Externe HA-URL: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (https ohne Port bedeutet 443). Eigene Adresse: eine URL, die du im nächsten Schritt eingibst. Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Danach einen Web-IO-Sync ausführen."
+          "webhook_address_mode": "Wohin Comexio die Live-Werte sendet. Automatisch: die lokale Adresse von HA. Externe HA-URL: Host und Port der externen URL aus den HA-Netzwerkeinstellungen (https ohne Port bedeutet 443). Eigene Adresse: eine URL, die du im nächsten Schritt eingibst. Mit externer oder eigener Adresse verlässt der Push dein Netzwerk und läuft über das Internet. Danach einen Web-IO-Sync ausführen.",
+          "ignored_io_types": "IO-Typen (die Buchstaben des IO-Namens, z. B. QI bei QI4), die nicht importiert werden: keine Entität in Home Assistant, kein Web-IO-Command, keine Funktionsplan-Anbindung. Jeder Typ zählt einmal; eigene Typen eintippen und mit Enter bestätigen. Neue Installationen starten mit QI, TL und UL: Die Stromeingänge (QI), die Board-Temperatur (TL) und die Versorgungsspannung (UL) melden etwa einmal pro Sekunde einen neuen Wert. Jeder davon sendet eine Web-IO-Meldung pro Sekunde, mehr als die Comexio-Warteschlange abarbeiten kann, und die Buslast schaukelt sich auf. Eine Installation, die vor dieser Option bestand, lässt nichts aus, bis hier Typen gewählt werden. Nach einer Änderung einen Web-IO-Sync ausführen, damit die Commands, die Comexio schon hat, entfernt werden."
         }
       },
       "webhook_url": {
@@ -238,7 +243,8 @@
       "insecure_external_url": "Die externe URL von Home Assistant ist eine http://-Adresse außerhalb des lokalen Netzes: die Werte gingen unverschlüsselt übers Internet. Lege zuerst eine https://-URL fest.",
       "no_external_url": "Home Assistant hat keine nutzbare externe URL. Lege sie zuerst unter Einstellungen → System → Netzwerk fest.",
       "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben.",
-      "unknown": "Unerwarteter Fehler aufgetreten."
+      "unknown": "Unerwarteter Fehler aufgetreten.",
+      "invalid_ignored_io_types": "Ungültiger IO-Typ. Ein Typ besteht nur aus Buchstaben (z. B. QI, TL, UL), ohne Zahl."
     }
   },
   "entity": {

@@ -1,6 +1,8 @@
 # Version: 0.8.0
+from collections.abc import Mapping
 import logging
 import socket
+from typing import Any
 from urllib.parse import urlsplit
 
 from aiocomexio import format_fingerprint
@@ -27,12 +29,14 @@ from .const import (
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_COVER_KEYWORDS,
     CONF_HOST,
+    CONF_IGNORED_IO_TYPES,
     CONF_PASSWORD,
     CONF_SERVER_ID,
     CONF_USERNAME,
     CONFIG_ENTRY_MINOR_VERSION,
     DEFAULT_COVER_KEYWORDS,
     DEFAULT_HOST,
+    DEFAULT_IGNORED_IO_TYPES,
     DOMAIN,
     KNOWN_DOMAINS,
     LOGIN_ERROR_CERTIFICATE,
@@ -40,14 +44,59 @@ from .const import (
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
 )
-from .options_flow import ComexioOptionsFlow, import_enabled_ignore_list_categories, normalize_ignore_lists
+from .options_flow import (
+    ComexioOptionsFlow,
+    import_enabled_ignore_list_categories,
+    io_type_selector,
+    normalize_ignore_lists,
+    normalize_ignored_io_types,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+_IMPORT_IOS_KEY = "import_ios"
 
 
 _CREDENTIAL_KEYS: frozenset[str] = frozenset(
     {CONF_HOST, CONF_USERNAME, CONF_PASSWORD, CONF_API_USERNAME, CONF_API_PASSWORD}
 )
+
+
+def _has_io_types_field(pending_entry: Mapping[str, Any]) -> bool:
+    """Whether the ignored IO types are asked for (#317): only while the IOs are imported."""
+    return bool(pending_entry.get(_IMPORT_IOS_KEY, True))
+
+
+def _has_ignore_lists_step(pending_entry: Mapping[str, Any]) -> bool:
+    """Whether the setup asks for ignore lists or IO types at all: some category or the IOs are imported."""
+    return bool(import_enabled_ignore_list_categories(pending_entry)) or _has_io_types_field(pending_entry)
+
+
+def _submitted_io_types(user_input: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The ignored IO types field as the form sent it; DEFAULT_IGNORED_IO_TYPES before the first display.
+
+    A missing key is an emptied field (a form sends none for it), never the default: the default is only
+    what the field starts with.
+    """
+    if user_input is None:
+        return {CONF_IGNORED_IO_TYPES: list(DEFAULT_IGNORED_IO_TYPES)}
+    return {CONF_IGNORED_IO_TYPES: user_input.get(CONF_IGNORED_IO_TYPES)}
+
+
+def _ignore_lists_schema(ignore_lists: Mapping[str, str], io_types: Mapping[str, Any] | None) -> vol.Schema:
+    """The ignore_lists form: the ID lists and, with io_types, the IO types field.
+
+    suggested_value, not default: after an error the field shows what the user typed, and a field the user
+    emptied stays empty.
+    """
+    fields: dict[Any, Any] = {
+        vol.Optional(key, description={"suggested_value": value}): str for key, value in ignore_lists.items()
+    }
+    if io_types is not None:
+        shown = list(io_types[CONF_IGNORED_IO_TYPES] or [])
+        key = vol.Optional(CONF_IGNORED_IO_TYPES, description={"suggested_value": shown})
+        fields[key] = io_type_selector({}, shown)
+    return vol.Schema(fields)
 
 
 class CannotConnect(HomeAssistantError):
@@ -286,7 +335,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 errors["base"] = "unknown"
             else:
                 # Outside the try: an error from here on is no setup validation failure.
-                if import_enabled_ignore_list_categories(user_input):
+                if _has_ignore_lists_step(user_input):
                     return await self.async_step_ignore_lists()
                 return await self._async_create_entry_if_free()
 
@@ -303,7 +352,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 vol.Optional(CONF_API_USERNAME, default=ui.get(CONF_API_USERNAME, "")): str,
                 vol.Optional(CONF_API_PASSWORD, default=ui.get(CONF_API_PASSWORD, "")): str,
                 vol.Required("import_markers", default=ui.get("import_markers", True)): bool,
-                vol.Required("import_ios", default=ui.get("import_ios", True)): bool,
+                vol.Required(_IMPORT_IOS_KEY, default=ui.get(_IMPORT_IOS_KEY, True)): bool,
                 # Opt-in, default OFF — blind implementation, see project_knx_objects memory.
                 vol.Required("import_knx", default=ui.get("import_knx", False)): bool,
                 vol.Required("import_quickbus", default=ui.get("import_quickbus", True)): bool,
@@ -329,24 +378,28 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """Ask for the ignore-lists of the categories whose import the user step switched on.
 
         Optional fields: empty imports everything. The lists go to the entry's options, where the
-        coordinator and the options flow read them.
+        coordinator and the options flow read them. With the IO import on, the IO types left out come
+        too (#317): DEFAULT_IGNORED_IO_TYPES is what the field starts with, the one place a default is
+        offered — an entry that never saved the option excludes nothing.
         """
         categories = import_enabled_ignore_list_categories(self._pending_entry)
+        io_types = _submitted_io_types(user_input) if _has_io_types_field(self._pending_entry) else None
         errors: dict[str, str] = {}
         ignore_lists = {cat.ignored_conf_key: (user_input or {}).get(cat.ignored_conf_key, "") for cat in categories}
         if user_input is not None:
             if not await self._async_pending_entry_still_free():
                 return self.async_abort(reason=_ALREADY_CONFIGURED)
             normalize_ignore_lists(ignore_lists, categories, errors)
+            if io_types is not None:
+                normalize_ignored_io_types(io_types, errors)
             if not errors:
-                return self._create_setup_entry({key: value for key, value in ignore_lists.items() if value})
+                return self._create_setup_entry(
+                    {**{key: v for key, v in ignore_lists.items() if v}, **(io_types or {})}
+                )
 
-        # suggested_value, not default: after an error the field shows what the user typed, and
-        # a field the user emptied stays empty.
-        schema = vol.Schema(
-            {vol.Optional(key, description={"suggested_value": value}): str for key, value in ignore_lists.items()}
+        return self.async_show_form(
+            step_id="ignore_lists", data_schema=_ignore_lists_schema(ignore_lists, io_types), errors=errors
         )
-        return self.async_show_form(step_id="ignore_lists", data_schema=schema, errors=errors)
 
     async def _async_create_entry_if_free(self):
         """Create the entry without ignore lists, unless another entry took its server meanwhile."""
@@ -376,7 +429,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 return False
             self._checked_hosts |= new_hosts
 
-    def _create_setup_entry(self, options: dict[str, str]):
+    def _create_setup_entry(self, options: dict[str, Any]):
         """Create the entry the user step validated, with the ignore-lists as its options."""
         data = self._pending_entry
         server_id, host = data[CONF_SERVER_ID], data[CONF_HOST]

@@ -11,6 +11,10 @@ How the integration chooses the entity:
 - An identifier starting with `Q` is an output, one starting with `I` is an input. Any other identifier goes by its IO type in Comexio.
 - The IO type also decides between on/off and a value, and sets the unit. The same `AI2` can therefore be a `binary_sensor` on one installation and a voltage `sensor` on another.
 - Inactive IOs get no entity.
+- IO types in the setting *IO types that are not imported* get no entity and no Web-IO command. A new installation leaves out `QI`, `TL` and `UL` (see the note below).
+
+> [!WARNING]
+> **`QI`, `TL` and `UL` are not imported by default.** These three IO types (current, temperature and voltage readings, for example on the LED Dimmer, the EnOcean Unit and the Universal-Aktor) report a new value many times a minute. Every change is a Web-IO push, and Comexio cannot work off that many value changes: the bus load builds up until the installation is sluggish. A new installation therefore starts with `QI, TL, UL` in the field *IO types that are not imported* (setup step and settings). You can remove a type from the list or add any other one (`AI`, `E`, ...); the type is the letters of the identifier, so `QI4` is type `QI` and `Q1` stays imported. An installation that already exists keeps importing everything until you fill the field. After a change run the sync button: it removes the Web-IO commands of the left-out IOs from Comexio, and their entities disappear from Home Assistant.
 
 ---
 
@@ -121,6 +125,10 @@ So wählt die Integration die Entität:
 - Ein Bezeichner mit `Q` am Anfang ist ein Ausgang, einer mit `I` ein Eingang. Alle anderen richten sich nach ihrem IO-Typ in Comexio.
 - Der IO-Typ entscheidet außerdem zwischen Ein/Aus und Wert und legt die Einheit fest. Derselbe `AI2` kann also auf einer Installation ein `binary_sensor` sein und auf einer anderen ein Spannungs-`sensor`.
 - Inaktive IOs bekommen keine Entität.
+- IO-Typen im Feld *IO-Typen, die nicht importiert werden* bekommen weder Entität noch Web-IO-Befehl. Eine neue Installation lässt `QI`, `TL` und `UL` weg (siehe Hinweis unten).
+
+> [!WARNING]
+> **`QI`, `TL` und `UL` werden standardmäßig nicht importiert.** Diese drei IO-Typen (Strom-, Temperatur- und Spannungswerte, z. B. am LED Dimmer, an der EnOcean Unit und am Universal-Aktor) melden viele Male pro Minute einen neuen Wert. Jede Änderung ist ein Web-IO-Push, und so viele Wertänderungen schafft die Comexio-Anlage nicht abzuführen: Die Bus-Last schaukelt sich auf, bis die Anlage träge wird. Eine neue Installation startet deshalb mit `QI, TL, UL` im Feld *IO-Typen, die nicht importiert werden* (Einrichtungsschritt und Einstellungen). Du kannst einen Typ aus der Liste nehmen oder jeden anderen hinzufügen (`AI`, `E`, ...); der Typ sind die Buchstaben des Bezeichners, `QI4` ist also Typ `QI`, und `Q1` bleibt importiert. Eine bereits bestehende Installation importiert weiter alles, bis du das Feld füllst. Nach einer Änderung den Sync-Button drücken: Er entfernt die Web-IO-Befehle der weggelassenen IOs aus Comexio, ihre Entitäten verschwinden aus Home Assistant.
 
 ---
 

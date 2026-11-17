@@ -51,7 +51,7 @@ The API user and password must match the Comexio **Api** page (in the Comexio St
 
 If a write fails, the log line names the cause when Comexio can be asked: the API inactive, or the access level of the data type. A failure with HTTP 503 (“Service Unavailable”) means Comexio itself did not answer correctly; the integration does not repeat that write, because it cannot tell whether Comexio already executed it.
 
-After a successful login test, a second step asks for the **ignore lists** of every category whose import is on (Markers, KNX objects): the IDs listed there get no entity, no Web-IO command and no function plan connection. Leave the fields empty to import everything — the lists can be changed later in the [Settings](#3-settings), where each field only shows while its import is on. Without Marker and KNX import this step is skipped.
+After a successful login test, a second step asks for the **ignore lists** of every category whose import is on (Markers, KNX objects): the IDs listed there get no entity, no Web-IO command and no function plan connection. Leave the fields empty to import everything — the lists can be changed later in the [Settings](#3-settings), where each field only shows while its import is on. The same step has the field **IO types that are not imported** (while IO import is on), pre-filled with `QI, TL, UL`: these three types report so many value changes that Comexio cannot work them off and the bus load builds up, see [Supported Hardware](SUPPORTED_HARDWARE.md). Without Marker, KNX and IO import this step is skipped.
 
 HA then confirms the new device:
 
@@ -82,6 +82,7 @@ Open via the **⚙️ icon** on the integration entry. Contains non-credential o
 | **Naming schema — KNX objects** | Template for entity names. Variables: `{KnxId}`, `{KnxTitle}`. See the [KNX Objects guide](KNX.md). |
 | **Create marker entities** | Enable/disable Marker import. |
 | **Create IO entities** | Enable/disable IO import. |
+| **IO types that are not imported** | IO types (the letters of an IO identifier: `QI4` is type `QI`) that get no entity and no Web-IO command. Any type can be added, each only once. New installations start with `QI, TL, UL`: these report so many value changes that Comexio cannot work them off and the bus load builds up (see [Supported Hardware](SUPPORTED_HARDWARE.md)). An installation set up before this option imports everything until you fill it. Run the sync button after a change: it removes the Web-IO commands of the left-out IOs, and their entities disappear. Shown while IO import is on. |
 | **Create KNX object entities** | Enable/disable KNX import (off by default), see the [KNX Objects guide](KNX.md). |
 | **Create Quickbus device entities** | Enable/disable the read-only Quickbus entities (on by default). |
 | **Create entities for 1-Wire sensors** | Enable/disable the read-only 1-Wire sensors and the 1-Wire problem sensor (on by default). Values arrive by push, see [1-Wire sensors](../README.md#-1-wire-sensors). |
@@ -214,7 +215,7 @@ Benutzer und Passwort müssen zur Seite **Api** in der Comexio Studio passen. Sc
 
 Ein Fehler mit HTTP 503 („Service Unavailable“) heißt, dass Comexio selbst nicht korrekt geantwortet hat. Die Integration wiederholt diesen Schreibzugriff nicht, weil nicht feststellbar ist, ob Comexio ihn bereits ausgeführt hat.
 
-Nach erfolgreichem Login-Test fragt ein zweiter Schritt nach den **Ignorier-Listen** jeder Kategorie, deren Import eingeschaltet ist (Merker, KNX-Objekte): Die dort eingetragenen IDs bekommen keine Entität, keinen Web-IO-Befehl und keine Logikplan-Verbindung. Leer lassen, um alles zu importieren — die Listen lassen sich später in den [Einstellungen](#3-einstellungen) ändern; dort erscheint jedes Feld nur, solange sein Import eingeschaltet ist. Ohne Merker- und KNX-Import entfällt dieser Schritt.
+Nach erfolgreichem Login-Test fragt ein zweiter Schritt nach den **Ignorier-Listen** jeder Kategorie, deren Import eingeschaltet ist (Merker, KNX-Objekte): Die dort eingetragenen IDs bekommen keine Entität, keinen Web-IO-Befehl und keine Logikplan-Verbindung. Leer lassen, um alles zu importieren — die Listen lassen sich später in den [Einstellungen](#3-einstellungen) ändern; dort erscheint jedes Feld nur, solange sein Import eingeschaltet ist. Im selben Schritt steht das Feld **IO-Typen, die nicht importiert werden** (solange der IO-Import an ist), vorbelegt mit `QI, TL, UL`: Diese drei Typen melden so viele Wertänderungen, dass Comexio sie nicht abführen kann und sich die Bus-Last aufschaukelt, siehe [Unterstützte Hardware](SUPPORTED_HARDWARE.md). Ohne Merker-, KNX- und IO-Import entfällt dieser Schritt.
 
 Danach bestätigt HA die Anlage des neuen Geräts:
 
@@ -245,6 +246,7 @@ Der Eintrag zeigt Instanzname, IP-Adresse, Geräteanzahl und Entitätenanzahl. D
 | **Namensschema — KNX-Objekte** | Vorlage für Entity-Namen. Variablen: `{KnxId}`, `{KnxTitle}`. Siehe [KNX-Leitfaden](KNX.md). |
 | **Merker als Entitäten anlegen** | Merker-Import aktivieren/deaktivieren. |
 | **Ein- und Ausgänge anlegen** | IO-Import aktivieren/deaktivieren. |
+| **IO-Typen, die nicht importiert werden** | IO-Typen (die Buchstaben eines IO-Bezeichners: `QI4` ist Typ `QI`), die weder Entität noch Web-IO-Befehl bekommen. Jeder Typ kann hinzugefügt werden, jeder nur einmal. Neue Installationen starten mit `QI, TL, UL`: Diese melden so viele Wertänderungen, dass Comexio sie nicht abführen kann und sich die Bus-Last aufschaukelt (siehe [Unterstützte Hardware](SUPPORTED_HARDWARE.md)). Eine vor dieser Option eingerichtete Installation importiert weiter alles, bis du das Feld füllst. Nach einer Änderung den Sync-Button drücken: Er entfernt die Web-IO-Befehle der weggelassenen IOs, ihre Entitäten verschwinden. Wird gezeigt, solange der IO-Import an ist. |
 | **KNX-Objekte als Entitäten anlegen** | KNX-Import aktivieren/deaktivieren (Standard aus), siehe [KNX-Leitfaden](KNX.md). |
 | **Quickbus-Geräte als Entitäten anlegen** | Die Nur-Lese-Entitäten der Quickbus-Geräte aktivieren/deaktivieren (Standard an). |
 | **1-Wire-Sensoren (Temperatur, Feuchte, ...) als Entitäten anlegen** | Die Nur-Lese-Entitäten der 1-Wire-Sensoren und den Sensor 1-Wire-Problem aktivieren/deaktivieren (Standard an). Die Werte kommen per Push, siehe [1-Wire-Sensoren](../README.md#-1-wire-sensoren). |
