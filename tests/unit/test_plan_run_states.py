@@ -311,7 +311,7 @@ class _FakeCoordinator(SimpleNamespace):
     _async_switch_legacy_webhook_id_off = ComexioCoordinator._async_switch_legacy_webhook_id_off
     _async_save_webhook_security = ComexioCoordinator._async_save_webhook_security
     _never_polled = False
-    _web_device_count = None
+    _own_web_device_count = None
     onewire_status = None
     async_start_from_saved_config = ComexioCoordinator.async_start_from_saved_config
     async_seed_saved_onewire_sensors = ComexioCoordinator.async_seed_saved_onewire_sensors
@@ -692,7 +692,7 @@ def test_the_first_scraped_poll_without_web_devices_switches_the_old_webhook_id_
 
     async def fetch() -> dict:
         coordinator._last_poll_scraped = scraped
-        coordinator._web_device_count = web_devices
+        coordinator._own_web_device_count = web_devices
         coordinator._polled_plan_ids = None
         return {}
 

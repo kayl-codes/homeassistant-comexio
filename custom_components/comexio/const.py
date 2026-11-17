@@ -44,6 +44,9 @@ CONF_HOST = "host"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"  # nosec B105
 CONF_SERVER_ID = "server_id"
+# Name of the Web-IO device class in Comexio ("<name> [M]", ...); the entry data key and its default.
+CONF_WEBIO_NAME = "webio_name"
+DEFAULT_WEBIO_NAME = "HomeAssistant"
 
 CONF_SCHEMA_MARKER = "schema_marker"
 CONF_SCHEMA_IO = "schema_io"

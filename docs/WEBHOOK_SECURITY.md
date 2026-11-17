@@ -102,17 +102,21 @@ reconfiguration writes commands again later, the notification returns and one mo
 ## 6. Good to know
 
 - **No pushes get lost** during the switch-over: both IDs work until the very end.
-- **A new installation on a Comexio without any Web-IO device has no old ID at all.** The old ID only exists for
-  commands from before the update. If the first read of Comexio after the entry was created shows that Comexio has no
-  Web-IO device at all, nothing can push to it: the old ID is switched off right then (log line `Comexio has no Web-IO
-  device yet: the old webhook id is not needed and stays off`), and the commands a later sync creates are born with
-  their own ID. Without that proof nothing is decided: a read that could not take the device list, or a Comexio that
-  has Web-IO devices (an entry created anew on one that still holds commands of an earlier entry), keeps the old ID
-  and goes through the switch-over as described above. So does an entry whose recorded host differs from the current
+- **A new installation on a Comexio without a Web-IO device of its own has no old ID at all.** The old ID only exists
+  for commands from before the update. If the first read of Comexio after the entry was created shows that Comexio has
+  none of the Web-IO devices this integration creates (`<class name> [M]`, `[IO]`, `[KNX]`, `[QB]`, `[1Wire]`, or the
+  old single device named exactly like the class), nothing can push to it: the old ID is switched off right then (log
+  line `Comexio has no Web-IO device of this entry yet: the old webhook id is not needed and stays off`), and the
+  commands a later sync creates are born with their own ID. Web-IO devices you made yourself do not count: their
+  commands never pushed to this integration. A device of this integration that you renamed in Comexio does not count
+  either. Without that proof nothing is decided: a read that could not take the
+  device list or a device without a readable name, or a Comexio that has a Web-IO device of this integration (an entry created anew on one that still
+  holds commands of an earlier entry), keeps the old ID and goes through the switch-over as described above. So does an entry whose recorded host differs from the current
   one (see the next point): the commands of the earlier host may still push to the old ID.
 - **An entry that never synced does not wait for ever.** The same proof is checked at the nightly run: if the last
-  read of Comexio showed no Web-IO device at all and this entry has rewritten or written no command, the old ID is
-  switched off there too (log line `No Web-IO device exists: the old webhook id is switched off`). Without that proof
+  read of Comexio showed no Web-IO device of this integration and this entry has rewritten or written no command, the
+  old ID is switched off there too (log line `No Web-IO device of this entry exists: the old webhook id is switched
+  off`). Without that proof
   the old ID stays on, and the two repairs below tell you what holds it.
 - **A new Comexio host** (the address of the entry changes): the old ID is switched on again until every command of
   the new host has its own ID. The integration then reads the commands from the new host and rewrites the ones that
@@ -255,19 +259,22 @@ Neustart steht an.
 
 ## 6. Gut zu wissen
 
-- **Eine neue Installation auf einem Comexio ohne jedes Web-IO-Gerät hat gar keine alte ID.** Die alte ID gibt es nur
-  für Commands aus der Zeit vor dem Update. Zeigt das erste Auslesen von Comexio nach dem Anlegen des Eintrags, dass
-  Comexio gar kein Web-IO-Gerät hat, kann nichts an sie pushen: Die alte ID wird sofort abgeschaltet (Logzeile
-  `Comexio has no Web-IO device yet: the old webhook id is not needed and stays off`), und die Commands, die ein
-  späterer Sync anlegt, bekommen gleich ihre eigene ID. Ohne diesen Beleg wird nichts entschieden: Ein Auslesen, das
-  die Geräteliste nicht lesen konnte, oder ein Comexio mit Web-IO-Geräten (ein neu angelegter Eintrag auf einem
-  Comexio, das noch Commands eines früheren Eintrags hält) behält die alte ID und durchläuft die Umstellung wie oben
-  beschrieben. Ebenso ein Eintrag, dessen gespeicherter Host vom aktuellen abweicht (siehe nächster Punkt): Die Commands
+- **Eine neue Installation auf einem Comexio ohne eigenes Web-IO-Gerät der Integration hat gar keine alte ID.** Die
+  alte ID gibt es nur für Commands aus der Zeit vor dem Update. Zeigt das erste Auslesen von Comexio nach dem Anlegen
+  des Eintrags, dass Comexio keines der Web-IO-Geräte hat, die diese Integration anlegt (`<Klassenname> [M]`, `[IO]`,
+  `[KNX]`, `[QB]`, `[1Wire]` oder das alte Einzelgerät, das genau wie die Klasse heißt), kann nichts an sie pushen: Die
+  alte ID wird sofort abgeschaltet (Logzeile `Comexio has no Web-IO device of this entry yet: the old webhook id is
+  not needed and stays off`), und die Commands, die ein späterer Sync anlegt, bekommen gleich ihre eigene ID. Web-IO-
+  Geräte, die du selbst angelegt hast, zählen nicht mit: Ihre Commands haben nie an diese Integration gepusht. Ein
+  Gerät dieser Integration, das du in Comexio umbenannt hast, zählt ebenfalls nicht. Ohne
+  diesen Beleg wird nichts entschieden: Ein Auslesen, das die Geräteliste oder den Namen eines Geräts nicht lesen konnte, oder ein Comexio mit
+  einem Web-IO-Gerät dieser Integration (ein neu angelegter Eintrag auf einem Comexio, das noch Commands eines
+  früheren Eintrags hält) behält die alte ID und durchläuft die Umstellung wie oben beschrieben. Ebenso ein Eintrag, dessen gespeicherter Host vom aktuellen abweicht (siehe nächster Punkt): Die Commands
   des früheren Hosts können noch an die alte ID pushen.
 - **Ein Eintrag, der nie synchronisiert hat, wartet nicht ewig.** Derselbe Beleg wird beim Nachtlauf geprüft: Zeigte
-  das letzte Auslesen von Comexio gar kein Web-IO-Gerät und hat dieser Eintrag kein Command umgeschrieben oder
-  geschrieben, wird die alte ID auch dort abgeschaltet (Logzeile `No Web-IO device exists: the old webhook id is
-  switched off`). Ohne diesen Beleg bleibt die alte ID an, und die beiden Reparaturmeldungen unten sagen, was sie
+  das letzte Auslesen von Comexio kein Web-IO-Gerät dieser Integration und hat dieser Eintrag kein Command
+  umgeschrieben oder geschrieben, wird die alte ID auch dort abgeschaltet (Logzeile `No Web-IO device of this entry
+  exists: the old webhook id is switched off`). Ohne diesen Beleg bleibt die alte ID an, und die beiden Reparaturmeldungen unten sagen, was sie
   festhält.
 - **Es gehen keine Pushes verloren:** Beide IDs funktionieren bis zum Schluss.
 - **Neuer Comexio-Host** (die Adresse des Eintrags ändert sich): Die alte ID wird wieder eingeschaltet, bis jedes
