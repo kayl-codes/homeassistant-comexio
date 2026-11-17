@@ -28,6 +28,7 @@ from tests.unit.test_webhook_security import (
 )
 
 _DOMAIN = "comexio"
+_HOST_CHANGED = "host_changed"  # the ledger key of WebhookSecurity.host_changed
 
 
 def test_a_command_saved_with_its_own_path_is_scheduled_for_saving_the_old_path_is_not(
@@ -1114,7 +1115,7 @@ def test_only_a_ledger_recorded_for_another_host_counts_as_a_host_change(
 
 
 def test_a_recorded_host_change_stays_recorded_when_the_host_is_the_same_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    security = _hosted(monkeypatch, {**_switched_off_ledger("new.local"), "host_changed": True}, "new.local")
+    security = _hosted(monkeypatch, {**_switched_off_ledger("new.local"), _HOST_CHANGED: True}, "new.local")
 
     _run(security.async_load())
 
@@ -1124,8 +1125,8 @@ def test_a_recorded_host_change_stays_recorded_when_the_host_is_the_same_again(m
 @pytest.mark.parametrize(
     "stored",
     [
-        pytest.param({"secret": 5, "host_changed": True}, id="secret-unreadable"),
-        pytest.param({"host_changed": True}, id="secret-missing"),
+        pytest.param({"secret": 5, _HOST_CHANGED: True}, id="secret-unreadable"),
+        pytest.param({_HOST_CHANGED: True}, id="secret-missing"),
         pytest.param({"secret": 5, "host": "old.local"}, id="another-host-without-the-flag"),
         pytest.param({"secret": 5, "host": ""}, id="empty-host-recorded-counts-like-in-an-intact-ledger"),
     ],
@@ -1137,7 +1138,7 @@ def test_a_host_change_survives_a_lost_secret(monkeypatch: pytest.MonkeyPatch, s
     _run(security.async_load())
 
     assert security.host_changed is True
-    assert security._store.stored["host_changed"] is True
+    assert security._store.stored[_HOST_CHANGED] is True
     # The reset ledger and the old id belong together: the new secret is in, the old id is on, nothing is migrated.
     assert security.secret
     assert security.legacy_enabled
@@ -1161,7 +1162,7 @@ def test_a_host_change_found_with_a_lost_secret_is_still_there_after_a_restart(m
     [
         pytest.param({"secret": 5, "host": "old.local"}, False, id="another-host-but-no-host-to-compare"),
         pytest.param(
-            {"secret": 5, "host": "old.local", "host_changed": True}, True, id="the-flag-survives-without-a-host"
+            {"secret": 5, "host": "old.local", _HOST_CHANGED: True}, True, id="the-flag-survives-without-a-host"
         ),
     ],
 )
@@ -1206,7 +1207,7 @@ def test_a_lost_secret_alone_is_no_host_change(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_a_recorded_host_change_is_read_back_for_an_entry_without_a_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    security = _hosted(monkeypatch, {**_switched_off_ledger("old.local"), "host_changed": True}, "")
+    security = _hosted(monkeypatch, {**_switched_off_ledger("old.local"), _HOST_CHANGED: True}, "")
 
     _run(security.async_load())
 
@@ -1221,7 +1222,7 @@ def test_a_host_change_found_at_load_keeps_the_old_id_on_through_the_first_poll_
     ledger = {"secret": "abc", "legacy": False, "host": "old.local"}
     security = _hosted(monkeypatch, ledger, "new.local")
     _run(security.async_load())
-    assert security._store.stored["host_changed"] is True  # persisted with the switch-on
+    assert security._store.stored[_HOST_CHANGED] is True  # persisted with the switch-on
 
     # Home Assistant restarts before the first scraped poll: the next load sees the host recorded already.
     again = _hosted(monkeypatch, security._store.stored, "new.local")
