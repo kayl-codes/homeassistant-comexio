@@ -458,6 +458,7 @@ def _after_a_start(monkeypatch: pytest.MonkeyPatch, *, boot: Any, written: Any =
     coordinator.last_update_success = True  # ... and committed it
     coordinator._full_poll_running = False
     coordinator._polls_open = 0
+    coordinator._poll_overlap = False
     return coordinator
 
 
@@ -689,7 +690,69 @@ def test_a_poll_that_ends_while_another_is_still_under_way_does_not_open_the_sto
 
     assert readable_when_first_ended == [False]
     assert coordinator._polls_open == 0
-    assert coordinator._webhook_stocktake_readable(security) is True
+    # Both ended, but the scrape flags may belong to the other poll than `self.data`: shut until one ran alone.
+    assert coordinator._webhook_stocktake_readable(security) is False
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(None, id="returns"),
+        pytest.param(OSError("poll"), id="raises"),
+        pytest.param(asyncio.CancelledError(), id="cancelled"),
+    ],
+)
+def test_the_restore_waits_after_overlapping_polls_until_a_poll_runs_alone(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock, failure: BaseException | None
+) -> None:
+    """(Sourcery, #313) After overlapping polls the flags and `self.data` need not describe the same poll, however the
+    second one ended: the restore decides nothing and latches nothing until a poll that started alone."""
+    coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
+    _healthy_after_a_rewrite(coordinator)
+    security = coordinator.api.webhook_security
+
+    async def overlapping_polls() -> None:
+        release = asyncio.Event()
+
+        async def slow() -> dict[str, Any]:
+            await release.wait()
+            return {}
+
+        async def quick() -> dict[str, Any]:
+            if failure is not None:
+                raise failure
+            return {}
+
+        coordinator._async_run_update = slow
+        slow_poll = asyncio.ensure_future(coordinator._async_update_data())
+        await asyncio.sleep(0)  # the slow poll started alone and is under way
+        coordinator._async_run_update = quick
+        await asyncio.gather(coordinator._async_update_data(), return_exceptions=True)  # overlaps it, ends first
+        release.set()
+        await slow_poll
+
+    _run(overlapping_polls())
+
+    assert coordinator._polls_open == 0
+    assert coordinator._webhook_stocktake_readable(security) is False
+    coordinator._restore_webhook_migration_notices()
+    issues.async_create_issue.assert_not_called()
+    notifications.async_create.assert_not_called()
+    assert coordinator._webhook_notices_restored is False
+
+    async def poll_alone() -> None:
+        coordinator._async_run_update = _async_empty_poll
+        await coordinator._async_update_data()
+
+    _run(poll_alone())
+    coordinator._restore_webhook_migration_notices()
+
+    assert _RESTART_ID in _raised(issues)
+    assert coordinator._webhook_notices_restored is True
+
+
+async def _async_empty_poll() -> dict[str, Any]:
+    return {}
 
 
 def test_an_unknown_boot_time_waits_instead_of_asking_for_a_restart_that_may_not_be_due(

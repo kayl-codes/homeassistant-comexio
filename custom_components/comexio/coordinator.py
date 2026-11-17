@@ -1563,6 +1563,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # id, saving the config): until the last one returns, the scrape flags already describe data that `self.data`
         # does not hold yet. A count, not a flag: a direct async_refresh() can overlap the scheduled poll.
         self._polls_open = 0
+        # True once a poll started while another was under way, until a poll starts alone: the flags then come from
+        # the poll that fetched last, `self.data` from the one that returned last, and the two need not be the same.
+        self._poll_overlap = False
         # Set while polls keep the last data because another certificate answers; the warning goes out once.
         self._reading_through_certificate_change = False
         # The config of the last scraped poll, saved for a setup that meets another certificate (#250), and whether
@@ -1604,6 +1607,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch configuration and perform smart audit including Type-Checks."""
+        self._poll_overlap = bool(self._polls_open)
         self._polls_open += 1
         try:
             return await self._async_run_update()
@@ -6396,15 +6400,17 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         Not while a poll is under way, up to the moment it returns (it sets `_last_poll_scraped` and
         `_own_web_device_count` before it commits its result, and keeps awaiting afterwards, so they would belong to
-        data not yet in `self.data`) nor after a poll that failed. `$WebDevices` must
-        have been read (without it the commands of our classes are not found), and a ledger that names migrated
-        commands next to no stored command at all means the commands were not decoded: either would take a stuck
-        repair away and dismiss a restart request that is due.
+        data not yet in `self.data`), nor after polls that overlapped (the flags then belong to the poll that fetched
+        last, the data to the one that returned last) until a poll ran alone, nor after a poll that failed.
+        `$WebDevices` must have been read (without it the commands of our classes are not found), and a ledger that
+        names migrated commands next to no stored command at all means the commands were not decoded: either would
+        take a stuck repair away and dismiss a restart request that is due.
         """
         return (
             bool(self.data)
             and self.last_update_success
             and not self._polls_open
+            and not self._poll_overlap
             and self._last_poll_scraped
             and self._own_web_device_count is not None
             and not (security.migrated and not self.data.get("webio_commands"))
