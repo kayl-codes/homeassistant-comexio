@@ -1113,9 +1113,13 @@ async def update_listener(hass: HomeAssistant, entry: ConfigEntry):
 
 
 async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Drop the repairs, the notification and the certificate push an entry leaves behind."""
-    async_remove_certificate_pushes(hass, entry)
-    if (server_id := entry.data.get(CONF_SERVER_ID)) is not None:
+    """Drop the repairs, the notification and the certificate push an entry leaves behind.
+
+    The repairs and the notification go first: they need no I/O, so a failing push or preview cleanup behind them
+    cannot leave them standing after the entry is gone.
+    """
+    server_id = entry.data.get(CONF_SERVER_ID)
+    if server_id is not None:
         ir.async_delete_issue(hass, DOMAIN, unsupported_io_issue_id(server_id))
         # The one persistent repair: raised once and kept across restarts, so one raised before the config entry
         # link existed (issue_owner) never gets it, and its dialog has no coordinator left to run on.
@@ -1124,6 +1128,8 @@ async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{server_id}")
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_RESTART}_{server_id}")
         persistent_notification.async_dismiss(hass, webhook_restart_notification_id(server_id))
+    async_remove_certificate_pushes(hass, entry)
+    if server_id is not None:
         # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).
         await async_remove_legacy_plan_preview(hass, server_id)
 

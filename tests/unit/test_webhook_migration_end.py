@@ -237,8 +237,9 @@ def test_the_nightly_run_raises_the_stuck_repair_and_takes_it_back_once_the_comm
 
     coordinator.data["webio_commands"]["HA m"]["cmdId"] = "9"  # a sync gave it its ids
 
-    assert _tick(coordinator) in {"done", "needs_restart"}
+    assert _tick(coordinator) == "done"  # Comexio booted after the write: nothing left to restart
     assert _STUCK_ID in _deleted(issues)
+    assert _RESTART_ID not in _raised(issues)
 
 
 def test_only_the_commands_the_run_cannot_rewrite_are_named(monkeypatch: pytest.MonkeyPatch, issues: MagicMock) -> None:
@@ -255,7 +256,8 @@ def test_only_the_commands_the_run_cannot_rewrite_are_named(monkeypatch: pytest.
     coordinator._report_unrewritable_webhooks(["HA m", "HA no id"])
 
     placeholders = _raised(issues)[_STUCK_ID]["translation_placeholders"]
-    assert (placeholders["count"], placeholders["commands"]) == ("1", "HA no id")
+    assert placeholders["count"] == "1"
+    assert placeholders["commands"] == "HA no id"
 
 
 def test_a_write_during_the_check_raises_the_restart_repair_again(
@@ -394,6 +396,30 @@ def test_a_failing_cleanup_does_not_keep_the_stores_of_the_removed_entry(monkeyp
         _run(removal)
 
     assert removed == ["saved_config_store", "webhook_security_store", "plan_preview_store"]
+
+
+def test_a_failing_certificate_push_cleanup_still_drops_the_repairs_and_the_notification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """(Sourcery, #310) The repairs and the notification go before the cleanups that can fail."""
+    registry = MagicMock()
+    shown = MagicMock()
+
+    def failing_push_cleanup(*_: Any) -> None:
+        raise OSError("push")
+
+    monkeypatch.setattr(comexio_init, "ir", registry)
+    monkeypatch.setattr(comexio_init, "persistent_notification", shown)
+    monkeypatch.setattr(comexio_init, "async_remove_certificate_pushes", failing_push_cleanup)
+    for name in ("saved_config_store", "webhook_security_store", "plan_preview_store"):
+        monkeypatch.setattr(comexio_init, name, lambda *_: MagicMock(async_remove=_none_coroutine))
+    removal = comexio_init.async_remove_entry(MagicMock(), MagicMock(entry_id=_ENTRY_ID, data={CONF_SERVER_ID: SERVER}))
+
+    with pytest.raises(OSError, match="push"):
+        _run(removal)
+
+    assert {_STUCK_ID, _RESTART_ID} <= _deleted(registry)
+    assert shown.async_dismiss.call_args.args[1] == f"comexio_{SERVER}_webhook_restart"
 
 
 async def _none_coroutine(*_: Any) -> None:
