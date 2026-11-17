@@ -5351,6 +5351,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         """Store an IO value; pushed=False marks HA's own write, which does not count as a push (#259)."""
         key = (ext_name.lower(), identifier.lower())
+        ring = False
         if (io := self._io_index.get(key)) and self._names_another_io_now(io):
             _LOGGER.debug(
                 WEBHOOK_FORMER_IO_LOG_MSG, self.server_id, f"{one_line(ext_name)} {one_line(identifier)}", value
@@ -5364,11 +5365,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             label = io.get("name") or f"{ext_name} {identifier}"
             _LOGGER.debug(WEBHOOK_VALUE_LOG_MSG, "io", one_line(label), value, previous)
             self._fire_plan_event("io", str(io["id"]), label, value)
-            if pushed:
-                # The event entities (a doorstation's bell) ring on a push, never on a poll or on HA's own write.
-                async_dispatcher_send(
-                    self.hass, io_push_signal(self.server_id, ext_name, identifier), self.io_states.get(io["id"])
-                )
+            ring = pushed  # the event entities (a doorstation's bell) ring on a push, not on a poll or an own write
             self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         else:
             self._log_unknown_webhook_io(
@@ -5379,6 +5376,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 value,
             )
         self._async_publish_pushed_value()
+        if ring and io:
+            # After the publish: a push proves Comexio reachable, so a failed poll must not leave the entities
+            # unavailable and swallow the press (a listener drops a ring while its entity is unavailable).
+            async_dispatcher_send(
+                self.hass,
+                io_push_signal(self.server_id, io.get("ext_id", ""), identifier),
+                self.io_states.get(io["id"]),
+            )
         self.schedule_plan_preview_refresh()
 
     def update_quickbus_io(self, io_id: str | int, value: float | int | str | None) -> None:

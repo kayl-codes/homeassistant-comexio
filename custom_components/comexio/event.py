@@ -136,7 +136,7 @@ class ComexioDoorbellEvent(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         self.async_on_remove(
             async_dispatcher_connect(
                 self.hass,
-                io_push_signal(self.coordinator.server_id, self._ext_name, self._identifier),
+                io_push_signal(self.coordinator.server_id, self._ext_id, self._identifier),
                 self._handle_push,
             )
         )

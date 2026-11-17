@@ -143,12 +143,35 @@ async def test_the_events_appear_with_the_poll_that_first_reports_the_doorstatio
     await _setup(hass, entry)
     assert _events(hass, entry) == []
 
+    # The page now reports the Doorstation: the next poll has to carry it through the tracker to the events.
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    coordinator.doorstations.update({2: Doorstation(ext_id=2, camera_id=7, name=EXTENSION)})
-    coordinator.async_update_listeners()
+    # api_returns is read when the mock API is built, so the new answer goes onto the mock itself.
+    coordinator.api.get_doorstations.return_value = ({2: Doorstation(ext_id=2, camera_id=7, name=EXTENSION)}, None)
+    await coordinator.async_refresh()
     await hass.async_block_till_done()
 
     assert {e.entity_id for e in _events(hass, entry)} == {BELL_1_ENTITY_ID, BELL_2_ENTITY_ID}
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_push_rings_although_the_last_poll_failed(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """The push proves Comexio reachable: the failed poll's unavailable state must not swallow the press."""
+    await _setup(hass, entry)
+    coordinator = await _bring_extension_online(hass, entry)
+    coordinator.last_update_success = False
+    coordinator.async_update_listeners()
+    await hass.async_block_till_done()
+    state = hass.states.get(BELL_1_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+
+    coordinator.update_io_by_name(EXTENSION, "DI1", 1)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(BELL_1_ENTITY_ID)
+    assert state is not None
+    assert state.state not in (STATE_UNAVAILABLE, STATE_UNKNOWN)
+    assert state.attributes["event_type"] == "ring"
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

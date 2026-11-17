@@ -177,15 +177,16 @@ def test_the_event_listens_to_the_push_signal_of_its_io_and_stops_with_its_remov
     with patch("custom_components.comexio.event.async_dispatcher_connect") as connect:
         asyncio.run(event.async_added_to_hass())
 
-    connect.assert_called_once_with(event.hass, io_push_signal(SERVER, "DOOR", "DI1"), event._handle_push)
+    connect.assert_called_once_with(event.hass, io_push_signal(SERVER, 14, "DI1"), event._handle_push)
     assert call(connect.return_value) in event.async_on_remove.call_args_list
 
 
-def test_the_signal_names_the_io_the_way_the_webhook_does_not_by_its_comexio_id() -> None:
-    assert io_push_signal(SERVER, "DOOR", "DI1") != io_push_signal(SERVER, "DOOR", "DI2")
-    assert io_push_signal(SERVER, "DOOR", "DI1") != io_push_signal(SERVER, "OTHER", "DI1")
-    assert io_push_signal(SERVER, "DOOR", "DI1") != io_push_signal("other", "DOOR", "DI1")
-    assert io_push_signal(SERVER, "DOOR", "DI1") == io_push_signal(SERVER, "door", "di1")
+def test_the_signal_names_the_io_by_its_extension_id_not_by_its_name_or_comexio_id() -> None:
+    """A rename of the extension in Comexio must not move the signal away from the entity that listens to it."""
+    assert io_push_signal(SERVER, 14, "DI1") != io_push_signal(SERVER, 14, "DI2")
+    assert io_push_signal(SERVER, 14, "DI1") != io_push_signal(SERVER, 15, "DI1")
+    assert io_push_signal(SERVER, 14, "DI1") != io_push_signal("other", 14, "DI1")
+    assert io_push_signal(SERVER, 14, "DI1") == io_push_signal(SERVER, "14", "di1")  # group key as text, any case
 
 
 def test_a_ring_while_the_entity_is_unavailable_is_dropped() -> None:

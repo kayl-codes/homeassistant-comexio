@@ -991,14 +991,14 @@ def plan_watch_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_plan_watch"
 
 
-def io_push_signal(server_id: str, ext_name: str, identifier: str) -> str:
+def io_push_signal(server_id: str, ext_id: str | int, identifier: str) -> str:
     """Dispatcher signal fired when a webhook push stored a value of this IO (an event entity listens, see event.py).
 
-    Only a push fires it: a poll reads the IO too, but says nothing about when its value changed. The IO is named the
-    way the webhook names it (extension and identifier, case-insensitive), not by its Comexio id: Comexio may hand an
-    id to another IO, and the signal must stay with the button.
+    Only a push fires it: a poll reads the IO too, but says nothing about when its value changed. The IO is named by
+    its extension's id and its identifier (case-insensitive), not by its Comexio id (Comexio may hand an id to
+    another IO) and not by the extension's name (a rename in Comexio would leave a listener on the old signal).
     """
-    return f"{DOMAIN}_{server_id}_io_push_{ext_name.lower()}_{identifier.lower()}"
+    return f"{DOMAIN}_{server_id}_io_push_{ext_id}_{identifier.lower()}"
 
 
 def bus_load_signal(server_id: str) -> str:

@@ -965,8 +965,42 @@ def test_only_a_webhook_push_rings_the_event_entities_of_an_io(api: ComexioAPI) 
         coordinator.update_io_by_name("BASE", "Q1", 1)
         coordinator.update_io_by_name("BASE", "Q1", "nan")  # junk: the signal carries "unknown", which never rings
 
-    signal = io_push_signal("iosrv1", "BASE", "Q1")
+    signal = io_push_signal("iosrv1", coordinator._io_index[("base", "q1")]["ext_id"], "Q1")
     assert send.call_args_list == [call(coordinator.hass, signal, 1.0), call(coordinator.hass, signal, None)]
+
+
+def test_the_ring_is_sent_after_the_pushed_value_made_the_entities_available_again(api: ComexioAPI) -> None:
+    """A failed poll leaves the entities unavailable, and an entity drops a ring while it is: the push has to
+    mark the coordinator successful first (it proves Comexio reachable), then ring."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    coordinator.last_update_success = False  # the last poll failed
+    available_when_ringing: list[bool] = []
+
+    with patch(
+        "custom_components.comexio.coordinator.async_dispatcher_send",
+        side_effect=lambda *_: available_when_ringing.append(coordinator.last_update_success),
+    ):
+        coordinator.update_io_by_name("BASE", "Q1", 1)
+
+    assert available_when_ringing == [True]
+
+
+def test_a_renamed_extension_keeps_the_signal_of_its_ios(api: ComexioAPI) -> None:
+    """The listener was connected before the rename: the push under the new name has to reach the same signal."""
+    coordinator = _coordinator(api)
+    _poll(coordinator, _config(), {})
+    _index_scraped_ios(coordinator, _config())
+    io = coordinator._io_index[("base", "q1")]
+    before = io_push_signal("iosrv1", io["ext_id"], "Q1")
+    coordinator._io_index[("renamed", "q1")] = coordinator._io_index.pop(("base", "q1"))
+    io["ext_name"] = "RENAMED"
+
+    with patch("custom_components.comexio.coordinator.async_dispatcher_send") as send:
+        coordinator.update_io_by_name("RENAMED", "Q1", 1)
+
+    assert send.call_args_list == [call(coordinator.hass, before, 1.0)]
 
 
 def _io_switch(coordinator: Any) -> ComexioIOSwitch:
