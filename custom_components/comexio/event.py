@@ -29,7 +29,7 @@ from .const import (
     offline_io_skipped,
 )
 from .coordinator import ComexioCoordinator
-from .doorstation import doorbell_ios
+from .doorstation import doorbell_ios, doorstation_ext_name
 from .entity import ComexioStableEntityIdMixin, build_device_info, extension_device_identifier
 
 _LOGGER = logging.getLogger(__name__)
@@ -100,7 +100,7 @@ class ComexioDoorbellEvent(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
         super().__init__(coordinator)
         # The IO is one of a known Doorstation (doorbell_ios), whose extension id is an integer.
         self._ext_id = int(io["ext_id"])
-        self._ext_name: str = io["ext_name"]
+        self._known_name: str = io["ext_name"]
         identifier = str(io["identifier"])
         self._identifier = identifier
         self._attr_unique_id = doorstation_doorbell_unique_id(coordinator.server_id, self._ext_id, identifier)
@@ -110,6 +110,15 @@ class ComexioDoorbellEvent(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
     @property
     def _doorstation(self) -> Doorstation | None:
         return self.coordinator.doorstations.known.get(self._ext_id)
+
+    @property
+    def _ext_name(self) -> str:
+        """The extension's current name: a rename in Comexio shows in the IO data before the next setup."""
+        doorstation = self._doorstation
+        if doorstation and (known := doorstation_ext_name(doorstation, (self.coordinator.data or {}).get("io", []))):
+            self._known_name = known
+        # The last name seen stays the entity's while the Doorstation is unknown: the offline set is looked up by it.
+        return self._known_name
 
     @property
     def device_info(self) -> DeviceInfo:

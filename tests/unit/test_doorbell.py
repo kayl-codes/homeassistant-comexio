@@ -46,7 +46,9 @@ def _event(io: dict[str, Any] | None = None, tracker: DoorstationTracker | None 
     coordinator.offline_extensions = set()
     coordinator.last_update_success = True
     coordinator.doorstations = tracker or _tracker(14)
-    return ComexioDoorbellEvent(coordinator, io or _io())
+    io = io or _io()
+    coordinator.data = {"io": [io]}
+    return ComexioDoorbellEvent(coordinator, io)
 
 
 # --- which IOs are bell buttons -----------------------------------------------------------------------------------
@@ -187,6 +189,26 @@ def test_the_signal_names_the_io_by_its_extension_id_not_by_its_name_or_comexio_
     assert io_push_signal(SERVER, 14, "DI1") != io_push_signal(SERVER, 15, "DI1")
     assert io_push_signal(SERVER, 14, "DI1") != io_push_signal("other", 14, "DI1")
     assert io_push_signal(SERVER, 14, "DI1") == io_push_signal(SERVER, "14", "di1")  # group key as text, any case
+
+
+def test_a_renamed_extension_is_looked_up_by_its_current_name_for_availability() -> None:
+    """The IO data carries the new name before the next setup: the offline set (and the device) follow it."""
+    event = _event()
+    event.coordinator.data["io"][0]["ext_name"] = "RENAMED"
+    event.coordinator.offline_extensions = {"RENAMED"}
+
+    assert event._ext_name == "RENAMED"
+    assert event.available is False
+    event.coordinator.offline_extensions = {"DOOR"}  # the old name no longer names the extension
+    assert event.available is True
+
+
+def test_an_extension_without_io_in_the_data_takes_the_name_the_doorstation_page_gives() -> None:
+    event = _event()
+    event.coordinator.data = {"io": []}
+    event.coordinator.doorstations.update({14: Doorstation(ext_id=14, camera_id=1, name="PAGE NAME")})
+
+    assert event._ext_name == "PAGE NAME"
 
 
 def test_a_ring_while_the_entity_is_unavailable_is_dropped() -> None:

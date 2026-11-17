@@ -175,6 +175,26 @@ async def test_a_push_rings_although_the_last_poll_failed(hass: HomeAssistant, e
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_renamed_extension_going_offline_makes_its_bells_unavailable(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The offline set names the extension as it is called now, not as it was at setup."""
+    await _setup(hass, entry)
+    coordinator = await _bring_extension_online(hass, entry)
+    for io in coordinator.data["io"]:
+        if str(io["ext_id"]) == "2":
+            io["ext_name"] = "UD RENAMED"
+    coordinator.offline_extensions = {"UD RENAMED"}
+
+    coordinator.async_update_listeners()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(BELL_1_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_an_installation_without_imported_ios_gets_no_doorbell_event(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
