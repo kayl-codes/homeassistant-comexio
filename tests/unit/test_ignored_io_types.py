@@ -1,5 +1,6 @@
 """IO types that are not imported (#317): QI, TL and UL report about once per second and flood the bus."""
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -170,6 +171,20 @@ def test_a_module_of_left_out_ios_only_keeps_its_extension() -> None:
     assert known_extension_names(imported, include_offline=False) == {"A1_7", "PWR1", "MT1"}
 
 
+def test_a_module_of_left_out_ios_only_is_tracked_as_offline() -> None:
+    """Its offline flag sits on the left-out IOs: without them the module would never count as offline."""
+    parsed = _parsed("I1")
+    parsed["io"][0]["offline"] = True  # an imported IO keeps counting beside the left-out ones
+    parsed["io"].append(_io("QI1", "PWR1", offline=True))
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "test"
+    coordinator.offline_extensions = None
+
+    coordinator._index_ios(_imported_data(parsed, {CONF_IGNORED_IO_TYPES: ["QI"]}))
+
+    assert coordinator.offline_extensions == {"A1_7", "PWR1"}
+
+
 def test_a_push_of_a_left_out_type_is_no_unknown_io(caplog: pytest.LogCaptureFixture) -> None:
     """Comexio pushes until a sync removed the commands: no warning, and no entry in the warned-IO set."""
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
@@ -252,6 +267,37 @@ def test_an_invalid_type_blocks_the_options_form() -> None:
     ComexioOptionsFlow._normalize_user_input({CONF_IGNORED_IO_TYPES: ["QI4"]}, errors, set())
 
     assert errors == {CONF_IGNORED_IO_TYPES: "invalid_ignored_io_types"}
+
+
+def _submitting_flow(monkeypatch: pytest.MonkeyPatch) -> tuple[ComexioOptionsFlow, list[dict[str, Any]]]:
+    """An options flow whose entry creation records what it is asked to save instead of saving it."""
+    flow = ComexioOptionsFlow.__new__(ComexioOptionsFlow)
+    flow._quickbus_shown = []
+    saved: list[dict[str, Any]] = []
+    monkeypatch.setattr(flow, "_create_options_entry", lambda user_input: saved.append(user_input) or "entry")
+    return flow, saved
+
+
+def test_submitting_an_invalid_type_returns_the_form_and_saves_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    flow, saved = _submitting_flow(monkeypatch)
+    errors: dict[str, str] = {}
+
+    result = asyncio.run(flow._async_submit_init({CONF_IGNORED_IO_TYPES: ["QI4"]}, {}, errors, set()))
+
+    assert result is None  # the form again
+    assert errors == {CONF_IGNORED_IO_TYPES: "invalid_ignored_io_types"}
+    assert saved == []
+
+
+def test_submitting_valid_types_saves_them_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
+    flow, saved = _submitting_flow(monkeypatch)
+    errors: dict[str, str] = {}
+
+    result = asyncio.run(flow._async_submit_init({CONF_IGNORED_IO_TYPES: ["ql", "qi"]}, {}, errors, set()))
+
+    assert result == "entry"
+    assert not errors
+    assert [entry[CONF_IGNORED_IO_TYPES] for entry in saved] == [["QL", "QI"]]
 
 
 # The field

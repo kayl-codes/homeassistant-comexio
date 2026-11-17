@@ -2112,8 +2112,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
         self._quickbus_index = {str(io["id"]): io for io in final_data[QUICKBUS_IO_DATA_KEY]}
         # Quickbus IOs carry their host extension's offline flag — an extension with only Quickbus IOs
-        # (or import_ios off) must still be tracked, or its Quickbus entities stay available.
-        self._track_offline_extensions([*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]])
+        # (or import_ios off) must still be tracked, or its Quickbus entities stay available. The same for a
+        # module whose IOs are all of a left-out type (#317): its offline flag is still read from them.
+        self._track_offline_extensions(
+            [*final_data["io"], *final_data[IGNORED_TYPE_IO_DATA_KEY], *final_data[QUICKBUS_IO_DATA_KEY]]
+        )
 
     def _track_offline_extensions(self, io_items: list[dict[str, Any]]) -> None:
         """Track offline extensions and log transitions."""

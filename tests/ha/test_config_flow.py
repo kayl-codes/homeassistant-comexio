@@ -149,7 +149,18 @@ async def test_without_markers_knx_and_ios_the_entry_is_created_at_once(hass: Ho
     result = await _submit(hass, {**USER_INPUT, "import_markers": False, "import_knx": False, "import_ios": False})
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["options"] == {}
+    # Saved all the same: switching the IO import on later must not import QI, TL and UL (#317).
+    assert result["options"] == {CONF_IGNORED_IO_TYPES: ["QI", "TL", "UL"]}
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_a_setup_without_the_io_import_keeps_the_defaults_next_to_the_lists(hass: HomeAssistant) -> None:
+    """The step without the IO types field (IO import off) still saves the default types (#317)."""
+    result = await _submit(hass, {**USER_INPUT, "import_ios": False})
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_IGNORED_MARKERS: "M7"})
+
+    assert result["options"] == {CONF_IGNORED_MARKERS: "7", CONF_IGNORED_IO_TYPES: ["QI", "TL", "UL"]}
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")

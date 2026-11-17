@@ -430,7 +430,12 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._checked_hosts |= new_hosts
 
     def _create_setup_entry(self, options: dict[str, Any]):
-        """Create the entry the user step validated, with the ignore-lists as its options."""
+        """Create the entry the user step validated, with the ignore-lists as its options.
+
+        A new entry always saves the IO types left out: a setup without the IO import (no field) keeps the defaults
+        for the day the import is switched on, instead of importing QI, TL and UL then (#317).
+        """
+        options = {CONF_IGNORED_IO_TYPES: list(DEFAULT_IGNORED_IO_TYPES), **options}
         data = self._pending_entry
         server_id, host = data[CONF_SERVER_ID], data[CONF_HOST]
         if (fingerprint := data.get(CONF_CERTIFICATE_FINGERPRINT)) is not None:
