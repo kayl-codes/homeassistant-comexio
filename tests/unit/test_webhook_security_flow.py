@@ -1038,6 +1038,7 @@ def _fresh_coordinator(
     if real_store:
         coordinator.api.webhook_security = _security(monkeypatch)
     coordinator._never_polled = never_polled
+    coordinator._last_poll_scraped = True  # the poll that read `$WebDevices` scraped the config
     coordinator._web_device_count = web_devices
     return coordinator
 
@@ -1271,6 +1272,26 @@ def test_a_poll_that_did_not_read_the_web_devices_decides_nothing_and_the_next_o
     assert coordinator._never_polled is True
 
     coordinator._web_device_count = 0  # a later poll read it, and it is empty
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled is False
+
+
+def test_a_poll_without_a_scraped_config_decides_nothing_even_when_it_read_no_web_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `$WebDevices` read as empty from a poll that scraped nothing (no `$FubModules`) proves no absence of commands.
+    coordinator = _fresh_coordinator(monkeypatch)
+    coordinator._last_poll_scraped = False
+    security = coordinator.api.webhook_security
+
+    _run(coordinator._async_settle_legacy_webhook_id())
+
+    assert security.legacy_enabled
+    security.async_save.assert_not_awaited()
+    assert coordinator._never_polled is True  # asked again at the next poll
+
+    coordinator._last_poll_scraped = True
     _run(coordinator._async_settle_legacy_webhook_id())
 
     assert security.legacy_enabled is False

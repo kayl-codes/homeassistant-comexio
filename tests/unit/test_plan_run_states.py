@@ -307,6 +307,8 @@ class _FakeCoordinator(SimpleNamespace):
     _async_save_config = ComexioCoordinator._async_save_config
     _async_save_config_or_keep_onewire_status = ComexioCoordinator._async_save_config_or_keep_onewire_status
     _async_settle_legacy_webhook_id = ComexioCoordinator._async_settle_legacy_webhook_id
+    _legacy_webhook_id_unneeded = ComexioCoordinator._legacy_webhook_id_unneeded
+    _async_switch_legacy_webhook_id_off = ComexioCoordinator._async_switch_legacy_webhook_id_off
     _async_save_webhook_security = ComexioCoordinator._async_save_webhook_security
     _never_polled = False
     _web_device_count = None

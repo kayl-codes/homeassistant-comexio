@@ -425,6 +425,14 @@
       "title": "Comexio extension module offline ({server_id})",
       "description": "Extension module(s) **{extensions}** went offline during operation. This may indicate a hardware failure or connection problem. If the module was intentionally decommissioned, you can dismiss this notification."
     },
+    "webhook_commands_stuck": {
+      "title": "Comexio: Web-IO commands cannot be moved to their own webhook ID ({server_id})",
+      "description": "{count} Web-IO command(s) of **{server_id}** still post to the old webhook ID, and the nightly migration cannot rewrite them (no command ID or device ID found): {commands}.\n\nThe old webhook ID therefore stays switched on. A sync (the Web-IO sync button) may fix it; this repair disappears at the next nightly run once no such command is left."
+    },
+    "webhook_restart_needed": {
+      "title": "Comexio: restart the Comexio server ({server_id})",
+      "description": "All Web-IO commands of **{server_id}** now use a webhook ID of their own, but Comexio only sends a changed command after a restart. **Restart the Comexio server.** The old webhook ID is switched off at the next nightly run after that, and this repair disappears."
+    },
     "uninstall_cleanup": {
       "title": "Comexio Uninstall Cleanup ({server_id})",
       "fix_flow": {

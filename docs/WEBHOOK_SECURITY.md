@@ -110,6 +110,10 @@ reconfiguration writes commands again later, the notification returns and one mo
   has Web-IO devices (an entry created anew on one that still holds commands of an earlier entry), keeps the old ID
   and goes through the switch-over as described above. So does an entry whose recorded host differs from the current
   one (see the next point): the commands of the earlier host may still push to the old ID.
+- **An entry that never synced does not wait for ever.** The same proof is checked at the nightly run: if the last
+  read of Comexio showed no Web-IO device at all and this entry has rewritten or written no command, the old ID is
+  switched off there too (log line `No Web-IO device exists: the old webhook id is switched off`). Without that proof
+  the old ID stays on, and the two repairs below tell you what holds it.
 - **A new Comexio host** (the address of the entry changes): the old ID is switched on again until every command of
   the new host has its own ID. The integration then reads the commands from the new host and rewrites the ones that
   differ.
@@ -121,7 +125,12 @@ reconfiguration writes commands again later, the notification returns and one mo
 
 - **The notification "Comexio: restart needed" does not go away:** restart the Comexio server, then wait for the next
   nightly run (01:30). If it stays, the log names the reason: commands that could not be read back or deviate are
-  listed by name.
+  listed by name. The same request is also raised as the repair **"Comexio: restart the Comexio server"** (Settings →
+  Repairs), so it is not lost when the notification was dismissed; both disappear together.
+- **Repair "Comexio: Web-IO commands cannot be moved to their own webhook ID":** the nightly run cannot rewrite the
+  commands it names (Comexio gave no command ID or device ID for them), and they still push to the old ID, which
+  therefore stays on. Run a sync (the Web-IO sync button): it creates such a command again with its IDs. The repair
+  disappears at the next nightly run once none is left.
 - **`failed` commands in the log:** Comexio refused or did not answer a rewrite (busy, offline). The next night tries
   again.
 - **Values arrive late after a Comexio restart:** that is expected for a moment; the integration polls the current
@@ -251,6 +260,11 @@ Neustart steht an.
   Comexio, das noch Commands eines früheren Eintrags hält) behält die alte ID und durchläuft die Umstellung wie oben
   beschrieben. Ebenso ein Eintrag, dessen gespeicherter Host vom aktuellen abweicht (siehe nächster Punkt): Die Commands
   des früheren Hosts können noch an die alte ID pushen.
+- **Ein Eintrag, der nie synchronisiert hat, wartet nicht ewig.** Derselbe Beleg wird beim Nachtlauf geprüft: Zeigte
+  das letzte Auslesen von Comexio gar kein Web-IO-Gerät und hat dieser Eintrag kein Command umgeschrieben oder
+  geschrieben, wird die alte ID auch dort abgeschaltet (Logzeile `No Web-IO device exists: the old webhook id is
+  switched off`). Ohne diesen Beleg bleibt die alte ID an, und die beiden Reparaturmeldungen unten sagen, was sie
+  festhält.
 - **Es gehen keine Pushes verloren:** Beide IDs funktionieren bis zum Schluss.
 - **Neuer Comexio-Host** (die Adresse des Eintrags ändert sich): Die alte ID wird wieder eingeschaltet, bis jedes
   Command des neuen Hosts eine eigene ID hat. Die Integration liest die Commands dann vom neuen Host und schreibt die
@@ -264,7 +278,13 @@ Neustart steht an.
 
 - **Die Benachrichtigung „Comexio: restart needed“ verschwindet nicht:** Starte den Comexio-Server neu und warte auf
   den nächsten Nachtlauf (01:30). Bleibt sie, nennt das Log den Grund: Commands, die sich nicht zurücklesen lassen oder
-  abweichen, stehen namentlich darin.
+  abweichen, stehen namentlich darin. Dieselbe Aufforderung gibt es auch als Reparaturmeldung **„Comexio: Comexio-Server
+  neu starten“** (Einstellungen → Reparaturen), sie geht also nicht verloren, wenn die Benachrichtigung weggeklickt
+  wurde; beide verschwinden gemeinsam.
+- **Reparatur „Comexio: Web-IO-Commands lassen sich nicht auf eine eigene Webhook-ID umstellen“:** Der Nachtlauf kann
+  die genannten Commands nicht umschreiben (Comexio lieferte keine Command-ID oder Geräte-ID dafür), und sie pushen
+  noch an die alte ID, die deshalb an bleibt. Führe einen Sync aus (die Web-IO-Sync-Taste): Er legt ein solches Command
+  mit seinen IDs neu an. Die Meldung verschwindet beim nächsten Nachtlauf, sobald keines mehr übrig ist.
 - **`failed`-Commands im Log:** Comexio hat ein Umschreiben abgelehnt oder nicht geantwortet (beschäftigt, offline). Die
   nächste Nacht versucht es erneut.
 - **Werte kommen nach einem Comexio-Neustart verspätet:** Das ist für einen Moment normal; die Integration fragt die

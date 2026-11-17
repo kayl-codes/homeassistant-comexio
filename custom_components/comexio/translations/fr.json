@@ -425,6 +425,14 @@
       "title": "Module d'extension Comexio hors ligne ({server_id})",
       "description": "Le(s) module(s) d'extension **{extensions}** sont passés hors ligne pendant le fonctionnement. Cela peut indiquer une panne matérielle ou un problème de connexion. Si le module a été intentionnellement mis hors service, vous pouvez ignorer cette notification."
     },
+    "webhook_commands_stuck": {
+      "title": "Comexio : les commandes Web-IO ne peuvent pas passer à leur propre ID de webhook ({server_id})",
+      "description": "{count} commande(s) Web-IO de **{server_id}** envoient encore vers l'ancien ID de webhook, et la migration nocturne ne peut pas les réécrire (ni ID de commande ni ID d'appareil trouvé) : {commands}.\n\nL'ancien ID de webhook reste donc activé. Une synchronisation (le bouton de synchronisation Web-IO) peut y remédier ; cette réparation disparaît à la prochaine exécution nocturne dès qu'il n'en reste aucune."
+    },
+    "webhook_restart_needed": {
+      "title": "Comexio : redémarrer le serveur Comexio ({server_id})",
+      "description": "Toutes les commandes Web-IO de **{server_id}** utilisent désormais leur propre ID de webhook, mais Comexio n'envoie une commande modifiée qu'après un redémarrage. **Redémarrez le serveur Comexio.** L'ancien ID de webhook est désactivé à la prochaine exécution nocturne qui suit, et cette réparation disparaît."
+    },
     "uninstall_cleanup": {
       "title": "Nettoyage de désinstallation Comexio ({server_id})",
       "fix_flow": {
