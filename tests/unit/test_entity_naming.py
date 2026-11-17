@@ -42,6 +42,8 @@ from custom_components.comexio.entity import ComexioFunctionPlanEntityMixin, Com
         ("comexio_iosrv1_qb211", "iosrv1_qb211"),
         ("comexio_iosrv1_onewire_ot1", "iosrv1_onewire_ot1"),
         ("comexio_iosrv1_onewire_problem", "iosrv1_onewire_problem"),
+        ("comexio_iosrv1_doorstation2_camera", "iosrv1_doorstation2_camera"),
+        ("comexio_iosrv1_doorstation2_di1_doorbell", "iosrv1_doorstation2_di1_doorbell"),
         ("comexio_iosrv1_fub19", "iosrv1_fub19"),
         ("comexio_iosrv1_orphaned_backups", "iosrv1_orphaned_backups"),
         ("comexio_iosrv1_api_write_errors", "iosrv1_api_write_errors"),
