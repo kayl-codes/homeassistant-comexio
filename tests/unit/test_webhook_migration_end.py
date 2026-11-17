@@ -829,6 +829,7 @@ def test_an_unknown_boot_time_still_waits_for_the_stocktake_before_reporting_a_s
     issues.async_create_issue.assert_not_called()
     issues.async_delete_issue.assert_not_called()
     notifications.async_create.assert_not_called()
+    notifications.async_dismiss.assert_not_called()  # an earlier request to restart stands until the stocktake reads
     assert coordinator._webhook_notices_restored is False
 
 
