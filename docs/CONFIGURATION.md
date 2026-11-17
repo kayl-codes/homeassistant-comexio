@@ -53,6 +53,10 @@ If a write fails, the log line names the cause when Comexio can be asked: the AP
 
 After a successful login test, a second step asks for the **ignore lists** of every category whose import is on (Markers, KNX objects): the IDs listed there get no entity, no Web-IO command and no function plan connection. Leave the fields empty to import everything — the lists can be changed later in the [Settings](#3-settings), where each field only shows while its import is on. The same step has the field **IO types that are not imported** (while IO import is on), pre-filled with `QI, TL, UL`: these three types report so many value changes that Comexio cannot work them off and the bus load builds up, see [Supported Hardware](SUPPORTED_HARDWARE.md). Without Marker, KNX and IO import this step is skipped.
 
+The field for the IO types (the same field is in the [Settings](#3-settings)):
+
+<img src="assets/ui/ignored_io_types_en.png" width="480">
+
 HA then confirms the new device:
 
 <img src="assets/ui/0_setup_dialog-2_en.png" width="320">
@@ -216,6 +220,10 @@ Benutzer und Passwort müssen zur Seite **Api** in der Comexio Studio passen. Sc
 Ein Fehler mit HTTP 503 („Service Unavailable“) heißt, dass Comexio selbst nicht korrekt geantwortet hat. Die Integration wiederholt diesen Schreibzugriff nicht, weil nicht feststellbar ist, ob Comexio ihn bereits ausgeführt hat.
 
 Nach erfolgreichem Login-Test fragt ein zweiter Schritt nach den **Ignorier-Listen** jeder Kategorie, deren Import eingeschaltet ist (Merker, KNX-Objekte): Die dort eingetragenen IDs bekommen keine Entität, keinen Web-IO-Befehl und keine Logikplan-Verbindung. Leer lassen, um alles zu importieren — die Listen lassen sich später in den [Einstellungen](#3-einstellungen) ändern; dort erscheint jedes Feld nur, solange sein Import eingeschaltet ist. Im selben Schritt steht das Feld **IO-Typen, die nicht importiert werden** (solange der IO-Import an ist), vorbelegt mit `QI, TL, UL`: Diese drei Typen melden so viele Wertänderungen, dass Comexio sie nicht abführen kann und sich die Bus-Last aufschaukelt, siehe [Unterstützte Hardware](SUPPORTED_HARDWARE.md). Ohne Merker-, KNX- und IO-Import entfällt dieser Schritt.
+
+Das Feld für die IO-Typen (dasselbe Feld steht in den [Einstellungen](#3-einstellungen)):
+
+<img src="assets/ui/ignored_io_types_de.png" width="480">
 
 Danach bestätigt HA die Anlage des neuen Geräts:
 
