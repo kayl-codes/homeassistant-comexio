@@ -6317,6 +6317,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 security.legacy_enabled = True
                 # An uptime reading during the save saw the old id off and counted the restore as decided.
                 self._webhook_notices_restored = False
+                # A restore that gave up (or failed) before starts over with its full number of attempts.
+                self._webhook_restore_failures = 0
         return saved
 
     def _dismiss_webhook_restart(self) -> None:

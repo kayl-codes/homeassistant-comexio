@@ -589,12 +589,14 @@ def test_a_save_that_fails_while_a_reading_saw_the_old_id_off_opens_the_restore_
         raise OSError("disk full")
 
     security.async_save.side_effect = save_met_by_a_reading
+    coordinator._webhook_restore_failures = WEBHOOK_RESTORE_ATTEMPTS - 1  # earlier attempts failed (or gave up)
 
     assert _run(coordinator._async_switch_legacy_webhook_id_off(security)) is False
 
     assert observed == [True]  # the reading did latch, or the check below proves nothing
     assert security.legacy_enabled
     assert coordinator._webhook_notices_restored is False
+    assert coordinator._webhook_restore_failures == 0  # the reopened restore has its full number of attempts
 
     coordinator._restore_webhook_migration_notices()  # the next reading, with the old id on again
 
@@ -609,11 +611,13 @@ def test_a_save_that_goes_through_leaves_the_restore_decided(
     security = coordinator.api.webhook_security
 
     coordinator._webhook_notices_restored = True  # a restore that was decided before the night's switch-off
+    coordinator._webhook_restore_failures = 2
 
     assert _run(coordinator._async_switch_legacy_webhook_id_off(security)) is True
 
     assert security.legacy_enabled is False
     assert coordinator._webhook_notices_restored is True  # only a save that failed opens it again
+    assert coordinator._webhook_restore_failures == 2  # the count is reset with the reopening, not by a good save
     issues.async_create_issue.assert_not_called()
 
 
@@ -1003,7 +1007,7 @@ def test_a_restore_that_fails_every_time_gives_up_after_its_attempts_instead_of_
     assert caplog.text.count("could not be raised again") == WEBHOOK_RESTORE_ATTEMPTS
     failures = [r.getMessage() for r in caplog.records if "could not be raised again" in r.getMessage()]
     assert "giving up" in failures[-1]
-    assert not any("giving up" in message for message in failures[:-1])
+    assert all("giving up" not in message for message in failures[:-1])
     calls = coordinator._webio_range_targets.call_count
 
     _run(coordinator._async_system_info_tick())
@@ -1013,18 +1017,49 @@ def test_a_restore_that_fails_every_time_gives_up_after_its_attempts_instead_of_
     issues.async_create_issue.assert_not_called()
 
 
+def test_a_restore_reopened_by_a_failed_save_gets_all_its_attempts_again(
+    monkeypatch: pytest.MonkeyPatch, issues: MagicMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    """(Sourcery, #313) After it gave up, a failed switch-off save puts the old id back on and reopens the restore:
+    its failures count from one again, so it does not give up at the first one."""
+    monkeypatch.setattr(coordinator_module, "async_dispatcher_send", MagicMock())
+    monkeypatch.setattr(coordinator_module.dt_util, "utcnow", lambda: NOW)
+    coordinator = _after_a_start(monkeypatch, boot=None, written=NOW)
+    coordinator.system_info = SystemInfoState()
+    coordinator.api.get_system_info = AsyncMock(
+        return_value=SystemInfoReading(None, timedelta(hours=1), "unused", None)
+    )
+    coordinator._webio_range_targets = MagicMock(side_effect=KeyError("Name"))
+    for _ in range(WEBHOOK_RESTORE_ATTEMPTS):
+        _run(coordinator._async_system_info_tick())
+    assert coordinator._webhook_notices_restored is True  # given up
+    security = coordinator.api.webhook_security
+    security.async_save.side_effect = OSError("disk full")
+
+    assert _run(coordinator._async_switch_legacy_webhook_id_off(security)) is False
+    caplog.clear()
+    for _ in range(WEBHOOK_RESTORE_ATTEMPTS):
+        _run(coordinator._async_system_info_tick())
+
+    messages = [r.getMessage() for r in caplog.records if "could not be raised again" in r.getMessage()]
+    assert len(messages) == WEBHOOK_RESTORE_ATTEMPTS
+    assert "attempt 1 of" in messages[0]
+    assert all("giving up" not in message for message in messages[:-1])
+    assert "giving up" in messages[-1]
+
+
 def test_a_restore_that_failed_after_its_first_repair_is_tried_again_without_doubling_it(
     monkeypatch: pytest.MonkeyPatch, issues: MagicMock, notifications: MagicMock
 ) -> None:
-    """The repairs are created by id, so the second run replaces what the first one raised before it failed."""
+    """The repairs are created by id, so the second run reuses the ids of what the first one raised before it failed."""
     coordinator = _after_a_start(monkeypatch, boot=NOW - timedelta(hours=1), written=NOW)
     real_notify = coordinator._notify_webhook_restart
     failures = [OSError("notification")]
 
     def failing_once() -> None:
+        real_notify()  # the repair and the notification are raised ...
         if failures:
-            raise failures.pop()
-        real_notify()
+            raise failures.pop()  # ... and the run fails after them
 
     coordinator._notify_webhook_restart = failing_once
 
@@ -1035,8 +1070,10 @@ def test_a_restore_that_failed_after_its_first_repair_is_tried_again_without_dou
     coordinator._restore_webhook_migration_notices()
 
     assert coordinator._webhook_notices_restored is True
-    assert [call.args[2] for call in issues.async_create_issue.call_args_list] == [_RESTART_ID]
-    notifications.async_create.assert_called_once()
+    # Same id both times, so Home Assistant replaces the first run's repair instead of adding another (the registry
+    # itself is a mock here: this pins the id, not the replacement).
+    assert [call.args[2] for call in issues.async_create_issue.call_args_list] == [_RESTART_ID, _RESTART_ID]
+    assert len({call.kwargs["notification_id"] for call in notifications.async_create.call_args_list}) == 1
 
 
 async def _none_coroutine(*_: Any) -> None:
