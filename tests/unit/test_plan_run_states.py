@@ -306,6 +306,10 @@ class _FakeCoordinator(SimpleNamespace):
     _keep_data_through_certificate_change = ComexioCoordinator._keep_data_through_certificate_change
     _async_save_config = ComexioCoordinator._async_save_config
     _async_save_config_or_keep_onewire_status = ComexioCoordinator._async_save_config_or_keep_onewire_status
+    _async_settle_legacy_webhook_id = ComexioCoordinator._async_settle_legacy_webhook_id
+    _async_save_webhook_security = ComexioCoordinator._async_save_webhook_security
+    _never_polled = False
+    _web_device_count = None
     onewire_status = None
     async_start_from_saved_config = ComexioCoordinator.async_start_from_saved_config
     async_seed_saved_onewire_sensors = ComexioCoordinator.async_seed_saved_onewire_sensors
@@ -665,6 +669,37 @@ def test_only_a_full_poll_that_read_fubs_publishes_the_plan_list(
     assert coordinator.plan_scrape_generation == int(published)
     assert (coordinator._plan_run_state_stale_count == 0) is published
     assert coordinator._plan_run_state_relogin_refused is not published
+
+
+@pytest.mark.parametrize(
+    ("scraped", "web_devices", "off"),
+    [(True, 0, True), (True, None, False), (True, 2, False), (False, 0, False)],
+    ids=["no web device", "web devices not read", "web devices exist", "nothing scraped"],
+)
+def test_the_first_scraped_poll_without_web_devices_switches_the_old_webhook_id_off_before_it_saves_the_config(
+    api: ComexioAPI, scraped: bool, web_devices: int | None, off: bool
+) -> None:
+    security = SimpleNamespace(
+        legacy_enabled=True, host_changed=False, migrated=set(), last_write=None, async_save=AsyncMock()
+    )
+    api.webhook_security = security
+    coordinator = _coordinator(api, _never_polled=True)
+    order: list[str] = []
+    security.async_save.side_effect = lambda: order.append("ledger")
+    coordinator._async_save_config = AsyncMock(side_effect=lambda *_a, **_k: order.append("config"))
+
+    async def fetch() -> dict:
+        coordinator._last_poll_scraped = scraped
+        coordinator._web_device_count = web_devices
+        coordinator._polled_plan_ids = None
+        return {}
+
+    coordinator._async_fetch_and_audit = fetch
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    assert security.legacy_enabled is not off
+    assert ("ledger" in order) is off
+    assert order == (["ledger", "config"] if off else ["config"] if scraped else [])
 
 
 def test_polls_without_a_plan_list_turn_the_sensors_unavailable(
