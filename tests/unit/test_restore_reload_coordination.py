@@ -2,7 +2,6 @@
 
 import asyncio
 import contextlib
-from functools import partial
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -34,7 +33,8 @@ def _coordinator() -> ComexioCoordinator:
     coordinator._plan_edits_done.set()
     coordinator.unloading = False
     coordinator._restored_as_new = {}
-    coordinator.config_entry = SimpleNamespace(entry_id="e1")
+    coordinator.config_entry = SimpleNamespace(entry_id="e1", options={"audit_ignored": True, "keep": 1})
+    coordinator.request_options_update_without_reload = MagicMock()  # type: ignore[method-assign]
     coordinator.hass = MagicMock()
     coordinator.hass.data = {DOMAIN: {"e1": coordinator}}
     coordinator.hass.config_entries.async_reload = AsyncMock()
@@ -62,9 +62,11 @@ def test_a_reload_waits_for_a_running_restore_to_finish() -> None:
 
 
 def _finishing_button(coordinator: ComexioCoordinator, reset_and_reload: AsyncMock) -> Any:
-    """The parts of the sync button `_finalize_sync` uses, with the real flag reset."""
-    button = SimpleNamespace(coordinator=coordinator, server_id="cx1", _reset_sync_state_and_reload=reset_and_reload)
-    button._reset_sync_flags = partial(ComexioSyncButton._reset_sync_flags, button)  # type: ignore[arg-type]
+    """The real sync button with only the closing reload replaced: `_finalize_sync` and its resets run as shipped."""
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.coordinator = coordinator
+    button.server_id = "cx1"
+    button._reset_sync_state_and_reload = reset_and_reload  # type: ignore[method-assign]
     return button
 
 
@@ -102,6 +104,10 @@ def test_a_cancelled_sync_finish_does_not_leave_the_coordinator_in_sync() -> Non
     coordinator.sync_current_step = "Create commands"
     reset_and_reload = AsyncMock()
     button = _finishing_button(coordinator, reset_and_reload)
+    lock_held_during_reset: list[bool] = []
+    coordinator.request_options_update_without_reload = MagicMock(  # type: ignore[method-assign]
+        side_effect=lambda _options: lock_held_during_reset.append(coordinator._sync_lock.locked())
+    )
 
     async def run() -> None:
         await coordinator._sync_lock.acquire()
@@ -118,6 +124,9 @@ def test_a_cancelled_sync_finish_does_not_leave_the_coordinator_in_sync() -> Non
         assert coordinator.sync_progress_pct is None
         assert coordinator.sync_current_step is None
         coordinator.async_set_updated_data.assert_called_once_with({})  # published: the button is not busy any more
+        # The stored option does not stay set either, and nothing else of the options is touched.
+        coordinator.request_options_update_without_reload.assert_called_once_with({"audit_ignored": False, "keep": 1})
+        assert lock_held_during_reset == [True]  # the resets run before the sync lock is released
         assert not coordinator._sync_lock.locked()
 
     asyncio.run(run())
@@ -177,13 +186,40 @@ def test_the_sync_lock_is_released_and_the_cancel_stands_when_the_reset_of_a_can
     log.exception.assert_called_once()
     assert not coordinator.in_sync
     assert not coordinator._sync_lock.locked()
+    # The publish fails last; the option reset ran before it. The separate guard is pinned by the test below.
+    coordinator.request_options_update_without_reload.assert_called_once()
+
+
+def test_a_failing_option_reset_of_a_cancelled_finish_does_not_skip_the_flag_reset() -> None:
+    coordinator = _coordinator()
+    coordinator.in_sync = True
+    coordinator.request_options_update_without_reload = MagicMock(side_effect=RuntimeError("entry"))  # type: ignore[method-assign]
+    button = _finishing_button(coordinator, AsyncMock())
+
+    async def run() -> None:
+        await coordinator._sync_lock.acquire()
+        async with coordinator._restore_lock:
+            task = asyncio.create_task(ComexioSyncButton._finalize_sync(button))  # type: ignore[arg-type]
+            await _settle()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    with patch("custom_components.comexio.button._LOGGER") as log:
+        asyncio.run(run())
+
+    log.exception.assert_called_once()
+    coordinator.request_options_update_without_reload.assert_called_once()
+    assert not coordinator.in_sync
+    assert not coordinator.cancel_sync
+    coordinator.async_set_updated_data.assert_called_once_with({})
+    assert not coordinator._sync_lock.locked()
 
 
 def test_a_finished_sync_publishes_its_reset_once_and_the_finally_adds_nothing() -> None:
     """The closing reload ran step 1 (in_sync is False): the finally only releases the lock."""
     coordinator = _coordinator()
     coordinator.in_sync = True
-    coordinator.config_entry = SimpleNamespace(entry_id="e1", data={}, options={})
     coordinator.hass.config_entries.async_reload = AsyncMock(return_value=True)
     button = ComexioSyncButton.__new__(ComexioSyncButton)
     button.coordinator = coordinator
@@ -200,6 +236,36 @@ def test_a_finished_sync_publishes_its_reset_once_and_the_finally_adds_nothing()
 
     assert not coordinator.in_sync
     coordinator.async_set_updated_data.assert_called_once_with({})
+    # Step 2 of the closing reload ran once (not again from the finally).
+    coordinator.request_options_update_without_reload.assert_called_once_with({"audit_ignored": False, "keep": 1})
+    coordinator.hass.config_entries.async_reload.assert_awaited_once_with("e1")
+    assert not coordinator._sync_lock.locked()
+
+
+def test_a_failing_flag_reset_of_a_finished_sync_does_not_skip_the_option_reset_or_the_reload() -> None:
+    """Both resets are guarded on their own in the normal path too: the log says "reloading anyway"."""
+    coordinator = _coordinator()
+    coordinator.in_sync = True
+    coordinator.async_set_updated_data = MagicMock(side_effect=RuntimeError("listener"))  # type: ignore[method-assign]
+    coordinator.hass.config_entries.async_reload = AsyncMock(return_value=True)
+    button = ComexioSyncButton.__new__(ComexioSyncButton)
+    button.coordinator = coordinator
+    button.hass = coordinator.hass
+    button.server_id = "cx1"
+    button.async_write_ha_state = MagicMock()  # type: ignore[method-assign]
+
+    async def run() -> None:
+        await coordinator._sync_lock.acquire()
+        await button._finalize_sync()
+
+    with (
+        patch("custom_components.comexio.button.asyncio.sleep", AsyncMock()),
+        patch("custom_components.comexio.button._LOGGER") as log,
+    ):
+        asyncio.run(run())
+
+    log.exception.assert_called_once()
+    coordinator.request_options_update_without_reload.assert_called_once_with({"audit_ignored": False, "keep": 1})
     coordinator.hass.config_entries.async_reload.assert_awaited_once_with("e1")
     assert not coordinator._sync_lock.locked()
 

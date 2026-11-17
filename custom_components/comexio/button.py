@@ -1541,23 +1541,42 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             # runs, so this only guards the reload. in_sync stays True while waiting, so the
             # restore's own reload request is skipped (async_reload_entry) — this reload covers it.
             async with self.coordinator.restores_held_off():
-                step_1_reached = True  # step 1 is its first statement, nothing is awaited before it
+                step_1_reached = True  # the resets are its first statements, nothing is awaited before them
                 await self._reset_sync_state_and_reload()
         finally:
-            try:
-                # A cancel while waiting for a restore never reaches step 1 and no reload follows: the sync
-                # must not stay "busy" (the sync button, its progress and the webhook stocktake would stay
-                # blocked until the next reload), so the same reset runs here, published like step 1 does.
-                # (in_sync is no marker for it: a failed sync clears it before it gets here.)
-                if not step_1_reached:
-                    self._reset_sync_flags()
-            except Exception:
-                # Not into the cancel or error that is on its way out, and never before the lock is released.
-                _LOGGER.exception("[%s] Resetting the sync state after a cancelled finish failed", self.server_id)
+            # (in_sync is no marker for step 1: a failed sync clears it before it gets here.)
+            if not step_1_reached:
+                # A cancel while waiting for a restore: no closing reload follows, so the sync must not stay "busy"
+                # (the button, its progress and the webhook stocktake would stay blocked until the next reload).
+                _LOGGER.warning(
+                    "[%s] The sync finish was cancelled before its closing reload: reload the integration to "
+                    "apply what the sync changed",
+                    self.server_id,
+                )
+                self._reset_sync_state()
             # 6. Release the (old) coordinator's lock — the reload built a new coordinator
             #    with its own lock; a press that waited on this one is dropped by
             #    async_handle_press' coordinator-identity check.
             self.coordinator._sync_lock.release()
+
+    def _reset_sync_state(self) -> None:
+        """Steps 1 and 2 of _finalize_sync, each guarded on its own.
+
+        A failing one neither skips the other (a failed publish must not leave the stored `audit_ignored` set, which
+        would keep the missing-class audit off) nor replaces a cancel or the reload that follow; `audit_ignored` goes
+        first so that a failing publish cannot block the persistent write. The sync lock is released after them.
+        """
+        for label, reset in (("audit_ignored", self._reset_audit_ignored), ("the sync flags", self._reset_sync_flags)):
+            try:
+                reset()
+            except Exception:
+                _LOGGER.exception("[%s] Resetting %s after the sync failed", self.server_id, label)
+
+    def _reset_audit_ignored(self) -> None:
+        """Step 2: reset `audit_ignored`; the update_listener suppresses its reload (R2)."""
+        new_options = dict(self.coordinator.config_entry.options)
+        new_options["audit_ignored"] = False
+        self.coordinator.request_options_update_without_reload(new_options)
 
     def _reset_sync_flags(self) -> None:
         """Step 1 of _finalize_sync: the sync is over for the coordinator, the button and the sensor; publish it."""
@@ -1572,17 +1591,9 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
 
     async def _reset_sync_state_and_reload(self) -> None:
         """Steps 1-5 of _finalize_sync: reset the sync state and the button, then reload the integration."""
-        try:
-            # 1. Flag reset
-            self._reset_sync_flags()
-
-            # 2. Reset audit_ignored. Set the skip flag first so the update_listener
-            #    suppresses its reload — the explicit reload below is the single reload (R2).
-            new_options = dict(self.coordinator.config_entry.options)
-            new_options["audit_ignored"] = False
-            self.coordinator.request_options_update_without_reload(new_options)
-        except Exception:
-            _LOGGER.exception("[%s] Resetting the sync state failed — reloading anyway", self.server_id)
+        # 1. Flag reset and 2. reset audit_ignored; the update_listener suppresses its reload, the explicit
+        #    reload below is the single one (R2).
+        self._reset_sync_state()
 
         # 3. Give the Comexio server a moment to finish the write operation;
         #    the update_listener task runs here, sees the skip flag, and returns. (R2)
