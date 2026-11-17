@@ -152,11 +152,15 @@ def test_a_push_that_reports_the_button_up_or_unknown_does_not_ring(value: float
 def test_every_push_down_rings_again() -> None:
     event = _event()
 
-    with patch.object(ComexioDoorbellEvent, "async_write_ha_state") as write:
+    with (
+        patch.object(ComexioDoorbellEvent, "_trigger_event") as trigger,
+        patch.object(ComexioDoorbellEvent, "async_write_ha_state") as write,
+    ):
         event._handle_push(1.0)
         event._handle_push(0.0)
         event._handle_push(1.0)
 
+    assert trigger.call_args_list == [call("ring"), call("ring")]  # the events, not only the state writes
     assert write.call_count == 2
 
 
@@ -164,11 +168,14 @@ def test_a_push_down_rings_whatever_the_value_before_it_was() -> None:
     """A poll that read the button down just before the push must not swallow the ring."""
     event = _event()
 
-    with patch.object(ComexioDoorbellEvent, "async_write_ha_state") as write:
+    with (
+        patch.object(ComexioDoorbellEvent, "_trigger_event") as trigger,
+        patch.object(ComexioDoorbellEvent, "async_write_ha_state"),
+    ):
         event._handle_push(1.0)
         event._handle_push(1.0)
 
-    assert write.call_count == 2
+    assert trigger.call_args_list == [call("ring"), call("ring")]
 
 
 def test_the_event_listens_to_the_push_signal_of_its_io_and_stops_with_its_removal() -> None:
