@@ -117,7 +117,8 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         self._failed_camera_id: int | None = None
         self._known_name: str | None = None
         self._lock = asyncio.Lock()
-        self._warned = False
+        # The camera whose failure streak was warned about: a new camera id starts a streak of its own.
+        self._warned_camera_id: int | None = None
 
     @property
     def _doorstation(self) -> Doorstation | None:
@@ -167,6 +168,9 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         async with self._lock:
             doorstation = self._doorstation
             if doorstation is None or self._extension_offline:
+                # What was cached belongs to a Doorstation that is not there: a rediscovery within the interval
+                # must read afresh, not hand out the picture from before it went. (A failed read stays throttled.)
+                self._frame = None
                 return None
             now = time.monotonic()
             if self._frame is not None and self._is_fresh(doorstation, now):
@@ -192,8 +196,8 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
                 self._report_failure(doorstation, error)
                 return None
             self._failed_at = None
-            if self._warned:
-                self._warned = False
+            if self._warned_camera_id is not None:
+                self._warned_camera_id = None
                 _LOGGER.info(
                     "[%s] Doorstation camera %d delivers images again", self.coordinator.server_id, self._ext_id
                 )
@@ -221,11 +225,11 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         return current is not None and current.camera_id == asked.camera_id and not self._extension_offline
 
     def _report_failure(self, doorstation: Doorstation, error: str | None) -> None:
-        """Warn once per failure streak that no image came, debug-log the later ones."""
+        """Warn once per failure streak of a camera that no image came, debug-log the later ones."""
         # A stale frame would pass for the current picture of a door: none is kept after a failure.
         self._frame = None
-        level = logging.DEBUG if self._warned else logging.WARNING
-        self._warned = True
+        level = logging.DEBUG if self._warned_camera_id == doorstation.camera_id else logging.WARNING
+        self._warned_camera_id = doorstation.camera_id
         _LOGGER.log(
             level,
             "[%s] No image from the camera of Doorstation %s (camera %d): %s",

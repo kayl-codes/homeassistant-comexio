@@ -68,6 +68,10 @@ async def test_the_camera_of_an_offline_extension_serves_no_image(hass: HomeAssi
     await _setup(hass, entry)
     coordinator = hass.data[DOMAIN][entry.entry_id]
     assert "UD 1" in coordinator.offline_extensions
+    # The camera exists and is unavailable: without this, a setup that never created it would pass below as well.
+    state = hass.states.get(CAMERA_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
 
     with pytest.raises(HomeAssistantError):
         await async_get_image(hass, CAMERA_ENTITY_ID)
@@ -100,7 +104,8 @@ async def test_a_page_without_doorstation_keeps_the_registered_camera_unavailabl
 
     assert er.async_get(hass).async_get(CAMERA_ENTITY_ID) is not None
     state = hass.states.get(CAMERA_ENTITY_ID)
-    assert state is None or state.state == STATE_UNAVAILABLE
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

@@ -336,6 +336,79 @@ def test_a_failed_read_does_not_hold_back_the_first_read_of_a_new_camera() -> No
     assert asyncio.run(_fail_change_ask()) == (None, FRAME)
 
 
+def test_a_doorstation_found_again_is_read_afresh_not_served_from_before_it_went() -> None:
+    frames = iter([b"before", b"after"])
+    snapshot = AsyncMock(side_effect=lambda _camera_id: (next(frames), None))
+    camera, coordinator = _camera(snapshot=snapshot)
+    same_camera = {14: _doorstation()}
+
+    async def _drop_ask_and_find_again() -> tuple[bytes | None, bytes | None, bytes | None]:
+        first = await camera.async_camera_image()
+        for _ in range(DOORSTATION_EMPTY_POLLS_BEFORE_DROP):
+            coordinator.doorstations.update({})
+        while_gone = await camera.async_camera_image()
+        coordinator.doorstations.update(same_camera)
+        return first, while_gone, await camera.async_camera_image()
+
+    assert asyncio.run(_drop_ask_and_find_again()) == (b"before", None, b"after")
+    assert snapshot.await_count == 2
+
+
+def test_an_extension_back_online_is_read_afresh_not_served_from_before_it_went_offline() -> None:
+    frames = iter([b"before", b"after"])
+    snapshot = AsyncMock(side_effect=lambda _camera_id: (next(frames), None))
+    camera, coordinator = _camera(snapshot=snapshot)
+
+    async def _offline_ask_and_online() -> tuple[bytes | None, bytes | None, bytes | None]:
+        first = await camera.async_camera_image()
+        coordinator.offline_extensions = {"DOOR"}
+        while_offline = await camera.async_camera_image()
+        coordinator.offline_extensions = set()
+        return first, while_offline, await camera.async_camera_image()
+
+    assert asyncio.run(_offline_ask_and_online()) == (b"before", None, b"after")
+    assert snapshot.await_count == 2
+
+
+def test_a_camera_that_works_again_after_a_change_says_so_and_warns_again_later(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    results = {1: (None, "boom"), 2: (FRAME, None)}
+    snapshot = AsyncMock(side_effect=lambda camera_id: results[camera_id])
+    camera, coordinator = _camera(snapshot=snapshot)
+
+    async def _fail_change_work_fail() -> None:
+        await camera.async_camera_image()
+        coordinator.doorstations.update({14: _doorstation(camera_id=2)})
+        await camera.async_camera_image()
+        camera._frame_at -= DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC + 1
+        results[2] = (None, "boom")
+        await camera.async_camera_image()
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.comexio.camera"):
+        asyncio.run(_fail_change_work_fail())
+
+    assert [r.levelno for r in caplog.records] == [logging.WARNING, logging.INFO, logging.WARNING]
+    assert "delivers images again" in caplog.records[1].getMessage()
+
+
+def test_a_replacement_camera_that_fails_too_is_warned_about_on_its_own(caplog: pytest.LogCaptureFixture) -> None:
+    snapshot = AsyncMock(return_value=(None, "boom"))
+    camera, coordinator = _camera(snapshot=snapshot)
+
+    async def _fail_change_fail() -> None:
+        await camera.async_camera_image()
+        coordinator.doorstations.update({14: _doorstation(camera_id=2)})
+        await camera.async_camera_image()
+
+    with caplog.at_level(logging.DEBUG, logger="custom_components.comexio.camera"):
+        asyncio.run(_fail_change_fail())
+
+    assert [r.levelno for r in caplog.records] == [logging.WARNING, logging.WARNING]
+    assert "(camera 1)" in caplog.records[0].getMessage()
+    assert "(camera 2)" in caplog.records[1].getMessage()
+
+
 def test_an_answer_for_a_doorstation_that_went_meanwhile_is_not_handed_out_or_kept() -> None:
     camera, coordinator = _camera()
 
@@ -365,7 +438,7 @@ def test_an_answer_for_a_camera_that_changed_meanwhile_is_not_handed_out_or_kept
 
     assert asyncio.run(_ask_twice()) == (None, FRAME)
     assert camera._failed_at is None
-    assert camera._warned is False
+    assert camera._warned_camera_id is None
 
 
 def test_a_failed_read_that_is_stale_is_neither_a_failure_nor_a_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -381,7 +454,7 @@ def test_a_failed_read_that_is_stale_is_neither_a_failure_nor_a_warning(caplog: 
         assert asyncio.run(camera.async_camera_image()) is None
 
     assert camera._failed_at is None
-    assert camera._warned is False
+    assert camera._warned_camera_id is None
     assert [r.levelno for r in caplog.records] == [logging.DEBUG]
 
 
