@@ -83,6 +83,28 @@ def test_the_sync_reload_waits_for_a_running_restore_and_keeps_in_sync_meanwhile
     asyncio.run(run())
 
 
+def test_a_cancelled_sync_finish_does_not_leave_the_coordinator_in_sync() -> None:
+    """A cancel while the closing reload waits for a restore skips the reset step: in_sync must not stick."""
+    coordinator = _coordinator()
+    coordinator.in_sync = True
+    reset_and_reload = AsyncMock()
+    button = SimpleNamespace(coordinator=coordinator, _reset_sync_state_and_reload=reset_and_reload)
+
+    async def run() -> None:
+        await coordinator._sync_lock.acquire()
+        async with coordinator._restore_lock:
+            task = asyncio.create_task(ComexioSyncButton._finalize_sync(button))  # type: ignore[arg-type]
+            await _settle()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        reset_and_reload.assert_not_awaited()
+        assert not coordinator.in_sync
+        assert not coordinator._sync_lock.locked()
+
+    asyncio.run(run())
+
+
 def test_an_unexpected_restore_error_replaces_the_progress_notice() -> None:
     coordinator = _coordinator()
     coordinator.async_update_listeners = MagicMock()  # type: ignore[method-assign]

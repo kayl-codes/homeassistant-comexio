@@ -363,7 +363,7 @@ def test_a_save_cut_short_by_an_unload_puts_the_old_id_back(monkeypatch: pytest.
         _run(migration)
 
     assert security.legacy_enabled  # the store may still hold "on": memory must not run ahead of it
-    assert coordinator._webhook_notices_restored is False  # and the restore is open again with it
+    assert not coordinator._webhook_notices_restored  # and the restore is open again with it
 
 
 def test_a_command_put_back_takes_the_restart_request_back_at_the_nightly_run(
@@ -459,6 +459,7 @@ def _after_a_start(monkeypatch: pytest.MonkeyPatch, *, boot: Any, written: Any =
     coordinator._full_poll_running = False
     coordinator._polls_open = 0
     coordinator._poll_overlap = False
+    coordinator.in_sync = False
     return coordinator
 
 
@@ -616,7 +617,7 @@ def test_a_save_that_goes_through_leaves_the_restore_decided(
     assert _run(coordinator._async_switch_legacy_webhook_id_off(security)) is True
 
     assert security.legacy_enabled is False
-    assert coordinator._webhook_notices_restored is True  # only a save that failed opens it again
+    assert coordinator._webhook_notices_restored  # only a save that failed opens it again
     assert coordinator._webhook_restore_failures == 2  # the count is reset with the reopening, not by a good save
     issues.async_create_issue.assert_not_called()
 
@@ -659,7 +660,9 @@ def test_a_poll_counts_as_open_up_to_the_moment_it_returns_its_data(
 
     assert seen == [(1, False)]  # open, and not readable although every other guard is open
     assert coordinator._polls_open == 0  # closed again on every way out, a cancel included
-    assert coordinator._webhook_stocktake_readable(coordinator.api.webhook_security) is True
+    if failure is not None:
+        coordinator.last_update_success = False  # what Home Assistant records for a poll that raised
+    assert coordinator._webhook_stocktake_readable(coordinator.api.webhook_security) is (failure is None)
 
 
 def test_a_poll_that_ends_while_another_is_still_under_way_does_not_open_the_stocktake(
@@ -841,6 +844,10 @@ def _poll_failed(coordinator: Any) -> None:
     coordinator.last_update_success = False
 
 
+def _sync_running(coordinator: Any) -> None:
+    coordinator.in_sync = True  # the sync changes the Web-IO commands; the reload that closes it restores again
+
+
 def _web_devices_unread(coordinator: Any) -> None:
     coordinator._own_web_device_count = None  # reset at the start of a poll, set once `$WebDevices` was read
 
@@ -856,6 +863,7 @@ def _commands_not_decoded(coordinator: Any) -> None:
         pytest.param(_poll_in_flight, id="poll-under-way"),
         pytest.param(_poll_awaiting_its_commit, id="poll-awaiting-its-commit"),
         pytest.param(_poll_failed, id="poll-failed"),
+        pytest.param(_sync_running, id="sync-running"),
         pytest.param(_web_devices_unread, id="web-devices-not-read"),
         pytest.param(_commands_not_decoded, id="ledger-without-stored-commands"),
     ],
@@ -889,6 +897,7 @@ def _healthy_after_a_rewrite(coordinator: Any) -> None:
     """Every guard open, the ledger names a command and the data holds it: the state after the first nightly rewrite."""
     coordinator._full_poll_running = False
     coordinator._polls_open = 0
+    coordinator.in_sync = False
     coordinator.last_update_success = True
     coordinator._own_web_device_count = 0
     coordinator.api.webhook_security.migrated = {"HA m"}

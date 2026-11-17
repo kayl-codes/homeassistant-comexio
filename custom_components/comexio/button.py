@@ -1542,6 +1542,13 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             async with self.coordinator.restores_held_off():
                 await self._reset_sync_state_and_reload()
         finally:
+            # A cancel while waiting for a restore never reaches step 1 and no reload follows:
+            # the coordinator must not stay "in sync" (the sync button, the busy state and the
+            # webhook stocktake would stay blocked until the next reload).
+            # A cancel while waiting for a restore never reaches step 1 and no reload follows:
+            # the coordinator must not stay "in sync" (the sync button, the busy state and the
+            # webhook stocktake would stay blocked until the next reload).
+            self.coordinator.in_sync = False
             # 6. Release the (old) coordinator's lock — the reload built a new coordinator
             #    with its own lock; a press that waited on this one is dropped by
             #    async_handle_press' coordinator-identity check.
