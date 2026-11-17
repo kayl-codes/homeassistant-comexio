@@ -195,6 +195,37 @@ async def test_a_renamed_extension_going_offline_makes_its_bells_unavailable(
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_bell_the_poll_no_longer_lists_is_unavailable_until_it_returns(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The Doorstation stays reported, but the coordinator no longer indexes DI1: a push of it reaches nobody."""
+    await _setup(hass, entry)
+    coordinator = await _bring_extension_online(hass, entry)
+    ios = coordinator.data["io"]
+    coordinator.data["io"] = [io for io in ios if not (str(io["ext_id"]) == "2" and io["identifier"] == "DI1")]
+
+    coordinator.async_update_listeners()
+    await hass.async_block_till_done()
+    coordinator.update_io_by_name(EXTENSION, "DI1", 1)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(BELL_1_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+    other = hass.states.get(BELL_2_ENTITY_ID)
+    assert other is not None
+    assert other.state == STATE_UNKNOWN  # DI2 is still listed
+
+    coordinator.data["io"] = ios
+    coordinator.async_update_listeners()
+    await hass.async_block_till_done()
+
+    state = hass.states.get(BELL_1_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNKNOWN  # back, and the ring of the meantime was not made up
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_an_installation_without_imported_ios_gets_no_doorbell_event(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:

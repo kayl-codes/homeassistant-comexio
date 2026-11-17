@@ -35,6 +35,11 @@ from .entity import ComexioStableEntityIdMixin, build_device_info, extension_dev
 _LOGGER = logging.getLogger(__name__)
 
 
+def _current_ios(coordinator: ComexioCoordinator) -> list[Mapping[str, Any]]:
+    """The IOs of the last poll; none before the first one."""
+    return (coordinator.data or {}).get("io", [])
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback) -> None:
     """Set up a doorbell event for every bell button of the Doorstations the polls report, now and later."""
     coordinator: ComexioCoordinator = hass.data[DOMAIN][entry.entry_id]
@@ -69,7 +74,7 @@ class _DoorbellSync:
         # One entity per unique id: two IOs of one button in a single poll must not become two entities.
         bells = {
             bell.unique_id: bell
-            for io in doorbell_ios((coordinator.data or {}).get("io", []), coordinator.doorstations.known)
+            for io in doorbell_ios(_current_ios(coordinator), coordinator.doorstations.known)
             if not offline_io_skipped(io, self._include_offline)
             for bell in [ComexioDoorbellEvent(coordinator, io)]
         }
@@ -115,10 +120,16 @@ class ComexioDoorbellEvent(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
     def _ext_name(self) -> str:
         """The extension's current name: a rename in Comexio shows in the IO data before the next setup."""
         doorstation = self._doorstation
-        if doorstation and (known := doorstation_ext_name(doorstation, (self.coordinator.data or {}).get("io", []))):
+        if doorstation and (known := doorstation_ext_name(doorstation, _current_ios(self.coordinator))):
             self._known_name = known
         # The last name seen stays the entity's while the Doorstation is unknown: the offline set is looked up by it.
         return self._known_name
+
+    @property
+    def _bell_listed(self) -> bool:
+        """Whether the last poll still lists this button: a push of an IO the coordinator lacks goes nowhere."""
+        bells = doorbell_ios(_current_ios(self.coordinator), [self._ext_id])
+        return any(str(io.get("identifier", "")).lower() == self._identifier.lower() for io in bells)
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -133,11 +144,12 @@ class ComexioDoorbellEvent(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
 
     @property
     def available(self) -> bool:
-        """Unavailable with the extension (offline) and with a Doorstation the polls no longer report."""
+        """Unavailable with the extension (offline), a Doorstation the polls no longer report and a button they omit."""
         return (
             super().available
             and self._ext_name not in (self.coordinator.offline_extensions or ())
             and self._doorstation is not None
+            and self._bell_listed
         )
 
     async def async_added_to_hass(self) -> None:
@@ -154,8 +166,9 @@ class ComexioDoorbellEvent(ComexioStableEntityIdMixin, CoordinatorEntity[Comexio
     def _handle_push(self, value: float | None) -> None:
         """A push stored the IO's value: a value above zero is the button going down.
 
-        While the entity is unavailable (its extension offline, its Doorstation no longer reported) the ring is
-        dropped: written as it is, the timestamp would show up as a late ring once the entity is available again.
+        While the entity is unavailable (its extension offline, its Doorstation no longer reported, its button
+        missing from the last poll) the ring is dropped: written as it is, the timestamp would show up as a late
+        ring once the entity is available again.
         """
         if value is None or value <= 0:
             return

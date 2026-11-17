@@ -113,7 +113,8 @@ def test_the_event_is_a_doorbell_with_the_one_event_type_ring() -> None:
     event = _event()
 
     assert event.device_class == "doorbell"
-    assert event.event_types == [DOORBELL_EVENT_RING] == ["ring"]
+    assert event.event_types == [DOORBELL_EVENT_RING]
+    assert DOORBELL_EVENT_RING == "ring"
 
 
 def test_the_event_joins_the_device_of_the_extension_like_its_io() -> None:
@@ -262,6 +263,56 @@ def test_the_event_is_unavailable_once_its_doorstation_is_no_longer_reported() -
     with patch("custom_components.comexio.event.CoordinatorEntity.available", True):
         tracker.update({15: Doorstation(ext_id=15, camera_id=2, name="OTHER")})
         assert event.available is False
+
+
+def test_the_event_is_unavailable_once_a_poll_no_longer_lists_its_button() -> None:
+    """The coordinator does not index the IO any more, so a push of it would never reach the event."""
+    event = _event()
+    event.coordinator.data = {"io": [_io("DI2")]}  # the Doorstation is still reported, DI1 is gone
+
+    with patch("custom_components.comexio.event.CoordinatorEntity.available", True):
+        assert event.available is False
+
+
+def test_the_event_is_unavailable_when_only_a_button_of_the_same_name_on_another_extension_is_listed() -> None:
+    event = _event()
+    event.coordinator.data = {"io": [_io("DI1", ext_id="15")]}
+
+    with patch("custom_components.comexio.event.CoordinatorEntity.available", True):
+        assert event.available is False
+
+
+def test_the_event_is_available_again_when_its_button_returns_in_a_poll() -> None:
+    event = _event()
+    event.coordinator.data = {"io": []}
+    event.coordinator.data = {"io": [_io("DI1")]}
+
+    with patch("custom_components.comexio.event.CoordinatorEntity.available", True):
+        assert event.available is True
+
+
+@pytest.mark.parametrize(("own", "listed"), [("DI1", "di1"), ("di1", "DI1")])
+def test_the_button_is_matched_without_regard_to_the_case_of_its_identifier(own: str, listed: str) -> None:
+    event = _event(_io(own))
+    event.coordinator.data = {"io": [_io(listed)]}
+
+    with patch("custom_components.comexio.event.CoordinatorEntity.available", True):
+        assert event.available is True
+
+
+def test_a_push_of_a_button_the_last_poll_no_longer_lists_is_dropped_and_not_made_up_later() -> None:
+    event = _event()
+    event.coordinator.data = {"io": []}
+
+    with (
+        patch("custom_components.comexio.event.CoordinatorEntity.available", True),
+        patch.object(ComexioDoorbellEvent, "async_write_ha_state") as write,
+    ):
+        event._handle_push(1.0)
+        event.coordinator.data = {"io": [_io("DI1")]}  # the button is back: the dropped ring stays dropped
+
+    assert event.state_attributes["event_type"] is None
+    write.assert_not_called()
 
 
 # --- the sync -----------------------------------------------------------------------------------------------------
