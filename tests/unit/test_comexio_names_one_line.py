@@ -74,6 +74,8 @@ IDENTITY_FUNCTIONS = {
         "extension_firmware_update_unique_id",  # an entity's unique_id
         "extension_firmware_object_id",  # an entity's object id
         "io_unique_id",  # an entity's unique_id
+        "doorstation_doorbell_unique_id",  # an entity's unique_id
+        "io_push_signal",  # a dispatcher signal name, never printed
         "io_command_name",  # the Web-IO command name Comexio must report back
     },
     "webhook_security.py": {"command_key", "payload_key"},  # the HMAC input that tells a command's webhook id

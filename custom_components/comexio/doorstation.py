@@ -11,7 +11,7 @@ from typing import Any
 
 from aiocomexio.doorstation import Doorstation
 
-from .const import DOORSTATION_EMPTY_POLLS_BEFORE_DROP
+from .const import DOORSTATION_BELL_IDENTIFIERS, DOORSTATION_EMPTY_POLLS_BEFORE_DROP
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -52,6 +52,24 @@ class DoorstationTracker:
         if self._known:
             _LOGGER.debug("No Doorstation on the IO home page (%d in a row), keeping the known ones", self._empty_polls)
         return False
+
+
+def doorbell_ios(ios: Iterable[Mapping[str, Any]], doorstation_ext_ids: Iterable[int | str]) -> list[Mapping[str, Any]]:
+    """The bell buttons among the IOs: the digital inputs DI1-DI3 of the extensions that are Doorstations.
+
+    An IO of another extension named DI1 (a different module may use the identifier) is no bell. The extension id
+    of an IO and the one of a Doorstation are compared as text: the page gives the Doorstation an integer, the IO
+    keeps the group key it was read under.
+    """
+    wanted = {str(ext_id) for ext_id in doorstation_ext_ids}
+    return [
+        io
+        for io in ios
+        if str(io.get("ext_id")) in wanted
+        and str(io.get("identifier", "")).upper() in DOORSTATION_BELL_IDENTIFIERS
+        and io.get("is_binary")
+        and io.get("is_input", True)
+    ]
 
 
 def doorstation_ext_name(doorstation: Doorstation, ios: Iterable[Mapping[str, Any]]) -> str | None:

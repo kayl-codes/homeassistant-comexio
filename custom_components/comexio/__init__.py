@@ -94,11 +94,18 @@ PLATFORMS = [
     "select",
     "image",
     "camera",
+    "event",
     "update",
     "cover",
     "light",
 ]
 
+
+# The platforms whose entities belong to a Doorstation and are not removed as orphans (camera.py, event.py);
+# the events only while the IO import is on (see DOORBELL_ENTITY_DOMAIN).
+DOORSTATION_ENTITY_DOMAINS = frozenset({"camera", "event"})
+# The doorbell events are made of IOs: with the IO import off none is created, so their entries are not kept.
+DOORBELL_ENTITY_DOMAIN = "event"
 
 # A pinned entry connects over HTTPS only; the reconfigure flow is the way back to plain HTTP.
 _HTTPS_RETRY_HINT = " (over HTTPS — if Comexio no longer serves HTTPS, reconfigure the entry to go back to HTTP)"
@@ -563,7 +570,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         }
     active_unique_ids |= plan_uids
 
-    active_unique_ids |= _doorstation_camera_uids(ent_reg, entry, server_id)
+    active_unique_ids |= _doorstation_entity_uids(ent_reg, entry, server_id, import_ios=conf.get("import_ios", True))
 
     # Bus-Load-Watchdog diagnostic sensors (always active, independent of extension/marker state)
     active_unique_ids.update(
@@ -764,19 +771,24 @@ def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: 
     )
 
 
-def _doorstation_camera_uids(ent_reg: er.EntityRegistry, entry: ConfigEntry, server_id: str) -> set[str]:
-    """The unique_ids of the Doorstation cameras (camera.py) that are registered: the orphan cleanup keeps them.
+def _doorstation_entity_uids(
+    ent_reg: er.EntityRegistry, entry: ConfigEntry, server_id: str, *, import_ios: bool
+) -> set[str]:
+    """The unique_ids of the Doorstation cameras (camera.py) and doorbell events (event.py) that are registered.
 
-    A camera turns unavailable while the IO home page shows no Doorstation (a changed page reads like that, and a
-    page that is only partly understood would drop some), so its registry entry stays and the camera comes back
-    with the page. The cleanup never decides that a Doorstation is gone for good: the camera of a removed one stays
-    unavailable until it is deleted by hand, which costs nothing, where a wrong removal would cost its history.
+    The orphan cleanup keeps them. Such an entity turns unavailable while the IO home page shows no Doorstation (a
+    changed page reads like that, and a page that is only partly understood would drop some), so its registry entry
+    stays and it comes back with the page. The cleanup never decides that a Doorstation is gone for good: the
+    entities of a removed one stay unavailable until they are deleted by hand, which costs nothing, where a wrong
+    removal would cost their history. The exception is the doorbell events of an entry that no longer imports IOs:
+    event.py creates none then, like every other IO entity, so their entries go with the rest.
     """
     prefix = f"comexio_{server_id}_doorstation".lower()
+    domains = DOORSTATION_ENTITY_DOMAINS if import_ios else DOORSTATION_ENTITY_DOMAINS - {DOORBELL_ENTITY_DOMAIN}
     return {
         e.unique_id
         for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-        if e.domain == "camera" and e.unique_id.startswith(prefix)
+        if e.domain in domains and e.unique_id.startswith(prefix)
     }
 
 

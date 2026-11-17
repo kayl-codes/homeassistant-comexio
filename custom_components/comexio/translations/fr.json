@@ -359,6 +359,18 @@
       "doorstation_camera": {
         "name": "Caméra"
       }
+    },
+    "event": {
+      "doorbell": {
+        "name": "Sonnette {button}",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "ring": "Sonnerie"
+            }
+          }
+        }
+      }
     }
   },
   "issues": {

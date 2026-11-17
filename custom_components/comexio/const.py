@@ -224,6 +224,10 @@ DOORSTATION_EMPTY_POLLS_BEFORE_DROP = 3
 # A camera snapshot is the first frame of the stream, which Comexio opens for each request (it serves one request at
 # a time): a frame younger than this is handed to a second request instead of opening the stream again.
 DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC = 5.0
+# The bell buttons of a Doorstation (its inputs DI1-DI3, the identifiers compared in upper case) and the one event type
+# of their `event` entities.
+DOORSTATION_BELL_IDENTIFIERS = frozenset({"DI1", "DI2", "DI3"})
+DOORBELL_EVENT_RING = "ring"
 
 # parse_config() output key of the stored Web-IO commands whose name an earlier command already
 # has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
@@ -990,6 +994,16 @@ def plan_watch_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_plan_watch"
 
 
+def io_push_signal(server_id: str, ext_id: str | int, identifier: str) -> str:
+    """Dispatcher signal fired when a webhook push stored a value of this IO (an event entity listens, see event.py).
+
+    Only a push fires it: a poll reads the IO too, but says nothing about when its value changed. The IO is named by
+    its extension's id and its identifier (case-insensitive), not by its Comexio id (Comexio may hand an id to
+    another IO) and not by the extension's name (a rename in Comexio would leave a listener on the old signal).
+    """
+    return f"{DOMAIN}_{server_id}_io_push_{ext_id}_{identifier.lower()}"
+
+
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
     return f"{DOMAIN}_{server_id}_bus_load_update"
@@ -1099,6 +1113,11 @@ def function_plan_run_state_unique_id(server_id: str, fub_id: int | str) -> str:
 def doorstation_camera_unique_id(server_id: str, ext_id: int | str) -> str:
     """unique_id of a Doorstation's camera — the extension id only, never its name."""
     return f"comexio_{server_id}_doorstation{ext_id}_camera".lower()
+
+
+def doorstation_doorbell_unique_id(server_id: str, ext_id: int | str, identifier: str) -> str:
+    """unique_id of the doorbell event of a bell button (DI1-DI3) — the extension id and the identifier only."""
+    return f"comexio_{server_id}_doorstation{ext_id}_{identifier}_doorbell".lower()
 
 
 def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:
