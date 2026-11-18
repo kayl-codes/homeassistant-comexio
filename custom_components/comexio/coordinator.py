@@ -1,11 +1,21 @@
 # Version: 0.8.2
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping, Set as AbstractSet
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Coroutine,
+    Iterable,
+    Iterator,
+    Mapping,
+    Set as AbstractSet,
+)
 import contextlib
 import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+import functools
 import html
 from itertools import chain
 import logging
@@ -13,7 +23,7 @@ import math
 import pathlib
 import re
 import time
-from typing import Any, NamedTuple
+from typing import Any, Concatenate, NamedTuple
 import uuid
 
 from aiocomexio import (
@@ -384,6 +394,32 @@ _SUN_ATTR_BY_FREQ = {
     "DAWN": "next_dawn",
     "DUSK": "next_dusk",
 }
+
+
+def _skip_when_connections_closed[C: ComexioCoordinator, **P](
+    tick: Callable[Concatenate[C, P], Awaitable[None]],
+) -> Callable[Concatenate[C, P], Coroutine[Any, Any, None]]:
+    """A periodic read of Comexio that does nothing once the main session is gone (unload, HA stopping).
+
+    Home Assistant's CLOSE event closes the connector of every session while the entry is still loaded and its
+    timers still fire; aiohttp then refuses the request with RuntimeError("Session is closed"), which nobody
+    catches and Home Assistant logs as "Task exception was never retrieved" (#289, open point eh). A tick that
+    starts on a closed session, or whose request meets the close, ends quietly; any other RuntimeError is a bug
+    and goes on.
+    """
+
+    @functools.wraps(tick)
+    async def wrapper(self: C, *args: P.args, **kwargs: P.kwargs) -> None:
+        if self.api.session_is_gone:
+            return
+        try:
+            await tick(self, *args, **kwargs)
+        except RuntimeError as err:
+            if not self.api.met_the_closed_session(err):
+                raise
+            _LOGGER.debug("[%s] %s met the closed session: %s", self.server_id, tick.__name__, err)
+
+    return wrapper
 
 
 def _unknown_run_state(_fub_id: int) -> None:
@@ -5151,6 +5187,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._preview_plan_cache is not None:
             self._restart_connection_poll(fast=active)
 
+    @_skip_when_connections_closed
     async def _async_poll_connection_values(self, _now: Any) -> None:
         """Stufe 2: refresh live per-connection wire values and re-render the armed plan
         (live plan or a displayed backup snapshot — see _render_armed_preview)."""
@@ -5163,6 +5200,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 cache["fub_id"], session=preview_session
             )
         except Exception:
+            if self.api.session_is_gone:
+                # Unload or Home Assistant stopping closed the connections under this request: no failure to count.
+                return
             if self._preview_plan_cache is not cache:
                 # The preview was stopped/replaced (stop_preview() or a new plan armed)
                 # while this request was in flight — its failure no longer belongs to the
@@ -6541,6 +6581,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._async_system_info_tick(), name=f"comexio_{self.server_id}_system_info_tick"
         )
 
+    @_skip_when_connections_closed
     async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
         """Fetch the uptime into self.system_info and notify its entities."""
         reading = await self.api.get_system_info(storage=False)
@@ -6624,6 +6665,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Whether a sync, repair, restore or full poll runs — the run-state fetch waits for it."""
         return self.in_sync or self._full_poll_running or self._sync_lock.locked() or self._restore_lock.locked()
 
+    @_skip_when_connections_closed
     async def _async_plan_run_state_tick(self, _now: datetime | None = None) -> None:
         """Timer tick of the run-state poll; an armed preview's poll carries the states instead."""
         if self._preview_plan_cache is None:
@@ -7958,6 +8000,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             _LOGGER.debug("[%s] Re-login for the function plan run states failed: %s", self.server_id, err)
 
+    @_skip_when_connections_closed
     async def _async_bus_load_tick(self, _now: datetime | None = None) -> None:
         """Poll internal bus workload (%) + SD-card presence on a fast, independent cadence.
 

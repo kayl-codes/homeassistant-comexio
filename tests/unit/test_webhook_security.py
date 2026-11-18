@@ -353,7 +353,9 @@ def _coordinator(monkeypatch: pytest.MonkeyPatch, *, boot: datetime | None, writ
     security = _security(monkeypatch)
     security.last_write = written
     security.async_save = AsyncMock()  # type: ignore[method-assign]
-    coordinator.api = SimpleNamespace(webhook_security=security, get_webio_command_form=AsyncMock(return_value=None))
+    coordinator.api = SimpleNamespace(
+        webhook_security=security, get_webio_command_form=AsyncMock(return_value=None), session_is_gone=False
+    )
     coordinator.system_info = SimpleNamespace(boot_time=boot)
     coordinator.sync_webhooks = MagicMock()
     # nothing stored to verify: the finish step reads no form

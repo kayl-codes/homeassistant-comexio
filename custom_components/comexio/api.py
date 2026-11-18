@@ -6289,8 +6289,17 @@ class ComexioAPI:
             return str(err) == _AIOHTTP_SESSION_CLOSED
         return isinstance(err, ComexioConnectionError | TimeoutError)
 
-    def _met_the_closed_session(self, err: RuntimeError) -> bool:
-        """Whether err is aiohttp's refusal of a request on a main session that is gone (unload, HA stopping)."""
+    @property
+    def session_is_gone(self) -> bool:
+        """Whether no request can go over the main session any more (unload, or Home Assistant stopping)."""
+        return self._session_gone_reason() is not None
+
+    def met_the_closed_session(self, err: RuntimeError) -> bool:
+        """Whether err is aiohttp's refusal of a request on a main session that is gone (unload, HA stopping).
+
+        The periodic reads of the coordinator (bus load, uptime, run states) use it: aiocomexio passes this
+        RuntimeError on, and any other RuntimeError stays a bug.
+        """
         return self._session_gone_reason() is not None and str(err) == _AIOHTTP_SESSION_CLOSED
 
     async def _write_once(
