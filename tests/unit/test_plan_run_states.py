@@ -205,6 +205,7 @@ class _FakeCoordinator(SimpleNamespace):
     _async_refresh_run_states_in_preview = ComexioCoordinator._async_refresh_run_states_in_preview
     _async_plan_run_state_tick = ComexioCoordinator._async_plan_run_state_tick
     _async_plan_run_state_fetch_failed = ComexioCoordinator._async_plan_run_state_fetch_failed
+    _async_count_run_state_fetch_error = ComexioCoordinator._async_count_run_state_fetch_error
     _existing_plan_names = ComexioCoordinator._existing_plan_names
     _managed_plan_names = ComexioCoordinator._managed_plan_names
     _watched_user_plan_names = ComexioCoordinator._watched_user_plan_names

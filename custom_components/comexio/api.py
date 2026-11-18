@@ -1092,7 +1092,8 @@ class ComexioAPI:
             self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
-            if self._closed or self.credentials_refused:
+            # Not only the entry's unload: Home Assistant stopping closes the main session while a tick waits here.
+            if self.session_is_gone or self.credentials_refused:
                 return None
             # Not bound to the entry: close() drops it, and a new one comes with every login that lapsed.
             credentials = self._credentials()
@@ -1107,7 +1108,7 @@ class ComexioAPI:
                 # the await above, or _login() raising) must not leave an authenticated session
                 # orphaned.
                 settings_changed = credentials != self._credentials()
-                if not login_ok or self._closed or settings_changed:
+                if not login_ok or self.session_is_gone or settings_changed:
                     # Never handed out, and its one request (the login) is over: nothing to wait for.
                     discard_session(session, unused=True)
             if settings_changed:
@@ -1116,7 +1117,7 @@ class ComexioAPI:
             if not login_ok:
                 _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
                 return None
-            if self._closed:
+            if self.session_is_gone:
                 return None
             self._preview_session = session
             self._preview_client = client
@@ -6160,7 +6161,7 @@ class ComexioAPI:
                 self._note_write_met_another_certificate(err, target_type, target_id)
             return _SettingsNote(settings_check_failed(err), err)
         except Exception as err:
-            if self._read_ended_with_the_session(err):
+            if self.read_ended_with_the_session(err):
                 _LOGGER.debug("The read of the Comexio API settings ended with the session (%s)", type(err).__name__)
                 return _SettingsNote()
             if not isinstance(err, ComexioError | TimeoutError):
@@ -6277,20 +6278,30 @@ class ComexioAPI:
             return _GONE_HA_CLOSED
         return None
 
-    def _read_ended_with_the_session(self, err: Exception) -> bool:
-        """Whether the settings read failed because the main session went away under it (unload, HA stopping).
+    def read_ended_with_the_session(self, err: Exception) -> bool:
+        """Whether a read failed because the main session went away under it (unload, HA stopping).
 
         A request in flight when the connector closes may fail as a transport error or a timeout instead of aiohttp's
-        refusal of a closed session; neither says anything about Comexio's settings. Any other error stays visible.
+        refusal of a closed session; neither says anything about Comexio. Any other error stays visible. Used by the
+        settings read after a failed write and by the preview poll of the coordinator.
         """
         if self._session_gone_reason() is None:
             return False
         if isinstance(err, RuntimeError):
             return str(err) == _AIOHTTP_SESSION_CLOSED
-        return isinstance(err, ComexioConnectionError | TimeoutError)
+        return isinstance(err, ComexioConnectionError | TimeoutError | aiohttp.ClientConnectionError)
 
-    def _met_the_closed_session(self, err: RuntimeError) -> bool:
-        """Whether err is aiohttp's refusal of a request on a main session that is gone (unload, HA stopping)."""
+    @property
+    def session_is_gone(self) -> bool:
+        """Whether no request can go over the main session any more (unload, or Home Assistant stopping)."""
+        return self._session_gone_reason() is not None
+
+    def met_the_closed_session(self, err: RuntimeError) -> bool:
+        """Whether err is aiohttp's refusal of a request on a main session that is gone (unload, HA stopping).
+
+        The periodic reads of the coordinator (bus load, uptime, run states) use it: aiocomexio passes this
+        RuntimeError on, and any other RuntimeError stays a bug.
+        """
         return self._session_gone_reason() is not None and str(err) == _AIOHTTP_SESSION_CLOSED
 
     async def _write_once(

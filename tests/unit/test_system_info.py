@@ -203,6 +203,7 @@ def _coordinator(info: SystemInfo | None, uptime: timedelta | None) -> ComexioCo
     coordinator.hass = MagicMock()
     coordinator.server_id = "srv"
     coordinator.api = MagicMock()
+    coordinator.api.session_is_gone = False  # a MagicMock attribute is truthy, and the tick asks the session first
     coordinator.api.get_system_info = AsyncMock(
         return_value=SystemInfoReading(info, uptime, None if info else "HTTP 500", None if uptime else "timed out")
     )
