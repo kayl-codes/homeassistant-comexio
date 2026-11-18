@@ -67,6 +67,10 @@ _CONNECTIONS = "connections"
 _OUTPUT = "output"
 _ELEMENT = "element"
 _REASON = "reason"
+_NAME = "name"
+_REF_ID = "ref_id"
+_KEY = "key"
+_UNFED = "unfed"
 # The catalog while none is verified: one shared object (never mutated), so identity memos still hit.
 NO_FUB_BASE: dict[str, Any] = {}
 
@@ -402,15 +406,15 @@ def _resolve_elements(
         elements[elem_id], key, reason = _resolve_element(elem, keys, ids_by_key)
         if reason is not None:
             old_id = (_block_reference(elem) or {}).get("ref_id")
-            unresolved.append({_ELEMENT: str(elem_id), "ref_id": old_id, "key": key, _REASON: reason})
+            unresolved.append({_ELEMENT: str(elem_id), _REF_ID: old_id, _KEY: key, _REASON: reason})
     return elements, unresolved
 
 
 def unresolved_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
     """One line per UNRESOLVED_BLOCKS entry: which element, which block, and why."""
     return [
-        f"element {block['element']}: block id {block['ref_id']} ({block['key'] or 'no key'}): "
-        f"{_REASON_TEXT.get(block['reason'], block['reason'])}"
+        f"element {block[_ELEMENT]}: block id {block[_REF_ID]} ({block[_KEY] or 'no key'}): "
+        f"{_REASON_TEXT.get(block[_REASON], block[_REASON])}"
         for block in blocks
     ]
 
@@ -482,19 +486,19 @@ def _omitted_report(block: Mapping[str, Any], elements: Mapping[str, Any], cut: 
     elements are the ones resolve_block_ids returned (the marked element), cut what _cut_connections left.
     """
     name = str((elements.get(str(block[_ELEMENT])) or {}).get("name") or "")
-    label = _unresolved_label(block["key"], block["ref_id"])
+    label = _unresolved_label(block[_KEY], block[_REF_ID])
     if name == label:
         name = ""
     elif name.startswith(f"{label}: "):
         name = name[len(label) + 2 :]
     return {
         _ELEMENT: block[_ELEMENT],
-        "name": name,
-        "ref_id": block["ref_id"],
-        "key": block["key"],
+        _NAME: name,
+        _REF_ID: block[_REF_ID],
+        _KEY: block[_KEY],
         _REASON: block[_REASON],
         _CONNECTIONS: cut.affected[str(block[_ELEMENT])],
-        "unfed": sorted(cut.unfed.get(str(block[_ELEMENT]), ()), key=lambda element: (len(element), element)),
+        _UNFED: sorted(cut.unfed.get(str(block[_ELEMENT]), ()), key=lambda element: (len(element), element)),
     }
 
 
@@ -555,13 +559,13 @@ def omitted_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
 
 
 def _omitted_line(block: Mapping[str, Any]) -> str:
-    title = f" ({one_line(block['name'])})" if block["name"] else ""
+    title = f" ({one_line(block[_NAME])})" if block[_NAME] else ""
     reason = _REASON_TEXT.get(block[_REASON], block[_REASON])
-    unfed = f"; input lost at element {', '.join(block['unfed'])}" if block["unfed"] else ""
-    key = one_line(block["key"]) if block["key"] else "no key"
+    unfed = f"; input lost at element {', '.join(block[_UNFED])}" if block[_UNFED] else ""
+    key = one_line(block[_KEY]) if block[_KEY] else "no key"
     return (
-        f"element {block['element']}{title}: block id {block['ref_id']} ({key}): {reason}; "
-        f"{block['connections']} connection(s) dropped or shortened{unfed}"
+        f"element {block[_ELEMENT]}{title}: block id {block[_REF_ID]} ({key}): {reason}; "
+        f"{block[_CONNECTIONS]} connection(s) dropped or shortened{unfed}"
     )
 
 

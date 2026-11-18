@@ -87,7 +87,7 @@ def test_a_block_that_is_gone_is_left_out_with_the_wire_that_ended_at_it(snapsho
 def test_a_block_that_can_no_longer_be_told_apart_is_left_out_too(snapshot: dict[str, Any]) -> None:
     result = _omitted(snapshot, TWO_NOT)
 
-    assert "7" not in result["elements"]
+    assert set(result["elements"]) == set(snapshot["elements"]) - {"7"}
     assert [block["reason"] for block in result[OMITTED_BLOCKS]] == [REASON_AMBIGUOUS]
 
 
@@ -301,8 +301,9 @@ def test_every_reason_has_its_own_words_in_the_report_line() -> None:
         omitted_block_lines([{**block, "reason": reason}])[0] for reason in (REASON_MISSING, REASON_AMBIGUOUS)
     )
 
-    assert gone != several
-    assert "several blocks" in several
+    tail = "connection(s) dropped or shortened"
+    assert gone.endswith(f"no block of this kind exists on Comexio today (app or firmware removed it?); 0 {tail}")
+    assert several.endswith(f"several blocks on Comexio today match it; 0 {tail}")
 
 
 def test_a_report_line_without_name_or_key_still_reads(snapshot: dict[str, Any]) -> None:
@@ -433,8 +434,7 @@ def test_a_comexio_name_with_line_breaks_stays_one_line_in_the_report() -> None:
     line = omitted_block_lines([{**block, "connections": 0, "unfed": []}])[0]
 
     assert "\n" not in line
-    assert "a" in line
-    assert "b" in line
+    assert line.startswith("element 7 (a b): block id 23 ")
 
 
 def test_a_block_key_with_a_line_break_stays_one_line_in_the_report() -> None:
