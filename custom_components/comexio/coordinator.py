@@ -6598,6 +6598,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_system_info_tick(self, _now: datetime | None = None) -> None:
         """Fetch the uptime into self.system_info and notify its entities."""
         reading = await self.api.get_system_info(storage=False)
+        if reading.uptime is None and self.api.session_is_gone:
+            # A read that ended with the session counts no failure (same reason as the bus load tick).
+            return
         self._note_system_info_dropped(self.system_info.apply_uptime(reading.uptime, dt_util.utcnow()), reading)
         try:
             self._restore_webhook_migration_notices()
@@ -6626,9 +6629,15 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             reading = await self.api.get_system_info(uptime=False)
         except ConfigEntryAuthFailed:
             raise
-        except Exception:
+        except Exception as err:
+            if self.api.read_ended_with_the_session(err):
+                # aiohttp's refusal on the closed connector passes through aiocomexio: no error line, no failed fetch.
+                return
             _LOGGER.exception("[%s] Free storage fetch failed unexpectedly", self.server_id)
             reading = SystemInfoReading(None, None, "unexpected error")
+        if reading.info is None and self.api.session_is_gone:
+            # The read ended with the session: no failed fetch to count (it could clear the valid readings).
+            return
         self._note_system_info_dropped(self.system_info.apply_storage(reading.info), reading)
 
     def _note_system_info_dropped(self, dropped: list[str], reading: SystemInfoReading) -> None:
@@ -6722,14 +6731,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # aiocomexio skips every plan whose answer it cannot classify; none at all means
                 # the answer format changed (e.g. new firmware) — no fresh state, not a success.
                 raise ComexioDataError("no plan's run state could be read")
-        except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
-            if self.api.read_ended_with_the_session(err):
-                # Unload or Home Assistant stopping closed the connections under this request: no outage to count.
-                _LOGGER.debug("[%s] Run-state fetch ended with the session: %s", self.server_id, type(err).__name__)
+        except (RuntimeError, ComexioError, aiohttp.ClientError, TimeoutError) as err:
+            if not await self._async_count_run_state_fetch_error(err, session):
                 return
-            if isinstance(err, UNREACHABLE_ERRORS):
-                self.note_comexio_unreachable()
-            await self._async_plan_run_state_fetch_failed(err, session)
             fetch_failed = True
         finally:
             self._plan_run_state_fetching = False
@@ -6756,6 +6760,24 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         changed = state_changed or was_unavailable or missed_out
         if await self.async_watch_managed_plans() or changed:
             self.async_update_listeners()
+
+    async def _async_count_run_state_fetch_error(self, err: Exception, session: aiohttp.ClientSession | None) -> bool:
+        """Account for an error of the run-state fetch; False when it ended with the session and counts nothing.
+
+        Unload or Home Assistant stopping closes the connections under the request, also for the callers outside
+        the guarded tick (plan transition, start of a managed plan): that is no outage. A RuntimeError that is not
+        aiohttp's refusal on the closed connector is a bug and goes on. Only the main session counts: a preview
+        session that is closed while the main one is open still raises.
+        """
+        if self.api.read_ended_with_the_session(err):
+            _LOGGER.debug("[%s] Run-state fetch ended with the session: %s", self.server_id, type(err).__name__)
+            return False
+        if isinstance(err, RuntimeError):
+            raise err
+        if isinstance(err, UNREACHABLE_ERRORS):
+            self.note_comexio_unreachable()
+        await self._async_plan_run_state_fetch_failed(err, session)
+        return True
 
     async def _async_watch_plans_and_refresh(self, *, run_states_read: bool = True) -> None:
         """Run a watchdog check and refresh the entities when its stopped set changed."""
@@ -8039,6 +8061,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         result = await self.api.get_bus_workload()
         if not result:
+            if self.api.session_is_gone:
+                # aiocomexio turns a failed read into {}: one that ended with the session (unload, Home Assistant
+                # stopping) says nothing about Comexio and must not advance the streak towards "unknown".
+                return
             self._bus_load_fail_streak += 1
             if self._bus_load_fail_streak == BUS_LOAD_FAIL_STREAK_THRESHOLD:
                 _LOGGER.warning(

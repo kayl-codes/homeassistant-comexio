@@ -6,8 +6,10 @@ Home Assistant logged as "Task exception was never retrieved".
 """
 
 import asyncio
+import collections
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+import functools
 import inspect
 import logging
 from types import SimpleNamespace
@@ -19,7 +21,7 @@ import aiohttp
 import pytest
 
 from custom_components.comexio import api as api_module, coordinator as coordinator_module
-from custom_components.comexio.api import ComexioAPI
+from custom_components.comexio.api import ComexioAPI, SystemInfoReading
 from custom_components.comexio.coordinator import ComexioCoordinator
 
 SESSION_CLOSED = "Session is closed"
@@ -322,7 +324,7 @@ def test_the_guard_passes_the_timer_argument_on(comexio_api: ComexioAPI) -> None
 
 
 def _fake_run_state_coordinator(api: ComexioAPI) -> Any:
-    return SimpleNamespace(
+    fake = SimpleNamespace(
         api=api,
         server_id=SERVER_ID,
         _plan_run_state_fetching=False,
@@ -334,6 +336,11 @@ def _fake_run_state_coordinator(api: ComexioAPI) -> Any:
         _async_plan_run_state_fetch_failed=AsyncMock(),
         _async_watch_plans_and_refresh=AsyncMock(),
     )
+    # The real error accounting runs on the fake's own mocks.
+    fake._async_count_run_state_fetch_error = functools.partial(
+        ComexioCoordinator._async_count_run_state_fetch_error, fake
+    )
+    return fake
 
 
 @pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
@@ -601,3 +608,255 @@ def test_what_ends_with_the_session_is_told_apart_for_every_caller(
         close(comexio_api)
 
     assert comexio_api.read_ended_with_the_session(error) is (expected and close is not None)
+
+
+_STORAGE_READING = SystemInfoReading(MagicMock(), None)
+
+
+def _fake_reading_coordinator(api: ComexioAPI) -> Any:
+    return SimpleNamespace(
+        api=api,
+        server_id=SERVER_ID,
+        _bus_load_fail_streak=coordinator_module.BUS_LOAD_FAIL_STREAK_THRESHOLD - 1,
+        bus_workload=7,
+        bus_sd_card=True,
+        hass=MagicMock(),
+        system_info=SimpleNamespace(apply_uptime=MagicMock(return_value=[]), apply_storage=MagicMock(return_value=[])),
+        _note_system_info_dropped=MagicMock(),
+        _restore_webhook_migration_notices=MagicMock(),
+    )
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_bus_load_read_that_ends_with_the_session_does_not_advance_the_failure_streak(
+    comexio_api: ComexioAPI, dispatched: MagicMock, close: Callable[[ComexioAPI], None]
+) -> None:
+    # aiocomexio turns the failed read into {}: the tick sees no exception, only an empty answer.
+    async def stopped_meanwhile() -> dict[str, object]:
+        close(comexio_api)
+        return {}
+
+    comexio_api.get_bus_workload = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    asyncio.run(ComexioCoordinator._async_bus_load_tick(fake))
+
+    assert fake._bus_load_fail_streak == coordinator_module.BUS_LOAD_FAIL_STREAK_THRESHOLD - 1
+    assert (fake.bus_workload, fake.bus_sd_card) == (7, True)
+    dispatched.assert_not_called()
+
+
+def test_an_empty_bus_load_read_on_an_open_session_still_advances_the_failure_streak(
+    comexio_api: ComexioAPI, dispatched: MagicMock
+) -> None:
+    comexio_api.get_bus_workload = AsyncMock(return_value={})  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    asyncio.run(ComexioCoordinator._async_bus_load_tick(fake))
+
+    assert fake._bus_load_fail_streak == coordinator_module.BUS_LOAD_FAIL_STREAK_THRESHOLD
+    assert (fake.bus_workload, fake.bus_sd_card) == (None, None)
+    dispatched.assert_called_once()
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_an_uptime_read_that_ends_with_the_session_counts_no_failure(
+    comexio_api: ComexioAPI, close: Callable[[ComexioAPI], None]
+) -> None:
+    async def stopped_meanwhile(**_kwargs: object) -> SystemInfoReading:
+        close(comexio_api)
+        return SystemInfoReading(None, None, None, "dropped")
+
+    comexio_api.get_system_info = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    asyncio.run(ComexioCoordinator._async_system_info_tick(fake))
+
+    fake.system_info.apply_uptime.assert_not_called()
+    fake._note_system_info_dropped.assert_not_called()
+    fake._restore_webhook_migration_notices.assert_not_called()
+
+
+def test_a_failed_uptime_read_on_an_open_session_is_still_counted(comexio_api: ComexioAPI) -> None:
+    comexio_api.get_system_info = AsyncMock(  # type: ignore[method-assign]
+        return_value=SystemInfoReading(None, None, None, "dropped")
+    )
+    fake = _fake_reading_coordinator(comexio_api)
+
+    asyncio.run(ComexioCoordinator._async_system_info_tick(fake))
+
+    fake.system_info.apply_uptime.assert_called_once()
+    fake._note_system_info_dropped.assert_called_once()
+    fake._restore_webhook_migration_notices.assert_called_once()
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_read_that_succeeded_is_applied_although_the_session_closed_meanwhile(
+    comexio_api: ComexioAPI, dispatched: MagicMock, close: Callable[[ComexioAPI], None]
+) -> None:
+    # Only a read that FAILED while the session went is dropped; an answer that came back is still a valid reading.
+    async def answered_then_closed(**kwargs: object) -> SystemInfoReading:
+        close(comexio_api)
+        return SystemInfoReading(None, timedelta(hours=1)) if kwargs.get("storage") is False else _STORAGE_READING
+
+    comexio_api.get_system_info = AsyncMock(side_effect=answered_then_closed)  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    # The uptime tick starts on an open session (the guard would skip it otherwise); the storage read is no tick.
+    asyncio.run(ComexioCoordinator._async_system_info_tick(fake))
+    fake.system_info.apply_uptime.assert_called_once()
+    comexio_api.get_system_info.assert_awaited_once_with(storage=False)
+
+    asyncio.run(ComexioCoordinator._async_refresh_system_info_storage(fake))
+    fake.system_info.apply_storage.assert_called_once_with(_STORAGE_READING.info)
+    assert comexio_api.get_system_info.await_args_list[-1].kwargs == {"uptime": False}
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_bus_load_answer_is_applied_although_the_session_closed_meanwhile(
+    comexio_api: ComexioAPI, dispatched: MagicMock, close: Callable[[ComexioAPI], None]
+) -> None:
+    async def answered_then_closed() -> dict[str, object]:
+        close(comexio_api)
+        return {"workload": 5, "sd_card": True}
+
+    comexio_api.get_bus_workload = AsyncMock(side_effect=answered_then_closed)  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+    fake._evaluate_bus_load_watchdog = MagicMock()
+    fake._bus_load_samples = collections.deque()
+
+    asyncio.run(ComexioCoordinator._async_bus_load_tick(fake))
+
+    assert (fake.bus_workload, fake.bus_sd_card, fake._bus_load_fail_streak) == (5, True, 0)
+    dispatched.assert_called_once()
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_storage_read_that_ends_with_the_session_counts_no_failure(
+    comexio_api: ComexioAPI, close: Callable[[ComexioAPI], None]
+) -> None:
+    # The config fetch went through, the storage request met the close: the valid readings must stay.
+    async def stopped_meanwhile(**_kwargs: object) -> SystemInfoReading:
+        close(comexio_api)
+        return SystemInfoReading(None, None, "dropped")
+
+    comexio_api.get_system_info = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    asyncio.run(ComexioCoordinator._async_refresh_system_info_storage(fake))
+
+    fake.system_info.apply_storage.assert_not_called()
+    fake._note_system_info_dropped.assert_not_called()
+
+
+def test_a_failed_storage_read_on_an_open_session_is_still_counted(comexio_api: ComexioAPI) -> None:
+    comexio_api.get_system_info = AsyncMock(  # type: ignore[method-assign]
+        return_value=SystemInfoReading(None, None, "dropped")
+    )
+    fake = _fake_reading_coordinator(comexio_api)
+
+    asyncio.run(ComexioCoordinator._async_refresh_system_info_storage(fake))
+
+    fake.system_info.apply_storage.assert_called_once_with(None)
+    fake._note_system_info_dropped.assert_called_once()
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_the_run_state_helper_ends_quietly_for_the_callers_outside_the_tick(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None]
+) -> None:
+    # async_plan_transition and async_start_managed_plan call the helper directly, without the tick's guard.
+    async def stopped_meanwhile(*_args: object, **_kwargs: object) -> None:
+        close(comexio_api)
+        raise RuntimeError(SESSION_CLOSED)
+
+    comexio_api.get_function_plan_run_states = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_run_state_coordinator(comexio_api)
+
+    with (
+        patch.object(coordinator_module, "function_plan_ids", return_value=[1]),
+        caplog.at_level(logging.DEBUG, logger=coordinator_module.__name__),
+    ):
+        asyncio.run(ComexioCoordinator._async_refresh_plan_run_states(fake))
+
+    fake.note_comexio_unreachable.assert_not_called()
+    fake._async_plan_run_state_fetch_failed.assert_not_awaited()
+    fake._async_watch_plans_and_refresh.assert_not_awaited()
+    assert fake._plan_run_state_fetching is False
+    assert (fake._plan_run_state_fail_streak, fake._plan_run_state_stale_count) == (2, 2)
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [record for record in caplog.records if "ended with the session" in record.getMessage()]
+
+
+@pytest.mark.parametrize(
+    ("error", "close"),
+    [(SESSION_CLOSED, None), (OTHER_ERROR, _ha_closes_the_connections)],
+    ids=["closed text, open session", "other error after close"],
+)
+def test_the_run_state_helper_does_not_swallow_what_is_no_closed_session(
+    comexio_api: ComexioAPI, error: str, close: Callable[[ComexioAPI], None] | None
+) -> None:
+    async def fails(*_args: object, **_kwargs: object) -> None:
+        if close is not None:
+            close(comexio_api)
+        raise RuntimeError(error)
+
+    comexio_api.get_function_plan_run_states = AsyncMock(side_effect=fails)  # type: ignore[method-assign]
+    fake = _fake_run_state_coordinator(comexio_api)
+
+    with patch.object(coordinator_module, "function_plan_ids", return_value=[1]):
+        running = ComexioCoordinator._async_refresh_plan_run_states(fake)
+        with pytest.raises(RuntimeError, match=error):
+            asyncio.run(running)
+
+    assert fake._plan_run_state_fetching is False
+    # A bug is no outage either: nothing is counted before it goes on.
+    fake.note_comexio_unreachable.assert_not_called()
+    fake._async_plan_run_state_fetch_failed.assert_not_awaited()
+    assert (fake._plan_run_state_fail_streak, fake._plan_run_state_stale_count) == (2, 2)
+
+
+def test_the_run_state_helper_hands_the_session_on_when_it_counts_an_outage(comexio_api: ComexioAPI) -> None:
+    # The preview poll passes its own session; the failure handling needs it.
+    error = ComexioConnectionError("dropped")
+    preview_session = MagicMock()
+    comexio_api.get_function_plan_run_states = AsyncMock(side_effect=error)  # type: ignore[method-assign]
+    fake = _fake_run_state_coordinator(comexio_api)
+
+    with patch.object(coordinator_module, "function_plan_ids", return_value=[1]):
+        asyncio.run(ComexioCoordinator._async_refresh_plan_run_states(fake, preview_session))
+
+    fake._async_plan_run_state_fetch_failed.assert_awaited_once_with(error, preview_session)
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_storage_read_met_by_the_closed_session_logs_no_error(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None]
+) -> None:
+    # aiocomexio passes aiohttp's refusal on, so it reaches the broad handler of the storage read.
+    async def stopped_meanwhile(**_kwargs: object) -> SystemInfoReading:
+        close(comexio_api)
+        raise RuntimeError(SESSION_CLOSED)
+
+    comexio_api.get_system_info = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    with caplog.at_level(logging.DEBUG, logger=coordinator_module.__name__):
+        asyncio.run(ComexioCoordinator._async_refresh_system_info_storage(fake))
+
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    fake.system_info.apply_storage.assert_not_called()
+    fake._note_system_info_dropped.assert_not_called()
+
+
+def test_an_unexpected_storage_read_error_on_an_open_session_is_still_logged_and_counted(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    comexio_api.get_system_info = AsyncMock(side_effect=RuntimeError(SESSION_CLOSED))  # type: ignore[method-assign]
+    fake = _fake_reading_coordinator(comexio_api)
+
+    with caplog.at_level(logging.DEBUG, logger=coordinator_module.__name__):
+        asyncio.run(ComexioCoordinator._async_refresh_system_info_storage(fake))
+
+    assert [record for record in caplog.records if record.levelno == logging.ERROR]
+    fake.system_info.apply_storage.assert_called_once_with(None)
