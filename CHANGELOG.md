@@ -7,8 +7,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.43.0] — 2026-11-18
+
+Covers everything since v0.42.0.
+
 ### ✨ New Features
-- **IO types that are not imported (#317):** a new field in the setup step and in the settings lists IO types (the letters of the identifier, `QI4` is `QI`) that get no entity, no Web-IO command and no function plan wiring. A new installation starts with `QI, TL, UL`: these three types report so many value changes that Comexio cannot work them off and the bus load builds up. Any other type can be added, each only once; the field explains the reason. An installation set up before keeps importing everything until the field is filled, so no entity or history disappears on update. After a change the sync button removes the Web-IO commands of the left-out IOs from Comexio. The Supported Hardware and Configuration guides carry the same note.
+- **IO types that are not imported (#317):** a new field in the setup step and in the settings lists IO types (the letters of the identifier, `QI4` is `QI`) that get no entity, no Web-IO command and no function plan wiring. A new installation starts with `QI, TL, UL`: these three types report so many value changes that Comexio cannot work them off and the bus load builds up. Any other type can be added, each only once; the field explains the reason. An installation set up before keeps importing everything until the field is filled, so no entity or history disappears on update. After a change the sync button removes the Web-IO commands of the left-out IOs from Comexio. Leaving out `DI` also stops the Doorstation doorbell: the bell buttons `DI1`–`DI3` get no Web-IO command and so push nothing, and their doorbell `event` entities are removed with the next reload. The Supported Hardware and Configuration guides carry the same note.
 - **Doorstation doorbell:** the bell buttons `DI1`–`DI3` of every Doorstation get an `event` entity of the device class `doorbell` (`event.<instance>_doorstation<extension id>_di<n>_doorbell`) on the device of its extension, next to the binary sensor of the same button. It rings (event type `ring`) once for every webhook push that reports the button down, so an automation gets the press itself, also when it ends between two reads of the binary sensor. A poll or HA's own write never rings. Comexio pushes an IO when its value changes, so a duplicate push of the value 1 would ring twice. Not yet confirmed on a real doorbell. The entity is unavailable with its extension (offline) or a Doorstation the polls no longer report.
 - **Doorstation camera:** every Doorstation of the IO-Server gets a `camera` entity (`camera.<instance>_doorstation<extension id>_camera`) on the device of its extension, next to its IOs (`PIR1`, `DI1`–`DI3`, ...). It shows a still image: the first frame of the camera's stream, read with the admin session and handed out again for 5 s, so several viewers cost one read. There is no live stream. The Doorstations are read from the IO home page with the configuration poll; a failed read or a page that shows none keeps the known cameras (unavailable after 3 empty polls in a row, never removed).
 
@@ -17,6 +23,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **The switch-over to per-command webhook ids no longer ends nowhere:** an entry that never synced, on a Comexio that showed no Web-IO device at all in the last read, now has the old webhook id switched off at the nightly run instead of re-checking it every night for ever. The two cases that still keep it on now raise a repair instead of a log line only: **"Comexio: Web-IO commands cannot be moved to their own webhook ID"** (commands the run cannot rewrite because Comexio gave no command or device ID, named in the repair) and **"Comexio: restart the Comexio server"** (shown beside the existing notification). Both disappear on their own once the cause is gone or the old id is off.
 - **The two repairs of the webhook switch-over come back after a Home Assistant restart:** they are not stored, so a restart dropped them until the next nightly run (01:30) although the old webhook id stayed on. With the uptime readings after the start the integration now raises again whichever of them is still due, and the restart notification with the restart repair, from the same stocktake as the nightly run. The repair for commands that cannot be rewritten does not need Comexio's boot time and comes as soon as the stocktake is readable; only the restart request waits for it. It only reports: rewriting and switching off stay with the nightly run.
 - **Fresh install without a Web-IO device no longer leaves the old webhook id open:** the old webhook id `comexio_<server_id>` is now switched off at the first poll of a new entry whose Comexio has no Web-IO device at all, so it no longer accepts marker or IO values on a guessable path until the first sync. An entry that has polled before, a Comexio that already holds Web-IO devices, and an entry whose stored Comexio host changed keep the old id for the nightly migration as before (#307).
+
+### ⚠️ Requirements & Notes
+- **Restart required** after updating.
+- **Dependency:** `aiocomexio==0.14.1` (was 0.14.0), installed automatically by Home Assistant.
 
 ---
 
@@ -521,7 +531,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.42.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.43.0...HEAD
+[0.43.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.40.0...v0.41.0
 [0.40.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.32.0...v0.40.0
