@@ -9,12 +9,13 @@ from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.comexio.const import CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
+from custom_components.comexio.const import CONF_IGNORED_IO_TYPES, CONF_INCLUDE_OFFLINE_EXTENSIONS, DOMAIN
 
 from .conftest import SERVER_ID, device_by_identifier
 
 BELL_1_ENTITY_ID = f"event.{SERVER_ID}_doorstation2_di1_doorbell"
 BELL_2_ENTITY_ID = f"event.{SERVER_ID}_doorstation2_di2_doorbell"
+CAMERA_ENTITY_ID = f"camera.{SERVER_ID}_doorstation2_camera"
 BELL_1_UNIQUE_ID = f"comexio_{SERVER_ID}_doorstation2_di1_doorbell"
 EXTENSION = "UD 1"
 
@@ -283,3 +284,32 @@ async def test_a_page_without_doorstation_keeps_the_registered_events_unavailabl
     state = hass.states.get(BELL_1_ENTITY_ID)
     assert state is not None
     assert state.state == STATE_UNAVAILABLE
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+@pytest.mark.parametrize(
+    ("ignored_types", "remaining_events"),
+    [
+        (["DI"], set()),  # the bell buttons are DI1 and DI2: no Web-IO command, so the events go
+        ([" di "], set()),  # the option is read as ignored_io_types() reads it: trimmed and upper-cased
+        (["QI", "TL"], {BELL_1_ENTITY_ID, BELL_2_ENTITY_ID}),  # other types do not touch the bells
+    ],
+)
+async def test_the_setup_hands_the_ignored_io_types_to_the_orphan_cleanup(
+    hass: HomeAssistant, entry: MockConfigEntry, ignored_types: list[str], remaining_events: set[str]
+) -> None:
+    """The registered events of an IO type that is left out go with the next setup, the other entities stay."""
+    await _setup(hass, entry)
+    assert {e.entity_id for e in _events(hass, entry)} == {BELL_1_ENTITY_ID, BELL_2_ENTITY_ID}
+    camera = er.async_get(hass).async_get(CAMERA_ENTITY_ID)
+    assert camera is not None
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_IGNORED_IO_TYPES: ignored_types})
+
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert {e.entity_id for e in _events(hass, entry)} == remaining_events
+    kept_camera = er.async_get(hass).async_get(CAMERA_ENTITY_ID)  # the Doorstation's camera is no bell
+    assert kept_camera is not None
+    assert kept_camera.id == camera.id  # kept by the cleanup, not removed and registered anew
