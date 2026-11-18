@@ -5409,7 +5409,13 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
         elif self._io_type_ignored(identifier):
             # Comexio pushes until a sync removed the commands of a left-out type: no warning, it is not unknown (#317).
+            # No value changed, so no preview refresh and, while the last poll succeeded, no listener notification:
+            # such a push can come once per second per IO, and each notification rewrites every entity's state.
+            # It still proves Comexio reachable, so after a failed poll it makes the entities available again.
             _LOGGER.debug(WEBHOOK_IGNORED_TYPE_IO_LOG_MSG, one_line(ext_name), one_line(identifier))
+            if not self.last_update_success:
+                self._async_publish_pushed_value()
+            return
         else:
             self._log_unknown_webhook_io(
                 _webhook_warn_key("io", *key),

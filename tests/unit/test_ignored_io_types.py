@@ -192,6 +192,7 @@ def test_a_push_of_a_left_out_type_is_no_unknown_io(caplog: pytest.LogCaptureFix
     coordinator.config_entry = SimpleNamespace(options={CONF_IGNORED_IO_TYPES: ["QI"]})
     coordinator._io_index = {}
     coordinator._warned_unknown_webhook_ios = set()
+    coordinator.last_update_success = True
     coordinator._async_publish_pushed_value = lambda: None
     coordinator.schedule_plan_preview_refresh = lambda: None
 
@@ -203,6 +204,38 @@ def test_a_push_of_a_left_out_type_is_no_unknown_io(caplog: pytest.LogCaptureFix
     assert len(warnings) == 1
     assert "Q9" in warnings[0].getMessage()  # an IO of a type that is imported but unknown still warns
     assert len(coordinator._warned_unknown_webhook_ios) == 1
+
+
+def _coordinator_for_left_out_push(*, last_update_success: bool) -> tuple[ComexioCoordinator, list[str]]:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "test"
+    coordinator.config_entry = SimpleNamespace(options={CONF_IGNORED_IO_TYPES: ["QI"]})
+    coordinator._io_index = {}
+    coordinator._io_push_counts = {}
+    coordinator.last_update_success = last_update_success
+    calls: list[str] = []
+    coordinator._async_publish_pushed_value = lambda: calls.append("publish")
+    coordinator.schedule_plan_preview_refresh = lambda: calls.append("preview")
+    return coordinator, calls
+
+
+def test_a_push_of_a_left_out_type_notifies_no_listener() -> None:
+    """Such a push can come once per second per IO until the sync: it must not rewrite every entity's state."""
+    coordinator, calls = _coordinator_for_left_out_push(last_update_success=True)
+
+    coordinator.update_io_by_name("PWR1", "QI1", 5)
+
+    assert calls == []
+    assert coordinator._io_push_counts == {}
+
+
+def test_a_push_of_a_left_out_type_still_proves_comexio_reachable_after_a_failed_poll() -> None:
+    """After a failed poll any push makes the entities available again, a left-out one too; no preview refresh."""
+    coordinator, calls = _coordinator_for_left_out_push(last_update_success=False)
+
+    coordinator.update_io_by_name("PWR1", "QI1", 5)
+
+    assert calls == ["publish"]
 
 
 # The form input
@@ -270,12 +303,13 @@ def test_an_invalid_type_blocks_the_options_form() -> None:
 
 
 def _submitting_flow(monkeypatch: pytest.MonkeyPatch) -> tuple[ComexioOptionsFlow, list[dict[str, Any]]]:
-    """An options flow whose entry creation records what it is asked to save instead of saving it."""
+    """An options flow over a bare entry; the real _create_options_entry runs, only async_create_entry records."""
     flow = ComexioOptionsFlow.__new__(ComexioOptionsFlow)
     flow._quickbus_shown = []
-    saved: list[dict[str, Any]] = []
-    monkeypatch.setattr(flow, "_create_options_entry", lambda user_input: saved.append(user_input) or "entry")
-    return flow, saved
+    flow._config_entry = SimpleNamespace(options={}, data={})
+    created: list[dict[str, Any]] = []
+    monkeypatch.setattr(flow, "async_create_entry", lambda **kwargs: created.append(kwargs["data"]) or "entry")
+    return flow, created
 
 
 def test_submitting_an_invalid_type_returns_the_form_and_saves_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -289,6 +323,16 @@ def test_submitting_an_invalid_type_returns_the_form_and_saves_nothing(monkeypat
     assert saved == []
 
 
+def test_submitting_replaces_the_saved_types_and_an_emptied_field_clears_them(monkeypatch: pytest.MonkeyPatch) -> None:
+    flow, saved = _submitting_flow(monkeypatch)
+    flow._config_entry.options = {CONF_IGNORED_IO_TYPES: ["QI"]}
+
+    asyncio.run(flow._async_submit_init({CONF_IGNORED_IO_TYPES: ["ul"]}, {}, {}, set()))
+    asyncio.run(flow._async_submit_init({CONF_IGNORED_IO_TYPES: []}, {}, {}, set()))
+
+    assert [options[CONF_IGNORED_IO_TYPES] for options in saved] == [["UL"], []]
+
+
 def test_submitting_valid_types_saves_them_normalized(monkeypatch: pytest.MonkeyPatch) -> None:
     flow, saved = _submitting_flow(monkeypatch)
     errors: dict[str, str] = {}
@@ -297,7 +341,7 @@ def test_submitting_valid_types_saves_them_normalized(monkeypatch: pytest.Monkey
 
     assert result == "entry"
     assert not errors
-    assert [entry[CONF_IGNORED_IO_TYPES] for entry in saved] == [["QL", "QI"]]
+    assert [options[CONF_IGNORED_IO_TYPES] for options in saved] == [["QL", "QI"]]  # what the entry is created with
 
 
 # The field
