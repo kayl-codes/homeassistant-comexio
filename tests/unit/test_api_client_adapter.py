@@ -1688,6 +1688,29 @@ def test_webio_write_success_is_true(comexio_api: ComexioAPI, client: MagicMock,
     assert asyncio.run(call(comexio_api)) is True
 
 
+def test_an_address_change_keeps_the_tls_settings_of_the_device(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """The lib resets the certificate check and the key pin unless told to keep them (#165)."""
+    client.update_webio_device_address = AsyncMock(return_value=None)
+    assert asyncio.run(comexio_api.update_webio_device_ip(3, "10.0.0.2:8123", "HA [M]")) is True
+    client.update_webio_device_address.assert_awaited_once_with(3, "10.0.0.2:8123", "HA [M]", keep_tls=True)
+
+
+def test_the_lib_still_takes_keep_tls_as_a_keyword() -> None:
+    """A mock accepts any call: the real signature is what makes keep_tls=True mean something."""
+    from aiocomexio import ComexioClient
+
+    parameter = inspect.signature(ComexioClient.update_webio_device_address).parameters["keep_tls"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_an_address_change_fails_when_the_tls_settings_cannot_be_read(
+    comexio_api: ComexioAPI, client: MagicMock
+) -> None:
+    """The lib raises before saving: the device keeps its old address and settings, the caller sees a failure."""
+    _fail(client, "update_webio_device_address", ComexioDataError("no checkca field"))
+    assert asyncio.run(comexio_api.update_webio_device_ip(3, "10.0.0.2:8123", "HA [M]")) is False
+
+
 def test_webio_device_in_use_is_false(comexio_api: ComexioAPI, client: MagicMock) -> None:
     client.delete_webio_device = AsyncMock(return_value=False)
     assert asyncio.run(comexio_api.delete_webio_device(3)) is False

@@ -38,6 +38,7 @@ def _coordinator() -> ComexioCoordinator:
     coordinator.hass = MagicMock()
     coordinator.hass.data = {DOMAIN: {"e1": coordinator}}
     coordinator.hass.config_entries.async_reload = AsyncMock()
+    coordinator.async_webhook_target = AsyncMock()  # type: ignore[method-assign]  # the range check resolves it (#165)
     return coordinator
 
 
@@ -364,6 +365,37 @@ def test_a_range_check_does_not_start_while_a_restore_runs() -> None:
     result = asyncio.run(run())
     assert result["skipped"] == 1
     assert not coordinator._sync_lock.locked()
+
+
+def test_a_range_check_resolves_the_webhook_target_and_skips_a_run_that_started_meanwhile() -> None:
+    """The protocol it writes comes from HA's target (#165); a restore that starts during the lookup still stops it."""
+    coordinator = _coordinator()
+    coordinator.data = {"webio_commands": {}, "webio_devices": {}}
+    coordinator._webio_range_targets = dict  # type: ignore[method-assign]
+
+    clean = asyncio.run(coordinator.async_force_webio_range_check())
+
+    coordinator.async_webhook_target.assert_awaited_once_with()
+    assert clean["skipped"] == 0
+
+    async def _restore_starts(*_args: object) -> None:
+        await coordinator._restore_lock.acquire()
+
+    coordinator.async_webhook_target = AsyncMock(side_effect=_restore_starts)  # type: ignore[method-assign]
+
+    skipped = asyncio.run(coordinator.async_force_webio_range_check())
+
+    assert skipped["skipped"] == 1
+    assert not coordinator._sync_lock.locked()
+
+
+def test_a_range_check_without_data_resolves_no_target() -> None:
+    coordinator = _coordinator()
+    coordinator.data = None
+
+    assert asyncio.run(coordinator.async_force_webio_range_check())["skipped"] == 1
+
+    coordinator.async_webhook_target.assert_not_awaited()
 
 
 def test_the_restores_own_reload_runs_after_it_instead_of_deadlocking() -> None:

@@ -36,8 +36,9 @@ foreign; set internal_url to that address there.
 
 All of the above is the automatic webhook address (#165). The other modes take host and port of a URL
 as they are, with no check against the own addresses: HA's external_url, or a URL of the user's own.
-Only host and port reach the Web-IO devices: their commands keep HTTP whatever the scheme, Comexio picks
-HTTP or HTTPS itself. The scheme only decides whether an http:// URL is allowed (webhook_url_error); for
+Host and port reach the Web-IO devices, the scheme the protocol field of their commands (WebhookTarget.https,
+see ComexioAPI.webhook_protocol): Comexio does not pick HTTP or HTTPS from the address. The scheme also decides
+whether an http:// URL is allowed (webhook_url_error); for
 the automatic address it is the one of internal_url (HA's own TLS setting without one). A mode whose URL
 is unusable (external_url removed since) falls back to the automatic
 address, warned once.

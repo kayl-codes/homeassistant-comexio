@@ -250,7 +250,7 @@ def _class_action_eta(
 ) -> int:
     """Seconds the delta tasks of action take for one class (the Fast-Track decision weighs it).
 
-    An address change costs one device write: the commands keep HTTP whatever the address.
+    An address change costs one device write: the commands are not rewritten for it.
     """
     eta = 0
     task_count = 0

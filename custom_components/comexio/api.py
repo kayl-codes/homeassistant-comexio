@@ -895,6 +895,10 @@ class ComexioAPI:
         # Set by the entry setup: with it every Web-IO command is built with a webhook id of its own (dg), without
         # it (a bare API in a test or a config flow check) with the one path of the old id.
         self.webhook_security: WebhookSecurity | None = None
+        # Whether HA's webhook address is served over HTTPS (#165). Set by the coordinator whenever it resolves the
+        # webhook target (`ComexioCoordinator.async_webhook_target`); the Web-IO command builders follow it, so a
+        # command always uses the protocol HA is reached with. Without a resolved target: HTTP.
+        self.webhook_https = False
 
         # Dedicated cookie management for Comexio session persistence.
         # unsafe=True is only enabled if the target host is a local address.
@@ -2177,15 +2181,26 @@ class ComexioAPI:
         Updates the server address (IP:Port) of an existing device.
         Uses the specific POST format required by Comexio's main save handler.
 
+        Only the address changes: the device's certificate check and key pin are read first and saved back
+        unchanged (`keep_tls`), so an address repair never deletes a pin. A device whose TLS settings cannot be
+        read is not saved at all (aiocomexio raises before the save), which fails this call with a warning.
+
         webio_name must be the class-specific name (see const.webio_class_name) matching
         the device_id being updated — the caller resolves it, since a single config entry
         now maps to two Web-IO devices (marker/io).
         """
         _LOGGER.info("Updating Web-IO device %s address to %s", device_id, ha_address)
         try:
-            await self.client.update_webio_device_address(device_id, ha_address, webio_name)
+            await self.client.update_webio_device_address(device_id, ha_address, webio_name, keep_tls=True)
         except ComexioError as err:
-            _LOGGER.warning("Updating the address of Web-IO device %s failed: %s", device_id, err)
+            # A device whose TLS settings could not be read keeps its old settings; the reason says what failed.
+            _LOGGER.warning(
+                "Updating the address of Web-IO device %s (%s) to %s failed, the device keeps its old settings: %s",
+                device_id,
+                webio_name,
+                ha_address,
+                err,
+            )
             return False
         return True
 
@@ -2281,8 +2296,9 @@ class ComexioAPI:
         ignored_marker_ids / ignored_knx_ids exclude items the user configured as ignored —
         they have no HA entity, so they need no Web-IO command pushing values back via webhook.
         Returns the list directly so callers can use it without a json.dumps/json.loads roundtrip.
-        Every command keeps the builder's default protocol (HTTP) whatever the webhook address: Comexio
-        picks HTTP or HTTPS from the device address itself, so an address change never rewrites commands.
+        The commands use the protocol HA's webhook address is reached with (`webhook_protocol`): Comexio does not
+        pick HTTP or HTTPS from the device address, only the command's protocol field decides (live tests of
+        2026-11-03 and 2026-11-15). The KNX loopback command (Comexio's own API) stays HTTP.
         """
         return comexio_webio.build_webio_commands(
             _webhook_path(server_id, self.webhook_security),
@@ -2290,8 +2306,14 @@ class ComexioAPI:
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
+            protocol=self.webhook_protocol,
             server=server_id if self.webhook_security else None,
         )
+
+    @property
+    def webhook_protocol(self) -> int:
+        """The Web-IO command protocol for HA's webhook address: HTTPS when HA is reached over TLS, else HTTP."""
+        return comexio_webio.WEBIO_PROTOCOL_HTTPS if self.webhook_https else comexio_webio.WEBIO_PROTOCOL_HTTP
 
     def _build_knx_loopback_webio_command(self, *, k_id: int, marker_id: int, is_analog: bool) -> dict[str, Any]:
         """Web-IO command dict for one K-Element's Phase 7 API-Loopback command (aiocomexio.webio).
@@ -2321,7 +2343,7 @@ class ComexioAPI:
         webio_name here is already the class-specific name (see const.webio_class_name) —
         callers append the ' [M]'/' [IO]'/' [KNX]'/' [QB]' suffix before calling this.
         ignored_marker_ids / ignored_knx_ids are forwarded to build_webio_commands() to
-        exclude ignored items. Every command keeps the builder's default protocol (HTTP), see
+        exclude ignored items. The commands use the protocol of HA's webhook address, see
         build_webio_commands.
         """
         return comexio_webio.generate_webio_json(
@@ -2331,6 +2353,7 @@ class ComexioAPI:
             webio_class,
             ignored_marker_ids,
             ignored_knx_ids,
+            protocol=self.webhook_protocol,
             server=server_id if self.webhook_security else None,
         )
 

@@ -256,6 +256,10 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         # on the Comexio server. The same for the Quickbus class while the server has no Quickbus IO.
         sync_classes = coordinator.required_webio_classes
 
+        # The commands carry the protocol HA is reached with (#165): resolve the target now, a poll may not have
+        # run since the address changed (or since the start).
+        await coordinator.async_webhook_target()
+
         if not do_upload:
             preview_parts = []
             for cls in sync_classes:

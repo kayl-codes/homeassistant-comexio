@@ -572,6 +572,7 @@ def test_generate_web_io_service_builds_from_the_selected_quickbus_devices(
         server_id="test",
         config_entry=SimpleNamespace(data={}, options={}),
         required_webio_classes=("quickbus",),
+        async_webhook_target=AsyncMock(),
         data={"quickbus_io": ["every device"]},
         webio_source_data=lambda: source,
         ignored_marker_ids=set(),

@@ -2201,9 +2201,17 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         False if a Web-IO class is missing on the server: the audit then only raises that
         repair issue (see _report_missing_webio_classes) and the poll ends early.
         """
+        webio_devices = parsed_data.get("webio_devices", {})
+        # The address a device already stores is kept while it still points to this host (#177),
+        # so a fresh resolver after a restart needs at most one lookup instead of a search.
+        # Resolved before anything can end the audit early: it also sets the protocol every command builder
+        # follows (#165), which a poll that stops at a missing class must not leave on an old value.
+        ha_address = (await self.async_webhook_target(webio_devices)).address
+        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
+        address_fallback = self.ha_address.fallback_reason
+
         ha_map, io_meta_by_key, com_map, disabled_commands = self._build_audit_maps(conf, final_data)
 
-        webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
         self._update_import_disabled_issues(conf, disabled_commands, webio_devices, marker_titles)
         if self._report_missing_webio_classes(conf, webio_devices, final_data):
@@ -2211,12 +2219,6 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Reset internal failure flag when the audit is successful
         self.last_audit_failed = False
-
-        # The address a device already stores is kept while it still points to this host (#177),
-        # so a fresh resolver after a restart needs at most one lookup instead of a search.
-        ha_address = (await self.async_webhook_target(webio_devices)).address
-        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
-        address_fallback = self.ha_address.fallback_reason
 
         # Prepare payload map for future delta updates via button/repairs
         payload_map = {
@@ -2609,7 +2611,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """IP/Port Audit, checked independently per Web-IO class.
 
         Marker and IO devices can in theory drift out of sync with each other. Only the device
-        address is audited: the commands keep HTTP whatever the address (see api.build_webio_commands).
+        address is audited (the commands' protocol is not yet, see api.build_webio_commands).
         """
         webio_device_audit: dict[str, dict[str, Any]] = {}
         for cls in WEBIO_CLASSES:
@@ -6050,6 +6052,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.data:
             result[RANGE_CHECK_SKIPPED] = 1
             return result
+        # A correction writes the whole target command, protocol included (#165): resolve the protocol first, as
+        # a start from the saved config has run no audit yet. Before the lock check, so that no await sits between
+        # the check and taking the lock (R4).
+        await self.async_webhook_target()
         if self._sync_lock.locked() or self._restore_lock.locked():
             _LOGGER.warning(
                 "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
@@ -6160,7 +6166,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_webhook_migration_tick(self, _now: datetime | None = None) -> str:
         """Rewrite the Web-IO commands that still POST to the old webhook id, within the nightly budget.
 
-        Only the path and the payload change, the commands' protocol and address stay as they are. The old id stays
+        The command is written as the builder produces it today: its own path and payload, and the protocol HA is
+        reached with (api.build_webio_commands); the device address is not touched. The old id stays
         registered until every command has been rewritten and Comexio restarted after the last write (Comexio only
         sends a changed command after a restart); then it is switched off. Returns one of the WEBHOOK_MIGRATION_*
         states.
@@ -6168,6 +6175,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         security = self.api.webhook_security
         if security is None or not self.data or self.unloading or not security.legacy_enabled:
             return WEBHOOK_MIGRATION_SKIPPED
+        # The commands are written with the protocol HA is reached with (#165). A start from the saved config has
+        # run no audit yet, so resolve the target here instead of relying on the last poll.
+        await self.async_webhook_target()
         try:
             written, failed = await self._async_rewrite_pending_webhooks(security)
         finally:
@@ -11635,7 +11645,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if webio_devices is None:
             webio_devices = (self.data or {}).get("webio_devices")
-        return await self.ha_address.async_target(*webio_device_hints(webio_devices))
+        target = await self.ha_address.async_target(*webio_device_hints(webio_devices))
+        # The commands every builder produces follow the protocol HA is reached with (#165).
+        self.api.webhook_https = target.https
+        return target
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None

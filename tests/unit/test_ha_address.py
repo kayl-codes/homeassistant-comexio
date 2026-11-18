@@ -724,9 +724,11 @@ def test_the_coordinator_passes_every_stored_address(data: dict | None, hints: t
 
     coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
     coordinator.data = data
+    coordinator.api = SimpleNamespace(webhook_https=True)
     coordinator.ha_address = SimpleNamespace(async_target=AsyncMock(return_value=WebhookTarget("x:8123", False)))
 
     assert asyncio.run(coordinator.async_ha_address()) == "x:8123"
+    assert coordinator.api.webhook_https is False
     coordinator.ha_address.async_target.assert_awaited_once_with(*hints)
 
 

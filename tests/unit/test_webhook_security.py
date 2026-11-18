@@ -358,6 +358,7 @@ def _coordinator(monkeypatch: pytest.MonkeyPatch, *, boot: datetime | None, writ
     )
     coordinator.system_info = SimpleNamespace(boot_time=boot)
     coordinator.sync_webhooks = MagicMock()
+    coordinator.async_webhook_target = AsyncMock()  # the tick resolves the protocol of its commands (#165)
     # nothing stored to verify: the finish step reads no form
     coordinator.data = {"webio_commands": {}, "webio_devices": {}}
     coordinator.unloading = False

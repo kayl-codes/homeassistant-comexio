@@ -170,6 +170,33 @@ def test_the_tick_waits_for_the_command_it_could_not_write_then_finishes(
     coordinator.sync_webhooks.assert_called_once_with()
 
 
+def test_the_tick_resolves_the_webhook_target_before_it_writes_a_command(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The protocol of a written command comes from HA's target (#165): a start from the saved config ran no audit."""
+    coordinator = _tick_coordinator(monkeypatch, cmd_id="9", boot=NOW + timedelta(hours=1))
+    order: list[str] = []
+    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: order.append("target"))
+    save = coordinator.api.save_single_command
+
+    async def _recorded_save(*args: Any, **kwargs: Any) -> bool:
+        order.append("save")
+        return await save(*args, **kwargs)
+
+    coordinator.api.save_single_command = _recorded_save
+
+    _run(coordinator._async_webhook_migration_tick())
+
+    assert order[:2] == ["target", "save"]
+
+
+def test_the_tick_resolves_no_target_when_it_cannot_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator = _coordinator(monkeypatch, boot=None, written=None)
+    coordinator.data = None
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
+
+    coordinator.async_webhook_target.assert_not_awaited()
+
+
 def test_the_tick_keeps_the_old_id_on_when_comexio_holds_another_command_than_written(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -933,6 +960,7 @@ def _preview_message(comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -
         server_id=SERVER,
         config_entry=SimpleNamespace(data={}, options={}),
         required_webio_classes=("marker",),
+        async_webhook_target=AsyncMock(),
         webio_source_data=lambda: PARSED,
         ignored_marker_ids=set(),
         ignored_knx_ids=set(),
