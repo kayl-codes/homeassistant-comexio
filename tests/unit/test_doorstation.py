@@ -598,6 +598,24 @@ def test_the_orphan_cleanup_lets_the_doorbells_go_once_the_io_import_is_off_but_
     assert uids == {camera.unique_id}
 
 
+def test_the_orphan_cleanup_lets_the_doorbell_of_an_ignored_io_type_go_but_keeps_the_other_entities() -> None:
+    """event.py creates no doorbell for a bell button whose type is left out (#317): its entry must not stay."""
+    camera = SimpleNamespace(domain="camera", unique_id=doorstation_camera_unique_id(SERVER, 14))
+    bell = SimpleNamespace(domain="event", unique_id=doorstation_doorbell_unique_id(SERVER, 14, "DI1"))
+    second_bell = SimpleNamespace(domain="event", unique_id=doorstation_doorbell_unique_id(SERVER, 14, "DI2"))
+
+    with patch("custom_components.comexio.er.async_entries_for_config_entry", return_value=[camera, bell, second_bell]):
+        left_out = _doorstation_entity_uids(
+            MagicMock(), MagicMock(entry_id="entry"), SERVER, import_ios=True, ignored_types=frozenset({"DI"})
+        )
+        kept = _doorstation_entity_uids(
+            MagicMock(), MagicMock(entry_id="entry"), SERVER, import_ios=True, ignored_types=frozenset({"QI"})
+        )
+
+    assert left_out == {camera.unique_id}
+    assert kept == {camera.unique_id, bell.unique_id, second_bell.unique_id}
+
+
 # --- api and poll -------------------------------------------------------------------------------------------------
 
 

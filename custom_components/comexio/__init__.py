@@ -2,6 +2,7 @@
 from collections.abc import Callable, Iterable
 from datetime import timedelta
 import logging
+import re
 from typing import Any
 
 from aiocomexio import __version__ as AIOCOMEXIO_VERSION
@@ -56,6 +57,7 @@ from .const import (
     extension_firmware_update_unique_id,
     function_plan_ids,
     function_plan_run_state_unique_id,
+    ignored_io_types,
     io_unique_id,
     known_extension_names,
     migrate_entry_options,
@@ -570,7 +572,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
         }
     active_unique_ids |= plan_uids
 
-    active_unique_ids |= _doorstation_entity_uids(ent_reg, entry, server_id, import_ios=conf.get("import_ios", True))
+    active_unique_ids |= _doorstation_entity_uids(
+        ent_reg, entry, server_id, import_ios=conf.get("import_ios", True), ignored_types=ignored_io_types(conf)
+    )
 
     # Bus-Load-Watchdog diagnostic sensors (always active, independent of extension/marker state)
     active_unique_ids.update(
@@ -771,8 +775,23 @@ def _start_comexio_checks(hass: HomeAssistant, entry: ConfigEntry, coordinator: 
     )
 
 
+# The IO identifier inside a doorbell event's unique_id (const.doorstation_doorbell_unique_id, lower case).
+_DOORBELL_UID_TYPE_RE = re.compile(r"_doorstation\d+_([a-z]+)\d*_doorbell$")
+
+
+def _doorbell_type_ignored(unique_id: str, ignored_types: frozenset[str]) -> bool:
+    """True for the doorbell event of a bell button whose IO type is left out of the import (#317)."""
+    match = _DOORBELL_UID_TYPE_RE.search(unique_id)
+    return match is not None and match.group(1).upper() in ignored_types
+
+
 def _doorstation_entity_uids(
-    ent_reg: er.EntityRegistry, entry: ConfigEntry, server_id: str, *, import_ios: bool
+    ent_reg: er.EntityRegistry,
+    entry: ConfigEntry,
+    server_id: str,
+    *,
+    import_ios: bool,
+    ignored_types: frozenset[str] = frozenset(),
 ) -> set[str]:
     """The unique_ids of the Doorstation cameras (camera.py) and doorbell events (event.py) that are registered.
 
@@ -780,15 +799,18 @@ def _doorstation_entity_uids(
     changed page reads like that, and a page that is only partly understood would drop some), so its registry entry
     stays and it comes back with the page. The cleanup never decides that a Doorstation is gone for good: the
     entities of a removed one stay unavailable until they are deleted by hand, which costs nothing, where a wrong
-    removal would cost their history. The exception is the doorbell events of an entry that no longer imports IOs:
-    event.py creates none then, like every other IO entity, so their entries go with the rest.
+    removal would cost their history. The exception is the doorbell events of an entry that no longer imports IOs
+    and those of a bell button whose IO type is left out (ignored_types): event.py creates none then, like every
+    other IO entity, so their entries go with the rest.
     """
     prefix = f"comexio_{server_id}_doorstation".lower()
     domains = DOORSTATION_ENTITY_DOMAINS if import_ios else DOORSTATION_ENTITY_DOMAINS - {DOORBELL_ENTITY_DOMAIN}
     return {
         e.unique_id
         for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
-        if e.domain in domains and e.unique_id.startswith(prefix)
+        if e.domain in domains
+        and e.unique_id.startswith(prefix)
+        and not (e.domain == DOORBELL_ENTITY_DOMAIN and _doorbell_type_ignored(e.unique_id, ignored_types))
     }
 
 
