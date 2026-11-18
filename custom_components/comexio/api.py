@@ -6288,7 +6288,7 @@ class ComexioAPI:
             return False
         if isinstance(err, RuntimeError):
             return str(err) == _AIOHTTP_SESSION_CLOSED
-        return isinstance(err, ComexioConnectionError | TimeoutError)
+        return isinstance(err, ComexioConnectionError | TimeoutError | aiohttp.ClientError)
 
     @property
     def session_is_gone(self) -> bool:

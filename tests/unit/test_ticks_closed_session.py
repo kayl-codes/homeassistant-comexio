@@ -14,7 +14,8 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from aiocomexio import ComexioConnectionError
+from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, ComexioDataError
+import aiohttp
 import pytest
 
 from custom_components.comexio import coordinator as coordinator_module
@@ -311,3 +312,155 @@ def test_the_guard_passes_the_timer_argument_on(comexio_api: ComexioAPI) -> None
     asyncio.run(Fake().tick(now=now))
 
     assert seen == [now, now]
+
+
+def _fake_run_state_coordinator(api: ComexioAPI) -> Any:
+    return SimpleNamespace(
+        api=api,
+        server_id=SERVER_ID,
+        _plan_run_state_fetching=False,
+        _plan_run_state_poll_blocked=lambda: False,
+        _plan_run_state_last_fetch=0.0,
+        _plan_run_state_fail_streak=2,
+        _plan_run_state_stale_count=2,
+        note_comexio_unreachable=MagicMock(),
+        _async_plan_run_state_fetch_failed=AsyncMock(),
+        _async_watch_plans_and_refresh=AsyncMock(),
+    )
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+@pytest.mark.parametrize(
+    "error",
+    [ComexioConnectionError("dropped"), TimeoutError(), aiohttp.ClientError("dropped")],
+    ids=["transport error", "timeout", "client error"],
+)
+def test_the_run_state_fetch_counts_no_outage_when_the_connections_close_under_its_request(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None], error: Exception
+) -> None:
+    # The request in flight fails as a transport error or a timeout (aiohttp's refusal is the tick guard's business).
+    async def stopped_meanwhile(*_args: object, **_kwargs: object) -> None:
+        close(comexio_api)
+        raise error
+
+    comexio_api.get_function_plan_run_states = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_run_state_coordinator(comexio_api)
+
+    with (
+        patch.object(coordinator_module, "function_plan_ids", return_value=[1]),
+        caplog.at_level(logging.DEBUG, logger=coordinator_module.__name__),
+    ):
+        asyncio.run(ComexioCoordinator._async_refresh_plan_run_states(fake))
+
+    fake.note_comexio_unreachable.assert_not_called()
+    fake._async_plan_run_state_fetch_failed.assert_not_awaited()
+    fake._async_watch_plans_and_refresh.assert_not_awaited()
+    assert fake._plan_run_state_fetching is False
+    assert (fake._plan_run_state_fail_streak, fake._plan_run_state_stale_count) == (2, 2)
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [record for record in caplog.records if "ended with the session" in record.getMessage()]
+
+
+def test_the_run_state_fetch_still_counts_an_outage_while_the_session_is_open(comexio_api: ComexioAPI) -> None:
+    comexio_api.get_function_plan_run_states = AsyncMock(  # type: ignore[method-assign]
+        side_effect=ComexioConnectionError("dropped")
+    )
+    fake = _fake_run_state_coordinator(comexio_api)
+
+    with patch.object(coordinator_module, "function_plan_ids", return_value=[1]):
+        asyncio.run(ComexioCoordinator._async_refresh_plan_run_states(fake))
+
+    fake.note_comexio_unreachable.assert_called_once()
+    fake._async_plan_run_state_fetch_failed.assert_awaited_once()
+
+
+def _fake_refresh_coordinator(api: ComexioAPI, run: AsyncMock, data: object) -> Any:
+    return SimpleNamespace(
+        api=api, server_id=SERVER_ID, data=data, _polls_open=0, _poll_overlap=False, _async_run_update=run
+    )
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_refresh_that_meets_the_closed_session_keeps_the_data(
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None]
+) -> None:
+    async def stopped_meanwhile() -> None:
+        close(comexio_api)
+        raise RuntimeError(SESSION_CLOSED)
+
+    data = {"markers": []}
+    fake = _fake_refresh_coordinator(comexio_api, AsyncMock(side_effect=stopped_meanwhile), data)
+
+    with caplog.at_level(logging.DEBUG, logger=coordinator_module.__name__):
+        result = asyncio.run(ComexioCoordinator._async_update_data(fake))
+
+    assert result is data
+    assert fake._polls_open == 0
+    assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize(
+    ("error", "close", "data"),
+    [
+        (SESSION_CLOSED, None, {"markers": []}),
+        (OTHER_ERROR, _ha_closes_the_connections, {"markers": []}),
+        (SESSION_CLOSED, _ha_closes_the_connections, None),
+    ],
+    ids=["closed text, open session", "other error after close", "first refresh without data"],
+)
+def test_a_refresh_error_that_is_no_closed_session_stays_visible(
+    comexio_api: ComexioAPI, error: str, close: Callable[[ComexioAPI], None] | None, data: object
+) -> None:
+    async def fails() -> None:
+        if close is not None:
+            close(comexio_api)
+        raise RuntimeError(error)
+
+    fake = _fake_refresh_coordinator(comexio_api, AsyncMock(side_effect=fails), data)
+    running = ComexioCoordinator._async_update_data(fake)
+
+    with pytest.raises(RuntimeError, match=error):
+        asyncio.run(running)
+    assert fake._polls_open == 0
+
+
+@pytest.mark.parametrize(
+    "error",
+    [ComexioDataError("unreadable"), ComexioAuthenticationError("refused")],
+    ids=["data error", "authentication error"],
+)
+def test_the_run_state_fetch_still_counts_an_error_that_is_no_disconnect_after_the_close(
+    comexio_api: ComexioAPI, error: Exception
+) -> None:
+    # A session that is gone explains a dropped request, not an answer Comexio gave or a foreign error.
+    async def stopped_meanwhile(*_args: object, **_kwargs: object) -> None:
+        _ha_closes_the_connections(comexio_api)
+        raise error
+
+    comexio_api.get_function_plan_run_states = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
+    fake = _fake_run_state_coordinator(comexio_api)
+
+    with patch.object(coordinator_module, "function_plan_ids", return_value=[1]):
+        asyncio.run(ComexioCoordinator._async_refresh_plan_run_states(fake))
+
+    fake._async_plan_run_state_fetch_failed.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "error", [ComexioConnectionError("dropped"), TimeoutError()], ids=["transport error", "timeout"]
+)
+def test_a_refresh_leaves_a_transport_error_to_home_assistant_after_the_close(
+    comexio_api: ComexioAPI, error: Exception
+) -> None:
+    # Only aiohttp's refusal is turned into "keep the data"; a transport error or timeout is the refresh's own failure
+    # handling (UNREACHABLE_ERRORS in _async_run_update) and passes through.
+    async def stopped_meanwhile() -> None:
+        _ha_closes_the_connections(comexio_api)
+        raise error
+
+    fake = _fake_refresh_coordinator(comexio_api, AsyncMock(side_effect=stopped_meanwhile), {"markers": []})
+    running = ComexioCoordinator._async_update_data(fake)
+
+    with pytest.raises(type(error)):
+        asyncio.run(running)
+    assert fake._polls_open == 0

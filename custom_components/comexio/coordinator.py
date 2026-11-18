@@ -1662,6 +1662,13 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._polls_open += 1
         try:
             return await self._async_run_update()
+        except RuntimeError as err:
+            # Home Assistant closed the connectors while this refresh was in flight: keep what is there instead of
+            # an "Unexpected error fetching" line at shutdown. Without data (first refresh) the error stays.
+            if self.data is None or not self.api.met_the_closed_session(err):
+                raise
+            _LOGGER.debug("[%s] The refresh met the closed session: %s", self.server_id, err)
+            return self.data
         finally:
             # No await between this and Home Assistant storing the returned data in `self.data`.
             self._polls_open -= 1
@@ -6715,6 +6722,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # the answer format changed (e.g. new firmware) — no fresh state, not a success.
                 raise ComexioDataError("no plan's run state could be read")
         except (ComexioError, aiohttp.ClientError, TimeoutError) as err:
+            if self.api.read_ended_with_the_session(err):
+                # Unload or Home Assistant stopping closed the connections under this request: no outage to count.
+                _LOGGER.debug("[%s] Run-state fetch ended with the session: %s", self.server_id, type(err).__name__)
+                return
             if isinstance(err, UNREACHABLE_ERRORS):
                 self.note_comexio_unreachable()
             await self._async_plan_run_state_fetch_failed(err, session)
