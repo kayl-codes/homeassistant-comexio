@@ -5199,9 +5199,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             connection_values = await self.api.get_function_plan_connection_values(
                 cache["fub_id"], session=preview_session
             )
-        except Exception:
-            if self.api.session_is_gone:
-                # Unload or Home Assistant stopping closed the connections under this request: no failure to count.
+        except Exception as err:
+            if self.api.read_ended_with_the_session(err):
+                # Unload or Home Assistant stopping closed the connections under this request (aiohttp's refusal, or
+                # a transport error / timeout of the request in flight): no failure to count. Any other error stays
+                # counted and logged, whatever the session is doing.
+                _LOGGER.debug(
+                    "[%s] Connection-value poll ended with the session: %s", self.server_id, type(err).__name__
+                )
                 return
             if self._preview_plan_cache is not cache:
                 # The preview was stopped/replaced (stop_preview() or a new plan armed)

@@ -6160,7 +6160,7 @@ class ComexioAPI:
                 self._note_write_met_another_certificate(err, target_type, target_id)
             return _SettingsNote(settings_check_failed(err), err)
         except Exception as err:
-            if self._read_ended_with_the_session(err):
+            if self.read_ended_with_the_session(err):
                 _LOGGER.debug("The read of the Comexio API settings ended with the session (%s)", type(err).__name__)
                 return _SettingsNote()
             if not isinstance(err, ComexioError | TimeoutError):
@@ -6277,11 +6277,12 @@ class ComexioAPI:
             return _GONE_HA_CLOSED
         return None
 
-    def _read_ended_with_the_session(self, err: Exception) -> bool:
-        """Whether the settings read failed because the main session went away under it (unload, HA stopping).
+    def read_ended_with_the_session(self, err: Exception) -> bool:
+        """Whether a read failed because the main session went away under it (unload, HA stopping).
 
         A request in flight when the connector closes may fail as a transport error or a timeout instead of aiohttp's
-        refusal of a closed session; neither says anything about Comexio's settings. Any other error stays visible.
+        refusal of a closed session; neither says anything about Comexio. Any other error stays visible. Used by the
+        settings read after a failed write and by the preview poll of the coordinator.
         """
         if self._session_gone_reason() is None:
             return False

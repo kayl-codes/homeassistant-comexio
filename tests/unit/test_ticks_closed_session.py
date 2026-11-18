@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from aiocomexio import ComexioConnectionError
 import pytest
 
 from custom_components.comexio import coordinator as coordinator_module
@@ -212,12 +213,18 @@ def test_the_preview_poll_sends_nothing_after_the_close(
 
 
 @pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+@pytest.mark.parametrize(
+    "error",
+    [RuntimeError(SESSION_CLOSED), ComexioConnectionError("dropped"), TimeoutError()],
+    ids=["aiohttp refusal", "transport error", "timeout"],
+)
 def test_the_preview_poll_counts_no_failure_when_the_connections_close_under_its_request(
-    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None]
+    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None], error: Exception
 ) -> None:
+    # A request in flight when the connector closes fails as aiohttp's refusal, a transport error or a timeout.
     async def stopped_meanwhile(*_args: object, **_kwargs: object) -> None:
         close(comexio_api)
-        raise RuntimeError(SESSION_CLOSED)
+        raise error
 
     comexio_api.ensure_preview_session = AsyncMock(side_effect=stopped_meanwhile)  # type: ignore[method-assign]
     cache = {"fub_id": 1}
@@ -231,12 +238,40 @@ def test_the_preview_poll_counts_no_failure_when_the_connections_close_under_its
     assert fake._connection_poll_fail_count == 0
     assert fake._preview_plan_cache is cache
     assert not [record for record in caplog.records if record.levelno >= logging.WARNING]
+    assert [record for record in caplog.records if "ended with the session" in record.getMessage()]
 
 
-def test_the_preview_poll_still_counts_a_failure_on_an_open_session(
-    comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture
+@pytest.mark.parametrize(
+    ("error", "close"),
+    [
+        (RuntimeError(OTHER_ERROR), None),
+        (RuntimeError(SESSION_CLOSED), None),
+        (ComexioConnectionError("dropped"), None),
+        (RuntimeError(OTHER_ERROR), _ha_closes_the_connections),
+        (ValueError(SESSION_CLOSED), _ha_closes_the_connections),
+    ],
+    ids=[
+        "other error, open session",
+        "closed text, open session",
+        "transport error, open session",
+        "other error after close",
+        "not a RuntimeError",
+    ],
+)
+def test_the_preview_poll_still_counts_a_failure_that_is_no_closed_session(
+    comexio_api: ComexioAPI,
+    caplog: pytest.LogCaptureFixture,
+    error: Exception,
+    close: Callable[[ComexioAPI], None] | None,
 ) -> None:
-    comexio_api.ensure_preview_session = AsyncMock(side_effect=RuntimeError(OTHER_ERROR))  # type: ignore[method-assign]
+    # A session that is gone does not explain an unrelated error: it stays counted and logged.
+    # The close comes while the request is under way (before the start the tick would not run at all).
+    async def fails(*_args: object, **_kwargs: object) -> None:
+        if close is not None:
+            close(comexio_api)
+        raise error
+
+    comexio_api.ensure_preview_session = AsyncMock(side_effect=fails)  # type: ignore[method-assign]
     fake = SimpleNamespace(
         api=comexio_api,
         server_id=SERVER_ID,
