@@ -18,7 +18,7 @@ from aiocomexio import ComexioAuthenticationError, ComexioConnectionError, Comex
 import aiohttp
 import pytest
 
-from custom_components.comexio import coordinator as coordinator_module
+from custom_components.comexio import api as api_module, coordinator as coordinator_module
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.coordinator import ComexioCoordinator
 
@@ -216,8 +216,13 @@ def test_the_preview_poll_sends_nothing_after_the_close(
 @pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
 @pytest.mark.parametrize(
     "error",
-    [RuntimeError(SESSION_CLOSED), ComexioConnectionError("dropped"), TimeoutError()],
-    ids=["aiohttp refusal", "transport error", "timeout"],
+    [
+        RuntimeError(SESSION_CLOSED),
+        ComexioConnectionError("dropped"),
+        TimeoutError(),
+        aiohttp.ServerDisconnectedError(),
+    ],
+    ids=["aiohttp refusal", "transport error", "timeout", "server disconnected"],
 )
 def test_the_preview_poll_counts_no_failure_when_the_connections_close_under_its_request(
     comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None], error: Exception
@@ -250,6 +255,7 @@ def test_the_preview_poll_counts_no_failure_when_the_connections_close_under_its
         (ComexioConnectionError("dropped"), None),
         (RuntimeError(OTHER_ERROR), _ha_closes_the_connections),
         (ValueError(SESSION_CLOSED), _ha_closes_the_connections),
+        (aiohttp.ClientPayloadError("cut"), _ha_closes_the_connections),
     ],
     ids=[
         "other error, open session",
@@ -257,6 +263,7 @@ def test_the_preview_poll_counts_no_failure_when_the_connections_close_under_its
         "transport error, open session",
         "other error after close",
         "not a RuntimeError",
+        "payload error after close",
     ],
 )
 def test_the_preview_poll_still_counts_a_failure_that_is_no_closed_session(
@@ -332,8 +339,8 @@ def _fake_run_state_coordinator(api: ComexioAPI) -> Any:
 @pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
 @pytest.mark.parametrize(
     "error",
-    [ComexioConnectionError("dropped"), TimeoutError(), aiohttp.ClientError("dropped")],
-    ids=["transport error", "timeout", "client error"],
+    [ComexioConnectionError("dropped"), TimeoutError(), aiohttp.ClientConnectionError("dropped")],
+    ids=["transport error", "timeout", "connection error"],
 )
 def test_the_run_state_fetch_counts_no_outage_when_the_connections_close_under_its_request(
     comexio_api: ComexioAPI, caplog: pytest.LogCaptureFixture, close: Callable[[ComexioAPI], None], error: Exception
@@ -426,8 +433,13 @@ def test_a_refresh_error_that_is_no_closed_session_stays_visible(
 
 @pytest.mark.parametrize(
     "error",
-    [ComexioDataError("unreadable"), ComexioAuthenticationError("refused")],
-    ids=["data error", "authentication error"],
+    [
+        ComexioDataError("unreadable"),
+        ComexioAuthenticationError("refused"),
+        aiohttp.ClientResponseError(MagicMock(), (), status=500),
+        aiohttp.ClientPayloadError("cut"),
+    ],
+    ids=["data error", "authentication error", "response error", "payload error"],
 )
 def test_the_run_state_fetch_still_counts_an_error_that_is_no_disconnect_after_the_close(
     comexio_api: ComexioAPI, error: Exception
@@ -464,3 +476,128 @@ def test_a_refresh_leaves_a_transport_error_to_home_assistant_after_the_close(
     with pytest.raises(type(error)):
         asyncio.run(running)
     assert fake._polls_open == 0
+
+
+def _fake_run_update_coordinator(api: ComexioAPI, fetch: AsyncMock) -> Any:
+    return SimpleNamespace(
+        api=api,
+        server_id=SERVER_ID,
+        onewire_status=None,
+        _full_poll_running=False,
+        _scraped_config=None,
+        _async_fetch_and_audit=fetch,
+        _note_system_info_dropped=MagicMock(),
+        system_info=SimpleNamespace(apply_storage=MagicMock(return_value=[])),
+    )
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_refresh_that_ends_with_the_session_counts_no_failed_storage_fetch(
+    comexio_api: ComexioAPI, close: Callable[[ComexioAPI], None]
+) -> None:
+    async def stopped_meanwhile() -> None:
+        close(comexio_api)
+        raise RuntimeError(SESSION_CLOSED)
+
+    fake = _fake_run_update_coordinator(comexio_api, AsyncMock(side_effect=stopped_meanwhile))
+    running = ComexioCoordinator._async_run_update(fake)
+
+    with pytest.raises(RuntimeError, match=SESSION_CLOSED):
+        asyncio.run(running)
+
+    fake.system_info.apply_storage.assert_not_called()
+    fake._note_system_info_dropped.assert_not_called()
+    assert fake._full_poll_running is False
+
+
+def test_a_failed_refresh_on_an_open_session_still_counts_a_failed_storage_fetch(comexio_api: ComexioAPI) -> None:
+    fake = _fake_run_update_coordinator(comexio_api, AsyncMock(side_effect=RuntimeError(OTHER_ERROR)))
+    running = ComexioCoordinator._async_run_update(fake)
+
+    with pytest.raises(RuntimeError, match=OTHER_ERROR):
+        asyncio.run(running)
+
+    fake.system_info.apply_storage.assert_called_once_with(None)
+    fake._note_system_info_dropped.assert_called_once()
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_preview_tick_that_waited_for_the_lock_opens_no_session_once_the_connections_closed(
+    comexio_api: ComexioAPI, close: Callable[[ComexioAPI], None]
+) -> None:
+    comexio_api._login = AsyncMock(return_value=True)  # type: ignore[method-assign]
+
+    async def run() -> object:
+        async with comexio_api._preview_session_lock:
+            queued = asyncio.create_task(comexio_api.ensure_preview_session())
+            await asyncio.sleep(0)
+            close(comexio_api)
+        return await queued
+
+    with patch.object(api_module, "async_create_session") as create:
+        assert asyncio.run(run()) is None
+
+    create.assert_not_called()
+    comexio_api._login.assert_not_awaited()
+    assert comexio_api._preview_session is None
+
+
+@pytest.mark.parametrize("close", CLOSERS, ids=HOW_THE_SESSION_GOES)
+def test_a_preview_session_logged_in_while_the_connections_close_is_not_kept(
+    comexio_api: ComexioAPI, close: Callable[[ComexioAPI], None]
+) -> None:
+    async def login_while_closing(*_args: object) -> bool:
+        close(comexio_api)
+        return True
+
+    comexio_api._login = AsyncMock(side_effect=login_while_closing)  # type: ignore[method-assign]
+
+    with (
+        patch.object(api_module, "async_create_session") as create,
+        patch.object(api_module, "discard_session") as discard,
+        patch.object(comexio_api, "_new_client"),
+    ):
+        assert asyncio.run(comexio_api.ensure_preview_session()) is None
+
+    # close() drops the main session through the same function; only the preview session matters here.
+    discard.assert_any_call(create.return_value, unused=True)
+    assert comexio_api._preview_session is None
+    assert comexio_api._preview_client is None
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (RuntimeError(SESSION_CLOSED), True),
+        (RuntimeError(OTHER_ERROR), False),
+        (ComexioConnectionError("dropped"), True),
+        (TimeoutError(), True),
+        (aiohttp.ServerDisconnectedError(), True),
+        (aiohttp.ClientPayloadError("cut"), False),
+        (aiohttp.ClientResponseError(MagicMock(), (), status=500), False),
+        (ComexioDataError("unreadable"), False),
+        (ComexioAuthenticationError("refused"), False),
+        (ValueError(SESSION_CLOSED), False),
+    ],
+    ids=[
+        "aiohttp refusal",
+        "other runtime error",
+        "transport error",
+        "timeout",
+        "server disconnected",
+        "payload error",
+        "response error",
+        "data error",
+        "authentication error",
+        "not a RuntimeError",
+    ],
+)
+@pytest.mark.parametrize("close", [*CLOSERS, None], ids=[*HOW_THE_SESSION_GOES, "session open"])
+def test_what_ends_with_the_session_is_told_apart_for_every_caller(
+    comexio_api: ComexioAPI, close: Callable[[ComexioAPI], None] | None, error: Exception, expected: bool
+) -> None:
+    # The one rule behind the settings read after a failed write, the preview poll and the run-state fetch.
+    if close is not None:
+        close(comexio_api)
+
+    assert comexio_api.read_ended_with_the_session(error) is (expected and close is not None)

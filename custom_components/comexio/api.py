@@ -1092,7 +1092,8 @@ class ComexioAPI:
             self._drop_outdated_preview_session()
             if self._preview_session is not None:
                 return self._preview_session
-            if self._closed or self.credentials_refused:
+            # Not only the entry's unload: Home Assistant stopping closes the main session while a tick waits here.
+            if self.session_is_gone or self.credentials_refused:
                 return None
             # Not bound to the entry: close() drops it, and a new one comes with every login that lapsed.
             credentials = self._credentials()
@@ -1107,7 +1108,7 @@ class ComexioAPI:
                 # the await above, or _login() raising) must not leave an authenticated session
                 # orphaned.
                 settings_changed = credentials != self._credentials()
-                if not login_ok or self._closed or settings_changed:
+                if not login_ok or self.session_is_gone or settings_changed:
                     # Never handed out, and its one request (the login) is over: nothing to wait for.
                     discard_session(session, unused=True)
             if settings_changed:
@@ -1116,7 +1117,7 @@ class ComexioAPI:
             if not login_ok:
                 _LOGGER.warning("Preview session login failed — Stufe-2 poll falls back to the main session")
                 return None
-            if self._closed:
+            if self.session_is_gone:
                 return None
             self._preview_session = session
             self._preview_client = client
@@ -6288,7 +6289,7 @@ class ComexioAPI:
             return False
         if isinstance(err, RuntimeError):
             return str(err) == _AIOHTTP_SESSION_CLOSED
-        return isinstance(err, ComexioConnectionError | TimeoutError | aiohttp.ClientError)
+        return isinstance(err, ComexioConnectionError | TimeoutError | aiohttp.ClientConnectionError)
 
     @property
     def session_is_gone(self) -> bool:

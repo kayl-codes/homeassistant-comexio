@@ -1704,8 +1704,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return self._keep_data_through_certificate_change(err)
         finally:
             self._full_poll_running = False
-            if not fetched:
-                # A poll that failed fetched no storage either: it counts as a failed storage fetch.
+            if not fetched and not self.api.session_is_gone:
+                # A poll that failed fetched no storage either: it counts as a failed storage fetch. Not one that
+                # ended with the session (unload, Home Assistant stopping): that says nothing about Comexio.
                 self._note_system_info_dropped(
                     self.system_info.apply_storage(None),
                     SystemInfoReading(None, None, CONFIG_POLL_FAILED_CAUSE),
