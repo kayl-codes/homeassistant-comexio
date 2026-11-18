@@ -321,6 +321,11 @@ class _FakeCoordinator(SimpleNamespace):
     async_seed_saved_onewire_sensors = ComexioCoordinator.async_seed_saved_onewire_sensors
     _index_ios = ComexioCoordinator._index_ios
     _track_offline_extensions = ComexioCoordinator._track_offline_extensions
+    # What the methods above call on a path no test of this file takes yet: bound so that a test that does take it
+    # fails on a missing attribute of the data, not on a missing method (test_fake_coordinators_bind_what_they_run).
+    _handle_offline_extension_transitions = ComexioCoordinator._handle_offline_extension_transitions
+    _log_unknown_webhook_io = ComexioCoordinator._log_unknown_webhook_io
+    webio_source_data = ComexioCoordinator.webio_source_data
 
 
 def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
