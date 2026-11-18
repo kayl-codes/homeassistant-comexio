@@ -144,6 +144,7 @@ from .const import (
     ICON_NETWORK,
     ICON_RENAME,
     ICON_WARNING,
+    IGNORED_TYPE_IO_DATA_KEY,
     IO_PLAN_KIND_IO,
     IO_PLAN_KIND_QUICKBUS,
     IO_PLAN_KINDS,
@@ -182,6 +183,7 @@ from .const import (
     WEBHOOK_ADDRESS_AUTO,
     WEBHOOK_EARLY_ONEWIRE_LOG_MSG,
     WEBHOOK_FORMER_IO_LOG_MSG,
+    WEBHOOK_IGNORED_TYPE_IO_LOG_MSG,
     WEBHOOK_MIGRATION_BUDGET_SEC,
     WEBHOOK_MIGRATION_DONE,
     WEBHOOK_MIGRATION_FAILED,
@@ -229,6 +231,7 @@ from .const import (
     function_plans,
     fw_update_signal,
     ignored_id_in_ranges,
+    ignored_io_types,
     import_disabled_issue_id,
     invalid_ignored_tokens,
     io_audit_key,
@@ -242,6 +245,7 @@ from .const import (
     io_plan_overflow,
     io_plan_shifted,
     io_push_signal,
+    io_type,
     one_line,
     onewire_entity_name,
     parse_ignored_ids,
@@ -717,9 +721,15 @@ def _imported_data(parsed_data: dict[str, Any], conf: dict[str, Any]) -> dict[st
     if not import_ios:
         # io_all labels plan elements: imported Quickbus IOs keep theirs without the physical IOs.
         io_all = [io for io in io_all if import_quickbus and io.get("quickbus")]
+    # An IO of an ignored type is as good as not there: no entity, no command (the ones Comexio has are orphans
+    # the sync removes), no wiring. io_all keeps it: the plan preview still names it in a plan of the user's own.
+    excluded_types = ignored_io_types(conf)
+    ios = parsed_data["io"] if import_ios else []
     return {
         "markers": parsed_data["markers"] if import_markers else [],
-        "io": parsed_data["io"] if import_ios else [],
+        "io": [io for io in ios if io_type(io) not in excluded_types],
+        # Kept apart for the extension list: a module of left-out IOs only still has its device and firmware.
+        IGNORED_TYPE_IO_DATA_KEY: [io for io in ios if io_type(io) in excluded_types],
         "io_all": io_all,
         "knx": parsed_data.get("knx", []) if import_knx else [],
         QUICKBUS_IO_DATA_KEY: parsed_data.get(QUICKBUS_IO_DATA_KEY, []) if import_quickbus else [],
@@ -2102,8 +2112,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._io_index = {(io["ext_name"].lower(), io["identifier"].lower()): io for io in final_data["io"]}
         self._quickbus_index = {str(io["id"]): io for io in final_data[QUICKBUS_IO_DATA_KEY]}
         # Quickbus IOs carry their host extension's offline flag — an extension with only Quickbus IOs
-        # (or import_ios off) must still be tracked, or its Quickbus entities stay available.
-        self._track_offline_extensions([*final_data["io"], *final_data[QUICKBUS_IO_DATA_KEY]])
+        # (or import_ios off) must still be tracked, or its Quickbus entities stay available. The same for a
+        # module whose IOs are all of a left-out type (#317): its offline flag is still read from them.
+        self._track_offline_extensions(
+            [*final_data["io"], *final_data[IGNORED_TYPE_IO_DATA_KEY], *final_data[QUICKBUS_IO_DATA_KEY]]
+        )
 
     def _track_offline_extensions(self, io_items: list[dict[str, Any]]) -> None:
         """Track offline extensions and log transitions."""
@@ -5365,6 +5378,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._handle_offline_extension_transitions(offline - {io["ext_name"]})
         return previous
 
+    def _io_type_ignored(self, identifier: str) -> bool:
+        """Whether the IO's type is one of the types left out of the import (#317)."""
+        return io_type({"identifier": identifier}) in ignored_io_types(self.config_entry.options)
+
     def io_push_count(self, io_id: str) -> int:
         """How many webhook pushes this IO has received; a write reads it before and after (#259)."""
         return self._io_push_counts.get(io_id, 0)
@@ -5390,6 +5407,15 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._fire_plan_event("io", str(io["id"]), label, value)
             ring = pushed  # the event entities (a doorstation's bell) ring on a push, not on a poll or an own write
             self._warned_unknown_webhook_ios.discard(_webhook_warn_key("io", *key))  # unknown again: warn again
+        elif self._io_type_ignored(identifier):
+            # Comexio pushes until a sync removed the commands of a left-out type: no warning, it is not unknown (#317).
+            # No value changed, so no preview refresh and, while the last poll succeeded, no listener notification:
+            # such a push can come once per second per IO, and each notification rewrites every entity's state.
+            # It still proves Comexio reachable, so after a failed poll it makes the entities available again.
+            _LOGGER.debug(WEBHOOK_IGNORED_TYPE_IO_LOG_MSG, one_line(ext_name), one_line(identifier))
+            if not self.last_update_success:
+                self._async_publish_pushed_value()
+            return
         else:
             self._log_unknown_webhook_io(
                 _webhook_warn_key("io", *key),

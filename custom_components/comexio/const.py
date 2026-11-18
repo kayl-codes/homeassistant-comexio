@@ -97,6 +97,17 @@ CONF_INCLUDE_OFFLINE_EXTENSIONS = "include_offline_extensions"
 OFFLINE_EXTENSION_PREFIXES_ALWAYS_INCLUDED: tuple[str, ...] = ()
 CONF_IGNORED_MARKERS = "ignored_markers"
 CONF_IGNORED_KNX = "ignored_knx"
+# IO types (the letters of an identifier: "QI" of QI4) that are not imported at all (#317): no entity, no Web-IO
+# command, no function plan wiring. An entry that never saved the option excludes nothing — only the setup flow
+# offers DEFAULT_IGNORED_IO_TYPES, so an existing installation keeps its entities and their history.
+CONF_IGNORED_IO_TYPES = "ignored_io_types"
+# The power inputs (QI), the board temperature (TL) and the supply voltage (UL) report a new value about once per
+# second (cycle time 1000 ms, the reading changes in the third decimal): every one of them pushes a Web-IO message
+# per second, which the Comexio queue cannot work off and the bus load builds up (#317).
+DEFAULT_IGNORED_IO_TYPES: tuple[str, ...] = ("QI", "TL", "UL")
+# Key of the IOs that the ignored types leave out of data["io"]; only the extension list reads them.
+IGNORED_TYPE_IO_DATA_KEY = "io_ignored_type"
+IO_TYPE_RE = re.compile(r"[A-Z]+")
 
 # Ids the user explicitly chose "leave as writable switch" for in the knx_dpt_ambiguous
 # repair flow (see repairs.py) — distinct from CONF_IGNORED_KNX (excludes a KNX object from
@@ -1164,12 +1175,67 @@ def offline_io_skipped(io: Mapping[str, Any], include_offline: bool) -> bool:
     )
 
 
+def io_type(io: Mapping[str, Any]) -> str:
+    """The type of an IO: the leading letters of its identifier, upper case ("QI" for QI4, "" without letters).
+
+    "Q" (relay output) and "QI" (power input) are two types: the whole letter run counts, never a prefix of it.
+    """
+    match = IO_TYPE_RE.match(str(io.get("identifier", "")).strip().upper())
+    return match.group() if match else ""
+
+
+def normalize_io_types(values: Iterable[Any]) -> list[str]:
+    """The IO types of a form input: upper case, each once, in the order given.
+
+    Raises ValueError naming the entries that are no type (letters only: "QI", not "QI4" or "Q I").
+    """
+    if isinstance(values, str):
+        # A bare string is no list of types: iterating it would read "QI" as the two types Q and I.
+        raise ValueError(f"Not a list of IO types: {values!r}")
+    types: dict[str, None] = {}
+    invalid: list[str] = []
+    for value in values:
+        text = str(value).strip().upper()
+        if IO_TYPE_RE.fullmatch(text):
+            types[text] = None
+        else:
+            invalid.append(str(value))
+    if invalid:
+        raise ValueError(f"Not an IO type: {', '.join(repr(entry) for entry in invalid[:3])}")
+    return list(types)
+
+
+def ignored_io_types(conf: Mapping[str, Any]) -> frozenset[str]:
+    """The IO types left out of the import; empty while the option was never saved (#317).
+
+    Read leniently: a saved entry that is not a string of letters is ignored, never an error — the value comes
+    from stored options, which an older or hand-edited entry may hold in another shape.
+    """
+    saved = conf.get(CONF_IGNORED_IO_TYPES)
+    if not isinstance(saved, list | tuple | set | frozenset):
+        return frozenset()
+    return frozenset(
+        text for value in saved if isinstance(value, str) and IO_TYPE_RE.fullmatch(text := value.strip().upper())
+    )
+
+
+def known_io_types(data: Mapping[str, Any]) -> list[str]:
+    """The IO types of the server's extensions, sorted: what the ignored-types field offers besides the usual ones.
+
+    From io_all, which still holds the IOs of an ignored type; Quickbus IOs are no extension IOs and stay out.
+    """
+    return sorted(
+        {found for io in data.get("io_all", data.get("io", [])) if not io.get("quickbus") and (found := io_type(io))}
+    )
+
+
 def known_extension_names(data: Mapping[str, Any], include_offline: bool) -> set[str]:
     """Names of the extensions the poll reports IOs for, offline ones only with ``include_offline``.
 
-    Counts Quickbus hosts too: a module that only hosts Quickbus devices lists no IO of its own.
+    Counts Quickbus hosts too: a module that only hosts Quickbus devices lists no IO of its own, and the IOs left out
+    by their type (#317): a module whose IOs are all of those types keeps its device and firmware entity.
     """
-    ios = (*data.get("io", []), *data.get(QUICKBUS_IO_DATA_KEY, []))
+    ios = (*data.get("io", []), *data.get(IGNORED_TYPE_IO_DATA_KEY, []), *data.get(QUICKBUS_IO_DATA_KEY, []))
     return {io["ext_name"] for io in ios if include_offline or not io.get("offline")}
 
 
@@ -1431,6 +1497,10 @@ WEBHOOK_VALUE_LOG_MSG = "Webhook %s push: %s = %r (prev %r)"
 # WARNING emitted when a webhook pushes a value for an IO key that is not in the parsed config
 # index — the value cannot be tracked and is dropped. Args: ext name, identifier, new value.
 WEBHOOK_UNKNOWN_IO_LOG_MSG = "Webhook push for unknown IO %s/%s (value %r) — not tracked, dropped"
+
+# The push of an IO whose type is left out of the import (#317): Comexio still sends it until a sync removed its
+# command, so it is no unknown IO and gets no warning. Args: extension, IO.
+WEBHOOK_IGNORED_TYPE_IO_LOG_MSG = "Webhook push for %s/%s ignored: its IO type is not imported"
 
 # The same for a Quickbus IO, addressed by its IO Id (unknown, or its import is off). Args: IO Id, new value.
 WEBHOOK_UNKNOWN_QUICKBUS_IO_LOG_MSG = "Webhook push for unknown Quickbus IO %s (value %r) — not tracked, dropped"

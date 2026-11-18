@@ -26,6 +26,7 @@ from homeassistant.const import __version__ as HA_VERSION
 from homeassistant.core import HomeAssistant
 
 from .const import (
+    CONF_IGNORED_IO_TYPES,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     QUICKBUS_IO_DATA_KEY,
@@ -44,6 +45,7 @@ DIAGNOSTICS_OPTION_KEYS = (
     "import_quickbus",
     "import_onewire",
     "import_knx",
+    CONF_IGNORED_IO_TYPES,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     "scan_interval",
 )

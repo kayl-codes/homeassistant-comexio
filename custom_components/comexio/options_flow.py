@@ -24,6 +24,7 @@ from .const import (
     CONF_FUNCTION_PLAN_QUICKBUS_DEVICES,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_FUNCTION_PLAN_WATCHDOG_USER_PLANS,
+    CONF_IGNORED_IO_TYPES,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     CONF_SCHEMA_IO,
     CONF_WEBHOOK_ADDRESS_MODE,
@@ -37,6 +38,8 @@ from .const import (
     DEFAULT_FUNCTION_PLAN_PLAN_PREFIX,
     DEFAULT_SCHEMA_IO,
     DOMAIN,
+    FUNCTION_PLAN_IO_GROUP_ORDER,
+    IO_TYPE_RE,
     QUICKBUS_IO_DATA_KEY,
     SCAN_INTERVAL_DEFAULT,
     SCAN_INTERVAL_OPTIONS,
@@ -49,7 +52,10 @@ from .const import (
     WebioClass,
     format_ignored_ids,
     ignore_list_categories,
+    ignored_io_types,
     is_valid_entity_name_schema,
+    known_io_types,
+    normalize_io_types,
     one_line,
     parse_ignored_marker_tokens,
     parse_watchdog_user_plan_pick,
@@ -65,6 +71,33 @@ _LOGGER = logging.getLogger(__name__)
 
 # Form error of an ignore-list field that does not parse (translations: config.error and options.error).
 INVALID_IGNORED_IDS = "invalid_ignored_ids"
+# Form error of the ignored IO types field holding an entry that is no type (translations: likewise).
+INVALID_IGNORED_IO_TYPES = "invalid_ignored_io_types"
+
+
+def normalize_ignored_io_types(user_input: dict, errors: dict[str, str]) -> None:
+    """Normalize the ignored IO types of user_input in place (upper case, each once); a field error if one is no type.
+
+    A form sends no key for a field the user emptied, so a missing key reads as an emptied list.
+    """
+    try:
+        user_input[CONF_IGNORED_IO_TYPES] = normalize_io_types(user_input.get(CONF_IGNORED_IO_TYPES) or [])
+    except ValueError as err:
+        # Logged at debug only: the translated form error already tells the user what to fix.
+        _LOGGER.debug("Invalid ignored IO types %r: %s", user_input.get(CONF_IGNORED_IO_TYPES), err)
+        errors[CONF_IGNORED_IO_TYPES] = INVALID_IGNORED_IO_TYPES
+
+
+def io_type_selector(coordinator_data: Mapping[str, Any], saved: Iterable[str]) -> SelectSelector:
+    """The multi-select of the ignored IO types: the usual types, the server's own and the saved ones, any typed in.
+
+    No translation_key: the options are Comexio's type codes, there is nothing to translate them against.
+    """
+    usual = (kind for kind in FUNCTION_PLAN_IO_GROUP_ORDER if IO_TYPE_RE.fullmatch(kind))
+    options = sorted({*usual, *known_io_types(coordinator_data), *saved})
+    return SelectSelector(
+        SelectSelectorConfig(options=options, multiple=True, custom_value=True, mode=SelectSelectorMode.DROPDOWN)
+    )
 
 
 def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", category_label: str = "marker") -> str:
@@ -119,6 +152,24 @@ def normalize_ignore_lists(user_input: dict, categories: Iterable[SourceCategory
 def import_enabled_ignore_list_categories(conf: Mapping[str, Any]) -> list[SourceCategory]:
     """The categories with an ignore-list whose import conf switches on: only their lists act on anything."""
     return [cat for cat in ignore_list_categories() if conf.get(cat.import_conf_key, cat.import_default)]
+
+
+def _ignored_io_types_field(
+    user_input: Mapping[str, Any] | None, conf: Mapping[str, Any], coordinator_data: Mapping[str, Any]
+) -> tuple[vol.Optional, SelectSelector]:
+    """Key and selector of the ignored IO types field: the types as submitted after an error, else as saved.
+
+    suggested_value, not default: a form sends no key for a field the user emptied, and a default would fill
+    the saved types back in. After an error an entry that is no type stays in the field to be corrected.
+    """
+    if user_input is not None:
+        shown = list(user_input.get(CONF_IGNORED_IO_TYPES) or [])
+    else:
+        shown = sorted(ignored_io_types(conf))
+    return (
+        vol.Optional(CONF_IGNORED_IO_TYPES, description={"suggested_value": shown}),
+        io_type_selector(coordinator_data, shown),
+    )
 
 
 def _saved_user_plan_pick(value: Any, candidates: dict[int, str]) -> str:
@@ -322,6 +373,11 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             schema_dict[
                 vol.Optional(cat.ignored_conf_key, description={"suggested_value": shown.get(cat.ignored_conf_key, "")})
             ] = str
+        # Beside the ID ignore lists, for the IOs: whole types (QI, TL, UL, ...) that are left out. Shown whatever
+        # the import_ios toggle says — it sits in this very form, so a hidden field could not follow it. The
+        # types as submitted after an error (an entry that is no type stays in the field), else as saved.
+        io_types_key, io_types_selector = _ignored_io_types_field(user_input, conf, coordinator_data)
+        schema_dict[io_types_key] = io_types_selector
         schema_dict[
             vol.Optional(
                 CONF_FUNCTION_PLAN_PLAN_PREFIX,
@@ -512,6 +568,7 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
         # A hidden list keeps its stored value as it is: an error there would sit on a field the
         # form does not show, and block every other option.
         normalize_ignore_lists(user_input, [cat for cat in source_cats if cat.key not in hidden_lists], errors)
+        normalize_ignored_io_types(user_input, errors)
 
     def _create_options_entry(self, user_input: dict):
         """Merge new options with existing entry options and create the config entry.

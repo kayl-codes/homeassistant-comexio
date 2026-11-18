@@ -158,13 +158,13 @@ async def test_an_abandoned_setup_announces_no_https(
 async def test_a_setup_without_ignore_lists_step_announces_https(
     hass: HomeAssistant, certificate_handshake: AsyncMock, notify: MagicMock
 ) -> None:
-    """Neither Markers nor KNX imported: the entry is created by the user step, and announced once."""
+    """Neither Markers, KNX nor IOs imported: the entry is created by the user step, and announced once."""
     certificate_handshake.side_effect = None
     certificate_handshake.return_value = PINNED
 
     result = await hass.config_entries.flow.async_init(DOMAIN, context={"source": SOURCE_USER})
     result = await hass.config_entries.flow.async_configure(
-        result["flow_id"], {**USER_INPUT, "import_markers": False, "import_knx": False}
+        result["flow_id"], {**USER_INPUT, "import_markers": False, "import_knx": False, "import_ios": False}
     )
 
     assert result["type"] is FlowResultType.CREATE_ENTRY
