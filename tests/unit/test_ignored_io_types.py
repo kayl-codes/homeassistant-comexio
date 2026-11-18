@@ -200,6 +200,8 @@ def test_a_push_of_a_left_out_type_is_no_unknown_io(caplog: pytest.LogCaptureFix
         coordinator.update_io_by_name("PWR1", "QI1", 5)
         coordinator.update_io_by_name("PWR1", "Q9", 5)
 
+    left_out = [record for record in caplog.records if "QI1" in record.getMessage()]
+    assert [record.levelname for record in left_out] == ["DEBUG"]  # logged at debug level, never louder
     warnings = [record for record in caplog.records if record.levelname == "WARNING"]
     assert len(warnings) == 1
     assert "Q9" in warnings[0].getMessage()  # an IO of a type that is imported but unknown still warns
