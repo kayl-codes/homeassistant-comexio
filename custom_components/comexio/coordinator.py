@@ -6320,7 +6320,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "[%s] Sync or function plan restore in progress, skipping the webhook migration", self.server_id
             )
             return WEBHOOK_MIGRATION_SKIPPED
+        # The ledger forgets the commands the run can rewrite; one that has no ids now cannot be, and stays in it, so
+        # that its protocol is still tracked (and the run is not reported done while it carries another one).
+        recorded = set(security.migrated)
         security.migrated.clear()
+        security.migrated.update(recorded - {name for name, *_ in self._pending_webhook_migrations()})
         security.protocol_write = dt_util.utcnow()  # keeps the restart request and the read-back going afterwards
         return await self._async_run_webhook_migration(security)
 
@@ -6361,9 +6365,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         A command counts as right when its path is the target's own, its body carries the target's server field
         (webhook_security.command_deviation) and its protocol is the target's (protocol_deviation, #165).
-        Unreadable: Comexio gave no form, path or body, or no protocol where the target is HTTPS
-        (protocol_unproven). Not complete: the run stopped at its budget, an unload or a function plan restore
-        before every command was read.
+        Unreadable: Comexio gave no form, path or body, or no protocol where the target is HTTPS or a protocol move
+        waits for this read-back (protocol_unproven). Not complete: the run stopped at its budget, an unload or a
+        function plan restore before every command was read.
         """
         deadline = time.monotonic() + WEBHOOK_VERIFY_BUDGET_SEC
         targets = self._webio_range_targets()
@@ -6377,7 +6381,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 unreadable.append(name)
                 continue
             protocol = getattr(form, "protocol", None)
-            if protocol_unproven(targets[name], protocol):
+            if protocol_unproven(targets[name], protocol, moving=security.protocol_write is not None):
                 unreadable.append(name)
             elif why := command_deviation(targets[name], form.parameter, form.data) or protocol_deviation(
                 targets[name], protocol

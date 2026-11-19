@@ -364,14 +364,15 @@ def protocol_deviation(target: Mapping[str, Any], protocol: int | None) -> str |
     return "protocol is not the one Home Assistant is reached with"
 
 
-def protocol_unproven(target: Mapping[str, Any], protocol: int | None) -> bool:
-    """True when a form that shows no protocol leaves an HTTPS target unproven.
+def protocol_unproven(target: Mapping[str, Any], protocol: int | None, *, moving: bool = False) -> bool:
+    """True when a form that shows no protocol leaves the protocol of a command unproven.
 
     A command that was HTTP before HTTPS was supported is not blocked by a form without the field (that is how it
     always was), but nothing proves a command is HTTPS then: it counts as unreadable, not as deviating, so it is
-    not rewritten over and over.
+    not rewritten over and over. The same holds for a move to HTTP (``moving``: a protocol move waits for its
+    read-back): without the field nothing proves the command left HTTPS.
     """
-    return protocol is None and target.get("Protocol") == WEBIO_PROTOCOL_HTTPS
+    return protocol is None and (moving or target.get("Protocol") == WEBIO_PROTOCOL_HTTPS)
 
 
 def _same(received: str, expected: str) -> bool:

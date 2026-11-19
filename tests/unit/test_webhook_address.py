@@ -388,6 +388,7 @@ def test_the_generate_web_io_service_resolves_the_webhook_target_before_it_build
         config_entry=SimpleNamespace(data={}, options={}),
         required_webio_classes=("marker",),
         async_webhook_target=resolve,
+        _sync_lock=asyncio.Lock(),
         webio_source_data=lambda: _PARSED,
         ignored_marker_ids=set(),
         ignored_knx_ids=set(),
