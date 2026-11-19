@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
+from aiocomexio import ComexioError
 from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 import pytest
 
@@ -319,11 +320,73 @@ def test_the_forced_run_does_not_start_while_a_sync_or_a_restore_runs(
         monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
     )
     setattr(coordinator, busy, SimpleNamespace(locked=lambda: True))
+    coordinator.async_webhook_target = AsyncMock()
     security = coordinator.api.webhook_security
 
     assert _run(coordinator.async_force_webhook_migration()) == "skipped"
 
     assert NAME in security.migrated  # the ledger was not touched
+    coordinator.api.client.save_webio_command.assert_not_awaited()
+    # resolving rewrites the protocol every builder follows: not while a sync or a restore is under way
+    coordinator.async_webhook_target.assert_not_awaited()
+
+
+@pytest.mark.parametrize("taken", ["unloading", "_webhook_migration_running", "_sync_lock", "_restore_lock"])
+def test_the_forced_run_checks_again_after_it_resolved_the_target(monkeypatch: pytest.MonkeyPatch, taken: str) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+
+    async def _resolve(*_a: Any) -> None:
+        # the await is where an unload, a sync or a restore can come in
+        if taken in {"unloading", "_webhook_migration_running"}:
+            setattr(coordinator, taken if taken == "_webhook_migration_running" else "unloading", True)
+        else:
+            setattr(coordinator, taken, SimpleNamespace(locked=lambda: True))
+
+    coordinator.async_webhook_target = AsyncMock(side_effect=_resolve)
+    security = coordinator.api.webhook_security
+
+    assert _run(coordinator.async_force_webhook_migration()) == "skipped"
+
+    coordinator.async_webhook_target.assert_awaited_once()
+    assert NAME in security.migrated  # the ledger was not emptied
+    coordinator.api.client.save_webio_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize("busy", ["_sync_lock", "_restore_lock"])
+def test_the_nightly_run_does_not_resolve_the_target_while_a_sync_or_a_restore_runs(
+    monkeypatch: pytest.MonkeyPatch, busy: str
+) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    setattr(coordinator, busy, SimpleNamespace(locked=lambda: True))
+    coordinator.async_webhook_target = AsyncMock()
+    coordinator._async_run_webhook_migration = AsyncMock(return_value="done")
+
+    # the run itself goes on (it takes the lock command by command), only the resolving is left out
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+
+    coordinator.async_webhook_target.assert_not_awaited()
+    coordinator._async_run_webhook_migration.assert_awaited_once()
+
+
+def test_the_nightly_run_does_not_start_when_the_entry_unloads_while_the_target_is_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+
+    async def _resolve(*_a: Any) -> None:
+        coordinator.unloading = True
+
+    coordinator.async_webhook_target = AsyncMock(side_effect=_resolve)
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
+
+    coordinator.async_webhook_target.assert_awaited_once()
     coordinator.api.client.save_webio_command.assert_not_awaited()
 
 
@@ -465,23 +528,43 @@ def test_a_failed_write_of_the_forced_run_leaves_the_move_open_for_the_next_nigh
     assert held["Protocol"] == WEBIO_PROTOCOL_HTTPS
 
 
+_UPLOAD_TEMPLATE = json.dumps(
+    {
+        "commands": [
+            {"Name": "HA s", "Parameter": "/api/webhook/a", "Protocol": WEBIO_PROTOCOL_HTTPS},
+            {"Name": "HA p", "Parameter": "/api/webhook/b", "Protocol": WEBIO_PROTOCOL_HTTP},
+            {"Name": "HA n", "Parameter": "/api/webhook/c"},
+        ]
+    }
+)
+
+
 def test_an_uploaded_class_template_records_each_commands_protocol(
     comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Through upload_web_io itself, so a successful upload that stops recording fails this."""
     comexio_api.webhook_security = security = _security(monkeypatch)
-    template = json.dumps(
-        {
-            "commands": [
-                {"Name": "HA s", "Parameter": "/api/webhook/a", "Protocol": WEBIO_PROTOCOL_HTTPS},
-                {"Name": "HA p", "Parameter": "/api/webhook/b", "Protocol": WEBIO_PROTOCOL_HTTP},
-                {"Name": "HA n", "Parameter": "/api/webhook/c"},
-            ]
-        }
-    )
+    upload = AsyncMock(return_value="7")
+    _use_client(comexio_api, SimpleNamespace(upload_webio_class=upload))
 
-    comexio_api._note_upload_written(template)
+    assert _run(comexio_api.upload_web_io(SERVER, "Cls", _UPLOAD_TEMPLATE)) == (True, "7")
 
+    upload.assert_awaited_once()
     assert security.https_written == {"HA s"}
+
+
+@pytest.mark.parametrize("outcome", ["error", "no_base_id"])
+def test_a_failed_class_upload_records_no_protocol(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    comexio_api.webhook_security = security = _security(monkeypatch)
+    upload = AsyncMock(side_effect=ComexioError("refused")) if outcome == "error" else AsyncMock(return_value="")
+    _use_client(comexio_api, SimpleNamespace(upload_webio_class=upload))
+
+    ok, _why = _run(comexio_api.upload_web_io(SERVER, "Cls", _UPLOAD_TEMPLATE))
+
+    assert not ok
+    assert security.https_written == set()  # Comexio holds none of these commands
 
 
 def test_a_second_run_while_one_is_going_on_is_skipped_and_leaves_the_ledger_alone(

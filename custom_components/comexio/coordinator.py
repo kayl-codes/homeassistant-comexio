@@ -6217,8 +6217,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if security is None or not self.data or self.unloading:
             return WEBHOOK_MIGRATION_SKIPPED
         # The commands are written with the protocol HA is reached with (#165). A start from the saved config has
-        # run no audit yet, so resolve the target here instead of relying on the last poll.
-        await self.async_webhook_target()
+        # run no audit yet, so resolve the target here instead of relying on the last poll. Not while a sync or a
+        # function plan restore runs: a sync resolved the target itself when it started, and resolving again would
+        # rewrite the protocol its builders follow; the run below takes the sync lock command by command anyway.
+        if not (self._sync_lock.locked() or self._restore_lock.locked()):
+            await self.async_webhook_target()
+        if self.unloading:
+            # The entry unloaded while the target was resolved: no write and no ledger change once the shutdown began.
+            return WEBHOOK_MIGRATION_SKIPPED
         return await self._async_run_webhook_migration(security)
 
     async def _async_run_webhook_migration(self, security: WebhookSecurity) -> str:
@@ -6303,9 +6309,20 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ", ".join(one_line(name) for name in stuck[:WEBHOOK_STUCK_LISTED]),
             )
 
-    def _webhook_migration_unavailable(self) -> bool:
-        """The entry unloaded or a run is going on: read after the await that resolved the target, not before it."""
-        return self.unloading or self._webhook_migration_running
+    def _webhook_migration_cannot_start(self) -> bool:
+        """The entry unloaded, a run, a sync or a function plan restore is going on (the last two are logged).
+
+        Read before the target is resolved (resolving rewrites the protocol every builder follows, which a sync under
+        way must not see change) and again after it, because the await in between can change any of them.
+        """
+        if self.unloading or self._webhook_migration_running:
+            return True
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping the webhook migration", self.server_id
+            )
+            return True
+        return False
 
     async def async_force_webhook_migration(self) -> str:
         """Rewrite every Web-IO command now: its own webhook path and the protocol HA is reached with (#165).
@@ -6313,20 +6330,17 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         The manual counterpart of the nightly run, for when a user does not want to wait for it or does not trust
         what the ledger holds: the ledger forgets which commands were rewritten, so the run takes all of them again,
         and the restart request and the read-back follow as after the nightly run. Returns the WEBHOOK_MIGRATION_*
-        state of the run; SKIPPED while a sync, a function plan restore or another run is going on (the target is
-        resolved first; from the check to the run there is no await, R4: the run takes the sync lock command by
-        command).
+        state of the run; SKIPPED while a sync, a function plan restore or another run is going on (checked before and
+        after the target is resolved; from the second check to the run there is no await, R4: the run takes the sync
+        lock command by command).
         """
         security = self.api.webhook_security
         if security is None or not self.data or self.unloading:
             return WEBHOOK_MIGRATION_SKIPPED
-        await self.async_webhook_target()
-        if self._webhook_migration_unavailable():
+        if self._webhook_migration_cannot_start():
             return WEBHOOK_MIGRATION_SKIPPED
-        if self._sync_lock.locked() or self._restore_lock.locked():
-            _LOGGER.warning(
-                "[%s] Sync or function plan restore in progress, skipping the webhook migration", self.server_id
-            )
+        await self.async_webhook_target()
+        if self._webhook_migration_cannot_start():
             return WEBHOOK_MIGRATION_SKIPPED
         recorded = set(security.migrated)
         security.migrated.clear()
