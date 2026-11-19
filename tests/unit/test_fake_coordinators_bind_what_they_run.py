@@ -19,9 +19,11 @@ name, or a keyword argument of a call that builds a double (a call of the double
 says coordinator: `_coordinator(api, other=...)`). A name that the method calls (`self.name()`) must be given
 something that can be called: a literal, a container, a computed number or text (`None`, `[]`, `a + b`, `1 if x else 2`)
 is not enough. What else is given (a name, a call, a `@property`) counts as callable: its value is not known here.
-In a class body a later assignment replaces an earlier one (`other = AsyncMock()`, then `other = None`). Only a direct
-call counts: `self.name.attr()` reads `name`, and so does `callback = self.name` or `schedule(self.name)`, so a literal
-passes there (not followed: it would flag every data attribute that is handed on as an argument).
+In a class body a later assignment replaces an earlier one (`other = AsyncMock()`, then `other = None`), and a double
+has the bodies of its base classes from the same module (a base from another module is not followed). A name the real
+coordinator defines as a plain method has to be callable wherever the method uses it, a callback included
+(`schedule(self.name)`); for every other name only a direct call counts: `self.name.attr()` reads `name`, so a literal
+passes (not followed).
 
 An assigned attribute, a `setattr` or a keyword at a builder function counts for every double of the file, because the
 object it goes to is not known; only a keyword at a call of a double's class counts for that class alone (by its name:
@@ -50,6 +52,7 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 TESTS = Path(__file__).parent
 COORDINATOR = "ComexioCoordinator"
 BUILDER_WORD = "coordinator"  # a function with this in its name builds a double: `_coordinator(api, other=...)`
+PROPERTY_DECORATORS = ("property", "cached_property", "setter", "getter", "deleter")
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 NOT_CALLABLE = (  # what no call can be made on, also when it holds names (`[mock]`, `f"{x}"`, `a + b`)
     ast.List,
@@ -150,16 +153,34 @@ Supply = dict[str, bool]
 def _callable(value: ast.expr) -> bool:
     """False for a literal (`None`, `1`, `-1`, `[]`, `{}`), a container, a computed number or text: no call possible.
 
-    A conditional can be called when either branch can (`AsyncMock() if x else None`).
+    A conditional or a Boolean expression can be called when one of its branches or operands can
+    (`AsyncMock() if x else None`, `mock or None`).
     """
     if isinstance(value, NOT_CALLABLE):
         return False
     if isinstance(value, ast.IfExp):
         return _callable(value.body) or _callable(value.orelse)
+    if isinstance(value, ast.BoolOp):
+        return _boolean_may_be_called(value)
     try:
         ast.literal_eval(value)
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
         return True
+    return False
+
+
+def _boolean_may_be_called(value: ast.BoolOp) -> bool:
+    """`a or b` is its first truthy operand, `a and b` its first falsy one, else the last: the operands behind a literal
+    that already decides it (`1 or mock`, `None and mock`) cannot be the result."""
+    decides = isinstance(value.op, ast.Or)
+    for operand in value.values:
+        if _callable(operand):
+            return True
+        try:
+            if bool(ast.literal_eval(operand)) is decides:
+                break
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            continue
     return False
 
 
@@ -281,19 +302,41 @@ def missing_bindings(
     tree = ast.parse(source)
     aliases = _class_aliases(tree)
     # By class definition, not by name: two doubles of one name (in two tests) keep their own bindings.
-    bound_of = [(node, _bindings(node, aliases)) for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    defined = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    bound_of = [(node, _bindings(node, aliases)) for node in defined]
     shared, per_class = _supplied_in_file(tree, {double.name for double, bound in bound_of if bound})
     found: dict[tuple[str, str, str], str] = {}
     for double, bound in bound_of:
-        have = _merged(
-            {name: True for name, _method in bound}, _defined_in_body(double), shared, per_class.get(double.name, {})
-        )
+        # The bindings are part of the class body: `other = ComexioCoordinator.other`, then `other = None` replaces it.
+        have = _merged(_class_supply(double, defined), shared, per_class.get(double.name, {}))
         for name, method in bound:
             if method not in methods:
                 continue  # inherited from Home Assistant's coordinator: no source here to follow
-            for needed in _lacking(have, methods[method], members):
+            for needed in _lacking(have, methods, methods[method], members):
                 found[(double.name, name, needed)] = method
     return found
+
+
+def _base_class(base: ast.expr, double: ast.ClassDef, defined: list[ast.ClassDef]) -> ast.ClassDef | None:
+    """The class a base name stands for: the nearest definition of that name above the double (a test function of its
+    own may define a `_Base` too), else the last one. None for a base this module does not define."""
+    if not isinstance(base, ast.Name):
+        return None
+    named = [node for node in defined if node.name == base.id and node is not double]
+    above = [node for node in named if node.lineno < double.lineno]
+    return (above or named or [None])[-1]
+
+
+def _class_supply(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple[ast.ClassDef, ...] = ()) -> Supply:
+    """The body of the double on top of the bodies of its base classes that this module defines (a base from
+    another module is not followed)."""
+    supply: Supply = {}
+    for base in double.bases:
+        parent = _base_class(base, double, defined)
+        if parent is not None and parent not in seen:
+            supply.update(_class_supply(parent, defined, (*seen, double)))
+    supply.update(_defined_in_body(double))
+    return supply
 
 
 def _bindings(double: ast.ClassDef, aliases: set[str]) -> list[tuple[str, str]]:
@@ -302,9 +345,19 @@ def _bindings(double: ast.ClassDef, aliases: set[str]) -> list[tuple[str, str]]:
     return [pair for pair in pairs if pair]
 
 
-def _lacking(have: Supply, method: ast.AST, members: frozenset[str]) -> list[str]:
-    """The names the method uses on `self` that the double does not supply (or not callably, where it calls them)."""
-    calls = _self_calls(method)
+def _is_property(method: ast.AST) -> bool:
+    decorators = getattr(method, "decorator_list", [])
+    return any(ast.unparse(item).split(".")[-1] in PROPERTY_DECORATORS for item in decorators)
+
+
+def _lacking(have: Supply, methods: dict[str, ast.AST], method: ast.AST, members: frozenset[str]) -> list[str]:
+    """The names the method uses on `self` that the double does not supply (or not callably, where it calls them).
+
+    A name the real coordinator defines as a plain method has to be callable wherever the method uses it: it is called
+    later when it is handed on (`async_track_time_interval(hass, self._tick, ...)`, `callback = self._tick`).
+    """
+    handed_on = {name for name, node in methods.items() if not _is_property(node)}
+    calls = _self_calls(method) | (_self_uses(method) & handed_on)
     return [
         needed
         for needed in sorted(_self_uses(method) & members)
@@ -371,6 +424,9 @@ METHODS = {
 MEMBERS = frozenset({RUN, HELPER, OTHER, PROPERTY})
 FINDING = {(FAKE, RUN, OTHER): RUN, (FAKE, HELPER, PROPERTY): HELPER}
 CALLED = {(FAKE, RUN, OTHER): RUN}  # `other` is called by `run`, so a literal does not do
+DOUBLE_OF_THE_SCAN = "class _Fake:\n    webhook_command_ids = ComexioCoordinator.webhook_command_ids\n"
+FINDING_OF_THE_SCAN = (FAKE, "webhook_command_ids", "webio_source_data")  # what the real method calls, the double lacks
+SUPPORT_MODULES = ("conftest.py", "support.py")
 ASSIGNED_LITERALS = "\ndef test_a(fake):\n    fake.other = None\n    fake.other_property = 1\n"
 
 
@@ -487,6 +543,10 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "    other = AsyncMock()\n    other: object = None\n    other_property = None\n",
         "    def other(self): ...\n    other = None\n    other_property = None\n",
         "    other = AsyncMock()\n    other = other_property = None\n",
+        "    other = ComexioCoordinator.other\n    other = None\n    other_property = None\n",
+        "\ndef test_a(fake):\n    fake.other = 1 or 2\n    fake.other_property = 1\n",
+        "\ndef test_a(fake):\n    fake.other = 1 or AsyncMock()\n    fake.other_property = 1\n",
+        "\ndef test_a(fake):\n    fake.other = None and AsyncMock()\n    fake.other_property = 1\n",
     ],
     ids=[
         "class body",
@@ -506,6 +566,10 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "annotated literal after a callable in the class body",
         "literal after a method in the class body",
         "literal for two targets after a callable in the class body",
+        "literal after a binding in the class body",
+        "Boolean expression of literals",
+        "a literal that decides `or` before the callable",
+        "a literal that decides `and` before the callable",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
@@ -521,12 +585,87 @@ def test_a_literal_hides_no_callable_whichever_comes_first() -> None:
     callable_in_a_branch = (
         DOUBLE + "\ndef test_a(fake, x):\n    fake.other = AsyncMock() if x else None\n    fake.other_property = 1\n"
     )
+    callable_operand = (
+        DOUBLE + "\ndef test_a(fake, mock):\n    fake.other = mock or None\n    fake.other_property = 1\n"
+    )
     literal_then_method = DOUBLE + "    other = None\n    def other(self): ...\n    other_property = None\n"
+    callable_behind_a_literal_that_does_not_decide = (
+        DOUBLE + "\ndef test_a(fake):\n    fake.other = 0 or AsyncMock()\n    fake.other_property = 1\n"
+    )
+    callable_behind_a_truthy_literal_of_and = (
+        DOUBLE + "\ndef test_a(fake):\n    fake.other = 1 and AsyncMock()\n    fake.other_property = 1\n"
+    )
 
+    assert missing_bindings(callable_behind_a_literal_that_does_not_decide, METHODS, MEMBERS) == {}
+    assert missing_bindings(callable_behind_a_truthy_literal_of_and, METHODS, MEMBERS) == {}
     assert missing_bindings(method_then_literal, METHODS, MEMBERS) == {}
     assert missing_bindings(literal_then_callable, METHODS, MEMBERS) == {}
     assert missing_bindings(callable_in_a_branch, METHODS, MEMBERS) == {}
+    assert missing_bindings(callable_operand, METHODS, MEMBERS) == {}
     assert missing_bindings(literal_then_method, METHODS, MEMBERS) == {}
+
+
+def test_a_double_has_what_the_base_classes_of_its_module_define() -> None:
+    base = "class _Base:\n    other = AsyncMock()\n    other_property = 1\n"
+    child = "class _Fake(_Base):\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    grandchild = "class _Fake(_Mid):\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    overriding = child + "    other = None\n"
+
+    assert missing_bindings(base + child, METHODS, MEMBERS) == {}
+    assert missing_bindings(base + "class _Mid(_Base):\n    pass\n" + grandchild, METHODS, MEMBERS) == {}
+    assert missing_bindings(base + overriding, METHODS, MEMBERS) == CALLED  # the subclass replaces `other`
+    assert missing_bindings(child, METHODS, MEMBERS) == FINDING  # a base this module does not define: not followed
+
+
+def test_a_double_whose_bases_name_each_other_still_ends() -> None:
+    loop = (
+        "class _A(_B):\n    other = AsyncMock()\n    other_property = 1\n"
+        "class _B(_A):\n    pass\n"
+        "class _Fake(_A):\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    )
+
+    assert missing_bindings(loop, METHODS, MEMBERS) == {}
+
+
+def test_a_base_name_means_the_nearest_definition_above_the_double() -> None:
+    complete = "class _Base:\n    other = AsyncMock()\n    other_property = 1\n"
+    bare = "class _Base:\n    pass\n"
+    child = "class _Fake(_Base):\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+
+    assert missing_bindings(complete + child + bare, METHODS, MEMBERS) == {}  # a later `_Base` is not the one used
+    assert missing_bindings(bare + child + complete, METHODS, MEMBERS) == FINDING
+    assert missing_bindings(complete + bare + child, METHODS, MEMBERS) == FINDING
+
+
+HANDED_ON = (
+    "class ComexioCoordinator:\n"
+    "    def run(self):\n        schedule(self.other)\n        return self.size\n"
+    "    {decorator}\n    def size(self):\n        return 1\n"
+    "    def other(self):\n        pass\n"
+)
+
+
+@pytest.mark.parametrize(
+    "decorator",
+    ["@property", "@functools.cached_property", "@cached_property", "@size.setter", "@size.getter", "@size.deleter"],
+)
+def test_a_method_handed_on_has_to_be_callable_but_a_property_may_be_a_value(decorator: str) -> None:
+    methods = {node.name: node for node in ast.parse(HANDED_ON.format(decorator=decorator)).body[0].body}
+    members = frozenset({"run", "size", "other"})
+    double = "class _Fake:\n    run = ComexioCoordinator.run\n"
+
+    assert missing_bindings(double + "    other = None\n    size = 5\n", methods, members) == {(FAKE, RUN, OTHER): RUN}
+    assert missing_bindings(double + "    other = AsyncMock()\n    size = 5\n", methods, members) == {}
+
+
+@pytest.mark.parametrize("decorator", ["@staticmethod", "@classmethod", "@functools.cache"])
+def test_a_decorated_plain_method_is_not_taken_for_a_property(decorator: str) -> None:
+    methods = {node.name: node for node in ast.parse(HANDED_ON.format(decorator=decorator)).body[0].body}
+    members = frozenset({"run", "size", "other"})
+    double = "class _Fake:\n    run = ComexioCoordinator.run\n    other = AsyncMock()\n"
+
+    assert missing_bindings(double + "    size = 5\n", methods, members) == {(FAKE, RUN, "size"): RUN}
+    assert missing_bindings(double + "    size = AsyncMock()\n", methods, members) == {}
 
 
 def test_a_keyword_at_the_call_of_one_double_does_not_supply_another() -> None:
@@ -605,25 +744,22 @@ def test_the_scan_sees_the_real_double_of_test_plan_run_states() -> None:
 def test_the_scan_reaches_a_test_module_in_a_nested_folder(tmp_path: Path) -> None:
     nested = tmp_path / "sub"
     nested.mkdir()
-    (nested / "test_nested.py").write_text(
-        "class _Fake:\n    webhook_command_ids = ComexioCoordinator.webhook_command_ids\n", encoding="utf-8"
-    )
+    (nested / "test_nested.py").write_text(DOUBLE_OF_THE_SCAN, encoding="utf-8")
 
     found = _findings(tmp_path)
 
     assert _scanned_files(tmp_path) == [nested / "test_nested.py"]
-    assert ("sub/test_nested.py", "_Fake", "webhook_command_ids", "webio_source_data") in found
+    assert ("sub/test_nested.py", *FINDING_OF_THE_SCAN) in found
 
 
 def test_the_scan_reaches_a_conftest_and_a_support_module(tmp_path: Path) -> None:
-    double = "class _Fake:\n    webhook_command_ids = ComexioCoordinator.webhook_command_ids\n"
-    for name in ("conftest.py", "support.py"):
-        (tmp_path / name).write_text(double, encoding="utf-8")
+    for name in SUPPORT_MODULES:
+        (tmp_path / name).write_text(DOUBLE_OF_THE_SCAN, encoding="utf-8")
 
     found = _findings(tmp_path)
 
-    for file in ("conftest.py", "support.py"):
-        assert (file, "_Fake", "webhook_command_ids", "webio_source_data") in found
+    for file in SUPPORT_MODULES:
+        assert (file, *FINDING_OF_THE_SCAN) in found
 
 
 def test_a_listed_finding_is_not_reported_and_a_stale_entry_is() -> None:
