@@ -541,6 +541,9 @@ def test_a_failed_write_of_the_forced_run_leaves_the_move_open_for_the_next_nigh
     state = _run(coordinator.async_force_webhook_migration())
 
     assert state != "done"
+    # The forced run did try the write (a run that skips it also leaves everything below as it is, and the night
+    # after would then do the write this test expects).
+    coordinator.api.client.save_webio_command.assert_awaited_once()
     assert held["Protocol"] == WEBIO_PROTOCOL_HTTP
     assert NAME not in security.migrated  # not recorded as moved
     assert security.protocol_write is not None  # the next night does not skip: it tries again
