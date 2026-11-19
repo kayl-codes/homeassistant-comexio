@@ -6062,13 +6062,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             result[RANGE_CHECK_SKIPPED] = 1
             return result
         # A correction writes the whole target command, protocol included (#165): resolve the protocol first, as
-        # a start from the saved config has run no audit yet. Before the lock check, so that no await sits between
-        # the check and taking the lock (R4).
+        # a start from the saved config has run no audit yet. Not while a sync or a restore runs (resolving rewrites
+        # the protocol the sync's builders follow), and checked again after the resolve, so that no await sits
+        # between the last check and taking the lock (R4).
+        if self._range_check_blocked():
+            result[RANGE_CHECK_SKIPPED] = 1
+            return result
         await self.async_webhook_target()
-        if self._sync_lock.locked() or self._restore_lock.locked():
-            _LOGGER.warning(
-                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
-            )
+        if self._range_check_blocked():
             result[RANGE_CHECK_SKIPPED] = 1
             return result
 
@@ -6216,16 +6217,23 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         security = self.api.webhook_security
         if security is None or not self.data or self.unloading:
             return WEBHOOK_MIGRATION_SKIPPED
-        # The commands are written with the protocol HA is reached with (#165). A start from the saved config has
-        # run no audit yet, so resolve the target here instead of relying on the last poll. Not while a sync or a
-        # function plan restore runs: a sync resolved the target itself when it started, and resolving again would
-        # rewrite the protocol its builders follow; the run below takes the sync lock command by command anyway.
-        if not (self._sync_lock.locked() or self._restore_lock.locked()):
-            await self.async_webhook_target()
-        if self.unloading:
-            # The entry unloaded while the target was resolved: no write and no ledger change once the shutdown began.
+        if not await self._async_resolve_webhook_target_for_nightly_run():
             return WEBHOOK_MIGRATION_SKIPPED
         return await self._async_run_webhook_migration(security)
+
+    async def _async_resolve_webhook_target_for_nightly_run(self) -> bool:
+        """Resolve the target the nightly run writes with; False if the entry unloaded meanwhile (nothing to write).
+
+        The commands are written with the protocol HA is reached with (#165). A start from the saved config has run
+        no audit yet, so the target is resolved here instead of relying on the last poll. Not while a sync or a
+        function plan restore runs: a sync resolved the target itself when it started, and resolving again would
+        rewrite the protocol its builders follow; the run takes the sync lock command by command anyway. The check
+        for the unload sits here, after the await, so that no write and no ledger change follow once the shutdown
+        began.
+        """
+        if not (self._sync_lock.locked() or self._restore_lock.locked()):
+            await self.async_webhook_target()
+        return not self.unloading
 
     async def _async_run_webhook_migration(self, security: WebhookSecurity) -> str:
         """The run of the nightly tick (or the forced one) once the target is resolved; one at a time.
@@ -6308,6 +6316,17 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 len(stuck),
                 ", ".join(one_line(name) for name in stuck[:WEBHOOK_STUCK_LISTED]),
             )
+
+    def _range_check_blocked(self) -> bool:
+        """The entry unloads, or a sync or a function plan restore runs (the latter logged): no resolve, no write."""
+        if self.unloading:
+            return True
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
+            )
+            return True
+        return False
 
     def _webhook_migration_cannot_start(self) -> bool:
         """The entry unloaded, a run, a sync or a function plan restore is going on (the last two are logged).

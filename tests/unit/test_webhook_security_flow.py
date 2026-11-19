@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 from aiocomexio.scrape import scrape_js_vars
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTP, WEBIO_PROTOCOL_HTTPS
 import pytest
 
 from custom_components import comexio as comexio_init
@@ -174,18 +175,53 @@ def test_the_tick_resolves_the_webhook_target_before_it_writes_a_command(monkeyp
     """The protocol of a written command comes from HA's target (#165): a start from the saved config ran no audit."""
     coordinator = _tick_coordinator(monkeypatch, cmd_id="9", boot=NOW + timedelta(hours=1))
     order: list[str] = []
-    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: order.append("target"))
-    save = coordinator.api.save_single_command
+    api = coordinator.api
+    api.webhook_https = False
+    plain = coordinator._webio_range_targets()["HA m"]
 
-    async def _recorded_save(*args: Any, **kwargs: Any) -> bool:
+    def _targets() -> dict[str, dict[str, Any]]:
+        # as the real builder: the protocol of the command is the one the resolver stored in api.webhook_https
+        return {"HA m": {**plain, "Protocol": WEBIO_PROTOCOL_HTTPS if api.webhook_https else WEBIO_PROTOCOL_HTTP}}
+
+    coordinator._webio_range_targets = _targets
+
+    async def _resolve(*_a: Any) -> None:
+        order.append("target")
+        api.webhook_https = True  # HA is reached over TLS
+
+    coordinator.async_webhook_target = AsyncMock(side_effect=_resolve)
+    save = api.save_single_command
+    written: list[dict[str, Any]] = []
+
+    async def _recorded_save(base: Any, device: Any, payload: dict[str, Any], **kwargs: Any) -> bool:
         order.append("save")
-        return await save(*args, **kwargs)
+        written.append(payload)
+        return await save(base, device, payload, **kwargs)
 
-    coordinator.api.save_single_command = _recorded_save
+    api.save_single_command = _recorded_save
 
     _run(coordinator._async_webhook_migration_tick())
 
-    assert order[:2] == ["target", "save"]
+    assert order.count("target") == 1
+    assert order.index("target") < order.index("save")
+    assert [payload["Protocol"] for payload in written] == [WEBIO_PROTOCOL_HTTPS]  # not the stale HTTP
+    assert "HA m" in api.webhook_security.https_written
+
+
+def test_a_target_that_cannot_be_resolved_stops_the_tick_before_anything_is_written(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _tick_coordinator(monkeypatch, cmd_id="9", boot=NOW + timedelta(hours=1))
+    coordinator.async_webhook_target = AsyncMock(side_effect=OSError("adapters"))
+
+    tick = coordinator._async_webhook_migration_tick()
+
+    with pytest.raises(OSError, match="adapters"):
+        _run(tick)
+
+    coordinator.api.client.save_webio_command.assert_not_awaited()
+    assert not coordinator.api.webhook_security.migrated
+    assert not coordinator._webhook_migration_running
 
 
 def test_the_tick_resolves_no_target_when_it_cannot_run(monkeypatch: pytest.MonkeyPatch) -> None:

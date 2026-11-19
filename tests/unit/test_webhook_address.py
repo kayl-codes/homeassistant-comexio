@@ -30,6 +30,7 @@ from custom_components.comexio.const import (
     RANGE_CHECK_CORRECTION_FAILED,
     RANGE_CHECK_FAILED,
     RANGE_CHECK_FIXED,
+    RANGE_CHECK_SKIPPED,
     SYNC_DURATION_DELETE,
     SYNC_DURATION_RECREATE,
     SYNC_DURATION_WRITE,
@@ -433,6 +434,97 @@ def _check(coordinator: ComexioCoordinator) -> dict[str, int]:
     )
     asyncio.run(coordinator._async_check_one_webio_range("M1 a", "11", _DEVICE, _TARGET, result))
     return result
+
+
+def _range_tick_coordinator(*, sync_locked: bool = False, restore_locked: bool = False) -> ComexioCoordinator:
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    coordinator.server_id = "srv"
+    coordinator.unloading = False
+    coordinator.data = {"webio_commands": {}, "webio_devices": {}}
+    coordinator._sync_lock = SimpleNamespace(locked=lambda: sync_locked)
+    coordinator._restore_lock = SimpleNamespace(locked=lambda: restore_locked)
+    coordinator.async_webhook_target = AsyncMock()
+    return coordinator
+
+
+@pytest.mark.parametrize("busy", ["sync", "restore"])
+def test_the_range_check_resolves_no_target_while_a_sync_or_restore_runs(
+    busy: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Resolving rewrites the protocol the running sync's builders follow: the check is skipped before it."""
+    coordinator = _range_tick_coordinator(sync_locked=busy == "sync", restore_locked=busy == "restore")
+
+    result = asyncio.run(coordinator._async_webio_range_check_tick())
+
+    assert result[RANGE_CHECK_SKIPPED] == 1
+    coordinator.async_webhook_target.assert_not_awaited()
+    assert caplog.text.count("skipping Web-IO range check") == 1
+
+
+@pytest.mark.parametrize("busy", ["sync", "restore"])
+def test_the_range_check_is_skipped_when_a_sync_or_restore_starts_during_the_resolve(
+    busy: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The lock is read again after the await: the check never takes the lock behind a run that began meanwhile."""
+    state = {"sync": False, "restore": False}
+    coordinator = _range_tick_coordinator()
+    coordinator._sync_lock = SimpleNamespace(locked=lambda: state["sync"])
+    coordinator._restore_lock = SimpleNamespace(locked=lambda: state["restore"])
+    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: state.update({busy: True}))
+
+    result = asyncio.run(coordinator._async_webio_range_check_tick())
+
+    assert result[RANGE_CHECK_SKIPPED] == 1
+    coordinator.async_webhook_target.assert_awaited_once()
+    assert caplog.text.count("skipping Web-IO range check") == 1
+
+
+def test_the_range_check_is_skipped_when_the_entry_unloads_during_the_resolve() -> None:
+    """No correction is written once the shutdown began."""
+    coordinator = _range_tick_coordinator()
+    coordinator._sync_lock = asyncio.Lock()
+    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: setattr(coordinator, "unloading", True))
+
+    result = asyncio.run(coordinator._async_webio_range_check_tick())
+
+    assert result[RANGE_CHECK_SKIPPED] == 1
+    assert not coordinator._sync_lock.locked()
+
+
+def test_the_range_check_builds_its_targets_after_it_resolved_the_webhook_protocol() -> None:
+    """A correction writes the whole command: the targets must carry the protocol the resolve stored (#165)."""
+    api = SimpleNamespace(webhook_https=False)
+    coordinator = _range_tick_coordinator()
+    coordinator._sync_lock = asyncio.Lock()
+    coordinator.data = {
+        "webio_commands": {"M1 a": {"typeId": 2, "cmdId": "11", "webioClass": "marker"}},
+        "webio_devices": {"marker": _DEVICE},
+    }
+    coordinator._webio_range_targets = lambda: {
+        "M1 a": {**_TARGET, "Protocol": WEBIO_PROTOCOL_HTTPS if api.webhook_https else WEBIO_PROTOCOL_HTTP}
+    }
+    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: setattr(api, "webhook_https", True))
+    coordinator.api = SimpleNamespace(
+        get_webio_command_form=AsyncMock(return_value=WebioCommandForm(0, 100, WEBIO_PROTOCOL_HTTP)),
+        save_single_command=AsyncMock(return_value=True),
+    )
+
+    result = asyncio.run(coordinator._async_webio_range_check_tick())
+
+    assert result[RANGE_CHECK_FIXED] == 1
+    written = coordinator.api.save_single_command.await_args.args[2]
+    assert written["Protocol"] == WEBIO_PROTOCOL_HTTPS  # built after the resolve, not from the stale HTTP
+
+
+def test_the_range_check_resolves_the_target_once_when_nothing_runs() -> None:
+    coordinator = _range_tick_coordinator()
+    coordinator._sync_lock = asyncio.Lock()
+    coordinator._webio_range_targets = dict
+
+    result = asyncio.run(coordinator._async_webio_range_check_tick())
+
+    assert result[RANGE_CHECK_SKIPPED] == 0
+    coordinator.async_webhook_target.assert_awaited_once()
 
 
 @pytest.mark.parametrize("protocol", [WEBIO_PROTOCOL_HTTPS, None])
