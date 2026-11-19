@@ -239,13 +239,16 @@ async def _upload_class_under_sync_lock(coordinator: Any, class_name: str, webio
 
     Like every sync step and every command the webhook migration rewrites, a class is replaced under the sync lock:
     the migration must not write to the commands of a class that is deleted meanwhile. The JSON is built after the
-    wait (a sync that held the lock may have changed what it describes), and an entry that unloaded meanwhile has
-    no session to upload through. A failing build or upload costs this line only, the others are still reported.
+    wait (a sync that held the lock may have changed what it describes), and so is the target: the commands carry
+    the protocol HA is reached with (#165), resolved after the wait and right before the build, not before it. An
+    entry that unloaded meanwhile has no session to upload through. A failing build or upload costs this line only,
+    the others are still reported; a failure before the old class is touched (target, build) says that nothing changed.
     """
     async with coordinator._sync_lock:
         if coordinator.unloading:
             return f"{class_name}: skipped — the integration is unloading"
         try:
+            await coordinator.async_webhook_target()
             web_io_json = coordinator.api.generate_webio_json(
                 coordinator.server_id,
                 class_name,
@@ -254,6 +257,13 @@ async def _upload_class_under_sync_lock(coordinator: Any, class_name: str, webio
                 ignored_marker_ids=coordinator.ignored_marker_ids,
                 ignored_knx_ids=coordinator.ignored_knx_ids,
             )
+        except Exception as err:
+            _LOGGER.exception("[%s] Building the Web-IO class '%s' failed", coordinator.server_id, class_name)
+            return (
+                f"{class_name}: failed ({type(err).__name__}) before the upload, nothing changed on Comexio: "
+                "see the log"
+            )
+        try:
             return await _upload_webio_class(coordinator.api, coordinator.server_id, class_name, web_io_json)
         except Exception as err:
             _LOGGER.exception("[%s] Uploading the Web-IO class '%s' failed", coordinator.server_id, class_name)
@@ -283,11 +293,10 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         # on the Comexio server. The same for the Quickbus class while the server has no Quickbus IO.
         sync_classes = coordinator.required_webio_classes
 
-        # The commands carry the protocol HA is reached with (#165): resolve the target now, a poll may not have
-        # run since the address changed (or since the start).
-        await coordinator.async_webhook_target()
-
         if not do_upload:
+            # The commands carry the protocol HA is reached with (#165): resolve the target now, a poll may not have
+            # run since the address changed (or since the start). An upload resolves it per class, under the lock.
+            await coordinator.async_webhook_target()
             preview_parts = []
             for cls in sync_classes:
                 class_name = webio_class_name(webio_name, cls)

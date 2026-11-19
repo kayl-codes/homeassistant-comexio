@@ -845,6 +845,7 @@ def _upload_coordinator(*, unloading: bool) -> Any:
     return SimpleNamespace(
         api=SimpleNamespace(generate_webio_json=MagicMock(return_value="{}")),
         server_id="srv",
+        async_webhook_target=AsyncMock(),
         _sync_lock=asyncio.Lock(),
         unloading=unloading,
         webio_source_data=dict,
@@ -864,6 +865,7 @@ def test_the_upload_of_a_class_is_skipped_once_the_entry_unloads(monkeypatch: py
 
     assert "skipped" in line
     upload.assert_not_awaited()
+    coordinator.async_webhook_target.assert_not_awaited()  # no adapter lookup for a class that is not built
     coordinator.api.generate_webio_json.assert_not_called()
 
 
@@ -930,6 +932,165 @@ def test_no_restart_request_once_comexio_restarted_after_the_last_write(monkeypa
     assert flags[-1:] == [False]
 
 
+def test_the_upload_of_a_class_resolves_the_target_under_the_lock_right_before_the_build(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    monkeypatch.setattr(services_misc, "_upload_webio_class", AsyncMock(return_value="ok"))
+    coordinator = _upload_coordinator(unloading=False)
+    steps: list[str] = []
+    coordinator.async_webhook_target = AsyncMock(
+        side_effect=lambda *_a: steps.append(f"target (locked={coordinator._sync_lock.locked()})")
+    )
+    coordinator.api.generate_webio_json = MagicMock(side_effect=lambda *_a, **_k: steps.append("build") or "{}")
+
+    _run(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
+
+    assert steps == ["target (locked=True)", "build"]
+
+
+def test_the_upload_of_a_class_resolves_the_target_only_after_the_lock_is_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from custom_components.comexio.services import misc as services_misc
+
+    monkeypatch.setattr(services_misc, "_upload_webio_class", AsyncMock(return_value="ok"))
+
+    async def scenario() -> tuple[int, list[str]]:
+        coordinator = _upload_coordinator(unloading=False)
+        steps: list[str] = []
+        coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: steps.append("target"))
+        coordinator.api.generate_webio_json = MagicMock(side_effect=lambda *_a, **_k: steps.append("build") or "{}")
+        await coordinator._sync_lock.acquire()  # a sync or a migration command holds it
+        task = asyncio.ensure_future(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
+        await asyncio.sleep(0.01)
+        resolved_while_waiting = coordinator.async_webhook_target.await_count
+        coordinator._sync_lock.release()
+        await task
+        return resolved_while_waiting, steps
+
+    resolved_while_waiting, steps = _run(scenario())
+
+    assert resolved_while_waiting == 0  # the target of before the wait would be the stale one
+    assert steps == ["target", "build"]
+
+
+def test_the_upload_of_several_classes_resolves_the_target_once_per_class_and_not_up_front(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    monkeypatch.setattr(services_misc, "_upload_webio_class", AsyncMock(return_value="ok"))
+    monkeypatch.setattr(services_misc.persistent_notification, "async_create", MagicMock())
+    coordinator = _upload_coordinator(unloading=False)
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
+    coordinator.required_webio_classes = ("marker", "io")
+    steps: list[str] = []
+    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: steps.append("target"))
+    coordinator.api.generate_webio_json = MagicMock(side_effect=lambda *_a, **_k: steps.append("build") or "{}")
+    hass = SimpleNamespace(data={"comexio": {"e1": coordinator}})
+
+    _run(services_misc.handle_generate_web_io(hass, SimpleNamespace(data={"config_entry": "e1", "upload": True})))
+
+    assert steps == ["target", "build", "target", "build"]
+
+
+def test_the_preview_resolves_the_target_before_it_builds_the_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    coordinator = _upload_coordinator(unloading=False)
+    coordinator.config_entry = SimpleNamespace(data={}, options={})
+    coordinator.required_webio_classes = ("marker",)
+    steps: list[str] = []
+    coordinator.async_webhook_target = AsyncMock(side_effect=lambda *_a: steps.append("target"))
+    coordinator.api.generate_webio_json = MagicMock(side_effect=lambda *_a, **_k: steps.append("build") or "{}")
+    monkeypatch.setattr(services_misc.persistent_notification, "async_create", MagicMock())
+    hass = SimpleNamespace(data={"comexio": {"e1": coordinator}})
+
+    _run(services_misc.handle_generate_web_io(hass, SimpleNamespace(data={"config_entry": "e1", "upload": False})))
+
+    assert steps == ["target", "build"]
+
+
+def test_a_target_that_cannot_be_resolved_is_the_result_line_of_that_class_and_uploads_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    upload = AsyncMock(return_value="ok")
+    monkeypatch.setattr(services_misc, "_upload_webio_class", upload)
+    coordinator = _upload_coordinator(unloading=False)
+    coordinator.async_webhook_target = AsyncMock(side_effect=OSError("adapters"))
+
+    line = _run(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
+
+    assert line.startswith("Cls: failed (OSError)")
+    assert "nothing changed on Comexio" in line  # the old class is untouched: no hint to the sync button
+    assert "may be missing" not in line
+    upload.assert_not_awaited()
+    coordinator.api.generate_webio_json.assert_not_called()
+    assert not coordinator._sync_lock.locked()
+
+
+def test_a_drifted_body_is_a_deviation_even_when_the_form_shows_no_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, held = _protocol_coordinator(monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1))
+    security = coordinator.api.webhook_security
+    security.https_written.add(NAME)
+    held["Data"] = held["Data"].replace('server="', 'server="other-')  # another server field than the target's
+
+    deviating, unreadable, complete = _run(coordinator._async_verify_webhook_commands(security))
+
+    assert list(deviating) == [NAME]
+    assert unreadable == []
+    assert complete
+
+
+def test_a_drifted_path_is_a_deviation_for_a_command_moved_to_http_whose_form_shows_no_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, held = _protocol_coordinator(
+        monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1), target_protocol=WEBIO_PROTOCOL_HTTP
+    )
+    security = coordinator.api.webhook_security
+    security.protocol_write = NOW - timedelta(hours=2)
+    security.protocol_moved = {NAME}
+    held["Parameter"] = "/api/webhook/somewhere-else"
+
+    deviating, unreadable, _complete = _run(coordinator._async_verify_webhook_commands(security))
+
+    assert list(deviating) == [NAME]
+    assert unreadable == []
+
+
+def test_an_unchanged_command_whose_form_shows_no_protocol_stays_unreadable_not_deviating(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _held = _protocol_coordinator(monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1))
+    security = coordinator.api.webhook_security
+    security.https_written.add(NAME)
+
+    deviating, unreadable, complete = _run(coordinator._async_verify_webhook_commands(security))
+
+    assert deviating == {}
+    assert unreadable == [NAME]
+    assert complete
+
+
+def test_a_drifted_path_is_a_deviation_even_when_the_form_shows_no_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, held = _protocol_coordinator(monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1))
+    security = coordinator.api.webhook_security
+    security.https_written.add(NAME)
+    security.protocol_write = NOW - timedelta(hours=2)
+    held["Parameter"] = "/api/webhook/somewhere-else"  # edited in Comexio; the form carries no protocol field
+
+    deviating, unreadable, complete = _run(coordinator._async_verify_webhook_commands(security))
+
+    assert list(deviating) == [NAME]
+    assert unreadable == []
+    assert complete
+
+
 def test_a_failing_build_of_a_class_is_its_result_line_too(monkeypatch: pytest.MonkeyPatch) -> None:
     from custom_components.comexio.services import misc as services_misc
 
@@ -941,6 +1102,7 @@ def test_a_failing_build_of_a_class_is_its_result_line_too(monkeypatch: pytest.M
     line = _run(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
 
     assert line.startswith("Cls: failed (KeyError)")
+    assert "nothing changed on Comexio" in line
     upload.assert_not_awaited()
     assert not coordinator._sync_lock.locked()
 

@@ -6392,11 +6392,13 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 unreadable.append(name)
                 continue
             protocol = getattr(form, "protocol", None)
-            if protocol_unproven(targets[name], protocol, moving=name in security.protocol_moved):
+            # Path and body are judged first: a form without a protocol field proves nothing about the protocol,
+            # but a path that drifted is a deviation whatever the protocol is.
+            if why := command_deviation(targets[name], form.parameter, form.data):
+                deviating[name] = why
+            elif protocol_unproven(targets[name], protocol, moving=name in security.protocol_moved):
                 unreadable.append(name)
-            elif why := command_deviation(targets[name], form.parameter, form.data) or protocol_deviation(
-                targets[name], protocol
-            ):
+            elif why := protocol_deviation(targets[name], protocol):
                 deviating[name] = why
         return deviating, unreadable, True
 
