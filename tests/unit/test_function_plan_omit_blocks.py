@@ -65,6 +65,15 @@ def _omitted(snapshot: dict[str, Any], fub_base: dict[str, Any]) -> dict[str, An
     return omit_unresolved_blocks(resolve_block_ids(snapshot, fub_base))
 
 
+@pytest.mark.parametrize("malformed", [5, [1], {"input": {"FubElementId": 4}, "output": 5}, {"output": "x"}])
+def test_resolve_block_ids_refuses_a_snapshot_with_a_malformed_wire(snapshot: dict[str, Any], malformed: Any) -> None:
+    """The cut reads wires as mappings because resolve_block_ids (plan_hash) already refused anything else."""
+    snapshot["connections"]["99"] = malformed
+
+    with pytest.raises((AttributeError, TypeError)):
+        resolve_block_ids(snapshot, WITHOUT_NOT)
+
+
 def test_a_block_that_is_gone_is_left_out_with_the_wire_that_ended_at_it(snapshot: dict[str, Any]) -> None:
     result = _omitted(snapshot, WITHOUT_NOT)
 

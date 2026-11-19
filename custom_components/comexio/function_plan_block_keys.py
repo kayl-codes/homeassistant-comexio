@@ -456,8 +456,8 @@ def _cut_connection(conn: Mapping[str, Any], omitted: set[str]) -> tuple[Mapping
     sinks = conn.get(_OUTPUT) or []
     sinks = list(sinks.values()) if isinstance(sinks, Mapping) else sinks
     source = _endpoint_element(conn.get(_INPUT))
-    touched = {source} & omitted
-    touched |= {element for sink in sinks if (element := _endpoint_element(sink)) in omitted}
+    ends = (source, *(_endpoint_element(sink) for sink in sinks))
+    touched = {element for element in ends if element is not None and element in omitted}
     if not touched:
         return conn, touched, set()
     if source in omitted:
@@ -488,7 +488,7 @@ def _omitted_report(block: Mapping[str, Any], elements: Mapping[str, Any], cut: 
 
     elements are the ones resolve_block_ids returned (the marked element), cut what _cut_connections left.
     """
-    name = str((elements.get(str(block[_ELEMENT])) or {}).get("name") or "")
+    name = str((elements.get(str(block[_ELEMENT])) or {}).get(_NAME) or "")
     label = _unresolved_label(block[_KEY], block[_REF_ID])
     if name == label:
         name = ""
