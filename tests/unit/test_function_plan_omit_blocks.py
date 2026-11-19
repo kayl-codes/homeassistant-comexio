@@ -7,6 +7,7 @@ from aiocomexio.function_plan import plan_hash
 import pytest
 
 from custom_components.comexio.function_plan_block_keys import (
+    CHECK_UNRESOLVED,
     CHECK_UNVERIFIED,
     OMITTED_BLOCKS,
     REASON_AMBIGUOUS,
@@ -241,7 +242,8 @@ def test_a_plan_without_any_wire_loses_only_the_element() -> None:
 
     result = _omitted(snapshot, {"5": OR})
 
-    assert (result["elements"], result["connections"]) == ({}, {})
+    assert result["elements"] == {}
+    assert result["connections"] == {}
     assert result[OMITTED_BLOCKS][0]["connections"] == 0
 
 
@@ -443,3 +445,25 @@ def test_a_block_key_with_a_line_break_stays_one_line_in_the_report() -> None:
     line = omitted_block_lines([{**block, "connections": 0, "unfed": []}])[0]
 
     assert "\n" not in line
+
+
+def test_element_and_block_ids_with_line_breaks_stay_one_line_in_the_report() -> None:
+    block = {"element": "7\nx", "name": "", "ref_id": "23\ny", "key": NOT_KEY, "reason": REASON_MISSING}
+
+    line = omitted_block_lines([{**block, "connections": 1, "unfed": ["5\nz", "6"]}])[0]
+
+    assert "\n" not in line
+    assert line.startswith("element 7 x: block id 23 y (")
+    assert line.endswith("; input lost at element 5 z, 6")
+
+
+def test_the_refusal_lines_of_a_check_keep_ids_and_keys_on_one_line() -> None:
+    entry = {"element": "7\nx", "ref_id": "23\ny", "key": "not\n/d/d", "reason": REASON_MISSING}
+
+    check = block_check({UNRESOLVED_BLOCKS: [entry]})
+
+    assert check is not None
+    assert check["status"] == CHECK_UNRESOLVED
+    assert len(check["problems"]) == 1
+    assert "\n" not in check["problems"][0]
+    assert check["problems"][0].startswith("element 7 x: block id 23 y (not /d/d): ")

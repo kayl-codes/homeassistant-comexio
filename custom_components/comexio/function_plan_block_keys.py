@@ -65,6 +65,7 @@ UNVERIFIED_BLOCK_PROBLEMS = "unverified_block_problems"
 _ELEMENTS = "elements"
 _CONNECTIONS = "connections"
 _OUTPUT = "output"
+_INPUT = "input"
 _ELEMENT = "element"
 _REASON = "reason"
 _NAME = "name"
@@ -228,7 +229,7 @@ def _wired_element_ids(connections: Mapping[str, Any]) -> set[str]:
         if not isinstance(conn, Mapping):
             continue
         sinks = conn.get(_OUTPUT)
-        for port in [conn.get("input"), *(sinks if isinstance(sinks, list) else [])]:
+        for port in [conn.get(_INPUT), *(sinks if isinstance(sinks, list) else [])]:
             if (endpoint := _endpoint(port)) is not None:
                 wired.add(endpoint[0])
     return wired
@@ -265,7 +266,7 @@ def implausible_block_wiring(
     for conn in connections.values():
         if not isinstance(conn, Mapping):
             continue
-        source = _endpoint(conn.get("input"))
+        source = _endpoint(conn.get(_INPUT))
         source_block = _block_def(elements, fub_base, source)
         if source and source_block and source[1] >= (_as_int(source_block.get("n_out")) or 0):
             problems.append(
@@ -413,7 +414,8 @@ def _resolve_elements(
 def unresolved_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
     """One line per UNRESOLVED_BLOCKS entry: which element, which block, and why."""
     return [
-        f"element {block[_ELEMENT]}: block id {block[_REF_ID]} ({block[_KEY] or 'no key'}): "
+        f"element {one_line(block[_ELEMENT])}: block id {one_line(block[_REF_ID])} "
+        f"({one_line(block[_KEY]) if block[_KEY] else 'no key'}): "
         f"{_REASON_TEXT.get(block[_REASON], block[_REASON])}"
         for block in blocks
     ]
@@ -452,7 +454,7 @@ def _cut_connection(conn: Mapping[str, Any], omitted: set[str]) -> tuple[Mapping
     """
     sinks = conn.get(_OUTPUT) or []
     sinks = list(sinks.values()) if isinstance(sinks, Mapping) else sinks
-    source = _endpoint_element(conn.get("input"))
+    source = _endpoint_element(conn.get(_INPUT))
     touched = {source} & omitted
     touched |= {element for sink in sinks if (element := _endpoint_element(sink)) in omitted}
     if not touched:
@@ -474,7 +476,7 @@ def _cut_connections(connections: Mapping[str, Any], omitted: set[str]) -> _Cut:
         for element in touched:
             affected[element] += 1
         if fed_no_more:
-            unfed.setdefault(str(_endpoint_element(conn.get("input"))), set()).update(fed_no_more)
+            unfed.setdefault(str(_endpoint_element(conn.get(_INPUT))), set()).update(fed_no_more)
         if cut is not None:
             kept[conn_id] = cut
     return _Cut(kept, affected, unfed)
@@ -561,10 +563,12 @@ def omitted_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
 def _omitted_line(block: Mapping[str, Any]) -> str:
     title = f" ({one_line(block[_NAME])})" if block[_NAME] else ""
     reason = _REASON_TEXT.get(block[_REASON], block[_REASON])
-    unfed = f"; input lost at element {', '.join(block[_UNFED])}" if block[_UNFED] else ""
+    unfed = (
+        f"; input lost at element {', '.join(one_line(element) for element in block[_UNFED])}" if block[_UNFED] else ""
+    )
     key = one_line(block[_KEY]) if block[_KEY] else "no key"
     return (
-        f"element {block[_ELEMENT]}{title}: block id {block[_REF_ID]} ({key}): {reason}; "
+        f"element {one_line(block[_ELEMENT])}{title}: block id {one_line(block[_REF_ID])} ({key}): {reason}; "
         f"{block[_CONNECTIONS]} connection(s) dropped or shortened{unfed}"
     )
 
