@@ -6222,18 +6222,20 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return await self._async_run_webhook_migration(security)
 
     async def _async_resolve_webhook_target_for_nightly_run(self) -> bool:
-        """Resolve the target the nightly run writes with; False if the entry unloaded meanwhile (nothing to write).
+        """Resolve the target the nightly run writes with; False if the run must not go on (nothing is written then).
 
         The commands are written with the protocol HA is reached with (#165). A start from the saved config has run
-        no audit yet, so the target is resolved here instead of relying on the last poll. Not while a sync or a
-        function plan restore runs: a sync resolved the target itself when it started, and resolving again would
-        rewrite the protocol its builders follow; the run takes the sync lock command by command anyway. The check
-        for the unload sits here, after the await, so that no write and no ledger change follow once the shutdown
-        began.
+        no audit yet, so the target is resolved here instead of relying on the last poll. Not while the entry
+        unloads, a run, a sync or a function plan restore is going on: resolving again would rewrite the protocol
+        their builders follow, and a run that went on without resolving would write with a target of before (the
+        restore may release its lock before the run's per-command check); the night is skipped and the next one
+        tries again. The same check after the await (like the forced run) keeps an unload, a run, a sync or a restore
+        that came in meanwhile from seeing a write or a ledger change.
         """
-        if not (self._sync_lock.locked() or self._restore_lock.locked()):
-            await self.async_webhook_target()
-        return not self.unloading
+        if self._webhook_migration_cannot_start():
+            return False
+        await self.async_webhook_target()
+        return not self._webhook_migration_cannot_start()
 
     async def _async_run_webhook_migration(self, security: WebhookSecurity) -> str:
         """The run of the nightly tick (or the forced one) once the target is resolved; one at a time.

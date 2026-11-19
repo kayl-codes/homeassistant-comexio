@@ -354,40 +354,62 @@ def test_the_forced_run_checks_again_after_it_resolved_the_target(monkeypatch: p
     coordinator.api.client.save_webio_command.assert_not_awaited()
 
 
-@pytest.mark.parametrize("busy", ["_sync_lock", "_restore_lock"])
-def test_the_nightly_run_does_not_resolve_the_target_while_a_sync_or_a_restore_runs(
+@pytest.mark.parametrize("busy", ["_sync_lock", "_restore_lock", "_webhook_migration_running"])
+def test_the_nightly_run_neither_resolves_nor_runs_while_a_sync_a_restore_or_a_run_is_going_on(
     monkeypatch: pytest.MonkeyPatch, busy: str
 ) -> None:
+    """A run that went on with an unresolved target would write with the protocol of before (#165)."""
     coordinator, _held = _protocol_coordinator(
         monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
     )
-    setattr(coordinator, busy, SimpleNamespace(locked=lambda: True))
+    if busy == "_webhook_migration_running":
+        coordinator._webhook_migration_running = True
+    else:
+        setattr(coordinator, busy, SimpleNamespace(locked=lambda: True))
     coordinator.async_webhook_target = AsyncMock()
     coordinator._async_run_webhook_migration = AsyncMock(return_value="done")
 
-    # the run itself goes on (it takes the lock command by command), only the resolving is left out
-    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
 
     coordinator.async_webhook_target.assert_not_awaited()
-    coordinator._async_run_webhook_migration.assert_awaited_once()
+    coordinator._async_run_webhook_migration.assert_not_awaited()
 
 
-def test_the_nightly_run_does_not_start_when_the_entry_unloads_while_the_target_is_resolved(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@pytest.mark.parametrize("taken", ["unloading", "_sync_lock", "_restore_lock", "_webhook_migration_running"])
+def test_the_nightly_run_checks_again_after_it_resolved_the_target(monkeypatch: pytest.MonkeyPatch, taken: str) -> None:
     coordinator, _held = _protocol_coordinator(
         monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
     )
 
     async def _resolve(*_a: Any) -> None:
-        coordinator.unloading = True
+        # the await is where an unload, a sync, a restore or a forced run can come in
+        if taken in {"unloading", "_webhook_migration_running"}:
+            setattr(coordinator, taken, True)
+        else:
+            setattr(coordinator, taken, SimpleNamespace(locked=lambda: True))
 
     coordinator.async_webhook_target = AsyncMock(side_effect=_resolve)
+    security = coordinator.api.webhook_security
 
     assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
 
     coordinator.async_webhook_target.assert_awaited_once()
+    assert NAME in security.migrated  # the ledger was not emptied
     coordinator.api.client.save_webio_command.assert_not_awaited()
+
+
+def test_the_nightly_target_is_not_resolved_for_an_entry_that_is_already_unloading(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    coordinator.unloading = True
+    coordinator.async_webhook_target = AsyncMock()
+
+    assert _run(coordinator._async_resolve_webhook_target_for_nightly_run()) is False
+
+    coordinator.async_webhook_target.assert_not_awaited()
 
 
 def test_the_restart_request_after_a_start_waits_for_the_boot_time_while_a_protocol_move_is_open(
