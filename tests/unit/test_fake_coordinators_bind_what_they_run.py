@@ -41,8 +41,9 @@ take it away: it may hold for one test only, and the order of assignments in a t
 
 Not followed: a double that is built without a class (`SimpleNamespace(...)` or `MagicMock()` passed to
 `ComexioCoordinator.method(fake)`), a method inherited from Home Assistant's coordinator that a double binds (no source
-here to read), a name read through `getattr` with a computed name, a `setattr` with a computed name, a name given by
-tuple unpacking (`other, size = None, 1`). These stay the reviewer's job.
+here to read), a name read through `getattr(self, ...)` (the coordinator does it once, with a default: a read that
+tolerates the name missing), a `setattr` with a computed name, a name given by tuple unpacking
+(`other, size = None, 1`). These stay the reviewer's job.
 
 A finding is fixed by binding the method in the double, or - where the test never reaches the call - listed in
 ALLOWED with the reason.
@@ -63,6 +64,9 @@ VALUE_PROPERTIES = ("property", "cached_property", "getter")  # decorators that 
 PROPERTY_CHANGERS = ("setter", "deleter")  # decorators that change a property, not its value
 PROPERTY_DECORATORS = VALUE_PROPERTIES + PROPERTY_CHANGERS
 NOT_A_LITERAL = (ValueError, TypeError, SyntaxError, MemoryError, RecursionError)  # what `ast.literal_eval` raises
+NOT_CALLABLE_TYPES = frozenset(
+    {"list", "dict", "set", "frozenset", "tuple", "str", "bytes", "int", "float", "bool", "object"}
+)
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 NOT_CALLABLE = (  # what no call can be made on, also when it holds names (`[mock]`, `f"{x}"`, `a + b`)
     ast.List,
@@ -220,6 +224,8 @@ def _callable(value: ast.expr) -> bool:
     """
     if isinstance(value, NOT_CALLABLE):
         return False
+    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in NOT_CALLABLE_TYPES:
+        return False  # `list()`, `object()`: an instance of a type that has no `__call__`
     if isinstance(value, ast.IfExp):
         return _conditional_may_be_called(value)
     if isinstance(value, ast.BoolOp):
@@ -306,9 +312,8 @@ def _defined_in_body(double: ast.ClassDef) -> Supply:
         elif isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
             _define_function(supply, statement)
         elif isinstance(statement, ast.Delete):
-            for target in statement.targets:
-                if isinstance(target, ast.Name):
-                    supply.pop(target.id, None)
+            for name in _names_defined(statement):
+                supply.pop(name, None)
     return supply
 
 
@@ -688,6 +693,9 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "    @other.setter\n    def other(self, value): ...\n    other_property = None\n",
         "    @property\n    def other(self):\n        def inner():\n            return AsyncMock()\n"
         "        return None\n    other_property = None\n",
+        "    other = AsyncMock()\n    other_property = None\n    del (other,)\n",
+        "    other = list()\n    other_property = None\n",
+        "\ndef test_a(fake):\n    fake.other = object()\n    fake.other_property = 1\n",
     ],
     ids=[
         "class body",
@@ -718,6 +726,9 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "cached property that returns a container",
         "setter after a property that returns a literal",
         "callable returned by a function nested in the property",
+        "name deleted with a tuple target",
+        "constructor of a type that is not callable",
+        "object() assigned in a test",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
