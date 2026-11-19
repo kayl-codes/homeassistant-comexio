@@ -6295,6 +6295,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 ", ".join(one_line(name) for name in stuck[:WEBHOOK_STUCK_LISTED]),
             )
 
+    def _webhook_migration_unavailable(self) -> bool:
+        """The entry unloaded or a run is going on: read after the await that resolved the target, not before it."""
+        return self.unloading or self._webhook_migration_running
+
     async def async_force_webhook_migration(self) -> str:
         """Rewrite every Web-IO command now: its own webhook path and the protocol HA is reached with (#165).
 
@@ -6309,7 +6313,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if security is None or not self.data or self.unloading:
             return WEBHOOK_MIGRATION_SKIPPED
         await self.async_webhook_target()
-        if self.unloading or self._webhook_migration_running:
+        if self._webhook_migration_unavailable():
             return WEBHOOK_MIGRATION_SKIPPED
         if self._sync_lock.locked() or self._restore_lock.locked():
             _LOGGER.warning(
