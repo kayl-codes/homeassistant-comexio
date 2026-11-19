@@ -266,18 +266,23 @@ def test_a_wire_between_two_left_out_blocks_counts_for_both(snapshot: dict[str, 
     assert {block["element"]: block["connections"] for block in result[OMITTED_BLOCKS]} == {"4": 4, "7": 2}
 
 
-@pytest.mark.parametrize(
-    ("wire", "left"),
-    [(_wire(3, 7, 7, 5), _wire(3, 5)), (_wire(3, 7, 7), None)],
-)
-def test_two_ends_at_one_left_out_block_count_the_wire_once(
-    snapshot: dict[str, Any], wire: dict[str, Any], left: dict[str, Any] | None
-) -> None:
-    snapshot["connections"]["20"] = wire
+def test_two_ends_at_one_left_out_block_count_the_wire_once(snapshot: dict[str, Any]) -> None:
+    snapshot["connections"]["20"] = _wire(3, 7, 7, 5)
 
     result = _omitted(snapshot, WITHOUT_NOT)
 
-    assert result["connections"].get("20") == left
+    assert result["connections"]["20"] == _wire(3, 5)
+    assert result[OMITTED_BLOCKS][0]["connections"] == 2  # wire 13 and this one
+
+
+def test_a_wire_whose_only_ends_are_two_at_the_left_out_block_is_gone_and_counted_once(
+    snapshot: dict[str, Any],
+) -> None:
+    snapshot["connections"]["20"] = _wire(3, 7, 7)
+
+    result = _omitted(snapshot, WITHOUT_NOT)
+
+    assert "20" not in result["connections"]
     assert result[OMITTED_BLOCKS][0]["connections"] == 2  # wire 13 and this one
 
 
