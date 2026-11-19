@@ -214,6 +214,7 @@ def _self_calls(method: ast.AST) -> set[str]:
 # A supply maps a name to whether what it is given could be called. A literal (`other = None`) cannot; a bare
 # annotation (`other: object`) gives nothing at all, Python creates no attribute for it.
 Supply = dict[str, bool]
+Scopes = dict[ast.ClassDef, tuple[ast.AST, ...]]  # class definition -> the functions it sits in
 
 
 def _callable(value: ast.expr) -> bool:
@@ -355,9 +356,10 @@ def _set_by_call(call: ast.Call) -> tuple[str, bool] | None:
     if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
         return None
     given = _argument(call, 2, *NEW_VALUE)
-    if given is None:
-        return name.value, True  # `patch.object(obj, "name", create=True)` puts a MagicMock there
-    return name.value, _callable(given)
+    if given is not None:
+        return name.value, _callable(given)
+    # Only `patch.object(obj, "name", create=True)` puts a MagicMock there; the setattr forms need a value.
+    return (name.value, True) if ast.unparse(call.func).endswith("patch.object") else None
 
 
 def _supplied_in_file(tree: ast.AST, doubles: set[str]) -> tuple[Supply, dict[str, Supply]]:
@@ -405,7 +407,7 @@ def missing_bindings(
     tree = ast.parse(source)
     aliases = _class_aliases(tree)
     # By class definition, not by name: two doubles of one name (in two tests) keep their own bindings.
-    defined = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    defined = _scopes(tree)
     method_aliases = _method_aliases(tree, aliases)
     bound_of = [(node, _class_bindings(node, defined, aliases, method_aliases)) for node in defined]
     shared, per_class = _supplied_in_file(tree, {double.name for double, bound in bound_of if bound})
@@ -421,17 +423,37 @@ def missing_bindings(
     return found
 
 
-def _base_class(base: ast.expr, double: ast.ClassDef, defined: list[ast.ClassDef]) -> ast.ClassDef | None:
-    """The class a base name stands for: the nearest definition of that name above the double (a test function of its
-    own may define a `_Base` too), else the last one. None for a base this module does not define."""
+def _scopes(tree: ast.AST) -> Scopes:
+    """Every class definition of the module in source order -> the functions it sits in, outermost first."""
+    scopes: Scopes = {}
+
+    def visit(node: ast.AST, chain: tuple[ast.AST, ...]) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                scopes[child] = chain
+            visit(child, (*chain, child) if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef) else chain)
+
+    visit(tree, ())
+    return scopes
+
+
+def _base_class(base: ast.expr, double: ast.ClassDef, defined: Scopes) -> ast.ClassDef | None:
+    """The class a base name stands for: a definition of that name the double can see (in its own function or one that
+    holds it, or at module level), the nearest one above the double, else the last one. None for a base this module
+    does not define."""
     if not isinstance(base, ast.Name):
         return None
-    named = [node for node in defined if node.name == base.id and node is not double]
+    scope = defined[double]
+    named = [
+        node
+        for node, own in defined.items()
+        if node.name == base.id and node is not double and scope[: len(own)] == own
+    ]
     above = [node for node in named if node.lineno < double.lineno]
     return (above or named or [None])[-1]
 
 
-def _parents(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple[ast.ClassDef, ...]) -> list[ast.ClassDef]:
+def _parents(double: ast.ClassDef, defined: Scopes, seen: tuple[ast.ClassDef, ...]) -> list[ast.ClassDef]:
     """The base classes of the double that this module defines, last base first: applied in this order, the first
     base wins, as in Python's lookup order (a diamond is not resolved exactly). A base of another module is not
     followed."""
@@ -439,7 +461,7 @@ def _parents(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple[ast.
     return [parent for parent in parents if parent is not None and parent not in seen]
 
 
-def _class_supply(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple[ast.ClassDef, ...] = ()) -> Supply:
+def _class_supply(double: ast.ClassDef, defined: Scopes, seen: tuple[ast.ClassDef, ...] = ()) -> Supply:
     """The body of the double on top of the bodies of its base classes that this module defines."""
     supply: Supply = {}
     for parent in _parents(double, defined, seen):
@@ -450,7 +472,7 @@ def _class_supply(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple
 
 def _class_bindings(
     double: ast.ClassDef,
-    defined: list[ast.ClassDef],
+    defined: Scopes,
     aliases: set[str],
     method_aliases: dict[str, str],
     seen: tuple[ast.ClassDef, ...] = (),
@@ -628,6 +650,10 @@ def test_detector_accepts_every_way_to_supply_a_name(supply: str) -> None:
         "    monkeypatch.setattr(fake, 'other_property', 2, raising=True)\n",
         "\ndef test_a(fake):\n    patch.object(target=fake, attribute='other', new=AsyncMock(), create=False)\n"
         "    patch.object(fake, 'other_property', 2, None, False)\n",
+        # the two-argument call is a TypeError, not an attribute
+        "\ndef test_a(fake):\n    setattr(fake, 'other')\n    setattr(fake, 'other_property')\n",
+        "\ndef test_a(fake, monkeypatch):\n    monkeypatch.setattr(fake, 'other', raising=False)\n"
+        "    monkeypatch.setattr(fake, 'other_property', raising=False)\n",
     ],
     ids=[
         "keyword of a call that builds no double",
@@ -638,6 +664,8 @@ def test_detector_accepts_every_way_to_supply_a_name(supply: str) -> None:
         "augmented assignment",
         "monkeypatch.setattr with raising True",
         "patch.object with create False",
+        "setattr without a value",
+        "monkeypatch.setattr without a value",
     ],
 )
 def test_detector_does_not_take_a_foreign_keyword_a_computed_name_or_a_plain_patch_for_a_supply(
@@ -880,6 +908,25 @@ def test_a_base_name_means_the_nearest_definition_above_the_double() -> None:
     assert missing_bindings(complete + child + bare, METHODS, MEMBERS) == {}  # a later `_Base` is not the one used
     assert missing_bindings(bare + child + complete, METHODS, MEMBERS) == FINDING
     assert missing_bindings(complete + bare + child, METHODS, MEMBERS) == FINDING
+
+
+def test_a_base_name_is_looked_up_in_the_scopes_the_double_can_see() -> None:
+    complete = "class _Base:\n    other = AsyncMock()\n    other_property = 1\n"
+    bare = "class _Base:\n    pass\n"
+    child = "class _Fake(_Base):\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+
+    def inside(source: str) -> str:
+        return "".join(f"    {line}\n" for line in source.splitlines())
+
+    function = "\ndef test_a():\n"
+    # a `_Base` inside another test function is not the one of a module-level double, however near it stands
+    assert missing_bindings(complete + function + inside(bare) + "\n" + child, METHODS, MEMBERS) == {}
+    assert missing_bindings(bare + function + inside(complete) + "\n" + child, METHODS, MEMBERS) == FINDING
+    # a double inside a function sees the module level, and its own function's `_Base` before it
+    assert missing_bindings(complete + function + inside(child), METHODS, MEMBERS) == {}
+    assert missing_bindings(bare + function + inside(child), METHODS, MEMBERS) == FINDING
+    assert missing_bindings(bare + function + inside(complete + child), METHODS, MEMBERS) == {}
+    assert missing_bindings(complete + function + inside(bare + child), METHODS, MEMBERS) == FINDING
 
 
 HANDED_ON = (
