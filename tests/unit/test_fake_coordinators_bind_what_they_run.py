@@ -21,16 +21,15 @@ something that can be called: a literal, a container, a computed number or text 
 is not enough (a conditional with a constant condition is the branch it selects). What else is given (a name, a call)
 counts as callable: its value is not known here. A `@property` defined in the class body is what its `return`s give.
 In a class body a later assignment replaces an earlier one (`other = AsyncMock()`, then `other = None`) and `del other`
-takes it away, and a double has the bodies and the bindings of its base classes from the same module (the first base
-wins; a base from another module is not followed). A binding that a later statement of the body replaces or deletes no
-longer counts, and a module-level name that holds a coordinator method (`run_alias = ComexioCoordinator.run`, also an
-alias of such a name) binds it. Only the direct statements of a class body and of the module are read: a definition
-inside an `if`/`try`/`with` suite is not followed, and a method handed over by tuple unpacking
-(`run, other = ComexioCoordinator.run, None`) is not a binding. A name the real coordinator defines as a plain method
-has to be callable wherever the method uses it, a callback
-included
-(`schedule(self.name)`); for every other name only a direct call counts: `self.name.attr()` reads `name`, so a literal
-passes (not followed).
+takes it away (falling back to what a base holds), and a double has the bodies and the bindings of its base classes
+from the same module (in Python's lookup order; a base from another module is not followed). A binding that a
+later statement of the body replaces or deletes no longer counts, and a module-level name that holds a coordinator
+method (`run_alias = ComexioCoordinator.run`, also an alias of such a name) binds it. Only the direct statements of a
+class body and of the module are read: a definition inside an `if`/`try`/`with` suite is not followed, and a method
+handed over by tuple unpacking (`run, other = ComexioCoordinator.run, None`) is not a binding. A name the real
+coordinator defines as a plain method has to be callable wherever the method uses it, a callback included
+(`schedule(self.name)`); for every other name only a direct call counts: `self.name.attr()` reads `name`, so a
+literal passes (not followed).
 
 An assigned attribute, a `setattr` or a keyword at a builder function counts for every double of the file, because the
 object it goes to is not known; only a keyword at a call of a double's class counts for that class alone (by its name:
@@ -41,8 +40,9 @@ take it away: it may hold for one test only, and the order of assignments in a t
 
 Not followed: a double that is built without a class (`SimpleNamespace(...)` or `MagicMock()` passed to
 `ComexioCoordinator.method(fake)`), a method inherited from Home Assistant's coordinator that a double binds (no source
-here to read), a name read through `getattr(self, ...)` (the coordinator does it once, with a default: a read that
-tolerates the name missing), a `setattr` with a computed name, a name given by tuple unpacking
+here to read), and one such a method hands on (`api.listener = self.async_update_listeners`), which only has to be
+supplied, not callable, a name read through `getattr(self, ...)` (the coordinator does it once, with a default: a
+read that tolerates the name missing), a `setattr` with a computed name, a name given by tuple unpacking
 (`other, size = None, 1`). These stay the reviewer's job.
 
 A finding is fixed by binding the method in the double, or - where the test never reaches the call - listed in
@@ -65,7 +65,23 @@ PROPERTY_CHANGERS = ("setter", "deleter")  # decorators that change a property, 
 PROPERTY_DECORATORS = VALUE_PROPERTIES + PROPERTY_CHANGERS
 NOT_A_LITERAL = (ValueError, TypeError, SyntaxError, MemoryError, RecursionError)  # what `ast.literal_eval` raises
 NOT_CALLABLE_TYPES = frozenset(
-    {"list", "dict", "set", "frozenset", "tuple", "str", "bytes", "int", "float", "bool", "object"}
+    {
+        "list",
+        "dict",
+        "set",
+        "frozenset",
+        "tuple",
+        "str",
+        "bytes",
+        "bytearray",
+        "int",
+        "float",
+        "complex",
+        "bool",
+        "object",
+        "range",
+        "slice",
+    }
 )
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 NOT_CALLABLE = (  # what no call can be made on, also when it holds names (`[mock]`, `f"{x}"`, `a + b`)
@@ -454,40 +470,51 @@ def _base_class(base: ast.expr, double: ast.ClassDef, defined: Scopes) -> ast.Cl
 
 
 def _parents(double: ast.ClassDef, defined: Scopes, seen: tuple[ast.ClassDef, ...]) -> list[ast.ClassDef]:
-    """The base classes of the double that this module defines, last base first: applied in this order, the first
-    base wins, as in Python's lookup order (a diamond is not resolved exactly). A base of another module is not
-    followed."""
-    parents = (_base_class(base, double, defined) for base in reversed(double.bases))
+    """The base classes of the double that this module defines, in the order they are written. A base of another
+    module is not followed."""
+    parents = (_base_class(base, double, defined) for base in double.bases)
     return [parent for parent in parents if parent is not None and parent not in seen]
 
 
-def _class_supply(double: ast.ClassDef, defined: Scopes, seen: tuple[ast.ClassDef, ...] = ()) -> Supply:
-    """The body of the double on top of the bodies of its base classes that this module defines."""
+def _linearization(double: ast.ClassDef, defined: Scopes, seen: tuple[ast.ClassDef, ...] = ()) -> list[ast.ClassDef]:
+    """The double and the classes of this module it inherits from, in Python's lookup order (C3). Where the
+    hierarchy has no such order (Python would refuse it), the first candidate of the first list is taken."""
+    parents = _parents(double, defined, seen)
+    lists = [_linearization(parent, defined, (*seen, double)) for parent in parents] + [parents]
+    order = [double]
+    while lists := [rest for rest in lists if rest]:
+        head = next(
+            (rest[0] for rest in lists if all(rest[0] not in other[1:] for other in lists)),
+            lists[0][0],
+        )
+        order.append(head)
+        lists = [rest[1:] if rest[0] is head else rest for rest in lists]
+    return order
+
+
+def _class_supply(double: ast.ClassDef, defined: Scopes) -> Supply:
+    """The body of the double on top of the bodies of its base classes that this module defines, nearest class last."""
     supply: Supply = {}
-    for parent in _parents(double, defined, seen):
-        supply.update(_class_supply(parent, defined, (*seen, double)))
-    supply.update(_defined_in_body(double))
+    for cls in reversed(_linearization(double, defined)):
+        supply.update(_defined_in_body(cls))
     return supply
 
 
 def _class_bindings(
-    double: ast.ClassDef,
-    defined: Scopes,
-    aliases: set[str],
-    method_aliases: dict[str, str],
-    seen: tuple[ast.ClassDef, ...] = (),
+    double: ast.ClassDef, defined: Scopes, aliases: set[str], method_aliases: dict[str, str]
 ) -> dict[str, str]:
-    """name in the double -> coordinator method, for each coordinator method the double still binds: those of its base
-    classes in this module, then its own body top down (a name defined or deleted later is no binding any more)."""
+    """name in the double -> coordinator method, for each coordinator method the double still binds: the bodies of its
+    classes from the farthest to the nearest, each top down. A name defined later is no binding any more; a name
+    deleted falls back to what the classes behind it hold."""
     bound: dict[str, str] = {}
-    for parent in _parents(double, defined, seen):
-        defines = _class_supply(parent, defined)  # what this base defines hides a binding of a base behind it
-        bound = {name: method for name, method in bound.items() if name not in defines}
-        bound |= _class_bindings(parent, defined, aliases, method_aliases, (*seen, double))
-    for statement in double.body:
-        for name in _names_defined(statement):
-            bound.pop(name, None)
-        bound.update(_bound_coordinator_methods(statement, aliases, method_aliases))
+    for cls in reversed(_linearization(double, defined)):
+        behind = dict(bound)
+        for statement in cls.body:
+            for name in _names_defined(statement):
+                bound.pop(name, None)
+                if isinstance(statement, ast.Delete) and name in behind:
+                    bound[name] = behind[name]
+            bound |= _bound_coordinator_methods(statement, aliases, method_aliases)
     return bound
 
 
@@ -724,6 +751,7 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "    other = AsyncMock()\n    other_property = None\n    del (other,)\n",
         "    other = list()\n    other_property = None\n",
         "\ndef test_a(fake):\n    fake.other = object()\n    fake.other_property = 1\n",
+        "    other = range(3)\n    other_property = None\n",
     ],
     ids=[
         "class body",
@@ -757,6 +785,7 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "name deleted with a tuple target",
         "constructor of a type that is not callable",
         "object() assigned in a test",
+        "range of a number",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
@@ -854,6 +883,34 @@ def test_a_base_in_front_hides_the_binding_of_a_base_behind_it() -> None:
 
     assert fake_findings("_First, _Second") == set()
     assert fake_findings("_Second, _First") == {RUN}
+
+
+def test_a_diamond_is_resolved_in_pythons_lookup_order() -> None:
+    body = "    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    top = "class _Top:\n    other = None\n    other_property = 1\n"
+    left = "class _Left(_Top):\n    pass\n"
+    right = "class _Right(_Top):\n    other = AsyncMock()\n"
+
+    # `_Left` does not define `other`, so Python finds `_Right`'s before `_Top`'s
+    assert missing_bindings(top + left + right + "class _Fake(_Left, _Right):\n" + body, METHODS, MEMBERS) == {}
+    assert missing_bindings(top + left + right + "class _Fake(_Right, _Left):\n" + body, METHODS, MEMBERS) == {}
+    # a binding that a class of one side replaces is not found again through the other side
+    binding = "class _Top:\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    replacing = "class _Right(_Top):\n    run = AsyncMock()\n"
+    found = missing_bindings(binding + left + replacing + "class _Fake(_Left, _Right):\n    pass\n", METHODS, MEMBERS)
+    assert {bound for (double, bound, _) in found if double == "_Fake"} == {"helper"}
+
+
+def test_a_name_deleted_in_the_class_body_falls_back_to_the_binding_of_its_base() -> None:
+    base = "class _Base:\n    run = ComexioCoordinator.run\n"
+
+    def fake_findings(body: str) -> set[str]:
+        found = missing_bindings(f"{base}class _Fake(_Base):\n{body}", METHODS, MEMBERS)
+        return {bound for (double, bound, _) in found if double == "_Fake"}
+
+    assert fake_findings("    run = AsyncMock()\n    del run\n") == {RUN}
+    assert fake_findings("    run = AsyncMock()\n") == set()
+    assert fake_findings("    def run(self): ...\n    del run\n") == {RUN}
 
 
 def test_a_module_level_name_that_is_defined_again_no_longer_holds_the_method() -> None:
