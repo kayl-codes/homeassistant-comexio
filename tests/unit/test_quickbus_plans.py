@@ -574,6 +574,7 @@ def test_generate_web_io_service_builds_from_the_selected_quickbus_devices(
         required_webio_classes=("quickbus",),
         async_webhook_target=AsyncMock(),
         _sync_lock=asyncio.Lock(),
+        _restore_lock=asyncio.Lock(),
         unloading=False,
         data={"quickbus_io": ["every device"]},
         webio_source_data=lambda: source,

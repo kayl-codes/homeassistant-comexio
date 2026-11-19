@@ -6541,7 +6541,12 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             security.schedule_save()
         if self._restart_pending(security):
             # A sync wrote a command while the save ran (a move to another protocol set the marker again): that write
-            # is not restarted yet, so the move is not over (as after the verification above).
+            # is not restarted yet, so the move is not over (as after the verification above). It stays open: with
+            # the marker unset, the next nightly run would skip, and no run would take the request back once Comexio
+            # has restarted.
+            security.protocol_write = security.last_write
+            if not await self._async_save_webhook_security(security):
+                security.schedule_save()  # the store holds no marker: a lost one would end the request silently
             self._notify_webhook_restart()
             return WEBHOOK_MIGRATION_NEEDS_RESTART
         self._clear_webhook_migration_notices()

@@ -247,6 +247,15 @@ async def _upload_class_under_sync_lock(coordinator: Any, class_name: str, webio
     async with coordinator._sync_lock:
         if coordinator.unloading:
             return f"{class_name}: skipped — the integration is unloading"
+        if coordinator._restore_lock.locked():
+            # A restore refuses to start while the sync lock is held, so one that already runs has to be waited for:
+            # the class is not replaced beside it (the sync button refuses the same way).
+            _LOGGER.warning(
+                "[%s] Web-IO class '%s' not uploaded: a function plan restore is running",
+                coordinator.server_id,
+                class_name,
+            )
+            return f"{class_name}: skipped — a function plan restore is running, try again after it"
         try:
             await coordinator.async_webhook_target()
             web_io_json = coordinator.api.generate_webio_json(

@@ -786,12 +786,45 @@ def test_a_protocol_move_is_not_over_when_a_sync_writes_a_command_while_the_end_
 
     assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
 
-    # the marker is the one the sync's write set after the end cleared it, not the one the run began with
-    assert security.protocol_write == (None if https else written)
+    # The marker is the sync's write, after the end cleared it, not the one the run began with: also for a write that
+    # keeps HTTPS (it sets none itself), or the next night would skip and nothing would take the request back once
+    # Comexio has restarted. It is saved again (a failed save is retried as well).
+    assert security.protocol_write == written
     assert security.protocol_moved == (set() if https else {NAME})
     coordinator._notify_webhook_restart.assert_called_once_with()
     coordinator._clear_webhook_migration_notices.assert_not_called()
-    assert security.schedule_save.call_count == (0 if saved else 1)  # a failed save is still retried
+    # the end and the re-armed marker are each saved by an awaited save; only a failed one falls back to a delayed save
+    assert coordinator._async_save_webhook_security.await_count == 2
+    assert security.schedule_save.call_count == (0 if saved else 2)
+
+
+def test_the_night_after_a_sync_wrote_at_the_end_of_a_protocol_move_ends_it_once_comexio_restarted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTPS, boot=NOW + timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.https_written.add(NAME)
+    security.protocol_write = NOW - timedelta(hours=2)
+    written = NOW + timedelta(hours=2)
+
+    async def _save(_security: Any) -> bool:
+        security.mark_written(NAME, written, https=True)  # the sync writes the command as it is: no protocol move
+        return True
+
+    coordinator._async_save_webhook_security = AsyncMock(side_effect=_save)
+    coordinator._notify_webhook_restart = MagicMock()
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+    coordinator._notify_webhook_restart.assert_called_once_with()  # the request stands until Comexio restarted
+
+    coordinator._async_save_webhook_security = AsyncMock(return_value=True)
+    coordinator.system_info.boot_time = written + timedelta(hours=1)  # Comexio restarted
+    coordinator._clear_webhook_migration_notices = MagicMock()
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    assert security.protocol_write is None
+    coordinator._clear_webhook_migration_notices.assert_called_once_with()
 
 
 def test_the_forced_run_that_switches_the_old_id_off_for_lack_of_commands_clears_the_marker(
@@ -907,6 +940,7 @@ def test_the_generate_web_io_upload_replaces_a_class_under_the_sync_lock(monkeyp
         required_webio_classes=("marker",),
         async_webhook_target=AsyncMock(),
         _sync_lock=lock,
+        _restore_lock=SimpleNamespace(locked=lambda: False),
         unloading=False,
         webio_source_data=dict,
         ignored_marker_ids=set(),
@@ -943,6 +977,7 @@ def test_the_generate_web_io_upload_waits_for_a_run_that_holds_the_sync_lock(mon
             required_webio_classes=("marker",),
             async_webhook_target=AsyncMock(),
             _sync_lock=lock,
+            _restore_lock=SimpleNamespace(locked=lambda: False),
             unloading=False,
             webio_source_data=dict,
             ignored_marker_ids=set(),
@@ -1067,6 +1102,7 @@ def _upload_coordinator(*, unloading: bool) -> Any:
         server_id="srv",
         async_webhook_target=AsyncMock(),
         _sync_lock=asyncio.Lock(),
+        _restore_lock=asyncio.Lock(),
         unloading=unloading,
         webio_source_data=dict,
         ignored_marker_ids=set(),
@@ -1087,6 +1123,26 @@ def test_the_upload_of_a_class_is_skipped_once_the_entry_unloads(monkeypatch: py
     upload.assert_not_awaited()
     coordinator.async_webhook_target.assert_not_awaited()  # no adapter lookup for a class that is not built
     coordinator.api.generate_webio_json.assert_not_called()
+
+
+def test_the_upload_of_a_class_is_skipped_while_a_function_plan_restore_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    upload = AsyncMock(return_value="ok")
+    monkeypatch.setattr(services_misc, "_upload_webio_class", upload)
+    coordinator = _upload_coordinator(unloading=False)
+
+    async def _during_a_restore() -> str:
+        async with coordinator._restore_lock:
+            return await services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker")
+
+    line = _run(_during_a_restore())
+
+    assert "a function plan restore is running" in line
+    upload.assert_not_awaited()  # the old class is not touched
+    coordinator.async_webhook_target.assert_not_awaited()
+    coordinator.api.generate_webio_json.assert_not_called()
+    assert not coordinator._sync_lock.locked()
 
 
 def test_a_failing_upload_of_one_class_becomes_its_result_line(
