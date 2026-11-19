@@ -44,8 +44,9 @@ The review of the integration for the HACS default list pointed this out, so the
 - **Notifications and logs never contain these IDs.** Refused requests are logged without their payload and at most
   once a minute per kind, so nobody can flood the log through the open endpoint.
 
-Only the **path and the payload text** of the Web-IO commands change. The protocol (HTTP/HTTPS) and the address of
-the commands stay exactly as they are. Entities, names and automations are not touched.
+Only the **path, the payload text and, where Home Assistant is reached over HTTPS, the protocol** of the Web-IO
+commands change (see [the protocol of the commands](#the-protocol-of-the-commands)). The address of the commands stays
+as it is. Entities, names and automations are not touched.
 
 ## 3. How the switch-over runs
 
@@ -71,6 +72,24 @@ The commands live in Comexio, so they have to be rewritten there. The integratio
 
 You can follow the progress in the Home Assistant log (`Webhook id migration: N rewritten, N failed, N left`). The
 last line of a finished switch-over is `Old webhook id switched off: every Web-IO command uses its own`.
+
+### The protocol of the commands
+
+Comexio does not pick HTTP or HTTPS from the address: every Web-IO command has a protocol field of its own. The
+integration sets it from how Home Assistant is reached at the address it gives Comexio: **HTTPS if Home Assistant
+(or the TLS proxy in front of it) answers over TLS there, otherwise HTTP.** New commands are written that way from
+the start, and the address sync of a Web-IO device only changes the IP address, never its TLS settings.
+
+If that protocol changes (for example you put Home Assistant behind TLS), the **same nightly run** that moves the
+commands to their own IDs also moves them to the new protocol, in the same way: it remembers per command with which
+protocol it was last written, rewrites the ones that differ, and asks for the same **restart of the Comexio server**
+afterwards (Comexio only sends a changed command after a restart). After the restart, the next nightly run reads every
+command back and checks its protocol along with its path. A command that still holds the old protocol goes back
+into the ledger and is rewritten again.
+
+To not wait for the night, call the `comexio.press_action` service on the sync button with the action
+`webhook_migration`: it rewrites **every** command now (also those the ledger believes to be right) with its own ID
+and the current protocol. A running sync, function plan restore or migration makes it skip. The result is in the log and in a notification.
 
 ## 4. Why Comexio has to be restarted
 
@@ -202,8 +221,9 @@ Das Review der Integration für die HACS-Standardliste hat darauf hingewiesen, d
 - **Benachrichtigungen und Logs enthalten diese IDs nie.** Abgewiesene Anfragen werden ohne ihren Inhalt und
   höchstens einmal pro Minute und Art protokolliert, damit niemand das Log über den offenen Endpunkt fluten kann.
 
-Nur **Pfad und Inhalt** der Web-IO-Commands ändern sich. Protokoll (HTTP/HTTPS) und Adresse der Commands bleiben
-genau, wie sie sind. Entitäten, Namen und Automationen bleiben unberührt.
+Nur **Pfad, Inhalt und, wo Home Assistant über HTTPS erreicht wird, das Protokoll** der Web-IO-Commands ändern sich
+(siehe [das Protokoll der Commands](#das-protokoll-der-commands)). Die Adresse der Commands bleibt, wie sie ist.
+Entitäten, Namen und Automationen bleiben unberührt.
 
 ## 3. Wie die Umstellung abläuft
 
@@ -229,6 +249,25 @@ Die Commands liegen in Comexio, also müssen sie dort umgeschrieben werden. Das 
 
 Den Fortschritt siehst du im Home-Assistant-Log (`Webhook id migration: N rewritten, N failed, N left`). Die letzte
 Zeile einer abgeschlossenen Umstellung lautet `Old webhook id switched off: every Web-IO command uses its own`.
+
+### Das Protokoll der Commands
+
+Comexio wählt HTTP oder HTTPS nicht anhand der Adresse: Jedes Web-IO-Command hat ein eigenes Protokollfeld. Die
+Integration setzt es danach, wie Home Assistant unter der Adresse erreichbar ist, die sie Comexio gibt: **HTTPS, wenn
+Home Assistant (oder der TLS-Proxy davor) dort TLS spricht, sonst HTTP.** Neue Commands werden von Anfang an so
+geschrieben, und der Adressabgleich eines Web-IO-Geräts ändert nur die IP-Adresse, nie dessen TLS-Einstellungen.
+
+Ändert sich dieses Protokoll (zum Beispiel weil du Home Assistant hinter TLS setzt), stellt **derselbe Nachtlauf**, der
+die Commands auf eigene IDs umstellt, sie auch auf das neue Protokoll um, auf dieselbe Art: Er merkt sich je Command,
+mit welchem Protokoll es zuletzt geschrieben wurde, schreibt die abweichenden um und bittet danach um denselben
+**Neustart des Comexio-Servers** (Comexio sendet ein geändertes Command erst nach einem Neustart). Nach dem Neustart
+liest der nächste Nachtlauf jedes Command zurück und prüft neben dem Pfad auch das Protokoll. Ein Command, das noch das
+alte Protokoll trägt, kommt zurück ins Ledger und wird erneut umgeschrieben.
+
+Um nicht bis zur Nacht zu warten, rufst du den Service `comexio.press_action` am Sync-Button mit der Aktion
+`webhook_migration` auf: Er schreibt **alle** Commands sofort um (auch die, die das Ledger für richtig hält), mit
+eigener ID und dem aktuellen Protokoll. Läuft gerade ein Sync, eine Plan-Wiederherstellung oder eine Migration, wird er übersprungen.
+Das Ergebnis steht im Log und in einer Benachrichtigung.
 
 ## 4. Warum Comexio neu gestartet werden muss
 

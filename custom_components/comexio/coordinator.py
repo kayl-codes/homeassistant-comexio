@@ -35,7 +35,7 @@ from aiocomexio import (
 )
 from aiocomexio.function_plan import build_source_id_translation, plan_hash, render_plan_svg, snapshot_label_maps
 from aiocomexio.onewire import OneWireStatus
-from aiocomexio.webio import quickbus_command_name
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTPS, quickbus_command_name
 import aiohttp
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry
@@ -315,7 +315,14 @@ from .plan_watchdog import (
 from .reference_monitor import ReferenceCatalogMonitor
 from .system_info import PART_SYSTEM_INFO, PART_UPTIME, SystemInfoState
 from .unsupported_ios import IoTypeTableSnapshot, UnsupportedIoMonitor, io_has_entity
-from .webhook_security import WebhookSecurity, command_deviation, command_key, derive_webhook_id
+from .webhook_security import (
+    WebhookSecurity,
+    command_deviation,
+    command_key,
+    derive_webhook_id,
+    protocol_deviation,
+    protocol_unproven,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -1634,6 +1641,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # _restore_webhook_migration_notices): they are not persistent, so a restart of Home Assistant drops them.
         self._webhook_notices_restored = False
         self._webhook_restore_failures = 0
+        # A run of the webhook migration (nightly or forced) is going on; a second one is skipped.
+        self._webhook_migration_running = False
         # Number of this entry's own Web-IO devices in the last poll's $WebDevices; None while it was not read.
         self._own_web_device_count: int | None = None
 
@@ -2201,9 +2210,17 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         False if a Web-IO class is missing on the server: the audit then only raises that
         repair issue (see _report_missing_webio_classes) and the poll ends early.
         """
+        webio_devices = parsed_data.get("webio_devices", {})
+        # The address a device already stores is kept while it still points to this host (#177),
+        # so a fresh resolver after a restart needs at most one lookup instead of a search.
+        # Resolved before anything can end the audit early: it also sets the protocol every command builder
+        # follows (#165), which a poll that stops at a missing class must not leave on an old value.
+        ha_address = (await self.async_webhook_target(webio_devices)).address
+        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
+        address_fallback = self.ha_address.fallback_reason
+
         ha_map, io_meta_by_key, com_map, disabled_commands = self._build_audit_maps(conf, final_data)
 
-        webio_devices = parsed_data.get("webio_devices", {})
         marker_titles = {int(m["id"]): m.get("title", "") for m in parsed_data.get("markers", [])}
         self._update_import_disabled_issues(conf, disabled_commands, webio_devices, marker_titles)
         if self._report_missing_webio_classes(conf, webio_devices, final_data):
@@ -2211,12 +2228,6 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         # Reset internal failure flag when the audit is successful
         self.last_audit_failed = False
-
-        # The address a device already stores is kept while it still points to this host (#177),
-        # so a fresh resolver after a restart needs at most one lookup instead of a search.
-        ha_address = (await self.async_webhook_target(webio_devices)).address
-        # Taken with the address: a later resolution (button, sync) rewrites the resolver's reason.
-        address_fallback = self.ha_address.fallback_reason
 
         # Prepare payload map for future delta updates via button/repairs
         payload_map = {
@@ -2609,7 +2620,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """IP/Port Audit, checked independently per Web-IO class.
 
         Marker and IO devices can in theory drift out of sync with each other. Only the device
-        address is audited: the commands keep HTTP whatever the address (see api.build_webio_commands).
+        address is audited (the commands' protocol is not yet, see api.build_webio_commands).
         """
         webio_device_audit: dict[str, dict[str, Any]] = {}
         for cls in WEBIO_CLASSES:
@@ -6050,10 +6061,15 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not self.data:
             result[RANGE_CHECK_SKIPPED] = 1
             return result
-        if self._sync_lock.locked() or self._restore_lock.locked():
-            _LOGGER.warning(
-                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
-            )
+        # A correction writes the whole target command, protocol included (#165): resolve the protocol first, as
+        # a start from the saved config has run no audit yet. Not while a sync or a restore runs (resolving rewrites
+        # the protocol the sync's builders follow), and checked again after the resolve, so that no await sits
+        # between the last check and taking the lock (R4).
+        if self._range_check_blocked():
+            result[RANGE_CHECK_SKIPPED] = 1
+            return result
+        await self.async_webhook_target()
+        if self._range_check_blocked():
             result[RANGE_CHECK_SKIPPED] = 1
             return result
 
@@ -6091,6 +6107,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         return result
 
+    # Class default: a coordinator built without __init__ (tests) is not running one.
+    _webhook_migration_running: bool = False
+
     def async_start_webhook_migration(self):
         """Start the nightly migration of the Web-IO commands to their own webhook ids; returns the cancel callback."""
         return async_track_time_change(
@@ -6101,8 +6120,35 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             second=0,
         )
 
+    @staticmethod
+    def _protocol_differs(security: WebhookSecurity, name: str, target: Mapping[str, Any]) -> bool:
+        """Whether the protocol this entry last wrote the command with is not the target's (#165).
+
+        Comexio's scrape shows no protocol, so the ledger (``https_written``) is the record: a command that is not
+        in it was written with HTTP. The read-back of the migration checks the real one.
+        """
+        return security.carries_https(name) != (target.get("Protocol") == WEBIO_PROTOCOL_HTTPS)
+
+    def _protocol_pending_commands(self, security: WebhookSecurity) -> list[str]:
+        """Names of the stored commands that carry their own path but not the protocol HA is reached with today.
+
+        They keep the migration going after the old id is off: Comexio has to be sent them again, and restarted.
+        """
+        targets = self._webio_range_targets()
+        return [
+            name
+            for name in self.data.get("webio_commands", {})
+            if name in security.migrated
+            and (target := targets.get(name)) is not None
+            and self._protocol_differs(security, name, target)
+        ]
+
     def _pending_webhook_migrations(self) -> list[tuple[str, dict[str, Any], dict[str, Any], dict[str, Any]]]:
-        """(name, stored command, its device, target) of every command that does not carry its own path yet."""
+        """(name, stored command, its device, target) of every command to rewrite: no path of its own or other protocol.
+
+        The protocol is the one HA is reached with (api.webhook_protocol); a command that is not written with it
+        is rewritten like one that has no path of its own yet (#165).
+        """
         security = self.api.webhook_security
         targets = self._webio_range_targets()
         devices = self.data.get("webio_devices", {})
@@ -6110,7 +6156,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for name, cmd in self.data.get("webio_commands", {}).items():
             target = targets.get(name)
             device = devices.get(cmd.get("webioClass"), {})
-            if target is None or security is None or name in security.migrated:
+            if target is None or security is None:
+                continue
+            if name in security.migrated and not self._protocol_differs(security, name, target):
                 continue
             if not cmd.get("cmdId") or not device.get("device_id"):
                 continue
@@ -6160,14 +6208,76 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_webhook_migration_tick(self, _now: datetime | None = None) -> str:
         """Rewrite the Web-IO commands that still POST to the old webhook id, within the nightly budget.
 
-        Only the path and the payload change, the commands' protocol and address stay as they are. The old id stays
+        The command is written as the builder produces it today: its own path and payload, and the protocol HA is
+        reached with (api.build_webio_commands); the device address is not touched. The old id stays
         registered until every command has been rewritten and Comexio restarted after the last write (Comexio only
         sends a changed command after a restart); then it is switched off. Returns one of the WEBHOOK_MIGRATION_*
         states.
         """
         security = self.api.webhook_security
-        if security is None or not self.data or self.unloading or not security.legacy_enabled:
+        if security is None or not self.data or self.unloading:
             return WEBHOOK_MIGRATION_SKIPPED
+        if not await self._async_resolve_webhook_target_for_nightly_run():
+            return WEBHOOK_MIGRATION_SKIPPED
+        return await self._async_run_webhook_migration(security)
+
+    async def _async_resolve_webhook_target_for_nightly_run(self) -> bool:
+        """Resolve the target the nightly run writes with; False if the run must not go on (nothing is written then).
+
+        The commands are written with the protocol HA is reached with (#165). A start from the saved config has run
+        no audit yet, so the target is resolved here instead of relying on the last poll. Not while the entry
+        unloads, a run, a sync or a function plan restore is going on: resolving again would rewrite the protocol
+        their builders follow, and a run that went on without resolving would write with a target of before (the
+        restore may release its lock before the run's per-command check); the night is skipped and the next one
+        tries again. The same check after the await (like the forced run) keeps an unload, a run, a sync or a restore
+        that came in meanwhile from seeing a write or a ledger change.
+        """
+        if self._webhook_migration_cannot_start():
+            return False
+        await self.async_webhook_target()
+        return not self._webhook_migration_cannot_start()
+
+    async def _async_run_webhook_migration(self, security: WebhookSecurity) -> str:
+        """The run of the nightly tick (or the forced one) once the target is resolved; one at a time.
+
+        A second call while one runs (the forced run during the nightly one) is skipped: the forced run empties the
+        ledger, which would put the commands the first run already moved back.
+        """
+        if self._webhook_migration_running:
+            return WEBHOOK_MIGRATION_SKIPPED
+        if (
+            not security.legacy_enabled
+            and security.protocol_write is None
+            and not self._protocol_pending_commands(security)
+            and not self._pending_webhook_migrations()  # a command the ledger never held and that can be rewritten
+        ):
+            return WEBHOOK_MIGRATION_SKIPPED
+        self._webhook_migration_running = True  # no await between the check above and here
+        try:
+            return await self._async_migrate_and_finish(security)
+        finally:
+            self._webhook_migration_running = False
+
+    def _report_webhook_leftovers(
+        self, security: WebhookSecurity, unmigrated: list[str], protocol_left: list[str]
+    ) -> int:
+        """Report what the run could not move and return how many commands keep it going.
+
+        With the old id on, a command without ids holds it on (repair). With it off, such a command keeps its path
+        and, if that differs from the target's, holds the run until a sync recreates it (it is named in the log every
+        night); only the old id's repair, whose text would be wrong, is left out.
+        """
+        if security.legacy_enabled:
+            self._report_unrewritable_webhooks(unmigrated)
+            self._warn_unrewritable_protocol(protocol_left)
+            return len(unmigrated) + len(protocol_left)
+        # The repair ("the old id stays on") would be wrong here; what is stuck is only logged.
+        ir.async_delete_issue(self.hass, DOMAIN, f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{self.server_id}")
+        self._warn_unrewritable_protocol(list(dict.fromkeys([*protocol_left, *unmigrated])))
+        rewritable = {name for name, *_ in self._pending_webhook_migrations()}
+        return len({*protocol_left, *(name for name in unmigrated if name in rewritable)})
+
+    async def _async_migrate_and_finish(self, security: WebhookSecurity) -> str:
         try:
             written, failed = await self._async_rewrite_pending_webhooks(security)
         finally:
@@ -6177,18 +6287,94 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await security.async_save()
             except Exception:
                 _LOGGER.exception("[%s] The webhook ledger could not be saved", self.server_id)
+                security.schedule_save()  # the marker of the rewrites must not be lost with this save
         unmigrated = self._unmigrated_webhook_commands(security)
-        remaining = len(unmigrated)
-        self._report_unrewritable_webhooks(unmigrated)
+        protocol_left = self._protocol_pending_commands(security)
+        remaining = self._report_webhook_leftovers(security, unmigrated, protocol_left)
         _LOGGER.info(
             "[%s] Webhook id migration: %d rewritten, %d failed, %d left", self.server_id, written, failed, remaining
         )
         if remaining:
             # "All commands are rewritten, restart Comexio" is not true (any more): a sync or a deviating read-back
             # put a command back. The request comes again when every command is rewritten.
-            self._dismiss_webhook_restart()
+            if (
+                not security.legacy_enabled
+                and not self._pending_webhook_migrations()
+                and self._restart_pending(security)
+            ):
+                # What is left cannot be rewritten (no ids): the commands that were still wait for their restart.
+                self._notify_webhook_restart()
+            else:
+                self._dismiss_webhook_restart()
             return WEBHOOK_MIGRATION_FAILED if failed and not written else WEBHOOK_MIGRATION_PENDING
         return await self._async_finish_webhook_migration()
+
+    def _warn_unrewritable_protocol(self, protocol_left: list[str]) -> None:
+        """Name the commands that carry another protocol than HA is reached with but cannot be rewritten (no ids)."""
+        pending = {name for name, *_ in self._pending_webhook_migrations()}
+        if stuck := [name for name in protocol_left if name not in pending]:
+            _LOGGER.warning(
+                "[%s] %d Web-IO commands cannot be moved to the protocol Home Assistant is reached with (no command "
+                "or device id found, a sync may fix it): %s",
+                self.server_id,
+                len(stuck),
+                ", ".join(one_line(name) for name in stuck[:WEBHOOK_STUCK_LISTED]),
+            )
+
+    def _range_check_blocked(self) -> bool:
+        """The entry unloads, or a sync or a function plan restore runs (the latter logged): no resolve, no write."""
+        if self.unloading:
+            return True
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping Web-IO range check", self.server_id
+            )
+            return True
+        return False
+
+    def _webhook_migration_cannot_start(self) -> bool:
+        """The entry unloaded, a run, a sync or a function plan restore is going on (the last two are logged).
+
+        Read before the target is resolved (resolving rewrites the protocol every builder follows, which a sync under
+        way must not see change) and again after it, because the await in between can change any of them.
+        """
+        if self.unloading or self._webhook_migration_running:
+            return True
+        if self._sync_lock.locked() or self._restore_lock.locked():
+            _LOGGER.warning(
+                "[%s] Sync or function plan restore in progress, skipping the webhook migration", self.server_id
+            )
+            return True
+        return False
+
+    async def async_force_webhook_migration(self) -> str:
+        """Rewrite every Web-IO command now: its own webhook path and the protocol HA is reached with (#165).
+
+        The manual counterpart of the nightly run, for when a user does not want to wait for it or does not trust
+        what the ledger holds: the ledger forgets which commands were rewritten, so the run takes all of them again,
+        and the restart request and the read-back follow as after the nightly run. Returns the WEBHOOK_MIGRATION_*
+        state of the run; SKIPPED while a sync, a function plan restore or another run is going on (checked before and
+        after the target is resolved; from the second check to the run there is no await, R4: the run takes the sync
+        lock command by command).
+        """
+        security = self.api.webhook_security
+        if security is None or not self.data or self.unloading:
+            return WEBHOOK_MIGRATION_SKIPPED
+        if self._webhook_migration_cannot_start():
+            return WEBHOOK_MIGRATION_SKIPPED
+        await self.async_webhook_target()
+        if self._webhook_migration_cannot_start():
+            return WEBHOOK_MIGRATION_SKIPPED
+        recorded = set(security.migrated)
+        security.migrated.clear()
+        if not security.legacy_enabled:
+            # With the old id off, a command that has no ids now cannot be rewritten and stays in the ledger, so that
+            # its protocol is still tracked (the run is not reported done while it carries another one). With the old
+            # id on it is forgotten: it holds the old id on and raises the repair, as any command without ids.
+            current = set(self.data.get("webio_commands", {}))
+            security.migrated.update((recorded & current) - {name for name, *_ in self._pending_webhook_migrations()})
+        security.protocol_write = dt_util.utcnow()  # keeps the restart request and the read-back going afterwards
+        return await self._async_run_webhook_migration(security)
 
     async def _async_rewrite_pending_webhooks(self, security: WebhookSecurity) -> tuple[int, int]:
         """(rewritten, failed) of one nightly run: stops at its budget, an unload or a function plan restore."""
@@ -6218,16 +6404,29 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 continue
             written += 1
+            self._keep_the_request_for_the_restart(security)
             if written % WEBHOOK_MIGRATION_SAVE_EVERY == 0:
                 await security.async_save()
         return written, failed
 
+    @staticmethod
+    def _keep_the_request_for_the_restart(security: WebhookSecurity) -> None:
+        """With the old id off, a command this run wrote is read back after Comexio restarted, whatever the ledger held.
+
+        A command the ledger never held sets no marker when it is written (mark_written); with the old id on, the
+        old id itself keeps the run going.
+        """
+        if not security.legacy_enabled and security.last_write is not None:
+            security.protocol_write = security.last_write
+
     async def _async_verify_webhook_commands(self, security: WebhookSecurity) -> tuple[dict[str, str], list[str], bool]:
         """Read every migrated command back from Comexio: (name -> why it deviates, unreadable names, complete).
 
-        A command counts as right when its path is the target's own and its body carries the target's server field
-        (webhook_security.command_deviation). Unreadable: Comexio gave no form, path or body. Not complete: the run
-        stopped at its budget, an unload or a function plan restore before every command was read.
+        A command counts as right when its path is the target's own, its body carries the target's server field
+        (webhook_security.command_deviation) and its protocol is the target's (protocol_deviation, #165).
+        Unreadable: Comexio gave no form, path or body, or no protocol where the target is HTTPS or a protocol move
+        was made to HTTP (protocol_unproven). Not complete: the run stopped at its budget, an unload or a
+        function plan restore before every command was read.
         """
         deadline = time.monotonic() + WEBHOOK_VERIFY_BUDGET_SEC
         targets = self._webio_range_targets()
@@ -6239,7 +6438,15 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 return deviating, unreadable, False
             if form is None or form.parameter is None or form.data is None:
                 unreadable.append(name)
-            elif why := command_deviation(targets[name], form.parameter, form.data):
+                continue
+            protocol = getattr(form, "protocol", None)
+            # Path and body are judged first: a form without a protocol field proves nothing about the protocol,
+            # but a path that drifted is a deviation whatever the protocol is.
+            if why := command_deviation(targets[name], form.parameter, form.data):
+                deviating[name] = why
+            elif protocol_unproven(targets[name], protocol, moving=name in security.protocol_moved):
+                unreadable.append(name)
+            elif why := protocol_deviation(targets[name], protocol):
                 deviating[name] = why
         return deviating, unreadable, True
 
@@ -6308,12 +6515,17 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # A sync wrote a command while the verification ran (it lasts minutes): that write is not restarted yet.
             self._notify_webhook_restart()
             return WEBHOOK_MIGRATION_NEEDS_RESTART
+        if not security.legacy_enabled:
+            # The old id was off already: this run only moved commands to another protocol (#165), and every one is
+            # read back right.
+            return await self._async_end_protocol_move(security)
         _LOGGER.debug(
             "[%s] Switching the old webhook id off (Comexio boot %s, last write %s)",
             self.server_id,
             self.system_info.boot_time,
             security.last_write,
         )
+        security.end_protocol_move()  # every command is read back right: nothing waits for a restart any more
         if not await self._async_switch_legacy_webhook_id_off(security):
             # Not persisted: after a restart the old id would be on again, so do not run on a state that is lost.
             return WEBHOOK_MIGRATION_PENDING
@@ -6334,6 +6546,26 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("[%s] Old webhook id switched off: every Web-IO command uses its own", self.server_id)
         return WEBHOOK_MIGRATION_DONE
 
+    async def _async_end_protocol_move(self, security: WebhookSecurity) -> str:
+        """End of a run that only moved commands to another protocol: nothing waits for a restart any more."""
+        security.end_protocol_move()
+        if not await self._async_save_webhook_security(security):
+            # The store still holds the marker, which would raise the restart request again after a start.
+            security.schedule_save()
+        if self._restart_pending(security):
+            # A sync wrote a command while the save ran (a move to another protocol set the marker again): that write
+            # is not restarted yet, so the move is not over (as after the verification above). It stays open: with
+            # the marker unset, the next nightly run would skip, and no run would take the request back once Comexio
+            # has restarted.
+            security.protocol_write = security.last_write
+            if not await self._async_save_webhook_security(security):
+                security.schedule_save()  # the store holds no marker: a lost one would end the request silently
+            self._notify_webhook_restart()
+            return WEBHOOK_MIGRATION_NEEDS_RESTART
+        self._clear_webhook_migration_notices()
+        _LOGGER.info("[%s] Every Web-IO command carries the protocol Home Assistant is reached with", self.server_id)
+        return WEBHOOK_MIGRATION_DONE
+
     async def _async_finish_without_stored_commands(self, security: WebhookSecurity) -> str:
         """End of a run that found targets but no stored command: switched off when none of our Web-IO devices exists.
 
@@ -6342,7 +6574,21 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hold commands this scrape did not show (a poll that did not read `$WebDevices`): an incomplete scrape,
         nothing was verified, the old id stays on.
         """
+        if not security.legacy_enabled:
+            if self._scrape_shows_no_device_of_ours():
+                # The old id is off and `$WebDevices` was read without a device of ours: no command of ours exists,
+                # so there is no protocol to move either.
+                return await self._async_end_protocol_move(security)
+            # An empty command list can also be an incomplete scrape (a poll that did not read `$WebDevices`): the
+            # marker and the moved commands stay, so that a later complete scrape is read back.
+            _LOGGER.warning(
+                "[%s] The protocol move is not over: no Web-IO command is known to verify, and the last scrape does "
+                "not show that none exists (a sync recreates missing commands)",
+                self.server_id,
+            )
+            return WEBHOOK_MIGRATION_PENDING
         if self._legacy_webhook_id_unneeded(security):
+            security.end_protocol_move()  # no command of ours exists: no protocol move waits for a restart
             if await self._async_switch_legacy_webhook_id_off(security):
                 _LOGGER.info(
                     "[%s] No Web-IO device of this entry exists: the old webhook id is switched off", self.server_id
@@ -6400,6 +6646,20 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info(
             "[%s] Comexio has no Web-IO device of this entry yet: the old webhook id is not needed and stays off",
             self.server_id,
+        )
+
+    def _scrape_shows_no_device_of_ours(self) -> bool:
+        """True when the last poll, committed and not overlapped, scraped `$WebDevices` and found no device of ours.
+
+        The flags are set before a poll commits its data, so a poll under way (or overlapping ones) would pair them
+        with the data of another poll.
+        """
+        return (
+            self._last_poll_scraped
+            and self._own_web_device_count == 0
+            and self.last_update_success
+            and not self._polls_open
+            and not self._poll_overlap
         )
 
     def _legacy_webhook_id_unneeded(self, security: WebhookSecurity | None) -> bool:
@@ -6475,9 +6735,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         persistent_notification.async_create(
             self.hass,
-            f"All Web-IO commands of {self.server_id} now use a webhook id of their own, but Comexio only sends "
-            "a changed command after a restart. Restart the Comexio server; the old webhook id is switched off "
-            "at the next nightly run after that.",
+            f"Web-IO commands of {self.server_id} were rewritten (a webhook id of their own, or the protocol "
+            "Home Assistant is reached with), but Comexio only sends a changed command after a restart. Restart "
+            "the Comexio server; the nightly run checks the commands after that, and switches the old webhook id "
+            "off if it is still on.",
             title="Comexio: restart needed",
             notification_id=webhook_restart_notification_id(self.server_id),
         )
@@ -6499,6 +6760,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         security = self.api.webhook_security
         if self._webhook_notices_restored or self.unloading or security is None:
+            return
+        if not security.legacy_enabled and security.protocol_write is not None:
+            self._restore_protocol_restart_notice(security)
             return
         if not security.legacy_enabled:
             # Decided: the old id is off, nothing is left to ask for. A run that persisted that and ended before it
@@ -6523,6 +6787,21 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             # A reload of the entry (not only a restart) comes through here, too: a request to restart Comexio
             # that an earlier run raised is out of date once a command is left to rewrite or Comexio restarted.
+            self._dismiss_webhook_restart()
+        self._webhook_notices_restored = True
+
+    def _restore_protocol_restart_notice(self, security: WebhookSecurity) -> None:
+        """The old id is off, but commands were moved to another protocol and not read back yet (#165).
+
+        Only the restart request is left to raise, and it waits for Comexio's boot time like the one of the id
+        migration (an unknown boot time counts as a restart still to come).
+        """
+        if self.system_info.boot_time is None:
+            _LOGGER.debug("[%s] The webhook migration notices wait for Comexio's boot time", self.server_id)
+            return
+        if self._restart_pending(security):
+            self._notify_webhook_restart()
+        else:
             self._dismiss_webhook_restart()
         self._webhook_notices_restored = True
 
@@ -11635,7 +11914,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if webio_devices is None:
             webio_devices = (self.data or {}).get("webio_devices")
-        return await self.ha_address.async_target(*webio_device_hints(webio_devices))
+        target = await self.ha_address.async_target(*webio_device_hints(webio_devices))
+        # The commands every builder produces follow the protocol HA is reached with (#165).
+        self.api.webhook_https = target.https
+        return target
 
     async def async_fresh_trigger_audit(
         self, snapshot: dict[str, Any] | None = None

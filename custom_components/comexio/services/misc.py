@@ -234,6 +234,52 @@ async def _upload_webio_class(api: Any, server_id: str, class_name: str, web_io_
     return f"{class_name}: Base-ID {result_val}" if success else f"{class_name}: Upload failed: {result_val}"
 
 
+async def _upload_class_under_sync_lock(coordinator: Any, class_name: str, webio_class: str) -> str:
+    """Build and upload one class while holding the sync lock; returns its result line.
+
+    Like every sync step and every command the webhook migration rewrites, a class is replaced under the sync lock:
+    the migration must not write to the commands of a class that is deleted meanwhile. The JSON is built after the
+    wait (a sync that held the lock may have changed what it describes), and so is the target: the commands carry
+    the protocol HA is reached with (#165), resolved after the wait and right before the build, not before it. An
+    entry that unloaded meanwhile has no session to upload through. A failing build or upload costs this line only,
+    the others are still reported; a failure before the old class is touched (target, build) says that nothing changed.
+    """
+    async with coordinator._sync_lock:
+        if coordinator.unloading:
+            return f"{class_name}: skipped — the integration is unloading"
+        if coordinator._restore_lock.locked():
+            # A restore refuses to start while the sync lock is held, so one that already runs has to be waited for:
+            # the class is not replaced beside it (the sync button refuses the same way).
+            _LOGGER.warning(
+                "[%s] Web-IO class '%s' not uploaded: a function plan restore is running",
+                coordinator.server_id,
+                class_name,
+            )
+            return f"{class_name}: skipped — a function plan restore is running, try again after it"
+        try:
+            await coordinator.async_webhook_target()
+            web_io_json = coordinator.api.generate_webio_json(
+                coordinator.server_id,
+                class_name,
+                coordinator.webio_source_data(),
+                webio_class=webio_class,
+                ignored_marker_ids=coordinator.ignored_marker_ids,
+                ignored_knx_ids=coordinator.ignored_knx_ids,
+            )
+        except Exception as err:
+            _LOGGER.exception("[%s] Building the Web-IO class '%s' failed", coordinator.server_id, class_name)
+            return (
+                f"{class_name}: failed ({type(err).__name__}) before the upload, nothing changed on Comexio: "
+                "see the log"
+            )
+        try:
+            return await _upload_webio_class(coordinator.api, coordinator.server_id, class_name, web_io_json)
+        except Exception as err:
+            _LOGGER.exception("[%s] Uploading the Web-IO class '%s' failed", coordinator.server_id, class_name)
+            # The old class may already be deleted: say so, the sync button recreates it.
+            return f"{class_name}: failed ({type(err).__name__}), the class may be missing on Comexio: see the log"
+
+
 async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None:
     """Service to preview or upload the Web-IO configuration."""
     entry_id = call.data.get("config_entry")
@@ -257,6 +303,9 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         sync_classes = coordinator.required_webio_classes
 
         if not do_upload:
+            # The commands carry the protocol HA is reached with (#165): resolve the target now, a poll may not have
+            # run since the address changed (or since the start). An upload resolves it per class, under the lock.
+            await coordinator.async_webhook_target()
             preview_parts = []
             for cls in sync_classes:
                 class_name = webio_class_name(webio_name, cls)
@@ -277,16 +326,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         results: list[str] = []
         for cls in sync_classes:
             class_name = webio_class_name(webio_name, cls)
-            web_io_json = api.generate_webio_json(
-                server_id,
-                class_name,
-                coordinator.webio_source_data(),
-                webio_class=cls,
-                ignored_marker_ids=coordinator.ignored_marker_ids,
-                ignored_knx_ids=coordinator.ignored_knx_ids,
-            )
-
-            results.append(await _upload_webio_class(api, server_id, class_name, web_io_json))
+            results.append(await _upload_class_under_sync_lock(coordinator, class_name, cls))
 
         persistent_notification.async_create(
             hass, "\n".join(results) or "Nothing to do.", title=f"Comexio Sync ({server_id})"

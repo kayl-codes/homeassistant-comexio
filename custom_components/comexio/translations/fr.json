@@ -454,7 +454,7 @@
     },
     "webhook_restart_needed": {
       "title": "Comexio : redémarrer le serveur Comexio ({server_id})",
-      "description": "Toutes les commandes Web-IO de **{server_id}** utilisent désormais leur propre ID de webhook, mais Comexio n'envoie une commande modifiée qu'après un redémarrage. **Redémarrez le serveur Comexio.** L'ancien ID de webhook est désactivé à la prochaine exécution nocturne qui suit, et cette réparation disparaît."
+      "description": "Des commandes Web-IO de **{server_id}** ont été réécrites (un ID de webhook propre ou le protocole avec lequel Home Assistant est joint), mais Comexio n'envoie une commande modifiée qu'après un redémarrage. **Redémarrez le serveur Comexio.** L'exécution nocturne vérifie ensuite les commandes, désactive l'ancien ID de webhook s'il est encore actif, et cette réparation disparaît."
     },
     "uninstall_cleanup": {
       "title": "Nettoyage de désinstallation Comexio ({server_id})",

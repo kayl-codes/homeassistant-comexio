@@ -663,6 +663,27 @@ def _run_audit(coordinator: ComexioCoordinator, open_issue: SimpleNamespace | No
         assert asyncio.run(coordinator._async_audit_webio({}, {"webio_commands": {}, "knx": []}, {}))
 
 
+def test_a_poll_that_ends_at_a_missing_class_still_sets_the_webhook_protocol() -> None:
+    """The audit stops there, but the commands every builder produces already follow HA's protocol (#165)."""
+    coordinator = _audit_coordinator({})
+    coordinator.api.webhook_https = False
+    coordinator.ha_address.async_target = AsyncMock(return_value=WebhookTarget("x:443", True))
+    coordinator._report_missing_webio_classes = MagicMock(return_value=True)
+    registry = SimpleNamespace(async_get_issue=MagicMock(return_value=None))
+
+    with (
+        patch.object(coordinator_module.ir, "async_get", return_value=registry),
+        patch.object(coordinator_module, "_split_disabled_commands", return_value=({}, {})),
+        patch.object(coordinator_module, "_build_com_audit_map", return_value={}),
+        patch.object(coordinator_module, "webio_device_hints", return_value=()),
+    ):
+        finished = asyncio.run(coordinator._async_audit_webio({}, {"webio_commands": {}, "knx": []}, {}))
+
+    assert finished is False
+    assert coordinator.api.webhook_https is True
+    coordinator._async_audit_webio_devices.assert_not_awaited()
+
+
 def test_a_poll_of_an_unreadable_plan_list_keeps_the_open_plan_findings() -> None:
     coordinator = _audit_coordinator({"7": {"Name": "Pumps"}})
     coordinator._function_plan_dangling_items = MagicMock(side_effect=_dangling_m5)

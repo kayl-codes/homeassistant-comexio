@@ -68,6 +68,11 @@ from .const import (
     SYNC_DURATION_WRITE,
     SYNC_PROGRESS_END_PCT,
     SYNC_PROGRESS_START_PCT,
+    WEBHOOK_MIGRATION_DONE,
+    WEBHOOK_MIGRATION_FAILED,
+    WEBHOOK_MIGRATION_NEEDS_RESTART,
+    WEBHOOK_MIGRATION_PENDING,
+    WEBHOOK_MIGRATION_SKIPPED,
     WEBIO_CLASS_KNX,
     WEBIO_CLASS_MARKER,
     WEBIO_CLASSES,
@@ -99,6 +104,20 @@ from .entity import ComexioFunctionPlanEntityMixin, ComexioKnxEntity, ComexioMar
 from .ha_address import is_loopback_address
 from .repairs import count_referencing_automations_and_scripts
 from .services import async_resync_io_group_headers, async_sort_function_plan
+
+# What a forced run of the webhook migration (press_action webhook_migration) tells the user, by its result state.
+WEBHOOK_MIGRATION_RESULT_TEXT = {
+    WEBHOOK_MIGRATION_DONE: "Every Web-IO command is moved.",
+    WEBHOOK_MIGRATION_NEEDS_RESTART: "The Web-IO commands are rewritten: restart Comexio so it sends them.",
+    WEBHOOK_MIGRATION_PENDING: (
+        "Not finished yet: some Web-IO commands are not moved or not verified (see the log); the nightly run goes on."
+    ),
+    WEBHOOK_MIGRATION_FAILED: "No Web-IO command could be moved (see the log).",
+    WEBHOOK_MIGRATION_SKIPPED: (
+        "Not started: a sync, a restore or another migration run is going on, or the integration is not ready."
+        " Try again later."
+    ),
+}
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -250,7 +269,7 @@ def _class_action_eta(
 ) -> int:
     """Seconds the delta tasks of action take for one class (the Fast-Track decision weighs it).
 
-    An address change costs one device write: the commands keep HTTP whatever the address.
+    An address change costs one device write: the commands are not rewritten for it.
     """
     eta = 0
     task_count = 0
@@ -633,10 +652,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
                     "function_plan_add_missing",
                     "cleanup_entities",
                     "knx_bridge_add_missing",
+                    "webhook_migration",
                 ]
             )
         },
-        "async_handle_press",
+        "async_press_action",
     )
 
 
@@ -732,6 +752,30 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             )
             return False
         return True
+
+    async def _async_handle_webhook_migration(self) -> None:
+        """Rewrite every Web-IO command now (press_action "webhook_migration", #165); the result goes to the log."""
+        started = datetime.datetime.now()
+        _LOGGER.info("[%s] press_action webhook_migration started", self.server_id)
+        state = await self.coordinator.async_force_webhook_migration()
+        duration = (datetime.datetime.now() - started).total_seconds()
+        _LOGGER.info(
+            "[%s] press_action webhook_migration finished: %s (duration %.1f s)", self.server_id, state, duration
+        )
+        persistent_notification.async_create(
+            self.hass,
+            f"{WEBHOOK_MIGRATION_RESULT_TEXT.get(state, state)} (duration {duration:.1f} s)",
+            title="Comexio webhook migration",
+            notification_id=f"comexio_webhook_migration_{self.server_id}",
+        )
+
+    async def async_press_action(self, action: str = "full_sync") -> None:
+        """Entity service ``press_action``: the sync modes, or the webhook migration outside the sync."""
+        if action == "webhook_migration":
+            # Takes the sync lock command by command itself, so it must not run under the sync's own.
+            await self._async_handle_webhook_migration()
+            return
+        await self.async_handle_press(action)
 
     async def async_handle_press(self, action: str = "full_sync") -> None:
         """Execute the sync logic with mode selection."""
