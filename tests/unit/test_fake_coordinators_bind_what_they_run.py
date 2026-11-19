@@ -32,8 +32,8 @@ take it away: it may hold for one test only, and the order of assignments in a t
 
 Not followed: a double that is built without a class (`SimpleNamespace(...)` or `MagicMock()` passed to
 `ComexioCoordinator.method(fake)`), a method inherited from Home Assistant's coordinator that a double binds (no source
-here to read), a name read through `getattr` with a computed name, a `setattr` with a computed name. These stay the
-reviewer's job.
+here to read), a name read through `getattr` with a computed name, a `setattr` with a computed name, a name given by
+tuple unpacking (`other, size = None, 1`). These stay the reviewer's job.
 
 A finding is fixed by binding the method in the double, or - where the test never reaches the call - listed in
 ALLOWED with the reason.
@@ -384,6 +384,7 @@ def test_detector_finds_a_method_the_double_lacks() -> None:
         "    other = ComexioCoordinator.other\n    other_property = None\n",
         "    def other(self): ...\n    other_property = None\n",
         "    other: object = AsyncMock()\n    other_property: int = 1\n",
+        "    other = AsyncMock()\n    other: object\n    other_property = 1\n",
         "\ndef test_a(fake):\n    fake.other = AsyncMock()\n    fake.other_property = 1\n",
         "\ndef test_a(fake):\n    fake.other: int = AsyncMock()\n    fake.other_property = 1\n",
         "\ndef test_a():\n    _Fake(other=AsyncMock(), other_property=2)\n",
@@ -402,6 +403,7 @@ def test_detector_finds_a_method_the_double_lacks() -> None:
         "bound",
         "defined",
         "annotated",
+        "bare annotation after a callable",
         "assigned",
         "annotated attribute",
         "keyword of the class",
@@ -482,6 +484,9 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "\ndef test_a(fake, x):\n    fake.other = f'{x}'\n    fake.other_property = 1\n",
         "\ndef test_a(fake, x):\n    fake.other = 1 if x else 2\n    fake.other_property = 1\n",
         "    other = AsyncMock()\n    other = None\n    other_property = None\n",
+        "    other = AsyncMock()\n    other: object = None\n    other_property = None\n",
+        "    def other(self): ...\n    other = None\n    other_property = None\n",
+        "    other = AsyncMock()\n    other = other_property = None\n",
     ],
     ids=[
         "class body",
@@ -498,6 +503,9 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "f-string",
         "conditional of two literals",
         "literal after a callable in the class body",
+        "annotated literal after a callable in the class body",
+        "literal after a method in the class body",
+        "literal for two targets after a callable in the class body",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
