@@ -66,6 +66,7 @@ _ELEMENTS = "elements"
 _CONNECTIONS = "connections"
 _OUTPUT = "output"
 _INPUT = "input"
+_HASH = "hash"
 _FUB_ELEMENT_ID = "FubElementId"
 _ELEMENT = "element"
 _REASON = "reason"
@@ -394,7 +395,7 @@ def resolve_block_ids(snapshot: dict[str, Any], fub_base: Mapping[str, Any]) -> 
         return snapshot | extra if extra else snapshot
     resolved = snapshot | extra | {_ELEMENTS: elements, UNRESOLVED_BLOCKS: unresolved}
     # The stored hash is over the stored ids; a restore verifies against the translated plan.
-    resolved["hash"] = plan_hash(resolved)
+    resolved[_HASH] = plan_hash(resolved)
     return resolved
 
 
@@ -538,7 +539,7 @@ def omit_unresolved_blocks(snapshot: dict[str, Any]) -> dict[str, Any]:
         result[SNAPSHOT_BLOCK_SETTINGS] = _without_elements(settings, omitted)
     if UNVERIFIED_BLOCK_PROBLEMS in snapshot:
         result[UNVERIFIED_BLOCK_PROBLEMS] = _problems_of_the_rest(snapshot[UNVERIFIED_BLOCK_PROBLEMS], omitted)
-    result["hash"] = plan_hash(result)
+    result[_HASH] = plan_hash(result)
     return result
 
 
