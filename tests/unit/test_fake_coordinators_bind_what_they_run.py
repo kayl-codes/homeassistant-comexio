@@ -23,8 +23,11 @@ counts as callable: its value is not known here. A `@property` defined in the cl
 In a class body a later assignment replaces an earlier one (`other = AsyncMock()`, then `other = None`) and `del other`
 takes it away, and a double has the bodies and the bindings of its base classes from the same module (the first base
 wins; a base from another module is not followed). A binding that a later statement of the body replaces or deletes no
-longer counts, and a module-level name that holds a coordinator method (`run_alias = ComexioCoordinator.run`) binds
-it. A name the real coordinator defines as a plain method has to be callable wherever the method uses it, a callback
+longer counts, and a module-level name that holds a coordinator method (`run_alias = ComexioCoordinator.run`, also an
+alias of such a name) binds it. Only the direct statements of a class body and of the module are read: a definition
+inside an `if`/`try`/`with` suite is not followed, and a method handed over by tuple unpacking
+(`run, other = ComexioCoordinator.run, None`) is not a binding. A name the real coordinator defines as a plain method
+has to be callable wherever the method uses it, a callback
 included
 (`schedule(self.name)`); for every other name only a direct call counts: `self.name.attr()` reads `name`, so a literal
 passes (not followed).
@@ -152,7 +155,7 @@ def _method_aliases(tree: ast.Module, aliases: set[str]) -> dict[str, str]:
             found.pop(name, None)  # a later definition of the name replaces the alias
         if assigned := _assignment(statement):
             targets, value = assigned
-            if (method := _coordinator_method_of(value, aliases, {})) is not None:
+            if (method := _coordinator_method_of(value, aliases, found)) is not None:
                 found |= {target.id: method for target in targets if isinstance(target, ast.Name)}
     return found
 
@@ -516,6 +519,7 @@ def test_every_double_binds_what_its_methods_call() -> None:
 FAKE = "_Fake"
 OTHER = "other"
 RUN = "run"
+SIZE = "size"
 HELPER = "helper"
 PROPERTY = "other_property"
 NO_TEST = "no test reaches it"
@@ -839,8 +843,10 @@ def test_a_double_inherits_the_bindings_of_a_base_and_is_checked_with_its_own_ov
 
 def test_a_module_level_name_that_holds_a_method_binds_it() -> None:
     aliased = "run_alias = ComexioCoordinator.run\nclass _Fake:\n    run = run_alias\n"
+    chained = "run_alias = ComexioCoordinator.run\nsecond = run_alias\nclass _Fake:\n    run = second\n"
 
     assert {bound for _, bound, _ in missing_bindings(aliased, METHODS, MEMBERS)} == {RUN}
+    assert {bound for _, bound, _ in missing_bindings(chained, METHODS, MEMBERS)} == {RUN}  # an alias of an alias
 
 
 def test_a_chained_binding_binds_every_name() -> None:
@@ -879,7 +885,7 @@ HANDED_ON = (
 )
 def test_a_method_handed_on_has_to_be_callable_but_a_property_may_be_a_value(decorator: str) -> None:
     methods = {node.name: node for node in ast.parse(HANDED_ON.format(decorator=decorator)).body[0].body}
-    members = frozenset({"run", "size", "other"})
+    members = frozenset({RUN, SIZE, OTHER})
     double = "class _Fake:\n    run = ComexioCoordinator.run\n"
 
     assert missing_bindings(double + "    other = None\n    size = 5\n", methods, members) == {(FAKE, RUN, OTHER): RUN}
@@ -889,10 +895,10 @@ def test_a_method_handed_on_has_to_be_callable_but_a_property_may_be_a_value(dec
 @pytest.mark.parametrize("decorator", ["@staticmethod", "@classmethod", "@functools.cache"])
 def test_a_decorated_plain_method_is_not_taken_for_a_property(decorator: str) -> None:
     methods = {node.name: node for node in ast.parse(HANDED_ON.format(decorator=decorator)).body[0].body}
-    members = frozenset({"run", "size", "other"})
+    members = frozenset({RUN, SIZE, OTHER})
     double = "class _Fake:\n    run = ComexioCoordinator.run\n    other = AsyncMock()\n"
 
-    assert missing_bindings(double + "    size = 5\n", methods, members) == {(FAKE, RUN, "size"): RUN}
+    assert missing_bindings(double + "    size = 5\n", methods, members) == {(FAKE, RUN, SIZE): RUN}
     assert missing_bindings(double + "    size = AsyncMock()\n", methods, members) == {}
 
 
