@@ -19,6 +19,7 @@ import pytest
 from custom_components.comexio import button as button_module, webhook_security as ws
 from custom_components.comexio.api import ComexioAPI
 from custom_components.comexio.button import ComexioSyncButton
+from custom_components.comexio.coordinator import ComexioCoordinator
 from tests.unit.test_api_helpers import PARSED
 from tests.unit.test_webhook_security import NOW, SERVER, _run, _security, _use_client
 from tests.unit.test_webhook_security_flow import _tick_coordinator
@@ -1076,6 +1077,139 @@ def test_the_forced_run_drops_ledger_names_the_data_no_longer_has(monkeypatch: p
 
     assert "HA gone" not in security.migrated
     assert NAME in security.migrated
+
+
+def test_a_command_the_ledger_never_held_is_rewritten_when_the_old_id_is_off_and_read_back_after_the_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Old id off, no marker, nothing in the ledger to move: a rewritable command that is not in it still runs."""
+    coordinator, held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.migrated.discard(NAME)  # created in Comexio by hand: never written by this entry
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+
+    assert held["Protocol"] == WEBIO_PROTOCOL_HTTPS  # really written, not skipped
+    assert NAME in security.migrated
+    assert security.protocol_write == NOW  # kept, so that the next night waits for the restart and reads it back
+
+    coordinator.system_info.boot_time = security.last_write + timedelta(minutes=5)
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    assert security.protocol_write is None
+    assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
+
+
+def test_a_never_held_command_whose_write_fails_sets_no_marker_and_is_tried_again_the_next_night(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.migrated.discard(NAME)
+    send = coordinator.api.client.save_webio_command
+    coordinator.api.client.save_webio_command = AsyncMock(side_effect=ConnectionError("down"))
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "failed"
+
+    coordinator.api.client.save_webio_command.assert_awaited_once()  # tried, not skipped
+    assert security.protocol_write is None  # nothing was written, so nothing waits for a restart
+    assert NAME not in security.migrated
+
+    coordinator.api.client.save_webio_command = send
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"  # the next night does not skip
+    assert held["Protocol"] == WEBIO_PROTOCOL_HTTPS
+
+
+def test_a_never_held_command_is_read_back_and_not_written_twice_while_comexio_has_not_restarted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.migrated.discard(NAME)
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+
+    # Comexio has not restarted: the next night asks again, rewrites nothing and keeps the marker.
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+    coordinator.api.client.save_webio_command.assert_awaited_once()
+    assert security.protocol_write == NOW
+
+    # After the restart the command is read back: one that still shows the old protocol is not accepted.
+    coordinator.system_info.boot_time = security.last_write + timedelta(minutes=5)
+    held["Protocol"] = WEBIO_PROTOCOL_HTTP
+    assert _run(coordinator._async_webhook_migration_tick()) == "pending"
+    coordinator.api.get_webio_command_form.assert_awaited()
+    assert NAME not in security.migrated  # back in the ledger gap, the next night rewrites it
+
+
+def test_a_never_held_command_with_the_old_id_on_sets_no_marker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the old id on, the old id itself keeps the run going: the marker belongs to a protocol move only."""
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1), legacy=True
+    )
+    security = coordinator.api.webhook_security
+    security.migrated.discard(NAME)
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+
+    assert NAME in security.migrated  # written
+    assert security.protocol_write is None
+
+
+def test_the_forced_run_keeps_its_marker_for_a_never_held_command_when_the_old_id_is_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.migrated.discard(NAME)
+
+    assert _run(coordinator.async_force_webhook_migration()) == "needs_restart"
+
+    assert held["Protocol"] == WEBIO_PROTOCOL_HTTPS
+    assert security.protocol_write == security.last_write == NOW  # moved forward by the write, never back
+
+
+@pytest.mark.parametrize("missing", ["cmd_id", "device_id", "target"])
+def test_a_never_held_command_that_cannot_be_rewritten_for_any_reason_leaves_the_night_skipped(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    coordinator.api.webhook_security.migrated.discard(NAME)
+    if missing == "cmd_id":
+        coordinator.data["webio_commands"][NAME]["cmdId"] = ""
+    elif missing == "device_id":
+        for device in coordinator.data["webio_devices"].values():
+            device["device_id"] = ""
+    else:
+        coordinator._webio_range_targets = dict
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
+
+    coordinator.api.client.save_webio_command.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("legacy", "last_write", "expected"), [(True, NOW, None), (False, None, NOW - timedelta(days=1))]
+)
+def test_the_marker_of_a_written_command_is_only_set_never_cleared_and_not_while_the_old_id_is_on(
+    monkeypatch: pytest.MonkeyPatch, legacy: bool, last_write: Any, expected: Any
+) -> None:
+    security = _security(monkeypatch)
+    security.legacy_enabled = legacy
+    security.last_write = last_write
+    security.protocol_write = expected  # what a forced run set before, or nothing
+
+    ComexioCoordinator._keep_the_request_for_the_restart(security)
+
+    assert security.protocol_write == expected
 
 
 def test_the_restart_request_stays_when_only_commands_without_ids_are_left(monkeypatch: pytest.MonkeyPatch) -> None:

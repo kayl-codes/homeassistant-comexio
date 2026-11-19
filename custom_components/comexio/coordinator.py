@@ -6249,6 +6249,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             not security.legacy_enabled
             and security.protocol_write is None
             and not self._protocol_pending_commands(security)
+            and not self._pending_webhook_migrations()  # a command the ledger never held and that can be rewritten
         ):
             return WEBHOOK_MIGRATION_SKIPPED
         self._webhook_migration_running = True  # no await between the check above and here
@@ -6286,6 +6287,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await security.async_save()
             except Exception:
                 _LOGGER.exception("[%s] The webhook ledger could not be saved", self.server_id)
+                security.schedule_save()  # the marker of the rewrites must not be lost with this save
         unmigrated = self._unmigrated_webhook_commands(security)
         protocol_left = self._protocol_pending_commands(security)
         remaining = self._report_webhook_leftovers(security, unmigrated, protocol_left)
@@ -6402,9 +6404,20 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
                 continue
             written += 1
+            self._keep_the_request_for_the_restart(security)
             if written % WEBHOOK_MIGRATION_SAVE_EVERY == 0:
                 await security.async_save()
         return written, failed
+
+    @staticmethod
+    def _keep_the_request_for_the_restart(security: WebhookSecurity) -> None:
+        """With the old id off, a command this run wrote is read back after Comexio restarted, whatever the ledger held.
+
+        A command the ledger never held sets no marker when it is written (mark_written); with the old id on, the
+        old id itself keeps the run going.
+        """
+        if not security.legacy_enabled and security.last_write is not None:
+            security.protocol_write = security.last_write
 
     async def _async_verify_webhook_commands(self, security: WebhookSecurity) -> tuple[dict[str, str], list[str], bool]:
         """Read every migrated command back from Comexio: (name -> why it deviates, unreadable names, complete).
