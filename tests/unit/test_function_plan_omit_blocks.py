@@ -445,6 +445,7 @@ def test_a_block_key_with_a_line_break_stays_one_line_in_the_report() -> None:
     line = omitted_block_lines([{**block, "connections": 0, "unfed": []}])[0]
 
     assert "\n" not in line
+    assert "(not /d/d)" in line
 
 
 def test_element_and_block_ids_with_line_breaks_stay_one_line_in_the_report() -> None:

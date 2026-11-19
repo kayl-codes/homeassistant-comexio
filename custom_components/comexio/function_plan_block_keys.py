@@ -66,6 +66,7 @@ _ELEMENTS = "elements"
 _CONNECTIONS = "connections"
 _OUTPUT = "output"
 _INPUT = "input"
+_FUB_ELEMENT_ID = "FubElementId"
 _ELEMENT = "element"
 _REASON = "reason"
 _NAME = "name"
@@ -177,7 +178,7 @@ def uses_unknown_block_ids(elements: Mapping[str, Any], fub_base: Mapping[str, A
 def _endpoint(port: Any) -> tuple[str, int] | None:
     if not isinstance(port, Mapping):
         return None
-    elem_id, pos = port.get("FubElementId"), _as_int(port.get("IOPos"))
+    elem_id, pos = port.get(_FUB_ELEMENT_ID), _as_int(port.get("IOPos"))
     return (str(elem_id), pos) if elem_id is not None and pos is not None else None
 
 
@@ -428,8 +429,8 @@ def unresolved_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
 
 def _endpoint_element(port: Any) -> str | None:
     """The element id a wire end names, None for anything that is no end."""
-    if isinstance(port, Mapping) and port.get("FubElementId") is not None:
-        return str(port["FubElementId"])
+    if isinstance(port, Mapping) and (element := port.get(_FUB_ELEMENT_ID)) is not None:
+        return str(element)
     return None
 
 
