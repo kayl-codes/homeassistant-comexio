@@ -686,6 +686,38 @@ def test_a_failed_save_at_the_end_of_a_protocol_move_is_retried_by_a_delayed_sav
     security.schedule_save.assert_called_once_with()
 
 
+@pytest.mark.parametrize(("https", "saved"), [(False, True), (True, True), (False, False)])
+def test_a_protocol_move_is_not_over_when_a_sync_writes_a_command_while_the_end_is_saved(
+    monkeypatch: pytest.MonkeyPatch, https: bool, saved: bool
+) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTPS, boot=NOW + timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.https_written.add(NAME)
+    security.protocol_write = NOW - timedelta(hours=2)
+    written = NOW + timedelta(hours=2)
+
+    async def _save(_security: Any) -> bool:
+        # the await is where a sync can write: back to HTTP (a move) or again with HTTPS; Comexio restarts for both
+        security.mark_written(NAME, written, https=https)
+        return saved
+
+    coordinator._async_save_webhook_security = AsyncMock(side_effect=_save)
+    coordinator._notify_webhook_restart = MagicMock()
+    coordinator._clear_webhook_migration_notices = MagicMock()
+    security.schedule_save = MagicMock()
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "needs_restart"
+
+    # the marker is the one the sync's write set after the end cleared it, not the one the run began with
+    assert security.protocol_write == (None if https else written)
+    assert security.protocol_moved == (set() if https else {NAME})
+    coordinator._notify_webhook_restart.assert_called_once_with()
+    coordinator._clear_webhook_migration_notices.assert_not_called()
+    assert security.schedule_save.call_count == (0 if saved else 1)  # a failed save is still retried
+
+
 def test_the_forced_run_that_switches_the_old_id_off_for_lack_of_commands_clears_the_marker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

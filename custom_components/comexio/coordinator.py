@@ -6539,6 +6539,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not await self._async_save_webhook_security(security):
             # The store still holds the marker, which would raise the restart request again after a start.
             security.schedule_save()
+        if self._restart_pending(security):
+            # A sync wrote a command while the save ran (a move to another protocol set the marker again): that write
+            # is not restarted yet, so the move is not over (as after the verification above).
+            self._notify_webhook_restart()
+            return WEBHOOK_MIGRATION_NEEDS_RESTART
         self._clear_webhook_migration_notices()
         _LOGGER.info("[%s] Every Web-IO command carries the protocol Home Assistant is reached with", self.server_id)
         return WEBHOOK_MIGRATION_DONE
