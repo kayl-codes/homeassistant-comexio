@@ -21,9 +21,11 @@ something that can be called: a literal, a container, a computed number or text 
 is not enough (a conditional with a constant condition is the branch it selects). What else is given (a name, a call)
 counts as callable: its value is not known here. A `@property` defined in the class body is what its `return`s give.
 In a class body a later assignment replaces an earlier one (`other = AsyncMock()`, then `other = None`) and `del other`
-takes it away, and a double has the bodies of its base classes from the same module (the first base wins; a base from
-another module is not followed). A name the real
-coordinator defines as a plain method has to be callable wherever the method uses it, a callback included
+takes it away, and a double has the bodies and the bindings of its base classes from the same module (the first base
+wins; a base from another module is not followed). A binding that a later statement of the body replaces or deletes no
+longer counts, and a module-level name that holds a coordinator method (`run_alias = ComexioCoordinator.run`) binds
+it. A name the real coordinator defines as a plain method has to be callable wherever the method uses it, a callback
+included
 (`schedule(self.name)`); for every other name only a direct call counts: `self.name.attr()` reads `name`, so a literal
 passes (not followed).
 
@@ -54,7 +56,9 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 TESTS = Path(__file__).parent
 COORDINATOR = "ComexioCoordinator"
 BUILDER_WORD = "coordinator"  # a function with this in its name builds a double: `_coordinator(api, other=...)`
-PROPERTY_DECORATORS = ("property", "cached_property", "setter", "getter", "deleter")
+VALUE_PROPERTIES = ("property", "cached_property", "getter")  # decorators that make a property of a method
+PROPERTY_CHANGERS = ("setter", "deleter")  # decorators that change a property, not its value
+PROPERTY_DECORATORS = VALUE_PROPERTIES + PROPERTY_CHANGERS
 NOT_A_LITERAL = (ValueError, TypeError, SyntaxError, MemoryError, RecursionError)  # what `ast.literal_eval` raises
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 NOT_CALLABLE = (  # what no call can be made on, also when it holds names (`[mock]`, `f"{x}"`, `a + b`)
@@ -130,16 +134,62 @@ def _class_aliases(tree: ast.Module) -> set[str]:
     return aliases
 
 
-def _bound_coordinator_methods(statement: ast.stmt, aliases: set[str]) -> list[tuple[str, str]]:
-    """(name in the double, coordinator method) for `name = ComexioCoordinator.method` in a class body; a chained
+def _coordinator_method_of(value: ast.expr, aliases: set[str], method_aliases: dict[str, str]) -> str | None:
+    """The coordinator method an expression stands for: `ComexioCoordinator.method`, or a module-level name that holds
+    one (`run_alias = ComexioCoordinator.method`)."""
+    if isinstance(value, ast.Attribute) and _names_the_class(value.value, aliases):
+        return value.attr
+    if isinstance(value, ast.Name):
+        return method_aliases.get(value.id)
+    return None
+
+
+def _method_aliases(tree: ast.Module, aliases: set[str]) -> dict[str, str]:
+    """Module-level names that hold a coordinator method (`run_alias = ComexioCoordinator.run`)."""
+    found: dict[str, str] = {}
+    for statement in tree.body:
+        for name in _names_defined(statement):
+            found.pop(name, None)  # a later definition of the name replaces the alias
+        if assigned := _assignment(statement):
+            targets, value = assigned
+            if (method := _coordinator_method_of(value, aliases, {})) is not None:
+                found |= {target.id: method for target in targets if isinstance(target, ast.Name)}
+    return found
+
+
+def _bound_coordinator_methods(
+    statement: ast.stmt, aliases: set[str], method_aliases: dict[str, str]
+) -> dict[str, str]:
+    """name in the double -> coordinator method for `name = ComexioCoordinator.method` in a class body; a chained
     assignment (`name = other = ComexioCoordinator.method`) binds it under every name."""
     assigned = _assignment(statement)
     if assigned is None:
-        return []
+        return {}
     targets, value = assigned
-    if not (isinstance(value, ast.Attribute) and _names_the_class(value.value, aliases)):
-        return []
-    return [(target.id, value.attr) for target in targets if isinstance(target, ast.Name)]
+    method = _coordinator_method_of(value, aliases, method_aliases)
+    if method is None:
+        return {}
+    return {target.id: method for target in targets if isinstance(target, ast.Name)}
+
+
+def _target_names(target: ast.expr) -> list[str]:
+    """The names a target binds, tuple and list targets (`a, (b, c) = ...`) included."""
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, ast.Tuple | ast.List):
+        return [name for element in target.elts for name in _target_names(element)]
+    return []
+
+
+def _names_defined(statement: ast.stmt) -> list[str]:
+    """The names a statement defines or (`del`) takes away; a bare annotation defines none."""
+    if assigned := _assignment(statement):
+        return [name for target in assigned[0] for name in _target_names(target)]
+    if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
+        return [statement.name]
+    if isinstance(statement, ast.Delete):
+        return [name for target in statement.targets for name in _target_names(target)]
+    return []
 
 
 def _self_calls(method: ast.AST) -> set[str]:
@@ -232,9 +282,9 @@ def _define_function(supply: Supply, function: ast.FunctionDef | ast.AsyncFuncti
     """A method is callable. A property is what it returns (nothing returned is `None`); a setter or deleter leaves
     the value of the property as it is."""
     kinds = {ast.unparse(decorator).split(".")[-1] for decorator in function.decorator_list}
-    if kinds & {"setter", "deleter"}:
+    if kinds & set(PROPERTY_CHANGERS):
         return
-    if kinds & {"property", "cached_property", "getter"}:
+    if kinds & set(VALUE_PROPERTIES):
         supply[function.name] = any(_callable(value) for value in _returned_values(function))
     else:
         supply[function.name] = True
@@ -348,13 +398,14 @@ def missing_bindings(
     aliases = _class_aliases(tree)
     # By class definition, not by name: two doubles of one name (in two tests) keep their own bindings.
     defined = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
-    bound_of = [(node, _bindings(node, aliases)) for node in defined]
+    method_aliases = _method_aliases(tree, aliases)
+    bound_of = [(node, _class_bindings(node, defined, aliases, method_aliases)) for node in defined]
     shared, per_class = _supplied_in_file(tree, {double.name for double, bound in bound_of if bound})
     found: dict[tuple[str, str, str], str] = {}
     for double, bound in bound_of:
         # The bindings are part of the class body: `other = ComexioCoordinator.other`, then `other = None` replaces it.
         have = _merged(_class_supply(double, defined), shared, per_class.get(double.name, {}))
-        for name, method in bound:
+        for name, method in bound.items():
             if method not in methods:
                 continue  # inherited from Home Assistant's coordinator: no source here to follow
             for needed in _lacking(have, methods, methods[method], members):
@@ -372,21 +423,42 @@ def _base_class(base: ast.expr, double: ast.ClassDef, defined: list[ast.ClassDef
     return (above or named or [None])[-1]
 
 
+def _parents(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple[ast.ClassDef, ...]) -> list[ast.ClassDef]:
+    """The base classes of the double that this module defines, last base first: applied in this order, the first
+    base wins, as in Python's lookup order (a diamond is not resolved exactly). A base of another module is not
+    followed."""
+    parents = (_base_class(base, double, defined) for base in reversed(double.bases))
+    return [parent for parent in parents if parent is not None and parent not in seen]
+
+
 def _class_supply(double: ast.ClassDef, defined: list[ast.ClassDef], seen: tuple[ast.ClassDef, ...] = ()) -> Supply:
-    """The body of the double on top of the bodies of its base classes that this module defines (a base from
-    another module is not followed)."""
+    """The body of the double on top of the bodies of its base classes that this module defines."""
     supply: Supply = {}
-    for base in reversed(double.bases):  # the first base wins, as in Python's lookup order
-        parent = _base_class(base, double, defined)
-        if parent is not None and parent not in seen:
-            supply.update(_class_supply(parent, defined, (*seen, double)))
+    for parent in _parents(double, defined, seen):
+        supply.update(_class_supply(parent, defined, (*seen, double)))
     supply.update(_defined_in_body(double))
     return supply
 
 
-def _bindings(double: ast.ClassDef, aliases: set[str]) -> list[tuple[str, str]]:
-    """(name in the double, coordinator method) for each coordinator method the class body binds."""
-    return [pair for statement in double.body for pair in _bound_coordinator_methods(statement, aliases)]
+def _class_bindings(
+    double: ast.ClassDef,
+    defined: list[ast.ClassDef],
+    aliases: set[str],
+    method_aliases: dict[str, str],
+    seen: tuple[ast.ClassDef, ...] = (),
+) -> dict[str, str]:
+    """name in the double -> coordinator method, for each coordinator method the double still binds: those of its base
+    classes in this module, then its own body top down (a name defined or deleted later is no binding any more)."""
+    bound: dict[str, str] = {}
+    for parent in _parents(double, defined, seen):
+        defines = _class_supply(parent, defined)  # what this base defines hides a binding of a base behind it
+        bound = {name: method for name, method in bound.items() if name not in defines}
+        bound |= _class_bindings(parent, defined, aliases, method_aliases, (*seen, double))
+    for statement in double.body:
+        for name in _names_defined(statement):
+            bound.pop(name, None)
+        bound.update(_bound_coordinator_methods(statement, aliases, method_aliases))
+    return bound
 
 
 def _is_property(method: ast.AST) -> bool:
@@ -706,6 +778,69 @@ def test_the_first_of_several_bases_wins() -> None:
 
     assert missing_bindings(literal + mock + "class _Fake(_First, _Second):\n" + body, METHODS, MEMBERS) == CALLED
     assert missing_bindings(literal + mock + "class _Fake(_Second, _First):\n" + body, METHODS, MEMBERS) == {}
+
+
+@pytest.mark.parametrize(
+    "replacing",
+    [
+        "    run = AsyncMock()\n",
+        "    def run(self): ...\n",
+        "    del run\n",
+        "    run: object = None\n",
+        "    run, other = AsyncMock(), None\n",
+    ],
+    ids=["assignment", "method", "deletion", "annotated assignment", "tuple target"],
+)
+def test_a_binding_that_the_class_body_replaces_later_is_not_checked(replacing: str) -> None:
+    assert missing_bindings("class _Fake:\n    run = ComexioCoordinator.run\n" + replacing, METHODS, MEMBERS) == {}
+
+
+def test_a_binding_that_the_body_makes_again_after_a_replacement_is_checked() -> None:
+    again = "class _Fake:\n    run = AsyncMock()\n    run = ComexioCoordinator.run\n"
+
+    assert {bound for _, bound, _ in missing_bindings(again, METHODS, MEMBERS)} == {RUN}
+
+
+def test_a_base_in_front_hides_the_binding_of_a_base_behind_it() -> None:
+    hiding = "class _First:\n    run = AsyncMock()\n"
+    binding = "class _Second:\n    run = ComexioCoordinator.run\n"
+
+    def fake_findings(bases: str) -> set[str]:  # `_Second` alone is a double of its own, only `_Fake` is of interest
+        found = missing_bindings(hiding + binding + f"class _Fake({bases}):\n    pass\n", METHODS, MEMBERS)
+        return {bound for (double, bound, _) in found if double == "_Fake"}
+
+    assert fake_findings("_First, _Second") == set()
+    assert fake_findings("_Second, _First") == {RUN}
+
+
+def test_a_module_level_name_that_is_defined_again_no_longer_holds_the_method() -> None:
+    reassigned = "run_alias = ComexioCoordinator.run\nrun_alias = None\nclass _Fake:\n    run = run_alias\n"
+    replaced = "run_alias = ComexioCoordinator.run\ndef run_alias(): ...\nclass _Fake:\n    run = run_alias\n"
+    tuple_target = (
+        "run_alias = ComexioCoordinator.run\nrun_alias, other = None, None\nclass _Fake:\n    run = run_alias\n"
+    )
+
+    assert missing_bindings(reassigned, METHODS, MEMBERS) == {}
+    assert missing_bindings(replaced, METHODS, MEMBERS) == {}
+    assert missing_bindings(tuple_target, METHODS, MEMBERS) == {}
+
+
+def test_a_double_inherits_the_bindings_of_a_base_and_is_checked_with_its_own_overrides() -> None:
+    base = (
+        "class _Base:\n    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+        "    other = AsyncMock()\n    other_property = 1\n"
+    )
+
+    assert missing_bindings(base + "class _Fake(_Base):\n    pass\n", METHODS, MEMBERS) == {}
+    assert missing_bindings(base + "class _Fake(_Base):\n    other = None\n", METHODS, MEMBERS) == CALLED
+    # a subclass that replaces the binding no longer runs the coordinator method
+    assert missing_bindings(base + "class _Fake(_Base):\n    run = AsyncMock()\n", METHODS, MEMBERS) == {}
+
+
+def test_a_module_level_name_that_holds_a_method_binds_it() -> None:
+    aliased = "run_alias = ComexioCoordinator.run\nclass _Fake:\n    run = run_alias\n"
+
+    assert {bound for _, bound, _ in missing_bindings(aliased, METHODS, MEMBERS)} == {RUN}
 
 
 def test_a_chained_binding_binds_every_name() -> None:
