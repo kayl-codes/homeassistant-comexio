@@ -155,6 +155,7 @@ def test_the_nightly_run_moves_a_command_to_https_when_the_old_id_is_off_and_wai
 
     assert _run(coordinator._async_webhook_migration_tick()) == "done"
     assert security.protocol_write is None  # read back right: nothing waits for a restart any more
+    assert security.protocol_moved == set()
     assert not security.legacy_enabled
     coordinator.sync_webhooks.assert_not_called()  # the old id was off already
     assert _run(coordinator._async_webhook_migration_tick()) == "skipped"  # and now the night has nothing to do
@@ -219,25 +220,48 @@ def test_a_form_without_a_protocol_does_not_prove_the_move_of_a_command_to_http(
         monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1), target_protocol=WEBIO_PROTOCOL_HTTP
     )
     security = coordinator.api.webhook_security
-    security.protocol_write = NOW - timedelta(hours=2)  # moved from HTTPS to HTTP, the restart is still to come
+    security.protocol_write = NOW - timedelta(hours=2)  # moved from HTTPS to HTTP, Comexio restarted since
+    security.protocol_moved = {NAME}  # this entry rewrote it from HTTPS to HTTP
 
     assert _run(coordinator._async_webhook_migration_tick()) == "pending"
 
     assert "1 could not be read" in caplog.text
     assert security.protocol_write is not None  # not ended, as the form proves nothing
+    assert NAME in security.migrated  # unreadable is no deviation: nothing is taken out of the ledger
+    coordinator.api.client.save_webio_command.assert_not_awaited()
+
+
+def test_a_form_that_shows_http_proves_the_move_of_a_command_to_http(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch,
+        held_protocol=WEBIO_PROTOCOL_HTTP,
+        boot=NOW + timedelta(hours=1),
+        target_protocol=WEBIO_PROTOCOL_HTTP,
+    )
+    security = coordinator.api.webhook_security
+    security.protocol_write = NOW - timedelta(hours=2)
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+
+    assert security.protocol_write is None
+    coordinator.api.get_webio_command_form.assert_awaited()
 
 
 def test_a_form_without_a_protocol_blocks_no_http_command_when_no_protocol_move_waits(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     coordinator, _held = _protocol_coordinator(
         monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1), target_protocol=WEBIO_PROTOCOL_HTTP
     )
     security = coordinator.api.webhook_security
     security.legacy_enabled = True  # a plain path migration: as it always was, the missing field blocks nothing
+    security.last_write = NOW - timedelta(hours=2)  # Comexio booted after the last write
 
-    assert _run(coordinator._async_webhook_migration_tick()) != "pending"
-    assert security.protocol_write is None
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+
+    assert not security.legacy_enabled  # verified (the read-back ran) and the old id is off
+    coordinator.api.get_webio_command_form.assert_awaited()
+    assert "could not be read" not in caplog.text
 
 
 def test_the_forced_run_keeps_a_command_without_ids_in_the_ledger_and_does_not_end_while_its_protocol_is_wrong(
@@ -399,6 +423,7 @@ def test_the_old_id_goes_off_with_the_protocol_move_in_one_run_and_the_marker_is
         monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW + timedelta(hours=1), legacy=True
     )
     security = coordinator.api.webhook_security
+    security.protocol_moved = {NAME}  # must go with the marker
     security.protocol_write = NOW - timedelta(hours=2)
     security.last_write = NOW - timedelta(hours=2)
     security.https_written.add(NAME)
@@ -414,6 +439,7 @@ def test_the_old_id_goes_off_with_the_protocol_move_in_one_run_and_the_marker_is
 
     assert not security.legacy_enabled
     assert security.protocol_write is None
+    assert security.protocol_moved == set()
     coordinator.sync_webhooks.assert_called()
 
 
@@ -510,11 +536,13 @@ def test_a_forced_run_on_an_entry_without_stored_commands_ends_when_the_old_id_i
         monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW + timedelta(hours=1)
     )
     security = coordinator.api.webhook_security
+    security.protocol_moved = {NAME}  # must go with the marker
     coordinator.data["webio_commands"] = {}
 
     assert _run(coordinator.async_force_webhook_migration()) == "done"
 
     assert security.protocol_write is None  # not "the old id stays on" every night, with the old id long off
+    assert security.protocol_moved == set()
     assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
 
 
@@ -542,12 +570,14 @@ def test_a_failed_save_at_the_end_of_a_protocol_move_is_retried_by_a_delayed_sav
     security = coordinator.api.webhook_security
     security.https_written.add(NAME)
     security.protocol_write = NOW - timedelta(hours=2)
+    security.protocol_moved = {NAME}
     coordinator._async_save_webhook_security = AsyncMock(return_value=False)
     security.schedule_save = MagicMock()
 
     assert _run(coordinator._async_webhook_migration_tick()) == "done"
 
     assert security.protocol_write is None
+    assert security.protocol_moved == set()
     security.schedule_save.assert_called_once_with()
 
 
@@ -560,11 +590,13 @@ def test_the_forced_run_that_switches_the_old_id_off_for_lack_of_commands_clears
     security = coordinator.api.webhook_security
     coordinator.data["webio_commands"] = {}
     coordinator._legacy_webhook_id_unneeded = lambda _security: True
+    security.protocol_moved = {NAME}
 
     assert _run(coordinator.async_force_webhook_migration()) == "done"
 
     assert not security.legacy_enabled
     assert security.protocol_write is None  # not left to raise a restart request after the next start
+    assert security.protocol_moved == set()
 
 
 def test_a_command_without_ids_does_not_hold_back_the_restart_request_when_the_old_id_is_off(
@@ -656,6 +688,7 @@ def test_the_generate_web_io_upload_replaces_a_class_under_the_sync_lock(monkeyp
         required_webio_classes=("marker",),
         async_webhook_target=AsyncMock(),
         _sync_lock=lock,
+        unloading=False,
         webio_source_data=dict,
         ignored_marker_ids=set(),
         ignored_knx_ids=set(),
@@ -668,3 +701,261 @@ def test_the_generate_web_io_upload_replaces_a_class_under_the_sync_lock(monkeyp
 
     assert held_during_upload == [True]
     assert not lock.locked()
+
+
+def test_the_generate_web_io_upload_waits_for_a_run_that_holds_the_sync_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    from custom_components.comexio.services import misc as services_misc
+
+    uploaded: list[bool] = []
+
+    async def upload(*_a: Any, **_k: Any) -> str:
+        uploaded.append(True)
+        return "ok"
+
+    async def scenario() -> tuple[list[bool], list[bool]]:
+        lock = asyncio.Lock()
+        coordinator = SimpleNamespace(
+            api=SimpleNamespace(generate_webio_json=MagicMock(return_value="{}")),
+            server_id="srv",
+            config_entry=SimpleNamespace(data={}, options={}),
+            required_webio_classes=("marker",),
+            async_webhook_target=AsyncMock(),
+            _sync_lock=lock,
+            unloading=False,
+            webio_source_data=dict,
+            ignored_marker_ids=set(),
+            ignored_knx_ids=set(),
+        )
+        hass = SimpleNamespace(data={"comexio": {"e1": coordinator}})
+        await lock.acquire()  # a sync or a migration command holds it
+        task = asyncio.ensure_future(
+            services_misc.handle_generate_web_io(hass, SimpleNamespace(data={"config_entry": "e1", "upload": True}))
+        )
+        await asyncio.sleep(0.01)
+        before = list(uploaded)
+        built_while_waiting = coordinator.api.generate_webio_json.call_count
+        lock.release()
+        await task
+        assert built_while_waiting == 0  # what the class describes is read after the wait, not before it
+        assert coordinator.api.generate_webio_json.call_count == 1
+        return before, list(uploaded)
+
+    monkeypatch.setattr(services_misc.persistent_notification, "async_create", MagicMock())
+    monkeypatch.setattr(services_misc, "_upload_webio_class", upload)
+
+    before_release, after_release = asyncio.run(scenario())
+
+    assert before_release == []  # waited, did not skip or run beside it
+    assert after_release == [True]
+
+
+def test_a_form_without_a_protocol_blocks_no_command_that_was_never_moved_to_http_even_when_a_move_waits(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An HTTP-only install under a forced run: nothing left HTTPS, so the missing field proves nothing wrong."""
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=None, boot=NOW + timedelta(hours=1), target_protocol=WEBIO_PROTOCOL_HTTP
+    )
+    security = coordinator.api.webhook_security
+    security.protocol_write = NOW - timedelta(hours=2)  # a forced run set the marker, no command carried HTTPS
+
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+
+    assert security.protocol_write is None
+
+
+def test_the_protocol_move_evidence_is_recorded_persisted_and_ended(monkeypatch: pytest.MonkeyPatch) -> None:
+    security = _security(monkeypatch, {"secret": "abc"})
+    security.mark_written(NAME, NOW, https=True)
+    assert security.protocol_moved == set()  # a move to HTTPS needs no proof of the missing field
+
+    security.mark_written(NAME, NOW, https=False)
+
+    assert security.protocol_moved == {NAME}
+    _run(security.async_save())
+    again = _security(monkeypatch, security._store.stored)
+    _run(again.async_load())
+    assert again.protocol_moved == {NAME}
+
+    again.end_protocol_move()
+
+    assert again.protocol_write is None
+    assert again.protocol_moved == set()
+
+
+@pytest.mark.parametrize("stored", [None, NAME, 5, [NAME, 1]])
+def test_a_hand_edited_protocol_moved_entry_is_read_without_failing(
+    monkeypatch: pytest.MonkeyPatch, stored: Any
+) -> None:
+    security = _security(monkeypatch, {"secret": "abc", "protocol_moved": stored})
+
+    _run(security.async_load())
+
+    assert security.protocol_moved == ({NAME} if stored == [NAME, 1] else set())
+
+
+def test_the_forced_run_forgets_a_command_without_ids_while_the_old_id_is_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With the old id on, such a command holds it on and raises the repair: the ledger must not hide it."""
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1), legacy=True
+    )
+    security = coordinator.api.webhook_security
+    coordinator.data["webio_commands"][NAME]["cmdId"] = ""
+
+    _run(coordinator.async_force_webhook_migration())
+
+    assert NAME not in security.migrated
+
+
+def test_the_forced_run_drops_ledger_names_the_data_no_longer_has(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.migrated.add("HA gone")  # a command that was deleted in Comexio meanwhile
+    coordinator.data["webio_commands"][NAME]["cmdId"] = ""
+
+    _run(coordinator.async_force_webhook_migration())
+
+    assert "HA gone" not in security.migrated
+    assert NAME in security.migrated
+
+
+def test_the_restart_request_stays_when_only_commands_without_ids_are_left(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.last_write = NOW  # another command was rewritten, Comexio has not restarted since
+    coordinator.data["webio_commands"][NAME]["cmdId"] = ""
+    notified: list[bool] = []
+    coordinator._notify_webhook_restart = lambda: notified.append(True)
+    coordinator._dismiss_webhook_restart = lambda: notified.append(False)
+
+    _run(coordinator._async_webhook_migration_tick())
+
+    assert notified[-1:] == [True]
+
+
+def _upload_coordinator(*, unloading: bool) -> Any:
+    import asyncio
+
+    return SimpleNamespace(
+        api=SimpleNamespace(generate_webio_json=MagicMock(return_value="{}")),
+        server_id="srv",
+        _sync_lock=asyncio.Lock(),
+        unloading=unloading,
+        webio_source_data=dict,
+        ignored_marker_ids=set(),
+        ignored_knx_ids=set(),
+    )
+
+
+def test_the_upload_of_a_class_is_skipped_once_the_entry_unloads(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    upload = AsyncMock(return_value="ok")
+    monkeypatch.setattr(services_misc, "_upload_webio_class", upload)
+    coordinator = _upload_coordinator(unloading=True)
+
+    line = _run(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
+
+    assert "skipped" in line
+    upload.assert_not_awaited()
+    coordinator.api.generate_webio_json.assert_not_called()
+
+
+def test_a_failing_upload_of_one_class_becomes_its_result_line(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    monkeypatch.setattr(services_misc, "_upload_webio_class", AsyncMock(side_effect=ValueError("secret detail")))
+    coordinator = _upload_coordinator(unloading=False)
+
+    line = _run(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
+
+    assert line.startswith("Cls: failed (ValueError)")  # the class of the error only, never its text
+    assert "secret detail" not in line
+    assert "may be missing" in line
+    assert "Uploading the Web-IO class 'Cls' failed" in caplog.text
+    assert not coordinator._sync_lock.locked()
+
+
+def _restart_flags(coordinator: Any) -> list[bool]:
+    flags: list[bool] = []
+    coordinator._notify_webhook_restart = lambda: flags.append(True)
+    coordinator._dismiss_webhook_restart = lambda: flags.append(False)
+    return flags
+
+
+def test_no_restart_request_with_the_old_id_on_and_a_command_without_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1), legacy=True
+    )
+    coordinator.api.webhook_security.last_write = NOW
+    coordinator.data["webio_commands"][NAME]["cmdId"] = ""
+    flags = _restart_flags(coordinator)
+
+    _run(coordinator._async_webhook_migration_tick())
+
+    assert flags[-1:] == [False]
+
+
+def test_no_restart_request_while_a_command_can_still_be_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW - timedelta(hours=1)
+    )
+    coordinator.api.webhook_security.last_write = NOW
+    coordinator.api.client.save_webio_command = AsyncMock(side_effect=RuntimeError("write failed"))
+    flags = _restart_flags(coordinator)
+
+    _run(coordinator._async_webhook_migration_tick())
+
+    assert flags[-1:] == [False]
+
+
+def test_no_restart_request_once_comexio_restarted_after_the_last_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW + timedelta(hours=1)
+    )
+    coordinator.api.webhook_security.last_write = NOW
+    coordinator.data["webio_commands"][NAME]["cmdId"] = ""
+    flags = _restart_flags(coordinator)
+
+    _run(coordinator._async_webhook_migration_tick())
+
+    assert flags[-1:] == [False]
+
+
+def test_a_failing_build_of_a_class_is_its_result_line_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    from custom_components.comexio.services import misc as services_misc
+
+    upload = AsyncMock(return_value="ok")
+    monkeypatch.setattr(services_misc, "_upload_webio_class", upload)
+    coordinator = _upload_coordinator(unloading=False)
+    coordinator.api.generate_webio_json = MagicMock(side_effect=KeyError("x"))
+
+    line = _run(services_misc._upload_class_under_sync_lock(coordinator, "Cls", "marker"))
+
+    assert line.startswith("Cls: failed (KeyError)")
+    upload.assert_not_awaited()
+    assert not coordinator._sync_lock.locked()
+
+
+def test_a_move_to_http_of_a_command_the_ledger_did_not_hold_marks_the_move_and_leaves_it_on_a_move_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    security = _security(monkeypatch, {"secret": "abc"})
+    security.https_written.add(NAME)  # carries HTTPS, but is not in the ledger of migrated commands
+
+    security.mark_written(NAME, NOW, https=False)
+
+    assert security.protocol_write == NOW  # a restart and a read-back have to follow
+    assert security.protocol_moved == {NAME}
+
+    security.mark_written(NAME, NOW, https=True)
+
+    assert security.protocol_moved == set()

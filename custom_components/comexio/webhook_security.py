@@ -56,6 +56,7 @@ _KEY_HOST = "host"
 _KEY_HOST_CHANGED = "host_changed"
 _KEY_HTTPS = "https_written"
 _KEY_PROTOCOL_WRITE = "protocol_write"
+_KEY_PROTOCOL_MOVED = "protocol_moved"
 
 
 def legacy_webhook_id(server_id: str) -> str:
@@ -187,6 +188,9 @@ class WebhookSecurity:
         # read every command back after a Comexio restart: the old id may be off by then, so this is what keeps the
         # nightly run (restart request, read-back) going.
         self.protocol_write: datetime | None = None
+        # The commands this entry rewrote from HTTPS to HTTP while a protocol move waits for its read-back: only for
+        # these, a form that shows no protocol proves nothing (protocol_unproven). Ends with protocol_write.
+        self.protocol_moved: set[str] = set()
         # kind of refusal -> (time of its last log line, refusals since then that were not logged)
         self._refusal_log: dict[str, tuple[float, int]] = {}
 
@@ -234,6 +238,7 @@ class WebhookSecurity:
         self.https_written = _stored_names(stored.get(_KEY_HTTPS))
         self.last_write = _stored_stamp(stored.get(_KEY_WRITTEN))
         self.protocol_write = _stored_stamp(stored.get(_KEY_PROTOCOL_WRITE))
+        self.protocol_moved = _stored_names(stored.get(_KEY_PROTOCOL_MOVED))
         if self.migrated and self.last_write is None:
             # Commands were rewritten but their stamp is lost: count the write as now, so the old id is only
             # switched off after a Comexio restart that happens from here on.
@@ -283,6 +288,7 @@ class WebhookSecurity:
             _KEY_HTTPS: sorted(self.https_written),
             _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
             _KEY_PROTOCOL_WRITE: self.protocol_write.isoformat() if self.protocol_write else None,
+            _KEY_PROTOCOL_MOVED: sorted(self.protocol_moved),
             _KEY_HOST: self.host or None,
             _KEY_HOST_CHANGED: self.host_changed,
         }
@@ -307,12 +313,22 @@ class WebhookSecurity:
         """A command of this name now carries its own path, and the given protocol, in Comexio's configuration."""
         if name in self.migrated and self.carries_https(name) != https:
             self.protocol_write = now
+        if not https and self.carries_https(name):
+            # It left HTTPS: the read-back has to prove that (protocol_unproven), and a restart has to come first.
+            self.protocol_moved.add(name)
+            self.protocol_write = now
         self.migrated.add(name)
         if https:
+            self.protocol_moved.discard(name)  # back on HTTPS: a form without a protocol is judged by the target again
             self.https_written.add(name)
         else:
             self.https_written.discard(name)
         self.last_write = now
+
+    def end_protocol_move(self) -> None:
+        """Every command is read back right: nothing waits for a restart or a proof any more."""
+        self.protocol_write = None
+        self.protocol_moved.clear()
 
     def carries_https(self, name: str) -> bool:
         """Whether the command of this name was last written with HTTPS (any other one carries HTTP)."""

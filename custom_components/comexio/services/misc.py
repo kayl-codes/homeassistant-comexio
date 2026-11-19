@@ -234,6 +234,33 @@ async def _upload_webio_class(api: Any, server_id: str, class_name: str, web_io_
     return f"{class_name}: Base-ID {result_val}" if success else f"{class_name}: Upload failed: {result_val}"
 
 
+async def _upload_class_under_sync_lock(coordinator: Any, class_name: str, webio_class: str) -> str:
+    """Build and upload one class while holding the sync lock; returns its result line.
+
+    Like every sync step and every command the webhook migration rewrites, a class is replaced under the sync lock:
+    the migration must not write to the commands of a class that is deleted meanwhile. The JSON is built after the
+    wait (a sync that held the lock may have changed what it describes), and an entry that unloaded meanwhile has
+    no session to upload through. A failing build or upload costs this line only, the others are still reported.
+    """
+    async with coordinator._sync_lock:
+        if coordinator.unloading:
+            return f"{class_name}: skipped — the integration is unloading"
+        try:
+            web_io_json = coordinator.api.generate_webio_json(
+                coordinator.server_id,
+                class_name,
+                coordinator.webio_source_data(),
+                webio_class=webio_class,
+                ignored_marker_ids=coordinator.ignored_marker_ids,
+                ignored_knx_ids=coordinator.ignored_knx_ids,
+            )
+            return await _upload_webio_class(coordinator.api, coordinator.server_id, class_name, web_io_json)
+        except Exception as err:
+            _LOGGER.exception("[%s] Uploading the Web-IO class '%s' failed", coordinator.server_id, class_name)
+            # The old class may already be deleted: say so, the sync button recreates it.
+            return f"{class_name}: failed ({type(err).__name__}), the class may be missing on Comexio: see the log"
+
+
 async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None:
     """Service to preview or upload the Web-IO configuration."""
     entry_id = call.data.get("config_entry")
@@ -281,19 +308,7 @@ async def handle_generate_web_io(hass: HomeAssistant, call: ServiceCall) -> None
         results: list[str] = []
         for cls in sync_classes:
             class_name = webio_class_name(webio_name, cls)
-            web_io_json = api.generate_webio_json(
-                server_id,
-                class_name,
-                coordinator.webio_source_data(),
-                webio_class=cls,
-                ignored_marker_ids=coordinator.ignored_marker_ids,
-                ignored_knx_ids=coordinator.ignored_knx_ids,
-            )
-
-            # Like every sync step and every command the webhook migration rewrites, a class is replaced under the
-            # sync lock: the migration must not write to the commands of a class that is deleted meanwhile.
-            async with coordinator._sync_lock:
-                results.append(await _upload_webio_class(api, server_id, class_name, web_io_json))
+            results.append(await _upload_class_under_sync_lock(coordinator, class_name, cls))
 
         persistent_notification.async_create(
             hass, "\n".join(results) or "Nothing to do.", title=f"Comexio Sync ({server_id})"
