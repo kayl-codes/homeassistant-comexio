@@ -10,10 +10,17 @@ only moves the failure to where the cause is named.
 The scan reads every class in `tests/unit` that binds a coordinator method in its body (also through a module-level
 alias of the class). For each bound method it takes the `self.<name>` uses in the coordinator source and checks that
 every `<name>` that the real coordinator has as a method, classmethod or property (its own or Home Assistant's) is
-supplied in that test file: bound or defined in the class body, or given elsewhere in the file - an attribute assigned
-(`fake.name = ...`), a `setattr` / `patch.object` with a literal name, or a keyword argument of a call that builds a
-double (a call of the double's class, or of a function whose name says coordinator, fake or double). A name supplied
-for one test counts for the whole file, so a double that lacks it only in another test is not found.
+supplied in that test file: bound or defined in the class body (a bare annotation without a value defines nothing), or
+given elsewhere in the file - an attribute assigned (`fake.name = ...`), a `setattr` (a `patch.object` only with
+`create=True`, a `monkeypatch.setattr` only with `raising=False`: without that they fail on a name the object lacks
+and supply nothing) with a literal name, or a keyword argument of a call that builds a double (a call of the double's
+class, or of a function whose name says coordinator, fake or double). A name that the method calls (`self.name()`)
+must be given something that can be called: a literal such as `None` or `[]` is not enough. Only a direct call counts:
+`self.name.attr()` reads `name`, so a literal passes (not followed).
+
+An assigned attribute, a `setattr` or a keyword at a builder function counts for every double of the file, because the
+object it goes to is not known; only a keyword at a call of a double's class counts for that class alone. So a double
+that lacks a name which another double of the same file gets that way is not found.
 
 Not followed: a double that is built without a class (`SimpleNamespace(...)` or `MagicMock()` passed to
 `ComexioCoordinator.method(fake)`), a method inherited from Home Assistant's coordinator that a double binds (no source
@@ -35,6 +42,7 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 TESTS = Path(__file__).parent
 COORDINATOR = "ComexioCoordinator"
 DOUBLE_WORDS = ("coordinator", "fake", "double")
+NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 
 # (test file, double class, bound method, name it does not supply) -> why no test reaches the call.
 ALLOWED: dict[tuple[str, str, str, str], str] = {}
@@ -97,17 +105,57 @@ def _bound_coordinator_method(statement: ast.stmt, aliases: set[str]) -> tuple[s
     return None
 
 
-def _defined_in_body(double: ast.ClassDef) -> set[str]:
-    """Names the class body defines itself: assignments (annotated ones too) and methods."""
-    names: set[str] = set()
+def _self_calls(method: ast.AST) -> set[str]:
+    """Every `self.<name>(...)` in the method: the names that have to be callable, not just present."""
+    return {
+        node.func.attr
+        for node in ast.walk(method)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+    }
+
+
+# A supply maps a name to whether what it is given could be called. A literal (`other = None`) cannot; a bare
+# annotation (`other: object`) gives nothing at all, Python creates no attribute for it.
+Supply = dict[str, bool]
+
+
+def _callable(value: ast.expr) -> bool:
+    """False for a literal (`None`, `1`, `-1`, `[]`, `{}`, a tuple of them): nothing a call could be made on."""
+    try:
+        ast.literal_eval(value)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        return True
+    return False
+
+
+def _give(supply: Supply, name: str, may_be_called: bool) -> None:
+    supply[name] = supply.get(name, False) or may_be_called
+
+
+def _merged(*supplies: Supply) -> Supply:
+    merged: Supply = {}
+    for supply in supplies:
+        for name, may_be_called in supply.items():
+            _give(merged, name, may_be_called)
+    return merged
+
+
+def _defined_in_body(double: ast.ClassDef) -> Supply:
+    """What the class body defines itself: assignments (annotated ones only with a value) and methods."""
+    supply: Supply = {}
     for statement in double.body:
         if isinstance(statement, ast.Assign):
-            names.update(target.id for target in statement.targets if isinstance(target, ast.Name))
-        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
-            names.add(statement.target.id)
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    _give(supply, target.id, _callable(statement.value))
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.value:
+            _give(supply, statement.target.id, _callable(statement.value))
         elif isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
-            names.add(statement.name)
-    return names
+            _give(supply, statement.name, True)
+    return supply
 
 
 def _builds_a_double(call: ast.Call, doubles: set[str]) -> bool:
@@ -116,21 +164,60 @@ def _builds_a_double(call: ast.Call, doubles: set[str]) -> bool:
     return name in doubles or any(word in name.lower() for word in DOUBLE_WORDS)
 
 
-def _supplied_in_file(tree: ast.AST, doubles: set[str]) -> set[str]:
-    """Names a test of the file hands to a double: assigned attributes, setattr, patch.object, keywords at a build."""
-    supplied: set[str] = set()
+def _keyword_is(call: ast.Call, name: str, expected: bool) -> bool:
+    return any(
+        keyword.arg == name and isinstance(keyword.value, ast.Constant) and keyword.value.value is expected
+        for keyword in call.keywords
+    )
+
+
+def _creates_the_attribute(call: ast.Call) -> bool:
+    """`setattr` always does. `patch.object` and `monkeypatch.setattr` fail on a name the object lacks, unless told."""
+    func = ast.unparse(call.func)
+    if func == "setattr":
+        return True
+    if func.endswith("patch.object"):
+        return _keyword_is(call, "create", True)
+    return func.endswith(".setattr") and _keyword_is(call, "raising", False)
+
+
+def _set_by_call(call: ast.Call) -> tuple[str, bool] | None:
+    """(name, may be called) for a call that creates an attribute with a literal name, else None."""
+    if len(call.args) < 2 or not _creates_the_attribute(call):
+        return None
+    name = call.args[1]
+    if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+        return None
+    given = call.args[2] if len(call.args) >= 3 else next((k.value for k in call.keywords if k.arg in NEW_VALUE), None)
+    if given is None:
+        return name.value, True  # `patch.object(obj, "name", create=True)` puts a MagicMock there
+    return name.value, _callable(given)
+
+
+def _supplied_in_file(tree: ast.AST, doubles: set[str]) -> tuple[Supply, dict[str, Supply]]:
+    """What a test of the file hands to a double: (for any double, per double class).
+
+    Assigned attributes, setattr and keywords at a call that builds a double (by helper name) count for every double of
+    the file: the object they are given to is not known. A keyword at a call of a double's class counts for that class.
+    """
+    shared: Supply = {}
+    per_class: dict[str, Supply] = {name: {} for name in doubles}
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if _builds_a_double(node, doubles):
-                supplied.update(keyword.arg for keyword in node.keywords if keyword.arg)
-            if ast.unparse(node.func).endswith(("setattr", "patch.object")) and len(node.args) >= 2:
-                name = node.args[1]
-                if isinstance(name, ast.Constant) and isinstance(name.value, str):
-                    supplied.add(name.value)
-        elif isinstance(node, ast.Assign | ast.AnnAssign | ast.AugAssign):
+                name = ast.unparse(node.func).rsplit(".", 1)[-1]
+                target = per_class[name] if name in doubles else shared
+                for keyword in node.keywords:
+                    if keyword.arg:
+                        _give(target, keyword.arg, _callable(keyword.value))
+            if (given := _set_by_call(node)) is not None:
+                _give(shared, *given)
+        elif isinstance(node, ast.Assign) or (isinstance(node, ast.AnnAssign) and node.value is not None):
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-            supplied.update(target.attr for target in targets if isinstance(target, ast.Attribute))
-    return supplied
+            for target in targets:
+                if isinstance(target, ast.Attribute):
+                    _give(shared, target.attr, _callable(node.value))
+    return shared, per_class
 
 
 def missing_bindings(
@@ -144,30 +231,36 @@ def missing_bindings(
         double.name: [pair for statement in double.body if (pair := _bound_coordinator_method(statement, aliases))]
         for double in classes
     }
-    supplied = _supplied_in_file(tree, {name for name, bound in bound_of.items() if bound})
+    shared, per_class = _supplied_in_file(tree, {name for name, bound in bound_of.items() if bound})
     found: dict[tuple[str, str, str], str] = {}
     for double in classes:
         bound = bound_of[double.name]
-        own = {name for name, _method in bound} | _defined_in_body(double)
+        have = _merged(
+            {name: True for name, _method in bound}, _defined_in_body(double), shared, per_class.get(double.name, {})
+        )
         for name, method in bound:
             if method not in methods:
                 continue  # inherited from Home Assistant's coordinator: no source here to follow
+            calls = _self_calls(methods[method])
             for needed in sorted(_self_uses(methods[method]) & members):
-                if needed not in own | supplied:
+                if not (have.get(needed, False) if needed in calls else needed in have):
                     found[(double.name, name, needed)] = method
     return found
 
 
-def _findings() -> dict[tuple[str, str, str, str], str]:
+def _test_files(root: Path) -> list[Path]:
+    """Every test module below `root`, nested folders included, but not this one."""
+    return [path for path in sorted(root.rglob("test_*.py")) if path != Path(__file__)]
+
+
+def _findings(root: Path = TESTS) -> dict[tuple[str, str, str, str], str]:
     methods, members = _coordinator_methods(), _real_members()
     found: dict[tuple[str, str, str, str], str] = {}
-    for path in sorted(TESTS.glob("test_*.py")):
-        if path == Path(__file__):
-            continue
+    for path in _test_files(root):
         for (double, bound, needed), method in missing_bindings(
             path.read_text(encoding="utf-8"), methods, members
         ).items():
-            found[(path.name, double, bound, needed)] = method
+            found[(path.relative_to(root).as_posix(), double, bound, needed)] = method
     return found
 
 
@@ -187,6 +280,13 @@ def test_every_double_binds_what_its_methods_call() -> None:
     assert not problems(_findings(), ALLOWED)
 
 
+FAKE = "_Fake"
+OTHER = "other"
+RUN = "run"
+HELPER = "helper"
+PROPERTY = "other_property"
+NO_TEST = "no test reaches it"
+
 DOUBLE = """
 class _Fake(SimpleNamespace):
     run = ComexioCoordinator.run
@@ -204,8 +304,9 @@ METHODS = {
     .body[0]
     .body
 }
-MEMBERS = frozenset({"run", "helper", "other", "other_property"})
-FINDING = {("_Fake", "run", "other"): "run", ("_Fake", "helper", "other_property"): "helper"}
+MEMBERS = frozenset({RUN, HELPER, OTHER, PROPERTY})
+FINDING = {(FAKE, RUN, OTHER): RUN, (FAKE, HELPER, PROPERTY): HELPER}
+CALLED = {(FAKE, RUN, OTHER): RUN}  # `other` is called by `run`, so a literal does not do
 
 
 def test_detector_finds_a_method_the_double_lacks() -> None:
@@ -217,12 +318,16 @@ def test_detector_finds_a_method_the_double_lacks() -> None:
     [
         "    other = ComexioCoordinator.other\n    other_property = None\n",
         "    def other(self): ...\n    other_property = None\n",
-        "    other: object = None\n    other_property: int = 1\n",
+        "    other: object = AsyncMock()\n    other_property: int = 1\n",
         "\ndef test_a(fake):\n    fake.other = AsyncMock()\n    fake.other_property = 1\n",
-        "\ndef test_a(fake):\n    fake.other: int = 1\n    fake.other_property = 1\n",
-        "\ndef test_a():\n    _Fake(other=1, other_property=2)\n",
-        "\ndef test_a():\n    _coordinator(api, other=1, other_property=2)\n",
-        "\ndef test_a(fake):\n    setattr(fake, 'other', 1)\n    patch.object(fake, 'other_property', 2)\n",
+        "\ndef test_a(fake):\n    fake.other: int = AsyncMock()\n    fake.other_property = 1\n",
+        "\ndef test_a():\n    _Fake(other=AsyncMock(), other_property=2)\n",
+        "\ndef test_a():\n    _coordinator(api, other=AsyncMock(), other_property=2)\n",
+        "\ndef test_a(fake):\n    setattr(fake, 'other', AsyncMock())\n    setattr(fake, 'other_property', 2)\n",
+        "\ndef test_a(fake):\n    patch.object(fake, 'other', create=True)\n"
+        "    patch.object(fake, 'other_property', 2, create=True)\n",
+        "\ndef test_a(fake, monkeypatch):\n    monkeypatch.setattr(fake, 'other', AsyncMock(), raising=False)\n"
+        "    monkeypatch.setattr(fake, 'other_property', 2, raising=False)\n",
     ],
     ids=[
         "bound",
@@ -232,7 +337,9 @@ def test_detector_finds_a_method_the_double_lacks() -> None:
         "annotated attribute",
         "keyword of the class",
         "keyword of a builder",
-        "setattr and patch.object",
+        "setattr",
+        "patch.object with create",
+        "monkeypatch.setattr with raising False",
     ],
 )
 def test_detector_accepts_every_way_to_supply_a_name(supply: str) -> None:
@@ -242,13 +349,78 @@ def test_detector_accepts_every_way_to_supply_a_name(supply: str) -> None:
 @pytest.mark.parametrize(
     "elsewhere",
     [
-        "\ndef test_a():\n    Other(other=1, other_property=2)\n",
-        "\ndef test_a(fake, name):\n    setattr(fake, name, 1)\n    patch.object(fake, name, 2)\n",
+        "\ndef test_a():\n    Other(other=AsyncMock(), other_property=2)\n",
+        "\ndef test_a(fake, name):\n    setattr(fake, name, 1)\n    patch.object(fake, name, 2, create=True)\n",
+        # a patch of a name the object lacks fails by itself: it supplies nothing (a never started one even less)
+        "\ndef test_a(fake):\n    patch.object(fake, 'other', AsyncMock())\n"
+        "    patch.object(fake, 'other_property', 2)\n",
+        "\ndef test_a(fake, monkeypatch):\n    monkeypatch.setattr(fake, 'other', AsyncMock())\n"
+        "    monkeypatch.setattr(fake, 'other_property', 2)\n",
+        # `+=` needs the attribute to exist already, it creates nothing
+        "\ndef test_a(fake):\n    fake.other += 1\n    fake.other_property += 1\n",
     ],
-    ids=["keyword of a call that builds no double", "setattr with a computed name"],
+    ids=[
+        "keyword of a call that builds no double",
+        "setattr with a computed name",
+        "patch.object without create",
+        "monkeypatch.setattr without raising False",
+        "augmented assignment",
+    ],
 )
-def test_detector_does_not_take_a_foreign_keyword_or_a_computed_name_for_a_supply(elsewhere: str) -> None:
+def test_detector_does_not_take_a_foreign_keyword_a_computed_name_or_a_plain_patch_for_a_supply(
+    elsewhere: str,
+) -> None:
     assert missing_bindings(DOUBLE + elsewhere, METHODS, MEMBERS) == FINDING
+
+
+@pytest.mark.parametrize(
+    "supply",
+    [
+        "    other: object\n    other_property: int\n",
+        "\ndef test_a(fake):\n    fake.other: object\n    fake.other_property: int\n",
+    ],
+    ids=["annotation in the class body", "annotation of an attribute"],
+)
+def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
+    assert missing_bindings(DOUBLE + supply, METHODS, MEMBERS) == FINDING
+
+
+@pytest.mark.parametrize(
+    "supply",
+    [
+        "    other = None\n    other_property = None\n",
+        "    other: object = None\n    other_property: int = 1\n",
+        "\ndef test_a(fake):\n    fake.other = None\n    fake.other_property = 1\n",
+        "\ndef test_a():\n    _Fake(other=1, other_property=2)\n",
+        "\ndef test_a(fake):\n    setattr(fake, 'other', 3)\n    setattr(fake, 'other_property', 2)\n",
+        "    other = []\n    other_property = None\n",
+        "\ndef test_a(fake):\n    fake.other = {}\n    fake.other_property = 1\n",
+        "\ndef test_a(fake):\n    fake.other = -1\n    fake.other_property = 1\n",
+        "\ndef test_a(fake):\n    patch.object(fake, 'other', new=None, create=True)\n"
+        "    patch.object(fake, 'other_property', 2, create=True)\n",
+    ],
+    ids=["class body", "annotated", "assigned", "keyword", "setattr", "list", "dict", "negative number", "new keyword"],
+)
+def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
+    assert missing_bindings(DOUBLE + supply, METHODS, MEMBERS) == CALLED
+
+
+def test_a_literal_given_in_a_test_does_not_hide_a_method_the_class_defines() -> None:
+    method_then_literal = (
+        DOUBLE + "    def other(self): ...\n    other_property = None\n\ndef test_a(fake):\n    fake.other = None\n"
+    )
+    literal_then_method = DOUBLE + "\ndef test_a(fake):\n    fake.other = None\n    fake.other_property = 1\n"
+    literal_then_method += "\ndef test_b():\n    _coordinator(api, other=AsyncMock())\n"
+
+    assert missing_bindings(method_then_literal, METHODS, MEMBERS) == {}
+    assert missing_bindings(literal_then_method, METHODS, MEMBERS) == {}
+
+
+def test_a_keyword_at_the_call_of_one_double_does_not_supply_another() -> None:
+    twin = DOUBLE.replace(FAKE, "_Twin")
+    both = DOUBLE + twin + "\ndef test_a():\n    _Fake(other=AsyncMock(), other_property=2)\n"
+
+    assert missing_bindings(both, METHODS, MEMBERS) == {("_Twin", RUN, OTHER): RUN, ("_Twin", HELPER, PROPERTY): HELPER}
 
 
 def test_detector_follows_a_binding_through_an_alias_of_the_class() -> None:
@@ -295,12 +467,25 @@ def test_the_scan_sees_the_real_double_of_test_plan_run_states() -> None:
     assert ("_FakeCoordinator", "webhook_command_ids", "webio_source_data") in found
 
 
-def test_a_listed_finding_is_not_reported_and_a_stale_entry_is() -> None:
-    key = ("test_x.py", "_Fake", "run", "other")
+def test_the_scan_reaches_a_test_module_in_a_nested_folder(tmp_path: Path) -> None:
+    nested = tmp_path / "sub"
+    nested.mkdir()
+    (nested / "test_nested.py").write_text(
+        "class _Fake:\n    webhook_command_ids = ComexioCoordinator.webhook_command_ids\n", encoding="utf-8"
+    )
 
-    assert problems({key: "run"}, {}) != []
-    assert problems({key: "run"}, {key: "no test reaches it"}) == []
-    assert len(problems({}, {key: "no test reaches it"})) == 1
+    found = _findings(tmp_path)
+
+    assert _test_files(tmp_path) == [nested / "test_nested.py"]
+    assert ("sub/test_nested.py", "_Fake", "webhook_command_ids", "webio_source_data") in found
+
+
+def test_a_listed_finding_is_not_reported_and_a_stale_entry_is() -> None:
+    key = ("test_x.py", FAKE, RUN, OTHER)
+
+    assert problems({key: RUN}, {}) != []
+    assert problems({key: RUN}, {key: NO_TEST}) == []
+    assert len(problems({}, {key: NO_TEST})) == 1
 
 
 def test_detector_ignores_classes_without_bound_methods() -> None:
