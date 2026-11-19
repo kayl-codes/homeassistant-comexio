@@ -43,7 +43,9 @@ Not followed: a double that is built without a class (`SimpleNamespace(...)` or 
 here to read), and one such a method hands on (`api.listener = self.async_update_listeners`), which only has to be
 supplied, not callable, a name read through `getattr(self, ...)` (the coordinator does it once, with a default: a
 read that tolerates the name missing), a `setattr` with a computed name, a name given by tuple unpacking
-(`other, size = None, 1`). These stay the reviewer's job.
+(`other, size = None, 1`), a real coordinator method supplied by a keyword or an assignment instead of the class body
+(its own `self` dependencies are not checked), a base that sits in a class body (a class nested in a class). These stay
+the reviewer's job.
 
 A finding is fixed by binding the method in the double, or - where the test never reaches the call - listed in
 ALLOWED with the reason.
@@ -89,7 +91,16 @@ NOT_CALLABLE_TYPES = frozenset(
         "reversed",
         "sorted",
         "len",
+        "sum",
+        "memoryview",
+        "repr",
+        "ord",
+        "chr",
+        "abs",
     }
+)
+BINDS_BOTH = (
+    "    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"  # a double's body in the tests
 )
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 NOT_CALLABLE = (  # what no call can be made on, also when it holds names (`[mock]`, `f"{x}"`, `a + b`)
@@ -182,12 +193,13 @@ def _method_aliases(tree: ast.Module, aliases: set[str], before: int) -> dict[st
     for statement in tree.body:
         if statement.lineno >= before:
             break
+        assigned = _assignment(statement)
+        # The right-hand side is read before the targets are bound: `run_alias = run_alias` keeps the alias.
+        method = _coordinator_method_of(assigned[1], aliases, found) if assigned else None
         for name in _names_defined(statement):
             found.pop(name, None)  # a later definition of the name replaces the alias
-        if assigned := _assignment(statement):
-            targets, value = assigned
-            if (method := _coordinator_method_of(value, aliases, found)) is not None:
-                found |= {target.id: method for target in targets if isinstance(target, ast.Name)}
+        if assigned and method is not None:
+            found |= {target.id: method for target in assigned[0] if isinstance(target, ast.Name)}
     return found
 
 
@@ -775,6 +787,8 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "    other = iter(())\n    other_property = None\n",
         "    other = enumerate([])\n    other_property = None\n",
         "    other = builtins.list()\n    other_property = None\n",
+        "    other = sum([])\n    other_property = None\n",
+        "    other = memoryview(b'')\n    other_property = None\n",
     ],
     ids=[
         "class body",
@@ -812,6 +826,8 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "iterator",
         "enumerate",
         "qualified builtin type",
+        "sum of a list",
+        "memoryview",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
@@ -872,7 +888,7 @@ def test_a_double_whose_bases_name_each_other_still_ends() -> None:
 def test_the_first_of_several_bases_wins() -> None:
     literal = "class _First:\n    other = None\n    other_property = 1\n"
     mock = "class _Second:\n    other = AsyncMock()\n"
-    body = "    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    body = BINDS_BOTH
 
     assert missing_bindings(literal + mock + "class _Fake(_First, _Second):\n" + body, METHODS, MEMBERS) == CALLED
     assert missing_bindings(literal + mock + "class _Fake(_Second, _First):\n" + body, METHODS, MEMBERS) == {}
@@ -912,7 +928,7 @@ def test_a_base_in_front_hides_the_binding_of_a_base_behind_it() -> None:
 
 
 def test_a_diamond_is_resolved_in_pythons_lookup_order() -> None:
-    body = "    run = ComexioCoordinator.run\n    helper = ComexioCoordinator.helper\n"
+    body = BINDS_BOTH
     top = "class _Top:\n    other = None\n    other_property = 1\n"
     left = "class _Left(_Top):\n    pass\n"
     right = "class _Right(_Top):\n    other = AsyncMock()\n"
@@ -935,6 +951,8 @@ def test_an_alias_counts_as_it_stood_where_the_class_is_defined() -> None:
     assert missing_bindings(alias + body + "run_alias = ComexioCoordinator.helper\n", METHODS, MEMBERS) == FINDING
     # an alias reassigned above the class is the one the class captured
     assert missing_bindings(alias + "run_alias = None\n" + body, METHODS, MEMBERS) != FINDING
+    # an alias assigned to itself stays what it was
+    assert missing_bindings(alias + "run_alias = run_alias\n" + body, METHODS, MEMBERS) == FINDING
 
 
 def test_a_name_deleted_in_the_class_body_falls_back_to_the_binding_of_its_base() -> None:
