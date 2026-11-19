@@ -16,17 +16,19 @@ without a value defines nothing), or given elsewhere in the file - an attribute 
 `setattr` (a `patch.object` only with `create=True`, a `monkeypatch.setattr` only with `raising=False`, as keyword or
 in the 5th / 4th position: without that they fail on a name the object lacks and supply nothing) with a literal
 name, or a keyword argument of a call that builds a double (a call of the double's class, or of a function whose name
-says coordinator, fake or double). A name that the method calls (`self.name()`) must be given something that can
-be called: a literal, a container, a computed number or text (`None`, `[]`, `a + b`) is not enough. What else is given
-(a name, a call, a `@property`) counts as callable: its value is not known here. Only a direct call counts:
-`self.name.attr()` reads `name`, so a literal passes (not followed).
+says coordinator: `_coordinator(api, other=...)`). A name that the method calls (`self.name()`) must be given
+something that can be called: a literal, a container, a computed number or text (`None`, `[]`, `a + b`, `1 if x else 2`)
+is not enough. What else is given (a name, a call, a `@property`) counts as callable: its value is not known here.
+In a class body a later assignment replaces an earlier one (`other = AsyncMock()`, then `other = None`). Only a direct
+call counts: `self.name.attr()` reads `name`, and so does `callback = self.name` or `schedule(self.name)`, so a literal
+passes there (not followed: it would flag every data attribute that is handed on as an argument).
 
 An assigned attribute, a `setattr` or a keyword at a builder function counts for every double of the file, because the
 object it goes to is not known; only a keyword at a call of a double's class counts for that class alone (by its name:
 two doubles of one name in one file share it). So a double that lacks a name which another double of the same file
 gets that way is not found, and an assignment that shadows a method the class defines (`fake.other = None`) does not
-take it away: it may hold for one test only. A `patch.object` whose patcher is never entered or started counts as
-supplied all the same.
+take it away: it may hold for one test only, and the order of assignments in a test is not followed either. A
+`patch.object` whose patcher is never entered or started counts as supplied all the same.
 
 Not followed: a double that is built without a class (`SimpleNamespace(...)` or `MagicMock()` passed to
 `ComexioCoordinator.method(fake)`), a method inherited from Home Assistant's coordinator that a double binds (no source
@@ -47,7 +49,7 @@ from custom_components.comexio.coordinator import ComexioCoordinator
 
 TESTS = Path(__file__).parent
 COORDINATOR = "ComexioCoordinator"
-DOUBLE_WORDS = ("coordinator", "fake", "double")
+BUILDER_WORD = "coordinator"  # a function with this in its name builds a double: `_coordinator(api, other=...)`
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
 NOT_CALLABLE = (  # what no call can be made on, also when it holds names (`[mock]`, `f"{x}"`, `a + b`)
     ast.List,
@@ -146,9 +148,14 @@ Supply = dict[str, bool]
 
 
 def _callable(value: ast.expr) -> bool:
-    """False for a literal (`None`, `1`, `-1`, `[]`, `{}`), a container, a computed number or text: no call possible."""
+    """False for a literal (`None`, `1`, `-1`, `[]`, `{}`), a container, a computed number or text: no call possible.
+
+    A conditional can be called when either branch can (`AsyncMock() if x else None`).
+    """
     if isinstance(value, NOT_CALLABLE):
         return False
+    if isinstance(value, ast.IfExp):
+        return _callable(value.body) or _callable(value.orelse)
     try:
         ast.literal_eval(value)
     except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
@@ -169,24 +176,27 @@ def _merged(*supplies: Supply) -> Supply:
 
 
 def _defined_in_body(double: ast.ClassDef) -> Supply:
-    """What the class body defines itself: assignments (annotated ones only with a value) and methods."""
+    """What the class body defines itself: assignments (annotated ones only with a value) and methods.
+
+    The body runs top down, so a later definition of a name replaces an earlier one.
+    """
     supply: Supply = {}
     for statement in double.body:
         if isinstance(statement, ast.Assign):
-            for target in statement.targets:
-                if isinstance(target, ast.Name):
-                    _give(supply, target.id, _callable(statement.value))
+            supply.update(
+                {target.id: _callable(statement.value) for target in statement.targets if isinstance(target, ast.Name)}
+            )
         elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name) and statement.value:
-            _give(supply, statement.target.id, _callable(statement.value))
+            supply[statement.target.id] = _callable(statement.value)
         elif isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
-            _give(supply, statement.name, True)
+            supply[statement.name] = True
     return supply
 
 
 def _builds_a_double(call: ast.Call, doubles: set[str]) -> bool:
     """A call of a double's class, or of a helper whose name says it builds one (`_coordinator(api, **kwargs)`)."""
     name = ast.unparse(call.func).rsplit(".", 1)[-1]
-    return name in doubles or any(word in name.lower() for word in DOUBLE_WORDS)
+    return name in doubles or BUILDER_WORD in name.lower()
 
 
 def _argument(call: ast.Call, index: int, *names: str) -> ast.expr | None:
@@ -361,6 +371,7 @@ METHODS = {
 MEMBERS = frozenset({RUN, HELPER, OTHER, PROPERTY})
 FINDING = {(FAKE, RUN, OTHER): RUN, (FAKE, HELPER, PROPERTY): HELPER}
 CALLED = {(FAKE, RUN, OTHER): RUN}  # `other` is called by `run`, so a literal does not do
+ASSIGNED_LITERALS = "\ndef test_a(fake):\n    fake.other = None\n    fake.other_property = 1\n"
 
 
 def test_detector_finds_a_method_the_double_lacks() -> None:
@@ -410,6 +421,7 @@ def test_detector_accepts_every_way_to_supply_a_name(supply: str) -> None:
     "elsewhere",
     [
         "\ndef test_a():\n    Other(other=AsyncMock(), other_property=2)\n",
+        "\ndef test_a():\n    make_fake_api(other=AsyncMock(), other_property=2)\n",
         "\ndef test_a(fake, name):\n    setattr(fake, name, 1)\n    patch.object(fake, name, 2, create=True)\n",
         # a patch of a name the object lacks fails by itself: it supplies nothing (a never started one even less)
         "\ndef test_a(fake):\n    patch.object(fake, 'other', AsyncMock())\n"
@@ -425,6 +437,7 @@ def test_detector_accepts_every_way_to_supply_a_name(supply: str) -> None:
     ],
     ids=[
         "keyword of a call that builds no double",
+        "keyword of a helper that only says fake",
         "setattr with a computed name",
         "patch.object without create",
         "monkeypatch.setattr without raising False",
@@ -456,7 +469,7 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
     [
         "    other = None\n    other_property = None\n",
         "    other: object = None\n    other_property: int = 1\n",
-        "\ndef test_a(fake):\n    fake.other = None\n    fake.other_property = 1\n",
+        ASSIGNED_LITERALS,
         "\ndef test_a():\n    _Fake(other=1, other_property=2)\n",
         "\ndef test_a(fake):\n    setattr(fake, 'other', 3)\n    setattr(fake, 'other_property', 2)\n",
         "    other = []\n    other_property = None\n",
@@ -467,6 +480,8 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "    other = [helper_mock]\n    other_property = None\n",
         "\ndef test_a(fake, x):\n    fake.other = x + 1\n    fake.other_property = 1\n",
         "\ndef test_a(fake, x):\n    fake.other = f'{x}'\n    fake.other_property = 1\n",
+        "\ndef test_a(fake, x):\n    fake.other = 1 if x else 2\n    fake.other_property = 1\n",
+        "    other = AsyncMock()\n    other = None\n    other_property = None\n",
     ],
     ids=[
         "class body",
@@ -481,6 +496,8 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "list of names",
         "sum",
         "f-string",
+        "conditional of two literals",
+        "literal after a callable in the class body",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
@@ -492,11 +509,16 @@ def test_a_literal_hides_no_callable_whichever_comes_first() -> None:
     method_then_literal = (
         DOUBLE + "    def other(self): ...\n    other_property = None\n\ndef test_a(fake):\n    fake.other = None\n"
     )
-    literal_then_callable = DOUBLE + "\ndef test_a(fake):\n    fake.other = None\n    fake.other_property = 1\n"
-    literal_then_callable += "\ndef test_b():\n    _coordinator(api, other=AsyncMock())\n"
+    literal_then_callable = DOUBLE + ASSIGNED_LITERALS + "\ndef test_b():\n    _coordinator(api, other=AsyncMock())\n"
+    callable_in_a_branch = (
+        DOUBLE + "\ndef test_a(fake, x):\n    fake.other = AsyncMock() if x else None\n    fake.other_property = 1\n"
+    )
+    literal_then_method = DOUBLE + "    other = None\n    def other(self): ...\n    other_property = None\n"
 
     assert missing_bindings(method_then_literal, METHODS, MEMBERS) == {}
     assert missing_bindings(literal_then_callable, METHODS, MEMBERS) == {}
+    assert missing_bindings(callable_in_a_branch, METHODS, MEMBERS) == {}
+    assert missing_bindings(literal_then_method, METHODS, MEMBERS) == {}
 
 
 def test_a_keyword_at_the_call_of_one_double_does_not_supply_another() -> None:
