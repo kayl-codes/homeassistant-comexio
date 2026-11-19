@@ -643,12 +643,85 @@ def test_a_forced_run_on_an_entry_without_stored_commands_ends_when_the_old_id_i
     security = coordinator.api.webhook_security
     security.protocol_moved = {NAME}  # must go with the marker
     coordinator.data["webio_commands"] = {}
+    coordinator._last_poll_scraped = True
+    coordinator._own_web_device_count = 0  # `$WebDevices` was read and holds no device of ours
+    for attr, value in _SCRAPE_STATE.items():
+        setattr(coordinator, attr, value)
 
     assert _run(coordinator.async_force_webhook_migration()) == "done"
 
     assert security.protocol_write is None  # not "the old id stays on" every night, with the old id long off
     assert security.protocol_moved == set()
     assert _run(coordinator._async_webhook_migration_tick()) == "skipped"
+
+
+_NO_PROOF = [(False, 0), (False, None), (True, None), (True, 1)]
+_SCRAPE_STATE = {"last_update_success": True, "_polls_open": 0, "_poll_overlap": False}
+
+
+@pytest.mark.parametrize(("scraped", "own_devices"), _NO_PROOF)
+@pytest.mark.parametrize("path", ["forced", "nightly"])
+def test_an_empty_command_list_does_not_end_a_protocol_move_without_the_proof_that_none_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    path: str,
+    scraped: bool,
+    own_devices: int | None,
+) -> None:
+    """An incomplete scrape (no `$WebDevices`, or a device of ours) must not clear the marker and the moved set."""
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW + timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.protocol_moved = {NAME}
+    security.protocol_write = NOW  # the move is under way (a forced run sets it itself)
+    coordinator.data["webio_commands"] = {}
+    coordinator._last_poll_scraped = scraped
+    coordinator._own_web_device_count = own_devices
+    for attr, value in _SCRAPE_STATE.items():
+        setattr(coordinator, attr, value)
+    coordinator._clear_webhook_migration_notices = MagicMock()
+    coordinator._async_save_webhook_security = AsyncMock(return_value=True)
+
+    run = coordinator.async_force_webhook_migration if path == "forced" else coordinator._async_webhook_migration_tick
+    assert _run(run()) == "pending"
+
+    assert security.protocol_write is not None  # still waiting: a later complete scrape is read back
+    assert security.protocol_moved == {NAME}
+    assert not security.legacy_enabled
+    coordinator._clear_webhook_migration_notices.assert_not_called()  # the repairs and notices stay
+    assert "The protocol move is not over" in caplog.text
+    assert "Every Web-IO command carries the protocol" not in caplog.text
+
+    # A later scrape that read `$WebDevices` without a device of ours ends it.
+    coordinator._last_poll_scraped = True
+    coordinator._own_web_device_count = 0
+    assert _run(coordinator._async_webhook_migration_tick()) == "done"
+    assert security.protocol_write is None
+    assert security.protocol_moved == set()
+
+
+@pytest.mark.parametrize(
+    "state", [{"_polls_open": 1}, {"_poll_overlap": True}, {"last_update_success": False}], ids=str
+)
+def test_the_proof_that_no_device_exists_is_not_taken_from_a_poll_that_is_not_through(
+    monkeypatch: pytest.MonkeyPatch, state: dict[str, Any]
+) -> None:
+    """The scrape flags are set before a poll commits its data: they do not belong to the data of this run yet."""
+    coordinator, _held = _protocol_coordinator(
+        monkeypatch, held_protocol=WEBIO_PROTOCOL_HTTP, boot=NOW + timedelta(hours=1)
+    )
+    security = coordinator.api.webhook_security
+    security.protocol_moved = {NAME}
+    coordinator.data["webio_commands"] = {}
+    coordinator._last_poll_scraped = True
+    coordinator._own_web_device_count = 0
+    for attr, value in {**_SCRAPE_STATE, **state}.items():
+        setattr(coordinator, attr, value)
+
+    assert _run(coordinator.async_force_webhook_migration()) == "pending"
+
+    assert security.protocol_moved == {NAME}
 
 
 def test_a_command_that_could_not_be_moved_after_the_old_id_is_off_raises_no_repair_about_the_old_id(
@@ -818,8 +891,14 @@ def test_the_generate_web_io_upload_replaces_a_class_under_the_sync_lock(monkeyp
         held_during_upload.append(lock.locked())
         return "ok"
 
+    held_during_build: list[bool] = []
+
+    def build(*_a: Any, **_k: Any) -> str:
+        held_during_build.append(lock.locked())
+        return "{}"
+
     coordinator = SimpleNamespace(
-        api=SimpleNamespace(generate_webio_json=MagicMock(return_value="{}")),
+        api=SimpleNamespace(generate_webio_json=build),
         server_id="srv",
         config_entry=SimpleNamespace(data={}, options={}),
         required_webio_classes=("marker",),
@@ -836,6 +915,7 @@ def test_the_generate_web_io_upload_replaces_a_class_under_the_sync_lock(monkeyp
 
     _run(services_misc.handle_generate_web_io(hass, SimpleNamespace(data={"config_entry": "e1", "upload": True})))
 
+    assert held_during_build == [True]  # the JSON is built from the source data of the moment the lock is held
     assert held_during_upload == [True]
     assert not lock.locked()
 

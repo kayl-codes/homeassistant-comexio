@@ -6557,8 +6557,18 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         nothing was verified, the old id stays on.
         """
         if not security.legacy_enabled:
-            # The old id is off and no command of ours exists: there is no protocol to move either.
-            return await self._async_end_protocol_move(security)
+            if self._scrape_shows_no_device_of_ours():
+                # The old id is off and `$WebDevices` was read without a device of ours: no command of ours exists,
+                # so there is no protocol to move either.
+                return await self._async_end_protocol_move(security)
+            # An empty command list can also be an incomplete scrape (a poll that did not read `$WebDevices`): the
+            # marker and the moved commands stay, so that a later complete scrape is read back.
+            _LOGGER.warning(
+                "[%s] The protocol move is not over: no Web-IO command is known to verify, and the last scrape does "
+                "not show that none exists (a sync recreates missing commands)",
+                self.server_id,
+            )
+            return WEBHOOK_MIGRATION_PENDING
         if self._legacy_webhook_id_unneeded(security):
             security.end_protocol_move()  # no command of ours exists: no protocol move waits for a restart
             if await self._async_switch_legacy_webhook_id_off(security):
@@ -6618,6 +6628,20 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info(
             "[%s] Comexio has no Web-IO device of this entry yet: the old webhook id is not needed and stays off",
             self.server_id,
+        )
+
+    def _scrape_shows_no_device_of_ours(self) -> bool:
+        """True when the last poll, committed and not overlapped, scraped `$WebDevices` and found no device of ours.
+
+        The flags are set before a poll commits its data, so a poll under way (or overlapping ones) would pair them
+        with the data of another poll.
+        """
+        return (
+            self._last_poll_scraped
+            and self._own_web_device_count == 0
+            and self.last_update_success
+            and not self._polls_open
+            and not self._poll_overlap
         )
 
     def _legacy_webhook_id_unneeded(self, security: WebhookSecurity | None) -> bool:
