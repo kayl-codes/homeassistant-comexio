@@ -13,6 +13,12 @@ needs no bookkeeping, and the store stays small.
 The old id (``comexio_<server_id>``) stays registered while commands still use it. ``migrated`` lists the
 commands already rewritten to their own path; once all are, and Comexio has restarted since the last write
 (Comexio only sends a changed command after a restart), the old id is switched off for good.
+
+``https_written`` lists the commands this entry last wrote with the protocol HTTPS (#165). Comexio's scrape does
+not show a command's protocol, so the ledger is how the integration knows it without reading every command's form:
+a command that is not in it was written with HTTP, as every command was before HTTPS was supported. It is the
+migration's second criterion, next to the path: a command whose recorded protocol is not the one HA is reached
+with today is rewritten, and Comexio has to restart for that, too.
 """
 
 from __future__ import annotations
@@ -28,6 +34,7 @@ from typing import Any
 
 from aiocomexio.const import WebioClass
 from aiocomexio.onewire import OneWireSensor
+from aiocomexio.webio import WEBIO_PROTOCOL_HTTPS
 from homeassistant.components import webhook
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.storage import Store
@@ -47,11 +54,29 @@ _KEY_LEGACY = "legacy"
 _KEY_WRITTEN = "last_write"
 _KEY_HOST = "host"
 _KEY_HOST_CHANGED = "host_changed"
+_KEY_HTTPS = "https_written"
+_KEY_PROTOCOL_WRITE = "protocol_write"
 
 
 def legacy_webhook_id(server_id: str) -> str:
     """The one id every command used before they got their own."""
     return f"comexio_{server_id}"
+
+
+def _stored_names(stored: Any) -> set[str]:
+    """The command names of a stored list; anything that is no list of strings (a hand-edited store) is dropped."""
+    return {name for name in stored if isinstance(name, str)} if isinstance(stored, list) else set()
+
+
+def _stored_stamp(stored: Any) -> datetime | None:
+    """A stored time stamp, aware; None when it is missing or unreadable.
+
+    as_utc: a naive stamp (a hand-edited store) would make the comparison with the aware boot time raise.
+    """
+    try:
+        return dt_util.as_utc(datetime.fromisoformat(stored)) if isinstance(stored, str) else None
+    except ValueError:
+        return None
 
 
 def _part(value: Any) -> str:
@@ -155,7 +180,13 @@ class WebhookSecurity:
         # has no saved config (see ComexioCoordinator._async_settle_legacy_webhook_id).
         self.host_changed = False
         self.migrated: set[str] = set()
+        # Names of the commands last written with HTTPS (see the module docstring); every other one carries HTTP.
+        self.https_written: set[str] = set()
         self.last_write: datetime | None = None
+        # When a command that already had its own path was last rewritten to another protocol (#165), until a run has
+        # read every command back after a Comexio restart: the old id may be off by then, so this is what keeps the
+        # nightly run (restart request, read-back) going.
+        self.protocol_write: datetime | None = None
         # kind of refusal -> (time of its last log line, refusals since then that were not logged)
         self._refusal_log: dict[str, tuple[float, int]] = {}
 
@@ -199,14 +230,10 @@ class WebhookSecurity:
         self.secret = stored[_KEY_SECRET]
         self.legacy_enabled = bool(stored.get(_KEY_LEGACY, True))
         self.host_changed = bool(stored.get(_KEY_HOST_CHANGED, False))
-        migrated = stored.get(_KEY_MIGRATED)
-        self.migrated = {name for name in migrated if isinstance(name, str)} if isinstance(migrated, list) else set()
-        written = stored.get(_KEY_WRITTEN)
-        try:
-            # as_utc: a naive stamp (a hand-edited store) would make the comparison with the aware boot time raise.
-            self.last_write = dt_util.as_utc(datetime.fromisoformat(written)) if isinstance(written, str) else None
-        except ValueError:
-            self.last_write = None
+        self.migrated = _stored_names(stored.get(_KEY_MIGRATED))
+        self.https_written = _stored_names(stored.get(_KEY_HTTPS))
+        self.last_write = _stored_stamp(stored.get(_KEY_WRITTEN))
+        self.protocol_write = _stored_stamp(stored.get(_KEY_PROTOCOL_WRITE))
         if self.migrated and self.last_write is None:
             # Commands were rewritten but their stamp is lost: count the write as now, so the old id is only
             # switched off after a Comexio restart that happens from here on.
@@ -253,7 +280,9 @@ class WebhookSecurity:
             _KEY_SECRET: self.secret,
             _KEY_LEGACY: self.legacy_enabled,
             _KEY_MIGRATED: sorted(self.migrated),
+            _KEY_HTTPS: sorted(self.https_written),
             _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
+            _KEY_PROTOCOL_WRITE: self.protocol_write.isoformat() if self.protocol_write else None,
             _KEY_HOST: self.host or None,
             _KEY_HOST_CHANGED: self.host_changed,
         }
@@ -274,10 +303,20 @@ class WebhookSecurity:
     def path_for(self, webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
         return command_path(self.secret, webio_class, item)
 
-    def mark_written(self, name: str, now: datetime) -> None:
-        """A command of this name now carries its own path in Comexio's configuration."""
+    def mark_written(self, name: str, now: datetime, *, https: bool = False) -> None:
+        """A command of this name now carries its own path, and the given protocol, in Comexio's configuration."""
+        if name in self.migrated and self.carries_https(name) != https:
+            self.protocol_write = now
         self.migrated.add(name)
+        if https:
+            self.https_written.add(name)
+        else:
+            self.https_written.discard(name)
         self.last_write = now
+
+    def carries_https(self, name: str) -> bool:
+        """Whether the command of this name was last written with HTTPS (any other one carries HTTP)."""
+        return name in self.https_written
 
     def accepts(self, webhook_id: str, data: Mapping[str, Any]) -> bool:
         """Whether a request on webhook_id may deliver this payload.
@@ -316,6 +355,23 @@ def command_deviation(target: Mapping[str, Any], parameter: str, data: str) -> s
     if wanted and len(re.findall(rf"(?<=[\s,{{]){re.escape(wanted.group(0))}", data)) != 1:
         return f"body without exactly one {wanted.group(0)}"
     return None
+
+
+def protocol_deviation(target: Mapping[str, Any], protocol: int | None) -> str | None:
+    """Why the protocol of a command as Comexio holds it is not the target's, or None when it is (or is unknown)."""
+    if protocol is None or protocol == target.get("Protocol"):
+        return None
+    return "protocol is not the one Home Assistant is reached with"
+
+
+def protocol_unproven(target: Mapping[str, Any], protocol: int | None) -> bool:
+    """True when a form that shows no protocol leaves an HTTPS target unproven.
+
+    A command that was HTTP before HTTPS was supported is not blocked by a form without the field (that is how it
+    always was), but nothing proves a command is HTTPS then: it counts as unreadable, not as deviating, so it is
+    not rewritten over and over.
+    """
+    return protocol is None and target.get("Protocol") == WEBIO_PROTOCOL_HTTPS
 
 
 def _same(received: str, expected: str) -> bool:

@@ -2251,7 +2251,7 @@ class ComexioAPI:
         return True
 
     def _note_command_written(self, cmd_payload: Mapping[str, Any]) -> None:
-        """Record that a command now carries a webhook id of its own, so the migration skips it."""
+        """Record that a command now carries a webhook id of its own and its protocol, so the migration skips it."""
         security = self.webhook_security
         path = cmd_payload.get("Parameter")
         name = cmd_payload.get("Name")
@@ -2261,7 +2261,9 @@ class ComexioAPI:
             and isinstance(path, str)
             and not path.endswith(legacy_webhook_id(security.server_id))
         ):
-            security.mark_written(name, dt_util.utcnow())
+            security.mark_written(
+                name, dt_util.utcnow(), https=cmd_payload.get("Protocol") == comexio_webio.WEBIO_PROTOCOL_HTTPS
+            )
             security.schedule_save()
 
     async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
