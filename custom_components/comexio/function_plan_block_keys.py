@@ -17,13 +17,14 @@ Snapshots taken before keys existed get them backfilled once from today's catalo
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, NamedTuple
 
 from aiocomexio.function_plan import plan_hash
 from aiocomexio.reference_catalog import KEY_SEPARATOR
 from homeassistant.util import dt as dt_util
 
 from .const import one_line
+from .function_plan_block_settings import SNAPSHOT_BLOCK_SETTINGS, snapshot_block_settings
 
 # Plan element reference type of a logic block (fubBase).
 BLOCK_ELEMENT_TYPE = "5"
@@ -44,6 +45,10 @@ UNRESOLVED_BLOCKS = "unresolved_blocks"
 REASON_NO_KEY = "no key"  # the id was not in the catalog when the keys were frozen
 REASON_MISSING = "missing"  # no live block has this key
 REASON_AMBIGUOUS = "ambiguous"  # several live blocks have this key
+# The reasons omit_unresolved_blocks may leave a block out for (the block is gone or cannot be told apart).
+OMITTABLE_REASONS = frozenset({REASON_MISSING, REASON_AMBIGUOUS})
+# Set on the copy omit_unresolved_blocks returns: what it left out.
+OMITTED_BLOCKS = "omitted_blocks"
 # Missing/ambiguous blocks get this ref_id prefix, so no renderer or diff mistakes them for a live block.
 # A block without a key keeps its stored id: it may be restored with an explicit opt-in.
 UNRESOLVED_REF_PREFIX = "unresolved:"
@@ -56,6 +61,19 @@ UNCHECKED_NO_CATALOG = "no catalog"  # no verified block catalog right now
 # Set on the copy async_get_snapshot returns for a backfilled_unverified snapshot: why its wiring
 # does not fit today's blocks (implausible_block_wiring).
 UNVERIFIED_BLOCK_PROBLEMS = "unverified_block_problems"
+# Keys of the plan dicts and of the entries this module builds, which repeat too often to stay literals.
+_ELEMENTS = "elements"
+_CONNECTIONS = "connections"
+_OUTPUT = "output"
+_INPUT = "input"
+_HASH = "hash"
+_FUB_ELEMENT_ID = "FubElementId"
+_ELEMENT = "element"
+_REASON = "reason"
+_NAME = "name"
+_REF_ID = "ref_id"
+_KEY = "key"
+_UNFED = "unfed"
 # The catalog while none is verified: one shared object (never mutated), so identity memos still hit.
 NO_FUB_BASE: dict[str, Any] = {}
 
@@ -161,7 +179,7 @@ def uses_unknown_block_ids(elements: Mapping[str, Any], fub_base: Mapping[str, A
 def _endpoint(port: Any) -> tuple[str, int] | None:
     if not isinstance(port, Mapping):
         return None
-    elem_id, pos = port.get("FubElementId"), _as_int(port.get("IOPos"))
+    elem_id, pos = port.get(_FUB_ELEMENT_ID), _as_int(port.get("IOPos"))
     return (str(elem_id), pos) if elem_id is not None and pos is not None else None
 
 
@@ -212,8 +230,8 @@ def _wired_element_ids(connections: Mapping[str, Any]) -> set[str]:
     for conn in connections.values():
         if not isinstance(conn, Mapping):
             continue
-        sinks = conn.get("output")
-        for port in [conn.get("input"), *(sinks if isinstance(sinks, list) else [])]:
+        sinks = conn.get(_OUTPUT)
+        for port in [conn.get(_INPUT), *(sinks if isinstance(sinks, list) else [])]:
             if (endpoint := _endpoint(port)) is not None:
                 wired.add(endpoint[0])
     return wired
@@ -250,7 +268,7 @@ def implausible_block_wiring(
     for conn in connections.values():
         if not isinstance(conn, Mapping):
             continue
-        source = _endpoint(conn.get("input"))
+        source = _endpoint(conn.get(_INPUT))
         source_block = _block_def(elements, fub_base, source)
         if source and source_block and source[1] >= (_as_int(source_block.get("n_out")) or 0):
             problems.append(
@@ -258,7 +276,7 @@ def implausible_block_wiring(
                 f"{one_line(source_block.get('name'))} block's outputs"
             )
             source_block = None
-        problems.extend(_sink_problems(elements, fub_base, source, source_block, conn.get("output")))
+        problems.extend(_sink_problems(elements, fub_base, source, source_block, conn.get(_OUTPUT)))
     return problems
 
 
@@ -283,10 +301,10 @@ def backfill_block_keys(
     """
     if SNAPSHOT_KEYS in snapshot:
         return None
-    elements = snapshot.get("elements") or {}
+    elements = snapshot.get(_ELEMENTS) or {}
     if _captured_since(snapshot, block_ids_changed_at):
         source = SOURCE_BACKFILLED
-    elif implausible_block_wiring(elements, snapshot.get("connections") or {}, fub_base):
+    elif implausible_block_wiring(elements, snapshot.get(_CONNECTIONS) or {}, fub_base):
         source = SOURCE_BACKFILLED_UNVERIFIED
     else:
         source = SOURCE_BACKFILLED_PLAUSIBLE
@@ -316,11 +334,15 @@ def _same_id_type(new_id: str, old_id: Any) -> Any:
     return int(new_id) if isinstance(old_id, int) and new_id.isdigit() else new_id
 
 
+def _unresolved_label(key: str | None, old_id: Any) -> str:
+    return f"⚠ {key or f'block id {old_id}'}"
+
+
 def _unresolved_element(elem: Mapping[str, Any], reference: dict[str, Any], key: str | None) -> dict[str, Any]:
     """The element marked as unknown: a ref_id no catalog has and a name saying which block it was."""
     old_id = reference.get("ref_id")
     name = elem.get("name") or ""
-    label = f"⚠ {key or f'block id {old_id}'}"
+    label = _unresolved_label(key, old_id)
     return {
         **elem,
         "name": f"{label}: {name}" if name else label,
@@ -358,7 +380,7 @@ def resolve_block_ids(snapshot: dict[str, Any], fub_base: Mapping[str, Any]) -> 
     backfilled_unverified snapshot lists why under UNVERIFIED_BLOCK_PROBLEMS.
     """
     keys = snapshot.get(SNAPSHOT_KEYS)
-    stored = snapshot.get("elements") or {}
+    stored = snapshot.get(_ELEMENTS) or {}
     if not isinstance(keys, Mapping) or not fub_base:
         if not _used_block_ids(stored):
             return snapshot
@@ -367,13 +389,13 @@ def resolve_block_ids(snapshot: dict[str, Any], fub_base: Mapping[str, Any]) -> 
     extra: dict[str, Any] = {}
     if snapshot.get(SNAPSHOT_KEYS_SOURCE) == SOURCE_BACKFILLED_UNVERIFIED:
         extra[UNVERIFIED_BLOCK_PROBLEMS] = implausible_block_wiring(
-            elements, snapshot.get("connections") or {}, fub_base
+            elements, snapshot.get(_CONNECTIONS) or {}, fub_base
         )
     if not unresolved and elements == stored:
         return snapshot | extra if extra else snapshot
-    resolved = snapshot | extra | {"elements": elements, UNRESOLVED_BLOCKS: unresolved}
+    resolved = snapshot | extra | {_ELEMENTS: elements, UNRESOLVED_BLOCKS: unresolved}
     # The stored hash is over the stored ids; a restore verifies against the translated plan.
-    resolved["hash"] = plan_hash(resolved)
+    resolved[_HASH] = plan_hash(resolved)
     return resolved
 
 
@@ -387,17 +409,170 @@ def _resolve_elements(
         elements[elem_id], key, reason = _resolve_element(elem, keys, ids_by_key)
         if reason is not None:
             old_id = (_block_reference(elem) or {}).get("ref_id")
-            unresolved.append({"element": str(elem_id), "ref_id": old_id, "key": key, "reason": reason})
+            unresolved.append({_ELEMENT: str(elem_id), _REF_ID: old_id, _KEY: key, _REASON: reason})
     return elements, unresolved
 
 
 def unresolved_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
     """One line per UNRESOLVED_BLOCKS entry: which element, which block, and why."""
     return [
-        f"element {block['element']}: block id {block['ref_id']} ({block['key'] or 'no key'}): "
-        f"{_REASON_TEXT.get(block['reason'], block['reason'])}"
+        f"element {one_line(block[_ELEMENT])}: block id {one_line(block[_REF_ID])} "
+        f"({one_line(block[_KEY]) if block[_KEY] else 'no key'}): "
+        f"{_REASON_TEXT.get(block[_REASON], block[_REASON])}"
         for block in blocks
     ]
+
+
+# ---------------------------------------------------------------------------
+# Restore without the blocks Comexio no longer has
+# ---------------------------------------------------------------------------
+
+
+def _endpoint_element(port: Any) -> str | None:
+    """The element id a wire end names, None for anything that is no end."""
+    if isinstance(port, Mapping) and (element := port.get(_FUB_ELEMENT_ID)) is not None:
+        return str(element)
+    return None
+
+
+class _Cut(NamedTuple):
+    """What cutting the omitted elements out of the connections left and cost."""
+
+    connections: dict[str, Any]
+    affected: dict[str, int]  # {omitted element: connections it made drop or shrink}
+    unfed: dict[str, set[str]]  # {omitted source: elements that lost their input with its wire}
+
+
+def _cut_connection(conn: Mapping[str, Any], omitted: set[str]) -> tuple[Mapping[str, Any] | None, set[str], set[str]]:
+    """(the connection without its omitted ends, or None when nothing of it is left; the omitted
+    elements it touched; the elements that lost their input because the source of the wire is omitted).
+
+    A wire whose source is omitted has nothing left to carry and goes whole. Of a fan-out only the
+    ends at an omitted element go; the wire stays while any sink does. A connection that names no
+    omitted element comes back as it is. Comexio keeps connections without an "input", and writes
+    "output" as a list or as an object keyed by position ({"0": {...}}), as plan_hash reads both; a
+    shortened wire comes back as a list. A connection with a malformed end would already have
+    failed plan_hash in resolve_block_ids.
+    """
+    sinks = conn.get(_OUTPUT) or []
+    sinks = list(sinks.values()) if isinstance(sinks, Mapping) else sinks
+    source = _endpoint_element(conn.get(_INPUT))
+    ends = (source, *(_endpoint_element(sink) for sink in sinks))
+    touched = {element for element in ends if element is not None and element in omitted}
+    if not touched:
+        return conn, touched, set()
+    if source in omitted:
+        unfed = {element for sink in sinks if (element := _endpoint_element(sink)) and element not in omitted}
+        return None, touched, unfed
+    remaining = [sink for sink in sinks if _endpoint_element(sink) not in omitted]
+    return ({**conn, _OUTPUT: remaining} if remaining else None), touched, set()
+
+
+def _cut_connections(connections: Mapping[str, Any], omitted: set[str]) -> _Cut:
+    """The connections without the omitted ends, and what that cost (see _Cut)."""
+    kept: dict[str, Any] = {}
+    affected = dict.fromkeys(omitted, 0)
+    unfed: dict[str, set[str]] = {}
+    for conn_id, conn in connections.items():
+        cut, touched, fed_no_more = _cut_connection(conn, omitted)
+        for element in touched:
+            affected[element] += 1
+        if fed_no_more:
+            unfed.setdefault(str(_endpoint_element(conn.get(_INPUT))), set()).update(fed_no_more)
+        if cut is not None:
+            kept[conn_id] = cut
+    return _Cut(kept, affected, unfed)
+
+
+def _omitted_report(block: Mapping[str, Any], elements: Mapping[str, Any], cut: _Cut) -> dict[str, Any]:
+    """One OMITTED_BLOCKS entry; the name is the element's own again, without the marker of _unresolved_element.
+
+    elements are the ones resolve_block_ids returned (the marked element), cut what _cut_connections left.
+    """
+    name = str((elements.get(str(block[_ELEMENT])) or {}).get(_NAME) or "")
+    label = _unresolved_label(block[_KEY], block[_REF_ID])
+    if name == label:
+        name = ""
+    elif name.startswith(f"{label}: "):
+        name = name[len(label) + 2 :]
+    return {
+        _ELEMENT: block[_ELEMENT],
+        _NAME: name,
+        _REF_ID: block[_REF_ID],
+        _KEY: block[_KEY],
+        _REASON: block[_REASON],
+        _CONNECTIONS: cut.affected[str(block[_ELEMENT])],
+        _UNFED: sorted(cut.unfed.get(str(block[_ELEMENT]), ()), key=lambda element: (len(element), element)),
+    }
+
+
+def omit_unresolved_blocks(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """The snapshot without the blocks Comexio no longer has, as resolve_block_ids returned it.
+
+    Only a block with no live counterpart at all (REASON_MISSING) or no unique one
+    (REASON_AMBIGUOUS) is left out, with the connections that end at it (see _cut_connection) and
+    its block settings; a block that is merely unknown to the catalog (REASON_NO_KEY) stays and
+    keeps needing accept_unverified_blocks. The result carries what was left out under
+    OMITTED_BLOCKS ({element, name, ref_id, key, reason, connections, unfed}: unfed are the elements
+    that lose their input with the wire of an omitted source) and lists only the remaining blocks
+    under UNRESOLVED_BLOCKS, so block_check judges what a restore would build. The hash is recomputed
+    like resolve_block_ids does. The same snapshot comes back when nothing is to be omitted (so a
+    second call on the result changes nothing); the stored one is never changed. Everything else
+    stays as it was: the labels belong to marker, Web-IO and IO elements, fub_base_keys to block ids
+    and module_configs to scene and Quantum elements, none of which is a logic block.
+    """
+    unresolved = snapshot.get(UNRESOLVED_BLOCKS) or []
+    omit = [block for block in unresolved if block[_REASON] in OMITTABLE_REASONS]
+    if not omit:
+        return snapshot
+    omitted = {str(block[_ELEMENT]) for block in omit}
+    stored = snapshot.get(_ELEMENTS) or {}
+    cut = _cut_connections(snapshot.get(_CONNECTIONS) or {}, omitted)
+    result = {
+        **snapshot,
+        _ELEMENTS: _without_elements(stored, omitted),
+        _CONNECTIONS: cut.connections,
+        UNRESOLVED_BLOCKS: [block for block in unresolved if block not in omit],
+        OMITTED_BLOCKS: [_omitted_report(block, stored, cut) for block in omit],
+    }
+    if (settings := snapshot_block_settings(snapshot)) is not None:
+        result[SNAPSHOT_BLOCK_SETTINGS] = _without_elements(settings, omitted)
+    if UNVERIFIED_BLOCK_PROBLEMS in snapshot:
+        result[UNVERIFIED_BLOCK_PROBLEMS] = _problems_of_the_rest(snapshot[UNVERIFIED_BLOCK_PROBLEMS], omitted)
+    result[_HASH] = plan_hash(result)
+    return result
+
+
+def _problems_of_the_rest(problems: list[str], omitted: set[str]) -> list[str]:
+    """The implausible-wiring lines (implausible_block_wiring) that do not name an omitted element.
+
+    Lines about the elements that lost their input with a cut wire stay as they were: the list is
+    a plausibility hint that errs towards asking for the opt-in, never towards skipping it.
+    """
+    return [line for line in problems if not any(line.startswith(f"element {elem_id}:") for elem_id in omitted)]
+
+
+def _without_elements(by_element: Mapping[str, Any], omitted: set[str]) -> dict[str, Any]:
+    """by_element ({element id: ...}) without the omitted elements."""
+    return {elem_id: value for elem_id, value in by_element.items() if str(elem_id) not in omitted}
+
+
+def omitted_block_lines(blocks: list[dict[str, Any]]) -> list[str]:
+    """One line per OMITTED_BLOCKS entry: which element, which block, why, and what its wires cost."""
+    return [_omitted_line(block) for block in blocks]
+
+
+def _omitted_line(block: Mapping[str, Any]) -> str:
+    title = f" ({one_line(block[_NAME])})" if block[_NAME] else ""
+    reason = _REASON_TEXT.get(block[_REASON], block[_REASON])
+    unfed = (
+        f"; input lost at element {', '.join(one_line(element) for element in block[_UNFED])}" if block[_UNFED] else ""
+    )
+    key = one_line(block[_KEY]) if block[_KEY] else "no key"
+    return (
+        f"element {one_line(block[_ELEMENT])}{title}: block id {one_line(block[_REF_ID])} ({key}): {reason}; "
+        f"{block[_CONNECTIONS]} connection(s) dropped or shortened{unfed}"
+    )
 
 
 def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -407,7 +582,7 @@ def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
     affected elements (empty for CHECK_PLAUSIBLE). Read by the restore service and the plan card.
     """
     unresolved = snapshot.get(UNRESOLVED_BLOCKS) or []
-    if hard := [block for block in unresolved if block["reason"] != REASON_NO_KEY]:
+    if hard := [block for block in unresolved if block[_REASON] != REASON_NO_KEY]:
         return {"status": CHECK_UNRESOLVED, "problems": unresolved_block_lines(hard)}
     if unresolved:
         return {"status": CHECK_UNVERIFIED, "problems": unresolved_block_lines(unresolved)}
