@@ -81,6 +81,14 @@ NOT_CALLABLE_TYPES = frozenset(
         "object",
         "range",
         "slice",
+        "iter",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "reversed",
+        "sorted",
+        "len",
     }
 )
 NEW_VALUE = ("new", "value")  # keyword spellings of the value in `patch.object` and `monkeypatch.setattr`
@@ -167,10 +175,13 @@ def _coordinator_method_of(value: ast.expr, aliases: set[str], method_aliases: d
     return None
 
 
-def _method_aliases(tree: ast.Module, aliases: set[str]) -> dict[str, str]:
-    """Module-level names that hold a coordinator method (`run_alias = ComexioCoordinator.run`)."""
+def _method_aliases(tree: ast.Module, aliases: set[str], before: int) -> dict[str, str]:
+    """Module-level names that hold a coordinator method (`run_alias = ComexioCoordinator.run`) as they stand when the
+    statement at line `before` runs: a later reassignment does not change what a class defined above it captured."""
     found: dict[str, str] = {}
     for statement in tree.body:
+        if statement.lineno >= before:
+            break
         for name in _names_defined(statement):
             found.pop(name, None)  # a later definition of the name replaces the alias
         if assigned := _assignment(statement):
@@ -233,6 +244,15 @@ Supply = dict[str, bool]
 Scopes = dict[ast.ClassDef, tuple[ast.AST, ...]]  # class definition -> the functions it sits in
 
 
+def _builtin_name(func: ast.expr) -> str | None:
+    """`list` for `list(...)` and `builtins.list(...)`; None for any other callee."""
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id == "builtins":
+        return func.attr
+    return None
+
+
 def _callable(value: ast.expr) -> bool:
     """False for a literal (`None`, `1`, `-1`, `[]`, `{}`), a container, a computed number or text: no call possible.
 
@@ -241,8 +261,8 @@ def _callable(value: ast.expr) -> bool:
     """
     if isinstance(value, NOT_CALLABLE):
         return False
-    if isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in NOT_CALLABLE_TYPES:
-        return False  # `list()`, `object()`: an instance of a type that has no `__call__`
+    if isinstance(value, ast.Call) and _builtin_name(value.func) in NOT_CALLABLE_TYPES:
+        return False  # `list()`, `object()`, `iter(())`: what no `__call__` can be made on
     if isinstance(value, ast.IfExp):
         return _conditional_may_be_called(value)
     if isinstance(value, ast.BoolOp):
@@ -424,7 +444,7 @@ def missing_bindings(
     aliases = _class_aliases(tree)
     # By class definition, not by name: two doubles of one name (in two tests) keep their own bindings.
     defined = _scopes(tree)
-    method_aliases = _method_aliases(tree, aliases)
+    method_aliases = {node: _method_aliases(tree, aliases, node.lineno) for node in defined}
     bound_of = [(node, _class_bindings(node, defined, aliases, method_aliases)) for node in defined]
     shared, per_class = _supplied_in_file(tree, {double.name for double, bound in bound_of if bound})
     found: dict[tuple[str, str, str], str] = {}
@@ -501,11 +521,11 @@ def _class_supply(double: ast.ClassDef, defined: Scopes) -> Supply:
 
 
 def _class_bindings(
-    double: ast.ClassDef, defined: Scopes, aliases: set[str], method_aliases: dict[str, str]
+    double: ast.ClassDef, defined: Scopes, aliases: set[str], method_aliases: dict[ast.ClassDef, dict[str, str]]
 ) -> dict[str, str]:
     """name in the double -> coordinator method, for each coordinator method the double still binds: the bodies of its
     classes from the farthest to the nearest, each top down. A name defined later is no binding any more; a name
-    deleted falls back to what the classes behind it hold."""
+    deleted falls back to what the classes behind it hold. An alias counts as it stood where its class is defined."""
     bound: dict[str, str] = {}
     for cls in reversed(_linearization(double, defined)):
         behind = dict(bound)
@@ -514,7 +534,7 @@ def _class_bindings(
                 bound.pop(name, None)
                 if isinstance(statement, ast.Delete) and name in behind:
                     bound[name] = behind[name]
-            bound |= _bound_coordinator_methods(statement, aliases, method_aliases)
+            bound |= _bound_coordinator_methods(statement, aliases, method_aliases[cls])
     return bound
 
 
@@ -752,6 +772,9 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "    other = list()\n    other_property = None\n",
         "\ndef test_a(fake):\n    fake.other = object()\n    fake.other_property = 1\n",
         "    other = range(3)\n    other_property = None\n",
+        "    other = iter(())\n    other_property = None\n",
+        "    other = enumerate([])\n    other_property = None\n",
+        "    other = builtins.list()\n    other_property = None\n",
     ],
     ids=[
         "class body",
@@ -786,6 +809,9 @@ def test_a_bare_annotation_supplies_nothing(supply: str) -> None:
         "constructor of a type that is not callable",
         "object() assigned in a test",
         "range of a number",
+        "iterator",
+        "enumerate",
+        "qualified builtin type",
     ],
 )
 def test_a_literal_does_not_supply_a_name_the_method_calls_but_does_one_it_only_reads(supply: str) -> None:
@@ -899,6 +925,16 @@ def test_a_diamond_is_resolved_in_pythons_lookup_order() -> None:
     replacing = "class _Right(_Top):\n    run = AsyncMock()\n"
     found = missing_bindings(binding + left + replacing + "class _Fake(_Left, _Right):\n    pass\n", METHODS, MEMBERS)
     assert {bound for (double, bound, _) in found if double == "_Fake"} == {"helper"}
+
+
+def test_an_alias_counts_as_it_stood_where_the_class_is_defined() -> None:
+    body = "class _Fake:\n    run = run_alias\n    helper = ComexioCoordinator.helper\n"
+    alias = "run_alias = ComexioCoordinator.run\n"
+
+    assert missing_bindings(alias + body + "run_alias = None\n", METHODS, MEMBERS) == FINDING
+    assert missing_bindings(alias + body + "run_alias = ComexioCoordinator.helper\n", METHODS, MEMBERS) == FINDING
+    # an alias reassigned above the class is the one the class captured
+    assert missing_bindings(alias + "run_alias = None\n" + body, METHODS, MEMBERS) != FINDING
 
 
 def test_a_name_deleted_in_the_class_body_falls_back_to_the_binding_of_its_base() -> None:
