@@ -1387,7 +1387,15 @@ async def _restore_plan_as_copy(
         return
     # Only now does a copy exist, so only now is it told what it lacks.
     _warn_blocks_omitted(
-        hass, snapshot, coordinator.server_id, source_fub_id, source_name, new_plan_name, (kind, slot), auto_start
+        hass,
+        snapshot,
+        coordinator.server_id,
+        source_fub_id,
+        source_name,
+        new_plan_name,
+        new_fub_id,
+        (kind, slot),
+        auto_start,
     )
     # No plan_data payload here: the structure was already built above via individual
     # element/connection calls, not via run_fup.
@@ -1605,17 +1613,17 @@ def _hold_back_auto_start(call: ServiceCall, snapshot: dict[str, Any], plan_name
 
 
 def _omitted_notification_id(
-    server_id: str, fub_id: int, plan_name: str, copy_name: str, backup: tuple[str, int]
+    server_id: str, fub_id: int, plan_name: str, copy_fub_id: int, backup: tuple[str, int]
 ) -> str:
-    """Id of the notice for one copy (server, plan, copy name, kind, slot), safe against names that hold the delimiter.
+    """Id of the notice for one copy (server, plan, copy's plan id, kind, slot), safe against names with the delimiter.
 
     Joined with underscores, (server "a", fub 1, plan "2_x") and (server "a_1", fub 2, plan "x") would
     be one id; the digest of the JSON list keeps every part apart and the id free of a plan's characters.
-    A copy's name is unique among the live plans, so a later copy of the same backup never replaces
-    another copy's notice, and a copy that leaves no block out takes none down; a notice stays until the
-    user dismisses it.
+    The copy is told apart by its plan id, not its name: a copy can be renamed and its old name taken by
+    the next copy of the same backup. So a later copy never replaces another copy's notice, and a copy
+    that leaves no block out takes none down; a notice stays until the user dismisses it.
     """
-    identity = json.dumps([server_id, fub_id, plan_name, copy_name, *backup])
+    identity = json.dumps([server_id, fub_id, plan_name, copy_fub_id, *backup])
     return f"comexio_restore_omitted_{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
 
 
@@ -1626,6 +1634,7 @@ def _warn_blocks_omitted(
     fub_id: int,
     plan_name: str,
     copy_name: str,
+    copy_fub_id: int,
     backup: tuple[str, int],
     auto_start: bool,
 ) -> None:
@@ -1641,11 +1650,12 @@ def _warn_blocks_omitted(
         return
     lines = omitted_block_lines(omitted)
     _LOGGER.warning(
-        "Function Plan Restore of '%s' (fub=%s): %d logic block(s) left out of the copy '%s':\n%s",
+        "Function Plan Restore of '%s' (fub=%s): %d logic block(s) left out of the copy '%s' (fub=%s):\n%s",
         one_line(plan_name),
         fub_id,
         len(lines),
         one_line(copy_name),
+        copy_fub_id,
         "\n".join(lines),
     )
     shown = lines[:_OMITTED_NOTICE_LINES]
@@ -1663,7 +1673,7 @@ def _warn_blocks_omitted(
         hass,
         message,
         title=_TITLE_RESTORE_OMITTED,
-        notification_id=_omitted_notification_id(server_id, fub_id, plan_name, copy_name, backup),
+        notification_id=_omitted_notification_id(server_id, fub_id, plan_name, copy_fub_id, backup),
     )
 
 

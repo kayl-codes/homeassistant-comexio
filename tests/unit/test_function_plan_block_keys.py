@@ -853,7 +853,7 @@ def test_an_unverified_restore_names_the_blocks() -> None:
 WITHOUT_NOT_BLOCK = {"5": OR, "40": ADD}  # the Nicht block is gone: element 7 is missing
 TWO_NOT_BLOCKS = {"5": OR, "24": NOT, "25": NOT, "40": ADD}  # the Nicht can no longer be told apart: ambiguous
 NOTICE_ID_PREFIX = "comexio_restore_omitted_"
-GOLDEN_NOTICE_DIGEST = "ec257578b06d4edf1bd980fe"  # of ["iosrv1", 42, "Kitch", "Copy", "auto", 0]
+GOLDEN_NOTICE_DIGEST = "6992d86455a4314474008368"  # of ["iosrv1", 42, "Kitch", 77, "auto", 0]
 COPY = {"as_copy": True, "new_plan_name": "Copy", "omit_unresolved_blocks": True}
 
 
@@ -1082,6 +1082,7 @@ def _warn_omitted(omitted: list[dict[str, Any]], **kwargs: Any) -> MagicMock:
         "fub_id": 42,
         "plan_name": "Kitch",
         "copy_name": "Copy",
+        "copy_fub_id": 77,
         "backup": ("auto", 0),
         "auto_start": False,
         **kwargs,
@@ -1120,7 +1121,7 @@ def test_the_notice_truncates_only_beyond_the_limit(count: int, more: str | None
         {"server_id": "iosrv2"},
         {"fub_id": 43},
         {"plan_name": "Kitchen"},
-        {"copy_name": "Copy 2"},
+        {"copy_fub_id": 78},
         {"backup": ("change", 0)},
         {"backup": ("auto", 1)},
     ],
@@ -1128,6 +1129,14 @@ def test_the_notice_truncates_only_beyond_the_limit(count: int, more: str | None
 )
 def test_the_notice_is_one_per_copy_of_a_backup(other: dict[str, Any]) -> None:
     assert _notice_id(**other) != _notice_id()
+
+
+def test_a_copy_that_took_the_name_of_a_renamed_copy_has_a_notice_of_its_own() -> None:
+    # copy 77 was renamed meanwhile, copy 78 got its old name: the name must not tie the notices together
+    renamed = _notice_id(copy_name="Copy", copy_fub_id=77)
+
+    assert _notice_id(copy_name="Copy", copy_fub_id=78) != renamed
+    assert _notice_id(copy_name="Other name", copy_fub_id=77) == renamed  # the copy is its plan id
 
 
 def test_the_notice_id_keeps_the_parts_of_a_backup_apart() -> None:
@@ -1173,7 +1182,7 @@ def test_a_copy_that_left_nothing_out_leaves_the_notice_of_an_earlier_copy_stand
         patch.object(backup_service.persistent_notification, "async_dismiss") as dismiss,
     ):
         backup_service._warn_blocks_omitted(
-            MagicMock(), {OMITTED_BLOCKS: []}, "iosrv1", 42, "Kitch", "Copy 2", ("auto", 0), False
+            MagicMock(), {OMITTED_BLOCKS: []}, "iosrv1", 42, "Kitch", "Copy 2", 78, ("auto", 0), False
         )
 
     notify.assert_not_called()
