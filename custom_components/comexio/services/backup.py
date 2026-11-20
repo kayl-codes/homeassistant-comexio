@@ -10,6 +10,7 @@ than acting on the live plan directly.
 import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+import hashlib
 import json
 import logging
 import time
@@ -1597,6 +1598,16 @@ def _hold_back_auto_start(call: ServiceCall, snapshot: dict[str, Any], plan_name
     return False
 
 
+def _omitted_notification_id(server_id: str, fub_id: int, plan_name: str, backup: tuple[str, int]) -> str:
+    """Id of the notice for one backup (server, plan, kind, slot), safe against names that hold the delimiter.
+
+    Joined with underscores, (server "a", fub 1, plan "2_x") and (server "a_1", fub 2, plan "x") would
+    be one id; the digest of the JSON list keeps every part apart and the id free of a plan's characters.
+    """
+    identity = json.dumps([server_id, fub_id, plan_name, *backup])
+    return f"comexio_restore_omitted_{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+
+
 def _warn_blocks_omitted(
     hass: HomeAssistant,
     snapshot: dict[str, Any],
@@ -1632,14 +1643,12 @@ def _warn_blocks_omitted(
     message += "\nCheck the copy before relying on it: an element that lost its input needs a new wire."
     if not auto_start:
         message += " It was not started."
-    kind, slot = backup
-    # One notification per backup (server, plan, kind and slot), like the firmware warning: a re-run
-    # replaces it, another slot's list of blocks keeps its own.
+    # One notification per backup: a re-run replaces it, another slot's list of blocks keeps its own.
     persistent_notification.async_create(
         hass,
         message,
         title=_TITLE_RESTORE_OMITTED,
-        notification_id=f"comexio_restore_omitted_{server_id}_{fub_id}_{plan_name}_{kind}_{slot}",
+        notification_id=_omitted_notification_id(server_id, fub_id, plan_name, backup),
     )
 
 

@@ -4,9 +4,10 @@ import asyncio
 import copy
 from datetime import UTC, datetime
 import logging
+import re
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioConnectionError
 from aiocomexio.function_plan import plan_hash
@@ -850,7 +851,8 @@ def test_an_unverified_restore_names_the_blocks() -> None:
 
 WITHOUT_NOT_BLOCK = {"5": OR, "40": ADD}  # the Nicht block is gone: element 7 is missing
 TWO_NOT_BLOCKS = {"5": OR, "24": NOT, "25": NOT, "40": ADD}  # the Nicht can no longer be told apart: ambiguous
-NOTICE_ID = "comexio_restore_omitted_iosrv1_42_Kitch_auto_0"
+NOTICE_ID_PREFIX = "comexio_restore_omitted_"
+GOLDEN_NOTICE_DIGEST = "1f981fa7a12622dee1e3e87d"  # of ["iosrv1", 42, "Kitch", "auto", 0]
 COPY = {"as_copy": True, "new_plan_name": "Copy", "omit_unresolved_blocks": True}
 
 
@@ -879,15 +881,19 @@ def _build_copy(
     auto_start: bool = False,
     rebuild_error: Exception | None = None,
     create_error: Exception | None = None,
+    start: AsyncMock | None = None,
 ) -> MagicMock:
-    """Run the real _restore_plan_as_copy on snapshot with Comexio's calls mocked; returns the notification mock."""
+    """Run the real _restore_plan_as_copy on snapshot with Comexio's calls mocked; returns the notification mock.
+
+    start stands in for _start_new_plan; a test that looks at what it was called with passes its own.
+    """
     api = SimpleNamespace(create_fup=AsyncMock(return_value=new_fub_id, side_effect=create_error))
     coordinator = SimpleNamespace(server_id="iosrv1")
     connections = len(snapshot.get("connections", {}))
     built = ({"1": "11"}, connections, [], {"included": False, "failed": 0, "unmapped": 0}, ModuleConfigRestore(None))
     with (
         patch.object(backup_service, "_rebuild_new_plan", AsyncMock(return_value=built, side_effect=rebuild_error)),
-        patch.object(backup_service, "_start_new_plan", AsyncMock(return_value=(None, None))),
+        patch.object(backup_service, "_start_new_plan", start or AsyncMock(return_value=(None, None))),
         patch.object(backup_service.persistent_notification, "async_create") as notify,
     ):
         asyncio.run(
@@ -925,7 +931,7 @@ def test_the_copy_is_named_by_a_notice_that_lists_the_blocks_left_out() -> None:
 
     notice = _notice(_build_copy(cut))
 
-    assert notice.kwargs["notification_id"] == NOTICE_ID
+    assert notice.kwargs["notification_id"].startswith(NOTICE_ID_PREFIX)
     for line in omitted_block_lines(cut[OMITTED_BLOCKS]):
         assert f"- {line}" in notice.args[1]
     assert "Kitch" in notice.args[1]
@@ -937,6 +943,15 @@ def test_the_notice_says_whether_the_copy_was_started(auto_start: bool, says_not
     notice = _notice(_build_copy(_cut_backup(), auto_start=auto_start))
 
     assert ("It was not started." in notice.args[1]) is says_not_started
+
+
+@pytest.mark.parametrize("auto_start", [False, True])
+def test_the_copy_builder_hands_auto_start_on_to_the_start(auto_start: bool) -> None:
+    start = AsyncMock(return_value=(None, None))
+
+    _build_copy(_cut_backup(), auto_start=auto_start, start=start)
+
+    start.assert_awaited_once_with(ANY, 77, "Copy", auto_start)
 
 
 def test_the_blocks_left_out_are_logged_as_a_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -1041,10 +1056,21 @@ def _omitted_blocks(count: int) -> list[dict[str, Any]]:
 
 
 def _warn_omitted(omitted: list[dict[str, Any]], **kwargs: Any) -> MagicMock:
-    values = {"backup": ("auto", 0), "auto_start": False, **kwargs}
+    values = {
+        "server_id": "iosrv1",
+        "fub_id": 42,
+        "plan_name": "Kitch",
+        "backup": ("auto", 0),
+        "auto_start": False,
+        **kwargs,
+    }
     with patch.object(backup_service.persistent_notification, "async_create") as notify:
-        backup_service._warn_blocks_omitted(MagicMock(), {OMITTED_BLOCKS: omitted}, "iosrv1", 42, "Kitch", **values)
+        backup_service._warn_blocks_omitted(MagicMock(), {OMITTED_BLOCKS: omitted}, **values)
     return notify
+
+
+def _notice_id(**identity: Any) -> str:
+    return _warn_omitted(_omitted_blocks(1), **identity).call_args.kwargs["notification_id"]
 
 
 def test_the_notice_names_the_first_blocks_and_the_log_all_of_them(caplog: pytest.LogCaptureFixture) -> None:
@@ -1066,13 +1092,41 @@ def test_the_notice_truncates_only_beyond_the_limit(count: int, more: str | None
     assert (more in message) if more else ("more (see log)" not in message)
 
 
-def test_the_notice_is_one_per_backup() -> None:
-    ids = {
-        _warn_omitted(_omitted_blocks(1), backup=backup).call_args.kwargs["notification_id"]
-        for backup in (("auto", 0), ("auto", 1), ("change", 0))
-    }
+@pytest.mark.parametrize(
+    "other",
+    [
+        {"server_id": "iosrv2"},
+        {"fub_id": 43},
+        {"plan_name": "Kitchen"},
+        {"backup": ("change", 0)},
+        {"backup": ("auto", 1)},
+    ],
+    ids=["server", "plan id", "plan name", "kind", "slot"],
+)
+def test_the_notice_is_one_per_backup(other: dict[str, Any]) -> None:
+    assert _notice_id(**other) != _notice_id()
 
-    assert len(ids) == 3
+
+def test_the_notice_id_keeps_the_parts_of_a_backup_apart() -> None:
+    # joined with underscores, both would be "iosrv_1_2_x_auto_0"
+    first = _notice_id(server_id="iosrv", fub_id=1, plan_name="2_x")
+    second = _notice_id(server_id="iosrv_1", fub_id=2, plan_name="x")
+
+    assert first != second
+    assert re.fullmatch(NOTICE_ID_PREFIX + "[0-9a-f]{24}", first)
+
+
+def test_the_notice_id_of_a_backup_is_pinned() -> None:
+    # A changed format would leave the notices of earlier restores standing next to the new ones.
+    assert _notice_id() == NOTICE_ID_PREFIX + GOLDEN_NOTICE_DIGEST
+
+
+def test_a_rerun_for_the_same_backup_replaces_its_notice() -> None:
+    first = _warn_omitted(_omitted_blocks(1), auto_start=False)
+    second = _warn_omitted(_omitted_blocks(2), auto_start=True)
+
+    assert first.call_args.kwargs["notification_id"] == second.call_args.kwargs["notification_id"]
+    assert first.call_args.args[1] != second.call_args.args[1]
 
 
 def test_a_snapshot_that_left_nothing_out_warns_nothing(caplog: pytest.LogCaptureFixture) -> None:
