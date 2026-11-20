@@ -1519,6 +1519,11 @@ class _BlockOptIns(NamedTuple):
     expected_hash: str | None = None  # the hash of the backup the caller reviewed; another one is refused
 
 
+def _expected_hash(call: ServiceCall) -> str | None:
+    """The hash of the backup the caller reviewed; none when the field is absent or blank."""
+    return str(call.data.get("expected_hash") or "").strip() or None
+
+
 def _refuse_changed_backup(
     hass: HomeAssistant, snapshot: dict[str, Any], expected_hash: str | None, plan_name: str, kind: str, slot: int
 ) -> bool:
@@ -2049,7 +2054,7 @@ async def _run_function_plan_restore(
         plan_name,
         kind,
         slot,
-        _BlockOptIns(accept_unverified, omit_unresolved, str(call.data.get("expected_hash") or "").strip() or None),
+        _BlockOptIns(accept_unverified, omit_unresolved, _expected_hash(call)),
     )
     if snapshot is None:
         return
