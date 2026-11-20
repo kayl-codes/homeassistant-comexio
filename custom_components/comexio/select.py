@@ -345,7 +345,7 @@ class ComexioPlanBackupSelectEntity(
         return attrs
 
     def _chosen_block_check(self, orphan: dict[str, Any] | None) -> dict[str, Any] | None:
-        """function_plan_block_keys.block_check of the chosen snapshot, None for Live or exact block ids."""
+        """function_plan_block_keys.block_check_for_card of the chosen snapshot, None for Live or exact block ids."""
         backups = self.coordinator.function_plan_backup
         if orphan is not None:
             return backups.block_check_sync(orphan["kind"], orphan["fub_id"], orphan["plan_name"], orphan["slot"])

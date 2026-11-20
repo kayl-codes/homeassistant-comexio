@@ -17,6 +17,8 @@ Snapshots taken before keys existed get them backfilled once from today's catalo
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
+import json
 from typing import Any, NamedTuple
 
 from aiocomexio.function_plan import plan_hash
@@ -596,3 +598,82 @@ def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
     if source == SOURCE_BACKFILLED_PLAUSIBLE:
         return {"status": CHECK_PLAUSIBLE, "problems": []}
     return None
+
+
+# The card's check is a state attribute, which the recorder caps at 16 KiB. Each list in it is cut by
+# lines, by the length of a line and by the UTF-8 bytes of all of them (the cap counts bytes); the
+# restore's result and log have everything. At most three lists, so well below the cap.
+CARD_OMIT_LINES = 30
+CARD_LINE_CHARS = 200
+CARD_LIST_BYTES = 2000
+
+
+def _bounded_lines(lines: list[str]) -> list[str]:
+    """lines as the card's check carries them: cut short, ending in "... and N more" when some are left out."""
+    shown: list[str] = []
+    used = 0
+    for line in lines:
+        text = line if len(line) <= CARD_LINE_CHARS else f"{line[: CARD_LINE_CHARS - 1]}…"
+        size = len(text.encode())
+        if len(shown) >= CARD_OMIT_LINES or used + size > CARD_LIST_BYTES:
+            break
+        shown.append(text)
+        used += size
+    if len(shown) < len(lines):
+        shown.append(f"... and {len(lines) - len(shown)} more")
+    return shown
+
+
+_IDENTITY_BOOKKEEPING = (SNAPSHOT_KEYS, SNAPSHOT_KEYS_SOURCE, "restored_at")
+
+
+def snapshot_identity(snapshot: Mapping[str, Any]) -> str:
+    """Fingerprint of a (resolved) backup as a restore would use it, to tell it from another one.
+
+    Not the plan hash: that covers the elements and wires only, while a restore also brings back
+    the block settings, module configs and the paper format, which another backup of the same
+    structure can hold differently. Hashing all of it also tells a newer backup from the one the
+    caller looked at, which is what the caller asks about.
+
+    The bookkeeping the manager changes on a stored backup in place (the block keys a backfill
+    adds and where they come from, the mark of a restore) is left out: looking at a backup or
+    restoring it must not make it another one. captured_at stays in.
+    """
+    content = {key: value for key, value in snapshot.items() if key not in _IDENTITY_BOOKKEEPING}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
+def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """block_check, plus what a copy without the blocks Comexio no longer has would be like.
+
+    For the plan card's restore dialog. A CHECK_UNRESOLVED check gets an "omit" entry:
+    "blocks" are the omitted_block_lines (which blocks go, what their wires cost; "count" is how many
+    blocks go, whatever the lines show) and "then"
+    is the block_check of the snapshot cut that way (None when it is exact, CHECK_UNVERIFIED
+    when a block unknown to the catalog or a backfill verdict remains, which the copy's restore
+    still needs accept_unverified_blocks for), "snapshot_hash" is the snapshot_identity of the
+    snapshot as resolved (what the restore's expected_hash is compared with). Every other check
+    comes back as block_check returns it, as the dialog has nothing to offer there. The lists of
+    every check are bounded (_bounded_lines), as the check is a state attribute.
+    """
+    check = block_check(snapshot)
+    if check is None:
+        return None
+    check = {**check, "problems": _bounded_lines(check["problems"])}
+    if check["status"] != CHECK_UNRESOLVED:
+        return check
+    cut = omit_unresolved_blocks(snapshot)
+    if not (omitted := cut.get(OMITTED_BLOCKS)):
+        return check
+    then = block_check(cut)
+    if then is not None:
+        then = {**then, "problems": _bounded_lines(then["problems"])}
+    # snapshot_hash names the backup the offer was made for: the card hands it to the restore, which
+    # refuses when the slot holds another one by then (a newer backup, a catalog change).
+    omit = {
+        "blocks": _bounded_lines(omitted_block_lines(omitted)),
+        "count": len(omitted),  # of all of them, as "blocks" ends in a "... and N more" line when cut
+        "then": then,
+        "snapshot_hash": snapshot_identity(snapshot),
+    }
+    return {**check, "omit": omit}
