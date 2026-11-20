@@ -853,7 +853,7 @@ def test_an_unverified_restore_names_the_blocks() -> None:
 WITHOUT_NOT_BLOCK = {"5": OR, "40": ADD}  # the Nicht block is gone: element 7 is missing
 TWO_NOT_BLOCKS = {"5": OR, "24": NOT, "25": NOT, "40": ADD}  # the Nicht can no longer be told apart: ambiguous
 NOTICE_ID_PREFIX = "comexio_restore_omitted_"
-GOLDEN_NOTICE_DIGEST = "1f981fa7a12622dee1e3e87d"  # of ["iosrv1", 42, "Kitch", "auto", 0]
+GOLDEN_NOTICE_DIGEST = "ec257578b06d4edf1bd980fe"  # of ["iosrv1", 42, "Kitch", "Copy", "auto", 0]
 COPY = {"as_copy": True, "new_plan_name": "Copy", "omit_unresolved_blocks": True}
 
 
@@ -1081,6 +1081,7 @@ def _warn_omitted(omitted: list[dict[str, Any]], **kwargs: Any) -> MagicMock:
         "server_id": "iosrv1",
         "fub_id": 42,
         "plan_name": "Kitch",
+        "copy_name": "Copy",
         "backup": ("auto", 0),
         "auto_start": False,
         **kwargs,
@@ -1119,12 +1120,13 @@ def test_the_notice_truncates_only_beyond_the_limit(count: int, more: str | None
         {"server_id": "iosrv2"},
         {"fub_id": 43},
         {"plan_name": "Kitchen"},
+        {"copy_name": "Copy 2"},
         {"backup": ("change", 0)},
         {"backup": ("auto", 1)},
     ],
-    ids=["server", "plan id", "plan name", "kind", "slot"],
+    ids=["server", "plan id", "plan name", "copy", "kind", "slot"],
 )
-def test_the_notice_is_one_per_backup(other: dict[str, Any]) -> None:
+def test_the_notice_is_one_per_copy_of_a_backup(other: dict[str, Any]) -> None:
     assert _notice_id(**other) != _notice_id()
 
 
@@ -1142,12 +1144,18 @@ def test_the_notice_id_of_a_backup_is_pinned() -> None:
     assert _notice_id() == NOTICE_ID_PREFIX + GOLDEN_NOTICE_DIGEST
 
 
-def test_a_rerun_for_the_same_backup_replaces_its_notice() -> None:
+def test_a_rerun_for_the_same_copy_replaces_its_notice() -> None:
     first = _warn_omitted(_omitted_blocks(1), auto_start=False)
     second = _warn_omitted(_omitted_blocks(2), auto_start=True)
 
     assert first.call_args.kwargs["notification_id"] == second.call_args.kwargs["notification_id"]
     assert first.call_args.args[1] != second.call_args.args[1]
+
+
+def test_the_notice_names_the_copy_and_its_source() -> None:
+    message = _warn_omitted(_omitted_blocks(1), copy_name="Kitch copy").call_args.args[1]
+
+    assert "The copy 'Kitch copy' of 'Kitch' was built without" in message
 
 
 def test_a_snapshot_that_left_nothing_out_warns_nothing(caplog: pytest.LogCaptureFixture) -> None:
@@ -1156,6 +1164,20 @@ def test_a_snapshot_that_left_nothing_out_warns_nothing(caplog: pytest.LogCaptur
 
     notify.assert_not_called()
     assert not caplog.records
+
+
+def test_a_copy_that_left_nothing_out_leaves_the_notice_of_an_earlier_copy_standing() -> None:
+    # the earlier copy still lacks its blocks: the clean run neither posts nor takes anything down
+    with (
+        patch.object(backup_service.persistent_notification, "async_create") as notify,
+        patch.object(backup_service.persistent_notification, "async_dismiss") as dismiss,
+    ):
+        backup_service._warn_blocks_omitted(
+            MagicMock(), {OMITTED_BLOCKS: []}, "iosrv1", 42, "Kitch", "Copy 2", ("auto", 0), False
+        )
+
+    notify.assert_not_called()
+    dismiss.assert_not_called()
 
 
 @pytest.mark.parametrize(("omitted", "status"), [([], "OK"), ([{"element": "7"}], "PARTIAL")])

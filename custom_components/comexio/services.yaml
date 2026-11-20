@@ -217,8 +217,8 @@ function_plan_restore:
         and any backup while the check is not possible right now. Some blocks may then
         be different ones — check the preview first. A backup with a block that no longer
         exists is never restored, unless it is restored as a copy without that block
-        ('omit_unresolved_blocks'). The plan card sets it once its restore dialog has named the
-        affected blocks.
+        ('omit_unresolved_blocks'). The plan card sends 'accept_unverified_blocks' once its
+        restore dialog has named the affected blocks and the user confirmed it.
       default: false
       advanced: true
       selector:

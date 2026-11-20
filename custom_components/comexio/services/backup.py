@@ -1386,7 +1386,9 @@ async def _restore_plan_as_copy(
         )
         return
     # Only now does a copy exist, so only now is it told what it lacks.
-    _warn_blocks_omitted(hass, snapshot, coordinator.server_id, source_fub_id, source_name, (kind, slot), auto_start)
+    _warn_blocks_omitted(
+        hass, snapshot, coordinator.server_id, source_fub_id, source_name, new_plan_name, (kind, slot), auto_start
+    )
     # No plan_data payload here: the structure was already built above via individual
     # element/connection calls, not via run_fup.
     run_ok, start_error = await _start_new_plan(api, new_fub_id, new_plan_name, auto_start)
@@ -1602,13 +1604,18 @@ def _hold_back_auto_start(call: ServiceCall, snapshot: dict[str, Any], plan_name
     return False
 
 
-def _omitted_notification_id(server_id: str, fub_id: int, plan_name: str, backup: tuple[str, int]) -> str:
-    """Id of the notice for one backup (server, plan, kind, slot), safe against names that hold the delimiter.
+def _omitted_notification_id(
+    server_id: str, fub_id: int, plan_name: str, copy_name: str, backup: tuple[str, int]
+) -> str:
+    """Id of the notice for one copy (server, plan, copy name, kind, slot), safe against names that hold the delimiter.
 
     Joined with underscores, (server "a", fub 1, plan "2_x") and (server "a_1", fub 2, plan "x") would
     be one id; the digest of the JSON list keeps every part apart and the id free of a plan's characters.
+    A copy's name is unique among the live plans, so a later copy of the same backup never replaces
+    another copy's notice, and a copy that leaves no block out takes none down; a notice stays until the
+    user dismisses it.
     """
-    identity = json.dumps([server_id, fub_id, plan_name, *backup])
+    identity = json.dumps([server_id, fub_id, plan_name, copy_name, *backup])
     return f"comexio_restore_omitted_{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
 
 
@@ -1618,6 +1625,7 @@ def _warn_blocks_omitted(
     server_id: str,
     fub_id: int,
     plan_name: str,
+    copy_name: str,
     backup: tuple[str, int],
     auto_start: bool,
 ) -> None:
@@ -1625,34 +1633,37 @@ def _warn_blocks_omitted(
 
     Silent when the snapshot left nothing out. The lines come from omitted_block_lines, which keep
     ids, keys and names on one line each; the notification names the first ones, the log all.
-    backup is the (kind, slot) the snapshot came from: the notification is one per backup.
+    The notification is one per copy (see _omitted_notification_id): a copy of the same backup that
+    leaves no block out posts nothing and leaves the warning of an earlier copy standing, as that
+    copy still lacks its blocks. backup is the (kind, slot) the snapshot came from.
     """
     if not (omitted := snapshot.get(OMITTED_BLOCKS)):
         return
     lines = omitted_block_lines(omitted)
     _LOGGER.warning(
-        "Function Plan Restore of '%s' (fub=%s): %d logic block(s) left out of the copy:\n%s",
+        "Function Plan Restore of '%s' (fub=%s): %d logic block(s) left out of the copy '%s':\n%s",
         one_line(plan_name),
         fub_id,
         len(lines),
+        one_line(copy_name),
         "\n".join(lines),
     )
     shown = lines[:_OMITTED_NOTICE_LINES]
     message = (
-        f"The copy of '{one_line(plan_name)}' was built without {len(lines)} logic block(s) {_OMITTED_REASON}, "
-        "and without the connections that end at them:\n" + "\n".join(f"- {line}" for line in shown)
+        f"The copy '{one_line(copy_name)}' of '{one_line(plan_name)}' was built without {len(lines)} logic "
+        f"block(s) {_OMITTED_REASON}, and without the connections that end at them:\n"
+        + "\n".join(f"- {line}" for line in shown)
     )
     if len(lines) > len(shown):
         message += f"\n… and {len(lines) - len(shown)} more (see log)"
     message += "\nCheck the copy before relying on it: an element that lost its input needs a new wire."
     if not auto_start:
         message += " It was not started."
-    # One notification per backup: a re-run replaces it, another slot's list of blocks keeps its own.
     persistent_notification.async_create(
         hass,
         message,
         title=_TITLE_RESTORE_OMITTED,
-        notification_id=_omitted_notification_id(server_id, fub_id, plan_name, backup),
+        notification_id=_omitted_notification_id(server_id, fub_id, plan_name, copy_name, backup),
     )
 
 
