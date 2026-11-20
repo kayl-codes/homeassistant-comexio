@@ -156,9 +156,17 @@ const _OMIT_COST_TEXT =
   "ihren Eingang verlieren, bleiben unversorgt. Die Kopie ist unvollständig und startet deshalb " +
   "nicht automatisch — bitte erst prüfen und ergänzen.";
 
-// True when the check offers a restore without the blocks Comexio no longer has.
+// True when the check offers a restore without the blocks Comexio no longer has. The offer
+// needs the fingerprint of the backup it was made for: without it the restore could not be tied
+// to what the dialog listed, so nothing is offered.
 function _canOmitBlocks(check) {
-  return check?.status === "unresolved" && Array.isArray(check.omit?.blocks) && check.omit.blocks.length > 0;
+  return (
+    check?.status === "unresolved" &&
+    Array.isArray(check.omit?.blocks) &&
+    check.omit.blocks.length > 0 &&
+    typeof check.omit.snapshot_hash === "string" &&
+    check.omit.snapshot_hash !== ""
+  );
 }
 
 // One part of the restore dialog's block hint: the text, and the lines it is about in a
@@ -1993,14 +2001,8 @@ ${warning}`;
     // wires cost. The service cuts them out of a copy only, and only of the backup that was
     // listed: should the slot hold another one by the time it resolves it, it refuses.
     if (omitting) {
-      const reviewed = this._restoreShownCheck?.omit?.snapshot_hash;
-      if (!reviewed) {
-        // Nothing names the backup the dialog showed, so nothing could guard the cut: do not send it.
-        console.warn("comexio-plan-card: no backup hash in the block check, restore without blocks not sent");
-        return;
-      }
       data.omit_unresolved_blocks = true;
-      data.expected_hash = reviewed;
+      data.expected_hash = this._restoreShownCheck.omit.snapshot_hash; // _canOmitBlocks made sure it is there
     }
     try {
       await this._hass.callService("comexio", "function_plan_restore", data);

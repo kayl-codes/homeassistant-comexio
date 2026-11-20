@@ -17,6 +17,8 @@ Snapshots taken before keys existed get them backfilled once from today's catalo
 from __future__ import annotations
 
 from collections.abc import Mapping
+import hashlib
+import json
 from typing import Any, NamedTuple
 
 from aiocomexio.function_plan import plan_hash
@@ -601,6 +603,25 @@ def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
 CARD_OMIT_LINES = 30  # omitted blocks the card's check names; the restore's result and log have them all
 
 
+_IDENTITY_BOOKKEEPING = (SNAPSHOT_KEYS, SNAPSHOT_KEYS_SOURCE, "restored_at")
+
+
+def snapshot_identity(snapshot: Mapping[str, Any]) -> str:
+    """Fingerprint of a (resolved) backup as a restore would use it, to tell it from another one.
+
+    Not the plan hash: that covers the elements and wires only, while a restore also brings back
+    the block settings, module configs and the paper format, which another backup of the same
+    structure can hold differently. Hashing all of it also tells a newer backup from the one the
+    caller looked at, which is what the caller asks about.
+
+    The bookkeeping the manager changes on a stored backup in place (the block keys a backfill
+    adds and where they come from, the mark of a restore) is left out: looking at a backup or
+    restoring it must not make it another one. captured_at stays in.
+    """
+    content = {key: value for key, value in snapshot.items() if key not in _IDENTITY_BOOKKEEPING}
+    return hashlib.sha256(json.dumps(content, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
+
+
 def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """block_check, plus what a copy without the blocks Comexio no longer has would be like.
 
@@ -608,9 +629,9 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     "blocks" are the omitted_block_lines (which blocks go, what their wires cost) and "then"
     is the block_check of the snapshot cut that way (None when it is exact, CHECK_UNVERIFIED
     when a block unknown to the catalog or a backfill verdict remains, which the copy's restore
-    still needs accept_unverified_blocks for), "snapshot_hash" is the hash of the snapshot as
-    resolved (what the restore's expected_hash is compared with). Every other check comes back as block_check
-    returns it, as the dialog has nothing to offer there.
+    still needs accept_unverified_blocks for), "snapshot_hash" is the snapshot_identity of the
+    snapshot as resolved (what the restore's expected_hash is compared with). Every other check
+    comes back as block_check returns it, as the dialog has nothing to offer there.
     """
     check = block_check(snapshot)
     if check is None or check["status"] != CHECK_UNRESOLVED:
@@ -623,5 +644,5 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         lines = [*lines[:CARD_OMIT_LINES], f"... and {len(lines) - CARD_OMIT_LINES} more"]
     # snapshot_hash names the backup the offer was made for: the card hands it to the restore, which
     # refuses when the slot holds another one by then (a newer backup, a catalog change).
-    omit = {"blocks": lines, "then": block_check(cut), "snapshot_hash": snapshot.get(_HASH)}
+    omit = {"blocks": lines, "then": block_check(cut), "snapshot_hash": snapshot_identity(snapshot)}
     return {**check, "omit": omit}

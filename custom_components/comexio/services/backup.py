@@ -54,6 +54,7 @@ from ..function_plan_block_keys import (
     block_check,
     omit_unresolved_blocks,
     omitted_block_lines,
+    snapshot_identity,
 )
 from ..function_plan_block_settings import (
     block_settings_diff,
@@ -1533,7 +1534,7 @@ def _refuse_changed_backup(
     the slot (or a catalog change that resolves the blocks otherwise) after that must not be cut
     by what the user was shown for another one.
     """
-    if expected_hash is None or snapshot.get("hash") == expected_hash:
+    if expected_hash is None or snapshot_identity(snapshot) == expected_hash:
         return False
     _LOGGER.warning(
         "Function Plan Restore of '%s' %s[%s] refused: the backup is not the one that was reviewed",
