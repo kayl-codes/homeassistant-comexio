@@ -1,6 +1,7 @@
 """Backups stay correct after Comexio shifted its logic-block ids (function_plan_block_keys.py)."""
 
 import asyncio
+from collections.abc import Callable
 import copy
 from datetime import UTC, datetime
 import logging
@@ -881,13 +882,15 @@ def _build_copy(
     auto_start: bool = False,
     rebuild_error: Exception | None = None,
     create_error: Exception | None = None,
-    start: AsyncMock | None = None,
+    start: Callable[..., Any] | None = None,
+    api: SimpleNamespace | None = None,
 ) -> MagicMock:
     """Run the real _restore_plan_as_copy on snapshot with Comexio's calls mocked; returns the notification mock.
 
-    start stands in for _start_new_plan; a test that looks at what it was called with passes its own.
+    start stands in for _start_new_plan (pass the real one to run it against api); a test that looks at what
+    it was called with passes its own mock.
     """
-    api = SimpleNamespace(create_fup=AsyncMock(return_value=new_fub_id, side_effect=create_error))
+    api = api or SimpleNamespace(create_fup=AsyncMock(return_value=new_fub_id, side_effect=create_error))
     coordinator = SimpleNamespace(server_id="iosrv1")
     connections = len(snapshot.get("connections", {}))
     built = ({"1": "11"}, connections, [], {"included": False, "failed": 0, "unmapped": 0}, ModuleConfigRestore(None))
@@ -922,20 +925,27 @@ def test_a_copy_is_built_without_the_blocks_comexio_no_longer_has(
     api.restore_as_new.assert_not_awaited()
 
 
-def _cut_backup() -> dict[str, Any]:
-    return backup_service.omit_unresolved_blocks(_backup_resolved_against(WITHOUT_NOT_BLOCK))
+def _cut_backup(fub_base: dict[str, Any] = WITHOUT_NOT_BLOCK) -> dict[str, Any]:
+    return backup_service.omit_unresolved_blocks(_backup_resolved_against(fub_base))
 
 
-def test_the_copy_is_named_by_a_notice_that_lists_the_blocks_left_out() -> None:
-    cut = _cut_backup()
+@pytest.mark.parametrize(
+    ("fub_base", "reason"),
+    [(WITHOUT_NOT_BLOCK, "no block of this kind exists"), (TWO_NOT_BLOCKS, "several blocks on Comexio today match")],
+    ids=["missing", "ambiguous"],
+)
+def test_the_copy_is_named_by_a_notice_that_lists_the_blocks_left_out(fub_base: dict[str, Any], reason: str) -> None:
+    cut = _cut_backup(fub_base)
 
     notice = _notice(_build_copy(cut))
 
     assert notice.kwargs["notification_id"].startswith(NOTICE_ID_PREFIX)
     for line in omitted_block_lines(cut[OMITTED_BLOCKS]):
         assert f"- {line}" in notice.args[1]
+    assert reason in notice.args[1]
     assert "Kitch" in notice.args[1]
     assert "was built without 1 logic block(s)" in notice.args[1]
+    assert "(or has more than one of)" in notice.args[1]  # an ambiguous block is left out too, not only a missing one
 
 
 @pytest.mark.parametrize(("auto_start", "says_not_started"), [(False, True), (True, False)])
@@ -952,6 +962,17 @@ def test_the_copy_builder_hands_auto_start_on_to_the_start(auto_start: bool) -> 
     _build_copy(_cut_backup(), auto_start=auto_start, start=start)
 
     start.assert_awaited_once_with(ANY, 77, "Copy", auto_start)
+
+
+@pytest.mark.parametrize("auto_start", [False, True])
+def test_a_copy_is_run_only_when_auto_start_is_on(auto_start: bool) -> None:
+    api = SimpleNamespace(create_fup=AsyncMock(return_value=77), function_plan_run_fup=AsyncMock(return_value=True))
+
+    _build_copy(_cut_backup(), auto_start=auto_start, start=backup_service._start_new_plan, api=api)
+
+    assert api.function_plan_run_fup.await_count == int(auto_start)
+    if auto_start:
+        api.function_plan_run_fup.assert_awaited_once_with(77)
 
 
 def test_the_blocks_left_out_are_logged_as_a_warning(caplog: pytest.LogCaptureFixture) -> None:
@@ -993,7 +1014,7 @@ def test_the_parameter_line_names_the_flag(caplog: pytest.LogCaptureFixture) -> 
 def test_a_failed_login_stops_before_a_copy_is_built() -> None:
     api, _notify = _run_restore(_backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=False, **COPY)
 
-    api.restore_as_copy.assert_not_awaited()
+    assert _restores_run(api) == 0
 
 
 def test_without_the_flag_a_copy_is_still_refused_and_the_error_names_the_way_out() -> None:
@@ -1149,7 +1170,7 @@ def test_a_copy_without_blocks_is_reported_as_partial(omitted: list[dict[str, An
 def test_the_result_of_a_copy_says_how_many_blocks_were_left_out() -> None:
     result = _build_copy(_cut_backup()).call_args
 
-    assert "Left out: 1 logic block(s) Comexio no longer has" in result.args[1]
+    assert "Left out: 1 logic block(s) that Comexio no longer has (or has more than one of), with" in result.args[1]
 
 
 def test_the_result_of_a_copy_that_left_nothing_out_says_nothing_about_it() -> None:
@@ -1213,11 +1234,29 @@ def test_the_result_says_why_a_copy_that_lacks_blocks_was_not_started() -> None:
     assert "auto-start disabled for this restore" in asked_for
 
 
+def test_the_result_of_a_copy_that_lacks_blocks_names_the_off_switch_too() -> None:
+    # a call that passed auto_start: false lands here as well as one that was held back
+    line = backup_service._new_plan_activation_line(None, False, lacks_blocks=True)
+
+    assert "auto-start is off and the copy lacks logic blocks" in line
+
+
 def test_a_flag_that_changes_nothing_leaves_a_trace(caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.INFO, logger=backup_service.__name__):
         _run_restore({"plan_name": "Kitch"}, logged_in=True, **COPY)
 
-    assert "nothing is left out" in caplog.text
+    assert "no block of this backup was found missing or ambiguous — nothing is left out" in caplog.text
+    assert "could not be checked" not in caplog.text
+
+
+def test_a_flag_on_a_backup_that_could_not_be_checked_says_so(caplog: pytest.LogCaptureFixture) -> None:
+    unchecked = {"plan_name": "Kitch", BLOCK_IDS_UNCHECKED: UNCHECKED_NO_CATALOG}
+
+    with caplog.at_level(logging.INFO, logger=backup_service.__name__):
+        _run_restore(unchecked, logged_in=True, **COPY)
+
+    assert "could not be checked (keys or catalog unavailable) — nothing is left out" in caplog.text
+    assert "found missing or ambiguous" not in caplog.text
 
 
 def test_a_flag_sent_as_text_is_read_as_a_boolean() -> None:

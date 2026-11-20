@@ -46,6 +46,7 @@ from ..function_plan_backup import (
     snapshot_paper_format,
 )
 from ..function_plan_block_keys import (
+    BLOCK_IDS_UNCHECKED,
     CHECK_PLAUSIBLE,
     CHECK_UNRESOLVED,
     CHECK_UNVERIFIED,
@@ -1058,13 +1059,14 @@ def _new_plan_activation_line(
 ) -> str:
     """Activation line of a restore that built a new plan (as new ID or as copy).
 
-    lacks_blocks: the plan was built without logic blocks, which is why it was held back (not the caller's choice).
+    lacks_blocks: the plan was built without logic blocks. A call that did not pass auto_start is
+    held back for that reason; one that passed it as false chose it, so the line names both facts.
     """
     if not auto_start:
         if lacks_blocks:
             return (
-                f"Activation: {ICON_INACTIVE} not started (the copy lacks logic blocks — check it, "
-                "then start it in Comexio Studio)"
+                f"Activation: {ICON_INACTIVE} not started (auto-start is off and the copy lacks logic blocks — "
+                "check it, then start it in Comexio Studio)"
             )
         return f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
     if start_error is not None:
@@ -1494,6 +1496,8 @@ _OMIT_HINT = (
     "'as_copy: true' and 'omit_unresolved_blocks: true'."
 )
 _OMITTED_NOTICE_LINES = 10  # lines of the omitted blocks one notice names; the log has them all
+# Why a block is left out: missing, or ambiguous (the stored block id fits more than one block Comexio has)
+_OMITTED_REASON = "that Comexio no longer has (or has more than one of)"
 
 
 class _BlockOptIns(NamedTuple):
@@ -1579,7 +1583,7 @@ def _omitted_blocks_line(snapshot: dict[str, Any]) -> str:
     """The line of a copy's result that says logic blocks were left out ('' when none were)."""
     if not (omitted := snapshot.get(OMITTED_BLOCKS)):
         return ""
-    return f"Left out: {len(omitted)} logic block(s) Comexio no longer has, with their connections (see the notice)\n"
+    return f"Left out: {len(omitted)} logic block(s) {_OMITTED_REASON}, with their connections (see the notice)\n"
 
 
 def _hold_back_auto_start(call: ServiceCall, snapshot: dict[str, Any], plan_name: str, auto_start: bool) -> bool:
@@ -1635,8 +1639,8 @@ def _warn_blocks_omitted(
     )
     shown = lines[:_OMITTED_NOTICE_LINES]
     message = (
-        f"The copy of '{one_line(plan_name)}' was built without {len(lines)} logic block(s) that Comexio no longer "
-        "has, and without the connections that end at them:\n" + "\n".join(f"- {line}" for line in shown)
+        f"The copy of '{one_line(plan_name)}' was built without {len(lines)} logic block(s) {_OMITTED_REASON}, "
+        "and without the connections that end at them:\n" + "\n".join(f"- {line}" for line in shown)
     )
     if len(lines) > len(shown):
         message += f"\n… and {len(lines) - len(shown)} more (see log)"
@@ -1674,10 +1678,12 @@ async def _load_restorable_snapshot(
         cut = omit_unresolved_blocks(snapshot)
         if cut is snapshot:
             _LOGGER.info(
-                "Function Plan Restore of '%s' (fub=%s): omit_unresolved_blocks is set, but no block of this "
-                "backup is missing or ambiguous — nothing is left out",
+                "Function Plan Restore of '%s' (fub=%s): omit_unresolved_blocks is set, but %s — nothing is left out",
                 one_line(plan_name),
                 fub_id,
+                "the blocks of this backup could not be checked (keys or catalog unavailable)"
+                if snapshot.get(BLOCK_IDS_UNCHECKED)
+                else "no block of this backup was found missing or ambiguous",
             )
         snapshot = cut
     if block_error := _block_ids_restore_error(snapshot, accept_unverified):
