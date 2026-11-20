@@ -3,6 +3,7 @@
 import asyncio
 import copy
 from datetime import UTC, datetime
+import logging
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -25,6 +26,7 @@ from custom_components.comexio.function_plan_block_keys import (
     CHECK_PLAUSIBLE,
     CHECK_UNRESOLVED,
     CHECK_UNVERIFIED,
+    OMITTED_BLOCKS,
     REASON_AMBIGUOUS,
     REASON_MISSING,
     REASON_NO_KEY,
@@ -45,9 +47,11 @@ from custom_components.comexio.function_plan_block_keys import (
     capture_block_keys,
     catalog_entry_key,
     implausible_block_wiring,
+    omitted_block_lines,
     resolve_block_ids,
 )
 from custom_components.comexio.function_plan_catalog import FunctionPlanCatalogManager
+from custom_components.comexio.function_plan_module_restore import ModuleConfigRestore
 from custom_components.comexio.services import backup as backup_service
 from tests.common import load_json_fixture
 
@@ -842,6 +846,350 @@ def test_an_unverified_restore_names_the_blocks() -> None:
     assert error is not None
     assert "- element 7: no wire to check the block against" in error
     assert "accept_unverified_blocks: true" in error
+
+
+WITHOUT_NOT_BLOCK = {"5": OR, "40": ADD}  # the Nicht block is gone: element 7 is missing
+TWO_NOT_BLOCKS = {"5": OR, "24": NOT, "25": NOT, "40": ADD}  # the Nicht can no longer be told apart: ambiguous
+NOTICE_ID = "comexio_restore_omitted_iosrv1_42_Kitch_auto_0"
+COPY = {"as_copy": True, "new_plan_name": "Copy", "omit_unresolved_blocks": True}
+
+
+def _backup_resolved_against(fub_base: dict[str, Any]) -> dict[str, Any]:
+    """The fixture plan as _resolve_restore_snapshot hands it over: block ids resolved against fub_base."""
+    fixture = load_json_fixture("function_plan.json")
+    plan = {"elements": fixture["elements"], "connections": fixture["connections"]}
+    stored = {
+        **plan,
+        "hash": plan_hash(plan),
+        "plan_name": "Kitch",
+        SNAPSHOT_KEYS: capture_block_keys(plan["elements"], FUB_BASE),
+        SNAPSHOT_KEYS_SOURCE: SOURCE_CAPTURED,
+    }
+    return resolve_block_ids(stored, fub_base)
+
+
+def _notice(notify: MagicMock) -> Any:
+    return next(c for c in notify.call_args_list if c.kwargs.get("title") == backup_service._TITLE_RESTORE_OMITTED)
+
+
+def _build_copy(
+    snapshot: dict[str, Any],
+    *,
+    new_fub_id: int | None = 77,
+    auto_start: bool = False,
+    rebuild_error: Exception | None = None,
+    create_error: Exception | None = None,
+) -> MagicMock:
+    """Run the real _restore_plan_as_copy on snapshot with Comexio's calls mocked; returns the notification mock."""
+    api = SimpleNamespace(create_fup=AsyncMock(return_value=new_fub_id, side_effect=create_error))
+    coordinator = SimpleNamespace(server_id="iosrv1")
+    connections = len(snapshot.get("connections", {}))
+    built = ({"1": "11"}, connections, [], {"included": False, "failed": 0, "unmapped": 0}, ModuleConfigRestore(None))
+    with (
+        patch.object(backup_service, "_rebuild_new_plan", AsyncMock(return_value=built, side_effect=rebuild_error)),
+        patch.object(backup_service, "_start_new_plan", AsyncMock(return_value=(None, None))),
+        patch.object(backup_service.persistent_notification, "async_create") as notify,
+    ):
+        asyncio.run(
+            backup_service._restore_plan_as_copy(
+                MagicMock(), coordinator, api, 42, snapshot, "auto", 0, "Copy", auto_start
+            )
+        )
+    return notify
+
+
+@pytest.mark.parametrize("fub_base", [WITHOUT_NOT_BLOCK, TWO_NOT_BLOCKS], ids=["missing", "ambiguous"])
+def test_a_copy_is_built_without_the_blocks_comexio_no_longer_has(
+    fub_base: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.INFO, logger=backup_service.__name__):
+        api, _notify = _run_restore(_backup_resolved_against(fub_base), logged_in=True, **COPY)
+
+    assert "nothing is left out" not in caplog.text
+    api.restore_as_copy.assert_awaited_once()
+    built = api.restore_as_copy.await_args.args[4]
+    assert "7" not in built["elements"]
+    assert "13" not in built["connections"]  # the wire into the left-out block
+    assert [block["element"] for block in built[OMITTED_BLOCKS]] == ["7"]
+    assert block_check(built) is None  # what the copy is built from is exact again
+    api.restore_in_place.assert_not_awaited()
+    api.restore_as_new.assert_not_awaited()
+
+
+def _cut_backup() -> dict[str, Any]:
+    return backup_service.omit_unresolved_blocks(_backup_resolved_against(WITHOUT_NOT_BLOCK))
+
+
+def test_the_copy_is_named_by_a_notice_that_lists_the_blocks_left_out() -> None:
+    cut = _cut_backup()
+
+    notice = _notice(_build_copy(cut))
+
+    assert notice.kwargs["notification_id"] == NOTICE_ID
+    for line in omitted_block_lines(cut[OMITTED_BLOCKS]):
+        assert f"- {line}" in notice.args[1]
+    assert "Kitch" in notice.args[1]
+    assert "was built without 1 logic block(s)" in notice.args[1]
+
+
+@pytest.mark.parametrize(("auto_start", "says_not_started"), [(False, True), (True, False)])
+def test_the_notice_says_whether_the_copy_was_started(auto_start: bool, says_not_started: bool) -> None:
+    notice = _notice(_build_copy(_cut_backup(), auto_start=auto_start))
+
+    assert ("It was not started." in notice.args[1]) is says_not_started
+
+
+def test_the_blocks_left_out_are_logged_as_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        _build_copy(_cut_backup())
+
+    warning = next(r.getMessage() for r in caplog.records if "left out of the copy" in r.getMessage())
+    assert "'Kitch' (fub=42): 1 logic block(s)" in warning
+    assert "element 7: block id 23" in warning
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"new_fub_id": None},
+        {"rebuild_error": TimeoutError()},
+        {"rebuild_error": aiohttp.ClientError()},
+        {"create_error": TimeoutError()},
+    ],
+    ids=["name taken", "timeout while building", "client error while building", "timeout while creating"],
+)
+def test_no_notice_names_a_copy_that_was_not_built(failure: dict[str, Any], caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        notify = _build_copy(_cut_backup(), **failure)
+
+    assert backup_service._TITLE_RESTORE_OMITTED not in _notification_titles(notify)
+    assert backup_service._TITLE_RESTORE_ERR in _notification_titles(notify)
+    assert "left out of the copy" not in caplog.text
+
+
+def test_the_parameter_line_names_the_flag(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger=backup_service.__name__):
+        _run_restore(_backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=True, **COPY)
+
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("Function Plan Restore: fub_id"))
+    assert line.endswith("omit_unresolved_blocks=True")
+
+
+def test_a_failed_login_stops_before_a_copy_is_built() -> None:
+    api, _notify = _run_restore(_backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=False, **COPY)
+
+    api.restore_as_copy.assert_not_awaited()
+
+
+def test_without_the_flag_a_copy_is_still_refused_and_the_error_names_the_way_out() -> None:
+    api, notify = _run_restore(
+        _backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=True, as_copy=True, new_plan_name="Copy"
+    )
+
+    api.login.assert_not_awaited()
+    assert _restores_run(api) == 0
+    message = notify.call_args.args[1]
+    assert "Restore refused" in message
+    assert "'as_copy: true' and 'omit_unresolved_blocks: true'" in message
+
+
+@pytest.mark.parametrize("data", [{}, {"confirm": False}, {"on_conflict": "force_override"}])
+def test_the_flag_never_changes_a_restore_onto_the_live_plan(
+    data: dict[str, Any], caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        api, notify = _run_restore(
+            _backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=True, omit_unresolved_blocks=True, **data
+        )
+
+    api.login.assert_not_awaited()  # stopped before it touched Comexio
+    assert _restores_run(api) == 0
+    assert notify.call_args.kwargs["title"] == backup_service._TITLE_RESTORE_ERR
+    assert "refused: omit_unresolved_blocks needs as_copy" in caplog.text
+    message = notify.call_args.args[1]
+    assert "only works together with 'Restore as copy'" in message
+    assert "Nothing was changed" in message
+
+
+def test_a_block_that_is_merely_unknown_is_not_left_out_and_still_needs_the_opt_in() -> None:
+    backup = {"plan_name": "Kitch", UNRESOLVED_BLOCKS: [NO_KEY_BLOCK]}
+
+    refused, notify = _run_restore(backup, logged_in=True, **COPY)
+    accepted, _ = _run_restore(backup, logged_in=True, accept_unverified_blocks=True, **COPY)
+
+    refused.login.assert_not_awaited()
+    assert "accept_unverified_blocks" in notify.call_args.args[1]
+    assert "omit_unresolved_blocks" not in notify.call_args.args[1]
+    accepted.restore_as_copy.assert_awaited_once()
+    assert accepted.restore_as_copy.await_args.args[4] is backup  # nothing to leave out: the very snapshot
+    assert backup_service._TITLE_RESTORE_OMITTED not in _notification_titles(_build_copy(backup))
+
+
+def test_a_backup_without_a_missing_block_is_restored_as_it_is() -> None:
+    backup = {"plan_name": "Kitch"}
+
+    api, _notify = _run_restore(backup, logged_in=True, **COPY)
+
+    assert api.restore_as_copy.await_args.args[4] is backup
+
+
+def _omitted_blocks(count: int) -> list[dict[str, Any]]:
+    return [
+        {"element": str(n), "name": "", "ref_id": 23, "key": None, "reason": "missing", "connections": 0, "unfed": []}
+        for n in range(1, count + 1)
+    ]
+
+
+def _warn_omitted(omitted: list[dict[str, Any]], **kwargs: Any) -> MagicMock:
+    values = {"backup": ("auto", 0), "auto_start": False, **kwargs}
+    with patch.object(backup_service.persistent_notification, "async_create") as notify:
+        backup_service._warn_blocks_omitted(MagicMock(), {OMITTED_BLOCKS: omitted}, "iosrv1", 42, "Kitch", **values)
+    return notify
+
+
+def test_the_notice_names_the_first_blocks_and_the_log_all_of_them(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        notify = _warn_omitted(_omitted_blocks(12))
+
+    message = notify.call_args.args[1]
+    assert message.count("\n- element ") == backup_service._OMITTED_NOTICE_LINES
+    assert "… and 2 more (see log)" in message
+    assert "element 12:" in caplog.text
+    assert "element 12:" not in message
+
+
+@pytest.mark.parametrize(("count", "more"), [(10, None), (11, "… and 1 more (see log)")])
+def test_the_notice_truncates_only_beyond_the_limit(count: int, more: str | None) -> None:
+    message = _warn_omitted(_omitted_blocks(count)).call_args.args[1]
+
+    assert message.count("\n- element ") == min(count, backup_service._OMITTED_NOTICE_LINES)
+    assert (more in message) if more else ("more (see log)" not in message)
+
+
+def test_the_notice_is_one_per_backup() -> None:
+    ids = {
+        _warn_omitted(_omitted_blocks(1), backup=backup).call_args.kwargs["notification_id"]
+        for backup in (("auto", 0), ("auto", 1), ("change", 0))
+    }
+
+    assert len(ids) == 3
+
+
+def test_a_snapshot_that_left_nothing_out_warns_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        notify = _warn_omitted([])
+
+    notify.assert_not_called()
+    assert not caplog.records
+
+
+@pytest.mark.parametrize(("omitted", "status"), [([], "OK"), ([{"element": "7"}], "PARTIAL")])
+def test_a_copy_without_blocks_is_reported_as_partial(omitted: list[dict[str, Any]], status: str) -> None:
+    snapshot = {"elements": {"1": {}}, "connections": {}, OMITTED_BLOCKS: omitted}
+
+    settings = {"included": False, "failed": 0, "unmapped": 0}
+
+    assert backup_service._new_plan_status(snapshot, 1, 0, [], settings, ModuleConfigRestore(None)) == status
+
+
+def test_the_result_of_a_copy_says_how_many_blocks_were_left_out() -> None:
+    result = _build_copy(_cut_backup()).call_args
+
+    assert "Left out: 1 logic block(s) Comexio no longer has" in result.args[1]
+
+
+def test_the_result_of_a_copy_that_left_nothing_out_says_nothing_about_it() -> None:
+    result = _build_copy({"plan_name": "Kitch", "elements": {"1": {}}, "connections": {}}).call_args
+
+    assert result.kwargs["title"] == "Function Plan Restore — OK"
+    assert "Left out" not in result.args[1]
+
+
+@pytest.mark.parametrize(("cut", "count"), [(True, 1), (False, 0)], ids=["blocks left out", "nothing left out"])
+def test_the_info_log_of_a_copy_counts_the_omitted_blocks(
+    cut: bool, count: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    snapshot = _cut_backup() if cut else {"plan_name": "Kitch"}
+
+    with caplog.at_level(logging.INFO, logger=backup_service.__name__):
+        _build_copy(snapshot)
+
+    line = next(r.getMessage() for r in caplog.records if r.getMessage().startswith("Function Plan Restore (copy)"))
+    assert f" omitted={count} " in line
+
+
+@pytest.mark.parametrize(
+    ("lacks_a_block", "data", "started"),
+    [
+        (True, {}, False),
+        (True, {"auto_start": True}, True),
+        (True, {"auto_start": False}, False),
+        (True, {"auto_start": "true"}, True),
+        (True, {"auto_start": "false"}, False),
+        (False, {}, True),
+    ],
+    ids=[
+        "held back",
+        "asked for by name",
+        "switched off",
+        "asked for as text",
+        "switched off as text",
+        "nothing left out",
+    ],
+)
+def test_a_copy_that_lacks_blocks_is_not_started_unless_the_call_says_so(
+    lacks_a_block: bool, data: dict[str, Any], started: bool, caplog: pytest.LogCaptureFixture
+) -> None:
+    snapshot = _backup_resolved_against(WITHOUT_NOT_BLOCK) if lacks_a_block else {"plan_name": "Kitch"}
+
+    with caplog.at_level(logging.INFO, logger=backup_service.__name__):
+        api, _notify = _run_restore(snapshot, logged_in=True, **COPY, **data)
+
+    assert api.restore_as_copy.await_args.args[-1] is started
+    # only a copy that was held back says so in the log
+    assert ("the copy lacks logic blocks, so it is not started" in caplog.text) is (lacks_a_block and not data)
+
+
+def test_the_result_says_why_a_copy_that_lacks_blocks_was_not_started() -> None:
+    held_back = _build_copy(_cut_backup(), auto_start=False).call_args.args[1]
+    asked_for = _build_copy({"plan_name": "Kitch"}, auto_start=False).call_args.args[1]
+
+    assert "the copy lacks logic blocks — check it" in held_back
+    assert "auto-start disabled for this restore" not in held_back
+    assert "auto-start disabled for this restore" in asked_for
+
+
+def test_a_flag_that_changes_nothing_leaves_a_trace(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger=backup_service.__name__):
+        _run_restore({"plan_name": "Kitch"}, logged_in=True, **COPY)
+
+    assert "nothing is left out" in caplog.text
+
+
+def test_a_flag_sent_as_text_is_read_as_a_boolean() -> None:
+    backup = _backup_resolved_against(WITHOUT_NOT_BLOCK)
+
+    api, notify = _run_restore(
+        backup, logged_in=True, as_copy=True, new_plan_name="Copy", omit_unresolved_blocks="false"
+    )
+
+    api.login.assert_not_awaited()
+    assert "Restore refused" in notify.call_args.args[1]
+
+
+def test_a_mix_of_a_missing_and_an_unknown_block_still_needs_the_opt_in() -> None:
+    backup = _backup_resolved_against(WITHOUT_NOT_BLOCK)
+    mixed = {**backup, UNRESOLVED_BLOCKS: [*backup[UNRESOLVED_BLOCKS], {**NO_KEY_BLOCK, "element": "5"}]}
+
+    refused, notify = _run_restore(mixed, logged_in=True, **COPY)
+    accepted, _ = _run_restore(mixed, logged_in=True, accept_unverified_blocks=True, **COPY)
+
+    refused.login.assert_not_awaited()
+    assert "accept_unverified_blocks" in notify.call_args.args[1]
+    assert "omit_unresolved_blocks" not in notify.call_args.args[1]
+    built = accepted.restore_as_copy.await_args.args[4]
+    assert "7" not in built["elements"]  # the missing block is left out ...
+    assert "5" in built["elements"]  # ... the unknown one stays
 
 
 # ---------------------------------------------------------------------------
