@@ -944,7 +944,7 @@ def test_the_copy_is_named_by_a_notice_that_lists_the_blocks_left_out(fub_base: 
         assert f"- {line}" in notice.args[1]
     assert reason in notice.args[1]
     assert "Kitch" in notice.args[1]
-    assert "was built without 1 logic block(s)" in notice.args[1]
+    assert "is built without 1 logic block(s)" in notice.args[1]
     assert "(or has more than one of)" in notice.args[1]  # an ambiguous block is left out too, not only a missing one
 
 
@@ -986,21 +986,45 @@ def test_the_blocks_left_out_are_logged_as_a_warning(caplog: pytest.LogCaptureFi
 
 @pytest.mark.parametrize(
     "failure",
-    [
-        {"new_fub_id": None},
-        {"rebuild_error": TimeoutError()},
-        {"rebuild_error": aiohttp.ClientError()},
-        {"create_error": TimeoutError()},
-    ],
-    ids=["name taken", "timeout while building", "client error while building", "timeout while creating"],
+    [{"new_fub_id": None}, {"create_error": TimeoutError()}],
+    ids=["name taken", "timeout while creating"],
 )
-def test_no_notice_names_a_copy_that_was_not_built(failure: dict[str, Any], caplog: pytest.LogCaptureFixture) -> None:
+def test_no_notice_names_a_copy_without_a_plan_id(failure: dict[str, Any], caplog: pytest.LogCaptureFixture) -> None:
     with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
         notify = _build_copy(_cut_backup(), **failure)
 
     assert backup_service._TITLE_RESTORE_OMITTED not in _notification_titles(notify)
     assert backup_service._TITLE_RESTORE_ERR in _notification_titles(notify)
     assert "left out of the copy" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "error",
+    [TimeoutError(), aiohttp.ClientError()],
+    ids=["timeout while building", "client error while building"],
+)
+def test_a_copy_that_fails_halfway_still_gets_the_list_of_blocks_left_out(
+    error: Exception, caplog: pytest.LogCaptureFixture
+) -> None:
+    cut = _cut_backup()
+
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        notify = _build_copy(cut, rebuild_error=error)
+
+    titles = _notification_titles(notify)
+    assert backup_service._TITLE_RESTORE_ERR in titles  # the failure is told as before
+    assert titles.count(backup_service._TITLE_RESTORE_OMITTED) == 1
+    for line in omitted_block_lines(cut[OMITTED_BLOCKS]):
+        assert f"- {line}" in _notice(notify).args[1]
+    assert "left out of the copy 'Copy' (fub=77)" in caplog.text
+
+
+def test_each_copy_the_builder_creates_has_a_notice_of_its_own() -> None:
+    # the same source, name and backup: only the plan id Comexio gave the copy tells the two copies apart
+    first = _notice(_build_copy(_cut_backup(), new_fub_id=77)).kwargs["notification_id"]
+    second = _notice(_build_copy(_cut_backup(), new_fub_id=78)).kwargs["notification_id"]
+
+    assert first != second
 
 
 def test_the_parameter_line_names_the_flag(caplog: pytest.LogCaptureFixture) -> None:
@@ -1164,7 +1188,7 @@ def test_a_rerun_for_the_same_copy_replaces_its_notice() -> None:
 def test_the_notice_names_the_copy_and_its_source() -> None:
     message = _warn_omitted(_omitted_blocks(1), copy_name="Kitch copy").call_args.args[1]
 
-    assert "The copy 'Kitch copy' of 'Kitch' was built without" in message
+    assert "The copy 'Kitch copy' of 'Kitch' is built without" in message
 
 
 def test_a_snapshot_that_left_nothing_out_warns_nothing(caplog: pytest.LogCaptureFixture) -> None:

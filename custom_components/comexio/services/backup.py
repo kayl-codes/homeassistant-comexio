@@ -1367,6 +1367,19 @@ async def _restore_plan_as_copy(
             )
             return
 
+        # A copy exists from here on, so it is told what it lacks now: a build that fails halfway leaves
+        # a partial copy, and the user should still see which blocks were left out on purpose.
+        _warn_blocks_omitted(
+            hass,
+            snapshot,
+            coordinator.server_id,
+            source_fub_id,
+            source_name,
+            new_plan_name,
+            new_fub_id,
+            (kind, slot),
+            auto_start,
+        )
         id_map, connections_created, warnings, block_settings, module_restore = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
@@ -1385,18 +1398,6 @@ async def _restore_plan_as_copy(
             notification_id=notif_id,
         )
         return
-    # Only now does a copy exist, so only now is it told what it lacks.
-    _warn_blocks_omitted(
-        hass,
-        snapshot,
-        coordinator.server_id,
-        source_fub_id,
-        source_name,
-        new_plan_name,
-        new_fub_id,
-        (kind, slot),
-        auto_start,
-    )
     # No plan_data payload here: the structure was already built above via individual
     # element/connection calls, not via run_fup.
     run_ok, start_error = await _start_new_plan(api, new_fub_id, new_plan_name, auto_start)
@@ -1638,10 +1639,12 @@ def _warn_blocks_omitted(
     backup: tuple[str, int],
     auto_start: bool,
 ) -> None:
-    """Warn (log + notification, the restore goes on) which logic blocks the copy was built without.
+    """Warn (log + notification, the restore goes on) which logic blocks the copy is built without.
 
-    Silent when the snapshot left nothing out. The lines come from omitted_block_lines, which keep
-    ids, keys and names on one line each; the notification names the first ones, the log all.
+    Called as soon as the copy exists, before its structure is built, so a build that fails halfway
+    still leaves the list. Silent when the snapshot left nothing out. The lines come from
+    omitted_block_lines, which keep ids, keys and names on one line each; the notification names
+    the first ones, the log all.
     The notification is one per copy (see _omitted_notification_id): a copy of the same backup that
     leaves no block out posts nothing and leaves the warning of an earlier copy standing, as that
     copy still lacks its blocks. backup is the (kind, slot) the snapshot came from.
@@ -1660,7 +1663,7 @@ def _warn_blocks_omitted(
     )
     shown = lines[:_OMITTED_NOTICE_LINES]
     message = (
-        f"The copy '{one_line(copy_name)}' of '{one_line(plan_name)}' was built without {len(lines)} logic "
+        f"The copy '{one_line(copy_name)}' of '{one_line(plan_name)}' is built without {len(lines)} logic "
         f"block(s) {_OMITTED_REASON}, and without the connections that end at them:\n"
         + "\n".join(f"- {line}" for line in shown)
     )
