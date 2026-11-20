@@ -171,13 +171,15 @@ function _canOmitBlocks(check) {
 
 // One part of the restore dialog's block hint: the text, and the lines it is about in a
 // collapsed list. textContent only — the lines name elements and blocks from the backup.
-function _blockHintSection(text, summary, lines) {
+// total is how many things the lines stand for when the list is cut short (a last "... and N more"
+// line); the summary then counts them, not the lines.
+function _blockHintSection(text, summary, lines, total) {
   const section = document.createElement("div");
   section.append(document.createTextNode(text));
   if (Array.isArray(lines) && lines.length) {
     const details = document.createElement("details");
     const title = document.createElement("summary");
-    title.textContent = `${summary} (${lines.length})`;
+    title.textContent = `${summary} (${Number.isInteger(total) && total >= lines.length ? total : lines.length})`;
     const list = document.createElement("ul");
     for (const line of lines) {
       const item = document.createElement("li");
@@ -1937,7 +1939,9 @@ ${warning}`;
 
   // What the copy lacks, then what is still unchecked in the rest of it.
   _omitSections(check) {
-    const sections = [_blockHintSection(_OMIT_COST_TEXT, "Ausgelassene Bausteine", check.omit.blocks)];
+    const sections = [
+      _blockHintSection(_OMIT_COST_TEXT, "Ausgelassene Bausteine", check.omit.blocks, check.omit.count),
+    ];
     return check.omit.then ? [...sections, ...this._checkSections(check.omit.then)] : sections;
   }
 

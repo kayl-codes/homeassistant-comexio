@@ -626,7 +626,8 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     """block_check, plus what a copy without the blocks Comexio no longer has would be like.
 
     For the plan card's restore dialog. A CHECK_UNRESOLVED check gets an "omit" entry:
-    "blocks" are the omitted_block_lines (which blocks go, what their wires cost) and "then"
+    "blocks" are the omitted_block_lines (which blocks go, what their wires cost; "count" is how many
+    blocks go, whatever the lines show) and "then"
     is the block_check of the snapshot cut that way (None when it is exact, CHECK_UNVERIFIED
     when a block unknown to the catalog or a backfill verdict remains, which the copy's restore
     still needs accept_unverified_blocks for), "snapshot_hash" is the snapshot_identity of the
@@ -644,5 +645,10 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
         lines = [*lines[:CARD_OMIT_LINES], f"... and {len(lines) - CARD_OMIT_LINES} more"]
     # snapshot_hash names the backup the offer was made for: the card hands it to the restore, which
     # refuses when the slot holds another one by then (a newer backup, a catalog change).
-    omit = {"blocks": lines, "then": block_check(cut), "snapshot_hash": snapshot_identity(snapshot)}
+    omit = {
+        "blocks": lines,
+        "count": len(omitted),  # of all of them, as "blocks" ends in a "... and N more" line past the cap
+        "then": block_check(cut),
+        "snapshot_hash": snapshot_identity(snapshot),
+    }
     return {**check, "omit": omit}

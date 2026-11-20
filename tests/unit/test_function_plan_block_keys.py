@@ -1207,8 +1207,11 @@ def test_the_identity_is_a_fixed_sha256_of_the_canonical_json() -> None:
     )
 
 
-def test_the_identity_survives_a_value_json_cannot_write() -> None:
-    assert snapshot_identity({"captured": datetime(2026, 11, 20, tzinfo=UTC)})
+def test_the_identity_survives_a_value_json_cannot_write_and_still_tells_values_apart() -> None:
+    day = datetime(2026, 11, 20, tzinfo=UTC)
+
+    assert snapshot_identity({"captured": day}) == snapshot_identity({"captured": datetime(2026, 11, 20, tzinfo=UTC)})
+    assert snapshot_identity({"captured": day}) != snapshot_identity({"captured": datetime(2026, 11, 21, tzinfo=UTC)})
 
 
 def test_looking_at_and_restoring_a_stored_backup_leave_the_offered_identity_alone(

@@ -502,6 +502,7 @@ def test_the_card_check_offers_the_omission_with_what_it_costs(snapshot: dict[st
             "element 7 (Kitchen light): block id 23 (not/d/d): no block of this kind exists on Comexio today "
             "(app or firmware removed it?); 1 connection(s) dropped or shortened"
         ],
+        "count": 1,
         "then": None,  # nothing else stands in the way of the copy
         "snapshot_hash": block_keys.snapshot_identity(resolve_block_ids(snapshot, WITHOUT_NOT)),
     }
@@ -593,3 +594,4 @@ def test_the_card_check_names_a_bounded_number_of_blocks(
 
     assert check is not None
     assert check["omit"]["blocks"] == ["... and 1 more"]
+    assert check["omit"]["count"] == 1  # the number of blocks, not of lines: the card's summary counts them
