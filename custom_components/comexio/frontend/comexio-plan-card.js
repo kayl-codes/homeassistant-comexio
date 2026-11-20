@@ -169,17 +169,25 @@ function _canOmitBlocks(check) {
   );
 }
 
+// The list may be cut short by the backend (a last "... and N more" line): the summary then counts
+// what the lines stand for, from total where the backend names it, else from that last line.
+function _lineTotal(lines, total) {
+  if (Number.isInteger(total) && total >= lines.length) {
+    return total;
+  }
+  const more = /^\.\.\. and (\d+) more$/.exec(lines[lines.length - 1]);
+  return more ? lines.length - 1 + Number(more[1]) : lines.length;
+}
+
 // One part of the restore dialog's block hint: the text, and the lines it is about in a
 // collapsed list. textContent only — the lines name elements and blocks from the backup.
-// total is how many things the lines stand for when the list is cut short (a last "... and N more"
-// line); the summary then counts them, not the lines.
 function _blockHintSection(text, summary, lines, total) {
   const section = document.createElement("div");
   section.append(document.createTextNode(text));
   if (Array.isArray(lines) && lines.length) {
     const details = document.createElement("details");
     const title = document.createElement("summary");
-    title.textContent = `${summary} (${Number.isInteger(total) && total >= lines.length ? total : lines.length})`;
+    title.textContent = `${summary} (${_lineTotal(lines, total)})`;
     const list = document.createElement("ul");
     for (const line of lines) {
       const item = document.createElement("li");

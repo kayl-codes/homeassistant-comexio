@@ -82,8 +82,9 @@ back to Comexio: structure, element positions and the paper/DPI setting of the c
 - **A copy without blocks is not started on its own:** it would run against the building
   with elements that lost their inputs. A call that does not pass `auto_start` leaves it
   stopped (the plan card always passes it, so its dialog unticks the box). Check the copy,
-  then start it. A notification names every omitted block and the elements that lost an
-  input; the result message says how many blocks were left out.
+  then start it. The log names every omitted block and the elements that lost an input; a
+  notification lists the first ten and says how many more the log has, and the result message
+  says how many blocks were left out.
 - Scene block and Quantum module configs are **not written back yet**. The restore message
   names the affected elements, so you can check them in Comexio.
 
@@ -247,9 +248,9 @@ der Zeichenfläche.
 - **Eine Kopie ohne Bausteine startet nicht von selbst:** sie würde mit Elementen laufen,
   die ihre Eingänge verloren haben. Ein Aufruf ohne `auto_start` lässt sie angehalten (die
   Plan-Karte übergibt den Wert immer, deshalb entfernt ihr Dialog das Häkchen). Kopie
-  prüfen, dann starten. Eine Benachrichtigung nennt jeden ausgelassenen Baustein und die
-  Elemente, die einen Eingang verloren haben; die Ergebnismeldung nennt, wie viele Bausteine
-  fehlen.
+  prüfen, dann starten. Das Log nennt jeden ausgelassenen Baustein und die Elemente, die einen
+  Eingang verloren haben; eine Benachrichtigung listet die ersten zehn und sagt, wie viele das
+  Log noch hat; die Ergebnismeldung nennt, wie viele Bausteine fehlen.
 - Die Konfiguration von Szenen-Bausteinen und Quantum-Modulen wird **noch nicht
   zurückgeschrieben**. Die Restore-Meldung nennt die betroffenen Elemente, damit man sie in
   Comexio prüfen kann.

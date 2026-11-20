@@ -600,7 +600,28 @@ def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-CARD_OMIT_LINES = 30  # omitted blocks the card's check names; the restore's result and log have them all
+# The card's check is a state attribute, which the recorder caps at 16 KiB. Each list in it is cut by
+# lines, by the length of a line and by the UTF-8 bytes of all of them (the cap counts bytes); the
+# restore's result and log have everything. At most three lists, so well below the cap.
+CARD_OMIT_LINES = 30
+CARD_LINE_CHARS = 200
+CARD_LIST_BYTES = 2000
+
+
+def _bounded_lines(lines: list[str]) -> list[str]:
+    """lines as the card's check carries them: cut short, ending in "... and N more" when some are left out."""
+    shown: list[str] = []
+    used = 0
+    for line in lines:
+        text = line if len(line) <= CARD_LINE_CHARS else f"{line[: CARD_LINE_CHARS - 1]}…"
+        size = len(text.encode())
+        if len(shown) >= CARD_OMIT_LINES or used + size > CARD_LIST_BYTES:
+            break
+        shown.append(text)
+        used += size
+    if len(shown) < len(lines):
+        shown.append(f"... and {len(lines) - len(shown)} more")
+    return shown
 
 
 _IDENTITY_BOOKKEEPING = (SNAPSHOT_KEYS, SNAPSHOT_KEYS_SOURCE, "restored_at")
@@ -632,23 +653,27 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     when a block unknown to the catalog or a backfill verdict remains, which the copy's restore
     still needs accept_unverified_blocks for), "snapshot_hash" is the snapshot_identity of the
     snapshot as resolved (what the restore's expected_hash is compared with). Every other check
-    comes back as block_check returns it, as the dialog has nothing to offer there.
+    comes back as block_check returns it, as the dialog has nothing to offer there. The lists of
+    every check are bounded (_bounded_lines), as the check is a state attribute.
     """
     check = block_check(snapshot)
-    if check is None or check["status"] != CHECK_UNRESOLVED:
+    if check is None:
+        return None
+    check = {**check, "problems": _bounded_lines(check["problems"])}
+    if check["status"] != CHECK_UNRESOLVED:
         return check
     cut = omit_unresolved_blocks(snapshot)
     if not (omitted := cut.get(OMITTED_BLOCKS)):
         return check
-    lines = omitted_block_lines(omitted)
-    if len(lines) > CARD_OMIT_LINES:  # the check is a state attribute, which the recorder caps at 16 KiB
-        lines = [*lines[:CARD_OMIT_LINES], f"... and {len(lines) - CARD_OMIT_LINES} more"]
+    then = block_check(cut)
+    if then is not None:
+        then = {**then, "problems": _bounded_lines(then["problems"])}
     # snapshot_hash names the backup the offer was made for: the card hands it to the restore, which
     # refuses when the slot holds another one by then (a newer backup, a catalog change).
     omit = {
-        "blocks": lines,
-        "count": len(omitted),  # of all of them, as "blocks" ends in a "... and N more" line past the cap
-        "then": block_check(cut),
+        "blocks": _bounded_lines(omitted_block_lines(omitted)),
+        "count": len(omitted),  # of all of them, as "blocks" ends in a "... and N more" line when cut
+        "then": then,
         "snapshot_hash": snapshot_identity(snapshot),
     }
     return {**check, "omit": omit}

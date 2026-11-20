@@ -595,3 +595,87 @@ def test_the_card_check_names_a_bounded_number_of_blocks(
     assert check is not None
     assert check["omit"]["blocks"] == ["... and 1 more"]
     assert check["omit"]["count"] == 1  # the number of blocks, not of lines: the card's summary counts them
+
+
+def test_a_long_line_is_cut_and_the_list_is_bounded_by_its_bytes() -> None:
+    long_line = "x" * 500
+    lines = [f"element {i}: " + "y" * 150 for i in range(40)]
+
+    cut = block_keys._bounded_lines([long_line])
+    shown = block_keys._bounded_lines(lines)
+
+    assert cut == ["x" * (block_keys.CARD_LINE_CHARS - 1) + "…"]
+    assert shown == [*lines[:12], "... and 28 more"]  # 12 x about 162 bytes fit, the 13th would pass 2000
+
+
+def test_a_list_that_fits_is_left_as_it_is() -> None:
+    lines = ["element 1: a", "element 2: b"]
+
+    assert block_keys._bounded_lines(lines) == lines
+    assert block_keys._bounded_lines([]) == []
+
+
+def test_every_list_of_the_card_check_is_bounded(snapshot: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The problems and the remainder's problems count against the attribute too, not only the omitted blocks."""
+    snapshot[SNAPSHOT_KEYS] = {"23": NOT_KEY}  # the Oder block (element 4) stays in the copy as unverified
+    monkeypatch.setattr(block_keys, "CARD_OMIT_LINES", 0)
+
+    check = block_check_for_card(resolve_block_ids(snapshot, WITHOUT_NOT))
+
+    assert check is not None
+    assert check["problems"] == ["... and 1 more"]
+    assert check["omit"]["blocks"] == ["... and 1 more"]
+    assert check["omit"]["then"]["problems"] == ["... and 1 more"]
+    assert check["omit"]["then"]["status"] == CHECK_UNVERIFIED
+
+
+def test_the_budget_counts_bytes_not_characters() -> None:
+    # 300 bytes each: six fit into 2000 bytes, though counted as 150 characters 13 would
+    lines = ["ä" * 150 for _ in range(20)]
+
+    shown = block_keys._bounded_lines(lines)
+
+    assert shown[:-1] == lines[:6]
+    assert shown[-1] == "... and 14 more"
+    assert sum(len(line.encode()) for line in shown[:-1]) <= block_keys.CARD_LIST_BYTES
+
+
+def test_a_check_without_an_offer_is_bounded_too(snapshot: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """A block unknown at capture: an unverified check with no omit entry, its lines count against the attribute too."""
+    snapshot[SNAPSHOT_KEYS] = {"5": OR_KEY}  # element 7's block (id 23) was not in the catalog when it was taken
+    monkeypatch.setattr(block_keys, "CARD_OMIT_LINES", 0)
+
+    check = block_check_for_card(resolve_block_ids(snapshot, WITHOUT_NOT))
+
+    assert check is not None
+    assert check["status"] == CHECK_UNVERIFIED
+    assert "omit" not in check
+    assert check["problems"] == ["... and 1 more"]
+
+
+@pytest.mark.parametrize(
+    ("lines", "expected_kept"),
+    [
+        pytest.param(["a" * 200], 1, id="a line of the limit stays whole"),
+        pytest.param(["a" * 100] * 20, 20, id="bytes exactly at the budget"),
+        pytest.param(["a" * 100] * 21, 20, id="one line past the budget"),
+        pytest.param(["a"] * 30, 30, id="lines exactly at the cap"),
+        pytest.param(["a"] * 31, 30, id="one line past the cap"),
+    ],
+)
+def test_the_bounds_hold_at_their_edge(lines: list[str], expected_kept: int) -> None:
+    shown = block_keys._bounded_lines(lines)
+    left_out = len(lines) - expected_kept
+
+    assert shown[:expected_kept] == lines[:expected_kept]
+    assert shown[expected_kept:] == ([f"... and {left_out} more"] if left_out else [])
+
+
+def test_a_line_one_past_the_limit_is_cut_with_an_ellipsis() -> None:
+    assert block_keys._bounded_lines(["a" * 201]) == ["a" * 199 + "…"]
+
+
+def test_a_first_line_over_the_budget_leaves_only_the_count(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(block_keys, "CARD_LIST_BYTES", 100)
+
+    assert block_keys._bounded_lines(["a" * 150]) == ["... and 1 more"]
