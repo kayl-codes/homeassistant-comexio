@@ -7,6 +7,11 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### ✨ New Features
+- **Restore a backup without the logic blocks Comexio no longer has:** block numbers shift when an app is installed or removed and with firmware updates, so a backup could contain a block that no longer exists (or can no longer be told apart) and was refused as a whole. As a copy it can now be restored without those blocks: `function_plan_restore` takes `omit_unresolved_blocks: true` together with `as_copy: true`. The copy is built without the missing blocks and the connections that ended at them; elements that lose an input stay unfed. A notification and the log name every omitted block and the elements that lost an input, and the result message says how many were left out. The original plan is never touched, and the option is refused without `as_copy`. A block that is merely unknown to the block catalog stays and still needs `accept_unverified_blocks`.
+- **A copy without blocks is not started on its own:** a call that does not pass `auto_start` leaves the copy stopped, so a plan with unfed elements does not run against the building before anyone has read the notice. Passing `auto_start: true` explicitly starts it anyway.
+- **Plan card:** the restore dialog of a backup with missing blocks offers **Restore without these blocks as a copy**. It lists the blocks and what their connections cost, turns the copy option on (with a name for the copy) and **Start automatically** off. The card needs the updated `comexio-plan-card.js` (card 0.9.60) in `config/www`.
+
 ---
 
 ## [0.43.0] — 2026-11-18

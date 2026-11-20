@@ -68,6 +68,22 @@ back to Comexio: structure, element positions and the paper/DPI setting of the c
   restore creates a **new plan** (`on_conflict: new_id`). With `confirm: true` and
   `on_conflict: force_override` it overwrites the plan that holds the ID now.
 - In the plan card's **Orphaned plans** view, **Restore** always creates a new plan.
+- **Logic blocks Comexio no longer has:** block numbers shift when an app is installed or
+  removed and with firmware updates. A backup with a block that no longer exists on Comexio
+  (or that cannot be told apart from several others) is **refused**, because a restore
+  would put a wrong block in its place. As a **copy** it can be restored without those blocks:
+  set `as_copy: true` and `omit_unresolved_blocks: true` (the plan card shows **Restore
+  without these blocks as a copy** in its dialog; it lists the blocks and what their
+  connections cost, and turns the copy option on and **Start automatically** off). The
+  copy is built without the missing blocks and every connection that ended at them; elements
+  that lose their input that way stay unfed. The original plan is never touched, and the
+  option is refused without `as_copy`. A block that is merely unknown to the block catalog
+  stays and still needs `accept_unverified_blocks`.
+- **A copy without blocks is not started on its own:** it would run against the building
+  with elements that lost their inputs. A call that does not pass `auto_start` leaves it
+  stopped (the plan card always passes it, so its dialog unticks the box). Check the copy,
+  then start it. A notification names every omitted block and the elements that lost an
+  input; the result message says how many blocks were left out.
 - Scene block and Quantum module configs are **not written back yet**. The restore message
   names the affected elements, so you can check them in Comexio.
 
@@ -215,6 +231,25 @@ der Zeichenfläche.
   jetzt belegt.
 - In der Ansicht **Orphaned plans** der Plan-Karte legt **Restore** immer einen neuen Plan
   an.
+- **Logikbausteine, die Comexio nicht mehr hat:** Bausteinnummern verschieben sich, wenn
+  eine App installiert oder entfernt wird, und bei Firmware-Updates. Ein Backup mit einem
+  Baustein, den es auf Comexio nicht mehr gibt (oder der sich von mehreren anderen nicht
+  mehr unterscheiden lässt), wird **abgelehnt**, weil ein Restore an seiner Stelle einen
+  falschen Baustein einsetzen würde. Als **Kopie** lässt es sich ohne diese Bausteine
+  wiederherstellen: `as_copy: true` und `omit_unresolved_blocks: true` setzen (die Plan-Karte
+  zeigt im Dialog **Ohne diese Bausteine als Kopie wiederherstellen**; sie listet die
+  Bausteine und was ihre Verbindungen kosten, schaltet die Kopie-Option ein und **Automatisch
+  starten** aus). Die Kopie wird ohne die fehlenden Bausteine und ohne jede Verbindung
+  angelegt, die an ihnen endete; Elemente, die dadurch ihren Eingang verlieren, bleiben
+  unversorgt. Der Originalplan wird nie angefasst, und die Option wird ohne `as_copy`
+  abgelehnt. Ein Baustein, den nur der Bausteinkatalog nicht kennt, bleibt erhalten und
+  braucht weiter `accept_unverified_blocks`.
+- **Eine Kopie ohne Bausteine startet nicht von selbst:** sie würde mit Elementen laufen,
+  die ihre Eingänge verloren haben. Ein Aufruf ohne `auto_start` lässt sie angehalten (die
+  Plan-Karte übergibt den Wert immer, deshalb entfernt ihr Dialog das Häkchen). Kopie
+  prüfen, dann starten. Eine Benachrichtigung nennt jeden ausgelassenen Baustein und die
+  Elemente, die einen Eingang verloren haben; die Ergebnismeldung nennt, wie viele Bausteine
+  fehlen.
 - Die Konfiguration von Szenen-Bausteinen und Quantum-Modulen wird **noch nicht
   zurückgeschrieben**. Die Restore-Meldung nennt die betroffenen Elemente, damit man sie in
   Comexio prüfen kann.

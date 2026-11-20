@@ -6,20 +6,25 @@ from typing import Any
 from aiocomexio.function_plan import plan_hash
 import pytest
 
+from custom_components.comexio import function_plan_block_keys as block_keys
 from custom_components.comexio.function_plan_block_keys import (
+    CHECK_PLAUSIBLE,
     CHECK_UNRESOLVED,
     CHECK_UNVERIFIED,
+    OMITTABLE_REASONS,
     OMITTED_BLOCKS,
     REASON_AMBIGUOUS,
     REASON_MISSING,
     REASON_NO_KEY,
     SNAPSHOT_KEYS,
     SNAPSHOT_KEYS_SOURCE,
+    SOURCE_BACKFILLED_PLAUSIBLE,
     SOURCE_BACKFILLED_UNVERIFIED,
     SOURCE_CAPTURED,
     UNRESOLVED_BLOCKS,
     UNVERIFIED_BLOCK_PROBLEMS,
     block_check,
+    block_check_for_card,
     capture_block_keys,
     omit_unresolved_blocks,
     omitted_block_lines,
@@ -482,3 +487,108 @@ def test_the_refusal_lines_of_a_check_keep_ids_and_keys_on_one_line() -> None:
     assert len(check["problems"]) == 1
     assert "\n" not in check["problems"][0]
     assert check["problems"][0].startswith("element 7 x: block id 23 y (not /d/d): ")
+
+
+def test_the_card_check_offers_the_omission_with_what_it_costs(snapshot: dict[str, Any]) -> None:
+    snapshot["elements"]["7"]["name"] = "Kitchen light"
+
+    check = block_check_for_card(resolve_block_ids(snapshot, WITHOUT_NOT))
+
+    assert check is not None
+    assert check["status"] == CHECK_UNRESOLVED
+    assert check["problems"] == block_check(resolve_block_ids(snapshot, WITHOUT_NOT))["problems"]
+    assert check["omit"] == {
+        "blocks": [
+            "element 7 (Kitchen light): block id 23 (not/d/d): no block of this kind exists on Comexio today "
+            "(app or firmware removed it?); 1 connection(s) dropped or shortened"
+        ],
+        "then": None,  # nothing else stands in the way of the copy
+    }
+
+
+def test_the_card_check_says_what_the_copy_still_needs_to_be_accepted_for(snapshot: dict[str, Any]) -> None:
+    """A block unknown at capture stays in the copy: the dialog must say so, or the opt-in would go unannounced."""
+    snapshot[SNAPSHOT_KEYS] = {"23": NOT_KEY}  # the Oder block (element 4) was unknown at capture
+
+    check = block_check_for_card(resolve_block_ids(snapshot, WITHOUT_NOT))
+
+    assert check is not None
+    then = check["omit"]["then"]
+    assert then["status"] == CHECK_UNVERIFIED
+    assert then["problems"] == block_check(_omitted(snapshot, WITHOUT_NOT))["problems"]
+    assert len(then["problems"]) == 1
+
+
+@pytest.mark.parametrize(
+    ("fub_base", "keys"),
+    [
+        pytest.param(FUB_BASE, None, id="exact"),
+        pytest.param(WITHOUT_NOT, {"5": OR_KEY}, id="unknown at capture"),
+    ],
+)
+def test_the_card_check_is_block_check_where_there_is_nothing_to_omit(
+    snapshot: dict[str, Any], fub_base: dict[str, Any], keys: dict[str, str] | None
+) -> None:
+    if keys is not None:
+        snapshot[SNAPSHOT_KEYS] = keys
+    resolved = resolve_block_ids(snapshot, fub_base)
+
+    assert block_check_for_card(resolved) == block_check(resolved)
+
+
+@pytest.mark.parametrize(
+    ("source", "status"),
+    [
+        pytest.param(SOURCE_BACKFILLED_UNVERIFIED, CHECK_UNVERIFIED, id="backfilled unverified"),
+        pytest.param(SOURCE_BACKFILLED_PLAUSIBLE, CHECK_PLAUSIBLE, id="backfilled plausible"),
+    ],
+)
+def test_the_card_check_carries_a_backfill_verdict_over_to_the_copy(
+    snapshot: dict[str, Any], source: str, status: str
+) -> None:
+    """The usual old backup: its block ids were guessed, so the copy still needs (or does not need) the opt-in."""
+    snapshot[SNAPSHOT_KEYS_SOURCE] = source
+
+    check = block_check_for_card(resolve_block_ids(snapshot, WITHOUT_NOT))
+
+    assert check is not None
+    assert check["status"] == CHECK_UNRESOLVED
+    then = check["omit"]["then"]
+    assert then == block_check(_omitted(snapshot, WITHOUT_NOT))
+    assert then["status"] == status
+    assert all("element 7" not in problem for problem in then["problems"])  # the left-out block's is gone
+
+
+def test_the_card_check_changes_nothing_and_leaves_the_service_check_alone(snapshot: dict[str, Any]) -> None:
+    resolved = resolve_block_ids(snapshot, WITHOUT_NOT)
+    resolved_before = copy.deepcopy(resolved)
+
+    check = block_check_for_card(resolved)
+
+    assert resolved == resolved_before
+    assert OMITTED_BLOCKS not in resolved
+    assert check is not None
+    assert "omit" in check
+    assert set(block_check(resolved)) == {"status", "problems"}
+
+
+def test_the_card_check_is_block_check_for_a_block_that_cannot_be_left_out(snapshot: dict[str, Any]) -> None:
+    """A hard reason the omission does not cover gets no offer, however it came about."""
+    resolved = resolve_block_ids(snapshot, WITHOUT_NOT)
+    resolved[UNRESOLVED_BLOCKS] = [{**resolved[UNRESOLVED_BLOCKS][0], "reason": "something else"}]
+
+    assert OMITTABLE_REASONS.isdisjoint({"something else"})
+    assert block_check(resolved)["status"] == CHECK_UNRESOLVED
+    assert block_check_for_card(resolved) == block_check(resolved)
+
+
+def test_the_card_check_names_a_bounded_number_of_blocks(
+    snapshot: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check is a state attribute (the recorder caps it): beyond the bound it says how many more there are."""
+    monkeypatch.setattr(block_keys, "CARD_OMIT_LINES", 0)
+
+    check = block_check_for_card(resolve_block_ids(snapshot, WITHOUT_NOT))
+
+    assert check is not None
+    assert check["omit"]["blocks"] == ["... and 1 more"]

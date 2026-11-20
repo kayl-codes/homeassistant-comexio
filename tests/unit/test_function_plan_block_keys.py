@@ -1469,6 +1469,22 @@ def test_the_backup_selector_reads_the_check_from_the_caches(stores: dict[str, A
     }
 
 
+def test_the_backup_selector_check_offers_to_leave_out_a_block_that_is_gone(
+    stores: dict[str, Any], snapshot: dict[str, Any]
+) -> None:
+    stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] = {"1": {"Lights": [snapshot]}}
+    catalog = SimpleNamespace(fub_base_sync=MagicMock(return_value={"5": OR, "40": ADD}))  # the Nicht block is gone
+    manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, catalog)
+    asyncio.run(manager._async_ensure_loaded())
+
+    check = manager.block_check_sync("auto", 1, "Lights", 0)
+
+    assert check is not None
+    assert check["status"] == CHECK_UNRESOLVED
+    assert len(check["omit"]["blocks"]) == 1
+    assert check["omit"]["then"] is None
+
+
 def test_the_backup_selector_check_is_computed_once_per_state(stores: dict[str, Any], snapshot: dict[str, Any]) -> None:
     """The selector's attributes are read on every webhook push: the check must not be redone each time."""
     legacy = {k: v for k, v in snapshot.items() if k not in (SNAPSHOT_KEYS, SNAPSHOT_KEYS_SOURCE)}

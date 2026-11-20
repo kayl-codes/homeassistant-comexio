@@ -40,7 +40,7 @@ import {
 // Shown in the console banner and in the help dialog's title, so the user can tell WHICH build
 // actually executes without opening the DevTools — ?v= query bumps and even a hard reload proved
 // unreliable against the browser/service-worker cache.
-const CARD_VERSION = "0.9.59";
+const CARD_VERSION = "0.9.60";
 console.info(`comexio-plan-card v${CARD_VERSION} (Live-Vorschau startet beim Öffnen) loaded`);
 
 // Matches format_backup_label()'s "<kind>[<slot>] — <timestamp>[suffix]" shape (select.py /
@@ -126,6 +126,61 @@ const _PREVIEW_FETCH_TIMEOUT_MS = 30000;
 // Must match LIVE_BACKUP_OPTION in select.py — the backup selector's "show the live plan,
 // not a stored snapshot" option, which is the only state where Restore has nothing to do.
 const LIVE_BACKUP_OPTION = "Live";
+
+// The restore dialog's explanation per block_check status (backup selector attribute
+// block_check, see function_plan_block_keys.block_check_for_card). Comexio numbers its logic
+// blocks in installation order, so an app install or a firmware update can shift them.
+const _BLOCK_CHECK_TEXTS = {
+  unresolved:
+    "Dieses Backup enthält Logikbausteine, die es auf dem Comexio heute nicht mehr eindeutig gibt " +
+    "(z. B. nach dem Entfernen einer App oder einem Firmware-Update). Ein Restore würde falsche " +
+    "Bausteine einsetzen und ist deshalb nicht möglich.",
+  unverified:
+    "Einige Logikbausteine dieses Backups lassen sich nicht sicher gegen die heutigen Bausteine des " +
+    "Comexio prüfen (deren Nummern können sich durch App-Installationen oder Firmware-Updates " +
+    "verschieben). Sie werden so übernommen, wie sie gespeichert sind — bitte den wiederhergestellten " +
+    "Plan danach kurz prüfen.",
+  plausible:
+    "Die Logikbausteine dieses älteren Backups wurden anhand ihrer Verdrahtung den heutigen Bausteinen " +
+    "zugeordnet — bitte den wiederhergestellten Plan danach kurz prüfen.",
+};
+// A backup whose blocks Comexio no longer has can still be restored as a copy without them
+// (the service's omit_unresolved_blocks). The user chooses that explicitly, so the first text
+// only points at it and the second one says what the choice costs.
+const _OMIT_OFFER_TEXT =
+  "Dieses Backup enthält Logikbausteine, die es auf dem Comexio heute nicht mehr (eindeutig) gibt " +
+  "(z. B. nach dem Entfernen einer App oder einem Firmware-Update). In den bestehenden Plan lässt " +
+  "es sich deshalb nicht zurückspielen. Als Kopie geht es ohne diese Bausteine.";
+const _OMIT_COST_TEXT =
+  "Die Kopie wird ohne diese Bausteine und ohne ihre Verbindungen angelegt. Elemente, die dadurch " +
+  "ihren Eingang verlieren, bleiben unversorgt. Die Kopie ist unvollständig und startet deshalb " +
+  "nicht automatisch — bitte erst prüfen und ergänzen.";
+
+// True when the check offers a restore without the blocks Comexio no longer has.
+function _canOmitBlocks(check) {
+  return check?.status === "unresolved" && Array.isArray(check.omit?.blocks) && check.omit.blocks.length > 0;
+}
+
+// One part of the restore dialog's block hint: the text, and the lines it is about in a
+// collapsed list. textContent only — the lines name elements and blocks from the backup.
+function _blockHintSection(text, summary, lines) {
+  const section = document.createElement("div");
+  section.append(document.createTextNode(text));
+  if (Array.isArray(lines) && lines.length) {
+    const details = document.createElement("details");
+    const title = document.createElement("summary");
+    title.textContent = `${summary} (${lines.length})`;
+    const list = document.createElement("ul");
+    for (const line of lines) {
+      const item = document.createElement("li");
+      item.textContent = line;
+      list.append(item);
+    }
+    details.append(title, list);
+    section.append(details);
+  }
+  return section;
+}
 
 // Seed filter for a card whose filter was never touched (localStorage key absent):
 // hides the periodically chattering analog inputs. A deliberately cleared filter
@@ -680,6 +735,8 @@ class ComexioPlanCard extends HTMLElement {
         .restore-dialog .restore-option {
           display: flex; align-items: center; gap: 6px; margin: 0 0 10px 0; cursor: pointer;
         }
+        .restore-dialog .restore-option[hidden] { display: none; }
+        .restore-dialog .restore-block-hint > div + div { margin-top: 8px; }
         .restore-dialog .restore-copy-name {
           width: 100%; box-sizing: border-box; padding: 6px 8px; margin: -4px 0 10px 0;
           border-radius: 6px; border: 1px solid var(--divider-color, #888);
@@ -785,6 +842,10 @@ class ComexioPlanCard extends HTMLElement {
         <h3>Backup wiederherstellen?</h3>
         <p class="restore-text"></p>
         <div class="restore-block-hint" hidden></div>
+        <label class="restore-option restore-omit-option" hidden>
+          <input type="checkbox" class="restore-omit-blocks">
+          Ohne diese Bausteine als Kopie wiederherstellen
+        </label>
         <label class="restore-option">
           <input type="checkbox" class="restore-as-copy">
           <span class="restore-as-copy-text"></span>
@@ -828,12 +889,15 @@ class ComexioPlanCard extends HTMLElement {
     this._restoreAutoStartEl = root.querySelector(".restore-auto-start");
     this._restoreBlockHintEl = root.querySelector(".restore-block-hint");
     this._restoreConfirmBtn = this._restoreDialog.querySelector(".restore-confirm");
+    this._restoreOmitLabelEl = root.querySelector(".restore-omit-option");
+    this._restoreOmitEl = root.querySelector(".restore-omit-blocks");
     this._restoreAsCopyEl.addEventListener("change", () => {
       this._restoreCopyNameEl.hidden = !this._restoreAsCopyEl.checked;
       if (this._restoreAsCopyEl.checked) {
         this._restoreCopyNameEl.focus();
       }
     });
+    this._restoreOmitEl.addEventListener("change", () => this._onOmitChoice());
     root.querySelector(".restore-cancel").addEventListener("click", () => this._restoreDialog.close());
     this._restoreConfirmBtn.addEventListener("click", () => this._confirmRestore());
     this._restoreDialog.addEventListener("click", (ev) => {
@@ -1556,7 +1620,11 @@ class ComexioPlanCard extends HTMLElement {
     // An open dialog keeps the check it showed (_confirmRestore compares against it), but a
     // backup that became restorable meanwhile must not stay blocked: confirming then reopens
     // the dialog with the current check.
-    if (this._restoreDialog?.open && this._restoreShownCheck?.status === "unresolved") {
+    if (
+      this._restoreDialog?.open &&
+      this._restoreShownCheck?.status === "unresolved" &&
+      !this._restoreOmitEl.checked
+    ) {
       this._restoreConfirmBtn.disabled = this._currentBlockCheck()?.status === "unresolved";
     }
     this._restoreBtn.disabled =
@@ -1781,6 +1849,9 @@ ${warning}`;
       this._restoreAsCopyTextEl.textContent = "Als neue Kopie wiederherstellen (Original bleibt unverändert)";
     }
     this._restoreAsCopyEl.checked = false;
+    this._restoreAsCopyEl.disabled = false;
+    this._restoreOmitEl.checked = false;
+    this._restoreAutoStartEl.disabled = false;
     this._restoreCopyNameEl.hidden = true;
     this._restoreCopyNameEl.value = "";
     // A deleted plan comes back stopped unless the user ticks auto-start; a live plan's restore
@@ -1795,64 +1866,79 @@ ${warning}`;
     return this._hass.states[this._config.backup_entity]?.attributes?.block_check ?? null;
   }
 
+  // True when the dialog's "without these blocks" choice is on for the check it shows.
+  _omitting() {
+    return _canOmitBlocks(this._restoreShownCheck) && this._restoreOmitEl.checked;
+  }
+
+  // The check the restore will be built on: with the omission, what is left of the backup.
+  _effectiveBlockCheck() {
+    return this._omitting() ? this._restoreShownCheck.omit.then : this._restoreShownCheck;
+  }
+
+  // Ticking "without these blocks" makes the restore a copy (the service refuses the omission
+  // for anything else) that does not start on its own: it lacks blocks, and the card always
+  // sends auto_start, which the service takes as the user's wish. Both boxes are locked meanwhile,
+  // so the text "does not start on its own" stays true; unticking puts them back.
+  _onOmitChoice() {
+    const omitting = this._restoreOmitEl.checked;
+    if (omitting) {
+      this._choiceBeforeOmit = { asCopy: this._restoreAsCopyEl.checked, autoStart: this._restoreAutoStartEl.checked };
+      this._restoreAsCopyEl.checked = true;
+      this._restoreAutoStartEl.checked = false;
+    } else if (this._choiceBeforeOmit) {
+      this._restoreAsCopyEl.checked = this._choiceBeforeOmit.asCopy;
+      this._restoreAutoStartEl.checked = this._choiceBeforeOmit.autoStart;
+    }
+    this._restoreAsCopyEl.disabled = omitting;
+    this._restoreAutoStartEl.disabled = omitting;
+    this._restoreCopyNameEl.hidden = !this._restoreAsCopyEl.checked;
+    if (omitting) {
+      this._restoreCopyNameEl.focus();
+    }
+    this._showBlockCheck(this._restoreShownCheck);
+  }
+
   // Explains in the restore dialog how far the chosen backup's logic blocks can be trusted
-  // (backup selector attribute block_check, see function_plan_block_keys.block_check). Comexio
-  // numbers its logic blocks in installation order, so an app install or a firmware update can
-  // shift them. Only "unresolved" stops the restore; the others are restored with a hint, the
-  // service's accept_unverified_blocks opt-in is sent by _confirmRestore.
+  // (backup selector attribute block_check, see _BLOCK_CHECK_TEXTS). "unresolved" stops the
+  // restore unless the backup can be restored as a copy without those blocks and the user
+  // chose that; the other statuses are restored with a hint, the service's
+  // accept_unverified_blocks opt-in is sent by _confirmRestore.
   _showBlockCheck(check) {
-    const texts = {
-      unresolved:
-        "Dieses Backup enthält Logikbausteine, die es auf dem Comexio heute nicht mehr eindeutig gibt " +
-        "(z. B. nach dem Entfernen einer App oder einem Firmware-Update). Ein Restore würde falsche " +
-        "Bausteine einsetzen und ist deshalb nicht möglich.",
-      unverified:
-        "Einige Logikbausteine dieses Backups lassen sich nicht sicher gegen die heutigen Bausteine des " +
-        "Comexio prüfen (deren Nummern können sich durch App-Installationen oder Firmware-Updates " +
-        "verschieben). Sie werden so übernommen, wie sie gespeichert sind — bitte den wiederhergestellten " +
-        "Plan danach kurz prüfen.",
-      plausible:
-        "Die Logikbausteine dieses älteren Backups wurden anhand ihrer Verdrahtung den heutigen Bausteinen " +
-        "zugeordnet — bitte den wiederhergestellten Plan danach kurz prüfen.",
-    };
-    let text = texts[check?.status];
-    if (check && !text) {
+    this._restoreShownCheck = check;
+    this._restoreOmitLabelEl.hidden = !_canOmitBlocks(check);
+    const sections = this._omitting() ? this._omitSections(check) : this._checkSections(check);
+    this._restoreBlockHintEl.hidden = sections.length === 0;
+    this._restoreBlockHintEl.classList.toggle("blocked", this._effectiveBlockCheck()?.status === "unresolved");
+    this._restoreConfirmBtn.disabled = this._effectiveBlockCheck()?.status === "unresolved";
+    this._restoreBlockHintEl.replaceChildren(...sections);
+  }
+
+  _checkSections(check) {
+    if (!check) {
+      return [];
+    }
+    let text = _canOmitBlocks(check) ? _OMIT_OFFER_TEXT : _BLOCK_CHECK_TEXTS[check.status];
+    if (!text) {
       // A status this card version does not know: warn rather than restore without a word.
       console.warn("comexio-plan-card: unknown block_check status", check.status);
-      text = texts.unverified;
+      text = _BLOCK_CHECK_TEXTS.unverified;
     }
-    this._restoreShownCheck = check;
-    const blocked = check?.status === "unresolved";
-    this._restoreBlockHintEl.hidden = !text;
-    this._restoreBlockHintEl.classList.toggle("blocked", blocked);
-    this._restoreConfirmBtn.disabled = blocked;
-    // textContent only — the problem lines name elements and blocks from the backup.
-    const parts = [];
-    if (text) {
-      parts.push(document.createTextNode(text));
-    }
-    const problems = Array.isArray(check?.problems) ? check.problems : [];
-    if (text && problems.length) {
-      const details = document.createElement("details");
-      const summary = document.createElement("summary");
-      summary.textContent = `Betroffene Elemente (${problems.length})`;
-      const list = document.createElement("ul");
-      for (const line of problems) {
-        const item = document.createElement("li");
-        item.textContent = line;
-        list.append(item);
-      }
-      details.append(summary, list);
-      parts.push(details);
-    }
-    this._restoreBlockHintEl.replaceChildren(...parts);
+    return [_blockHintSection(text, "Betroffene Elemente", check.problems)];
+  }
+
+  // What the copy lacks, then what is still unchecked in the rest of it.
+  _omitSections(check) {
+    const sections = [_blockHintSection(_OMIT_COST_TEXT, "Ausgelassene Bausteine", check.omit.blocks)];
+    return check.omit.then ? [...sections, ...this._checkSections(check.omit.then)] : sections;
   }
 
   async _confirmRestore() {
     if (!this._hass || this._restoreKind === undefined) {
       return;
     }
-    const asCopy = this._restoreAsCopyEl.checked;
+    const omitting = this._omitting();
+    const asCopy = this._restoreAsCopyEl.checked || omitting;
     const newPlanName = this._restoreCopyNameEl.value.trim();
     if (asCopy && !newPlanName) {
       this._restoreCopyNameEl.focus();
@@ -1869,7 +1955,7 @@ ${warning}`;
       this._openRestoreDialog();
       return;
     }
-    const acceptUnverified = this._restoreShownCheck?.status === "unverified";
+    const acceptUnverified = this._effectiveBlockCheck()?.status === "unverified";
     this._restoreDialog.close();
     this._restoreBtn.disabled = true;
     const orphan = this._restoreOrphan;
@@ -1902,6 +1988,11 @@ ${warning}`;
     // confirming is the opt-in. Blocks without a unique counterpart are still refused.
     if (acceptUnverified) {
       data.accept_unverified_blocks = true;
+    }
+    // The user ticked "without these blocks" after the dialog listed them and what their
+    // wires cost. The service cuts them out of a copy only.
+    if (omitting) {
+      data.omit_unresolved_blocks = true;
     }
     try {
       await this._hass.callService("comexio", "function_plan_restore", data);

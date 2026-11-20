@@ -596,3 +596,28 @@ def block_check(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
     if source == SOURCE_BACKFILLED_PLAUSIBLE:
         return {"status": CHECK_PLAUSIBLE, "problems": []}
     return None
+
+
+CARD_OMIT_LINES = 30  # omitted blocks the card's check names; the restore's result and log have them all
+
+
+def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """block_check, plus what a copy without the blocks Comexio no longer has would be like.
+
+    For the plan card's restore dialog. A CHECK_UNRESOLVED check gets an "omit" entry:
+    "blocks" are the omitted_block_lines (which blocks go, what their wires cost) and "then"
+    is the block_check of the snapshot cut that way (None when it is exact, CHECK_UNVERIFIED
+    when a block unknown to the catalog or a backfill verdict remains, which the copy's restore
+    still needs accept_unverified_blocks for). Every other check comes back as block_check
+    returns it, as the dialog has nothing to offer there.
+    """
+    check = block_check(snapshot)
+    if check is None or check["status"] != CHECK_UNRESOLVED:
+        return check
+    cut = omit_unresolved_blocks(snapshot)
+    if not (omitted := cut.get(OMITTED_BLOCKS)):
+        return check
+    lines = omitted_block_lines(omitted)
+    if len(lines) > CARD_OMIT_LINES:  # the check is a state attribute, which the recorder caps at 16 KiB
+        lines = [*lines[:CARD_OMIT_LINES], f"... and {len(lines) - CARD_OMIT_LINES} more"]
+    return {**check, "omit": {"blocks": lines, "then": block_check(cut)}}

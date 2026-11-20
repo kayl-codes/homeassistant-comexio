@@ -45,7 +45,7 @@ from .function_plan_block_keys import (
     SNAPSHOT_KEYS_SOURCE,
     SOURCE_CAPTURED,
     backfill_block_keys,
-    block_check,
+    block_check_for_card,
     capture_block_keys,
     resolve_block_ids,
     uses_unknown_block_ids,
@@ -1462,7 +1462,7 @@ class FunctionPlanBackupManager:
         return None if snapshot is None else snapshot_paper_format(snapshot)
 
     def block_check_sync(self, kind: str, fub_id: int, plan_name: str, slot: int) -> dict[str, Any] | None:
-        """function_plan_block_keys.block_check of a stored snapshot, from the caches (for the backup selector).
+        """block_check_for_card of a stored snapshot, from the caches (for the backup selector).
 
         None when the snapshot's block ids are exact, or when it is not cached. The selector's
         attributes are read on every state write — each webhook push — so the last result is kept
@@ -1476,6 +1476,6 @@ class FunctionPlanBackupManager:
         memo = self._block_check_memo
         if memo is not None and memo[0] is stored and memo[1] is fub_base and memo[2] == source:
             return memo[3]
-        check = block_check(resolve_block_ids(stored, fub_base))
+        check = block_check_for_card(resolve_block_ids(stored, fub_base))
         self._block_check_memo = (stored, fub_base, source, check)
         return check
