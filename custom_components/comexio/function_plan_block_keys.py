@@ -608,7 +608,8 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     "blocks" are the omitted_block_lines (which blocks go, what their wires cost) and "then"
     is the block_check of the snapshot cut that way (None when it is exact, CHECK_UNVERIFIED
     when a block unknown to the catalog or a backfill verdict remains, which the copy's restore
-    still needs accept_unverified_blocks for). Every other check comes back as block_check
+    still needs accept_unverified_blocks for), "snapshot_hash" is the hash of the snapshot as
+    resolved (what the restore's expected_hash is compared with). Every other check comes back as block_check
     returns it, as the dialog has nothing to offer there.
     """
     check = block_check(snapshot)
@@ -620,4 +621,7 @@ def block_check_for_card(snapshot: dict[str, Any]) -> dict[str, Any] | None:
     lines = omitted_block_lines(omitted)
     if len(lines) > CARD_OMIT_LINES:  # the check is a state attribute, which the recorder caps at 16 KiB
         lines = [*lines[:CARD_OMIT_LINES], f"... and {len(lines) - CARD_OMIT_LINES} more"]
-    return {**check, "omit": {"blocks": lines, "then": block_check(cut)}}
+    # snapshot_hash names the backup the offer was made for: the card hands it to the restore, which
+    # refuses when the slot holds another one by then (a newer backup, a catalog change).
+    omit = {"blocks": lines, "then": block_check(cut), "snapshot_hash": snapshot.get(_HASH)}
+    return {**check, "omit": omit}

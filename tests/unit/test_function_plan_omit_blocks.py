@@ -503,6 +503,7 @@ def test_the_card_check_offers_the_omission_with_what_it_costs(snapshot: dict[st
             "(app or firmware removed it?); 1 connection(s) dropped or shortened"
         ],
         "then": None,  # nothing else stands in the way of the copy
+        "snapshot_hash": resolve_block_ids(snapshot, WITHOUT_NOT)["hash"],
     }
 
 

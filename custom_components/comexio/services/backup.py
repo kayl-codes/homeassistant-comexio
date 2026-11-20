@@ -1516,6 +1516,34 @@ class _BlockOptIns(NamedTuple):
 
     accept_unverified: bool
     omit_unresolved: bool
+    expected_hash: str | None = None  # the hash of the backup the caller reviewed; another one is refused
+
+
+def _refuse_changed_backup(
+    hass: HomeAssistant, snapshot: dict[str, Any], expected_hash: str | None, plan_name: str, kind: str, slot: int
+) -> bool:
+    """True (user told, nothing touched) when the slot no longer holds the backup the caller reviewed.
+
+    The plan card's restore dialog names the blocks a copy would leave out; a backup rotating into
+    the slot (or a catalog change that resolves the blocks otherwise) after that must not be cut
+    by what the user was shown for another one.
+    """
+    if expected_hash is None or snapshot.get("hash") == expected_hash:
+        return False
+    _LOGGER.warning(
+        "Function Plan Restore of '%s' %s[%s] refused: the backup is not the one that was reviewed",
+        one_line(plan_name),
+        one_line(kind),
+        slot,
+    )
+    persistent_notification.async_create(
+        hass,
+        f"The backup {one_line(kind)}[{slot}] of '{one_line(plan_name)}' is not the one the restore dialog showed — "
+        "a newer backup took its place, or the logic blocks of Comexio changed meanwhile. Nothing was changed. "
+        "Open the restore dialog again.",
+        title=_TITLE_RESTORE_ERR,
+    )
+    return True
 
 
 def _problem_lines(check: dict[str, Any]) -> str:
@@ -1695,7 +1723,7 @@ async def _load_restorable_snapshot(
     for a copy only), so what the block check judges is what the copy will be built from.
     """
     snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
-    if snapshot is None:
+    if snapshot is None or _refuse_changed_backup(hass, snapshot, opt_ins.expected_hash, plan_name, kind, slot):
         return None
     accept_unverified = opt_ins.accept_unverified
     if opt_ins.omit_unresolved:
@@ -2015,7 +2043,13 @@ async def _run_function_plan_restore(
         return
 
     snapshot = await _load_restorable_snapshot(
-        hass, coordinator, fub_id, plan_name, kind, slot, _BlockOptIns(accept_unverified, omit_unresolved)
+        hass,
+        coordinator,
+        fub_id,
+        plan_name,
+        kind,
+        slot,
+        _BlockOptIns(accept_unverified, omit_unresolved, str(call.data.get("expected_hash") or "").strip() or None),
     )
     if snapshot is None:
         return

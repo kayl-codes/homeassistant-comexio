@@ -45,6 +45,7 @@ from custom_components.comexio.function_plan_block_keys import (
     UNVERIFIED_BLOCK_PROBLEMS,
     backfill_block_keys,
     block_check,
+    block_check_for_card,
     block_ids_changed,
     capture_block_keys,
     catalog_entry_key,
@@ -1071,6 +1072,92 @@ def test_the_flag_never_changes_a_restore_onto_the_live_plan(
     assert "Nothing was changed" in message
 
 
+def test_a_copy_is_cut_only_when_the_backup_is_the_one_the_dialog_listed(caplog: pytest.LogCaptureFixture) -> None:
+    """The slot may rotate between the dialog's last check and the service's lookup: the user saw another backup."""
+    backup = _backup_resolved_against(WITHOUT_NOT_BLOCK)
+
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        refused, notify = _run_restore(backup, logged_in=True, expected_hash="hash of another backup", **COPY)
+    accepted, _ = _run_restore(backup, logged_in=True, expected_hash=backup["hash"], **COPY)
+
+    refused.login.assert_not_awaited()  # stopped before it touched Comexio
+    assert _restores_run(refused) == 0
+    assert notify.call_args.kwargs["title"] == backup_service._TITLE_RESTORE_ERR
+    assert "is not the one the restore dialog showed" in notify.call_args.args[1]
+    assert "Nothing was changed" in notify.call_args.args[1]
+    assert "the backup is not the one that was reviewed" in caplog.text
+    assert _restores_run(accepted) == 1
+
+
+@pytest.mark.parametrize("value", ["", None, False])
+def test_an_empty_expected_hash_compares_nothing(value: Any) -> None:
+    """The card sends none when the offer carried no hash; an empty one must not refuse every restore."""
+    api, _notify = _run_restore(
+        _backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=True, expected_hash=value, **COPY
+    )
+
+    assert _restores_run(api) == 1
+
+
+@pytest.mark.parametrize(
+    "data",
+    [{}, {"as_copy": True, "new_plan_name": "Copy"}, {"on_conflict": "force_override"}],
+    ids=["in place", "plain copy", "forced"],
+)
+def test_the_expected_hash_guards_every_restore_not_only_the_cut_copy(data: dict[str, Any]) -> None:
+    backup = {**_backup_resolved_against(FUB_BASE), "hash": "the backup now in the slot"}
+
+    api, notify = _run_restore(backup, logged_in=True, expected_hash="the backup that was reviewed", **data)
+
+    api.login.assert_not_awaited()
+    assert _restores_run(api) == 0
+    assert "is not the one the restore dialog showed" in notify.call_args.args[1]
+
+
+def test_a_changed_catalog_is_not_the_backup_the_dialog_listed(caplog: pytest.LogCaptureFixture) -> None:
+    """The dialog's offer was made against one catalog; the restore resolves against another."""
+    stored = _backup_resolved_against(WITHOUT_NOT_BLOCK)
+    offered = block_check_for_card(stored)["omit"]["snapshot_hash"]
+    now = _backup_resolved_against(FUB_BASE)  # the Nicht block is back: other ids, other hash
+    assert offered != now["hash"]
+
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        api, _notify = _run_restore(now, logged_in=True, expected_hash=offered, **COPY)
+
+    assert _restores_run(api) == 0
+    assert offered not in caplog.text
+
+
+def test_the_refusal_keeps_the_log_and_the_notification_to_one_line(caplog: pytest.LogCaptureFixture) -> None:
+    backup = {**_backup_resolved_against(FUB_BASE), "hash": "another"}
+
+    with caplog.at_level(logging.WARNING, logger=backup_service.__name__):
+        _api, notify = _run_restore(backup, logged_in=True, expected_hash="the reviewed one", kind="auto\nfake", **COPY)
+
+    assert "\n" not in notify.call_args.args[1]
+    assert all("\n" not in record.getMessage() for record in caplog.records)
+    assert "the reviewed one" not in notify.call_args.args[1] + caplog.text
+
+
+def test_a_backup_without_a_hash_is_refused_when_one_is_expected() -> None:
+    api, _notify = _run_restore({"plan_name": "Kitch"}, logged_in=True, expected_hash="x", **COPY)
+
+    assert _restores_run(api) == 0
+
+
+def test_the_offer_of_a_backup_without_a_hash_carries_none() -> None:
+    stored = _backup_resolved_against(WITHOUT_NOT_BLOCK)
+    del stored["hash"]
+
+    assert block_check_for_card(stored)["omit"]["snapshot_hash"] is None
+
+
+def test_without_an_expected_hash_nothing_is_compared() -> None:
+    api, _notify = _run_restore(_backup_resolved_against(WITHOUT_NOT_BLOCK), logged_in=True, **COPY)
+
+    assert _restores_run(api) == 1
+
+
 def test_a_block_that_is_merely_unknown_is_not_left_out_and_still_needs_the_opt_in() -> None:
     backup = {"plan_name": "Kitch", UNRESOLVED_BLOCKS: [NO_KEY_BLOCK]}
 
@@ -1473,7 +1560,10 @@ def test_the_backup_selector_check_offers_to_leave_out_a_block_that_is_gone(
     stores: dict[str, Any], snapshot: dict[str, Any]
 ) -> None:
     stores[f"{DOMAIN}_logikplan_auto_{SERVER_ID}"] = {"1": {"Lights": [snapshot]}}
-    catalog = SimpleNamespace(fub_base_sync=MagicMock(return_value={"5": OR, "40": ADD}))  # the Nicht block is gone
+    gone = {"5": OR, "40": ADD}  # the Nicht block is gone
+    catalog = SimpleNamespace(
+        fub_base_sync=MagicMock(return_value=gone), async_get_fub_base=AsyncMock(return_value=(gone, CHANGED_AT))
+    )
     manager = FunctionPlanBackupManager(MagicMock(), SERVER_ID, catalog)
     asyncio.run(manager._async_ensure_loaded())
 
@@ -1483,6 +1573,10 @@ def test_the_backup_selector_check_offers_to_leave_out_a_block_that_is_gone(
     assert check["status"] == CHECK_UNRESOLVED
     assert len(check["omit"]["blocks"]) == 1
     assert check["omit"]["then"] is None
+    # what the card hands back as expected_hash is the hash the restore's own lookup sees
+    restored_from = asyncio.run(manager.async_get_snapshot("auto", 1, "Lights", 0))
+    assert restored_from is not None
+    assert check["omit"]["snapshot_hash"] == restored_from["hash"]
 
 
 def test_the_backup_selector_check_is_computed_once_per_state(stores: dict[str, Any], snapshot: dict[str, Any]) -> None:

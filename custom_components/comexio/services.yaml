@@ -254,6 +254,19 @@ function_plan_restore:
       advanced: true
       selector:
         boolean:
+    expected_hash:
+      name: Expected backup hash
+      description: >
+        Optional: the hash of the backup the caller looked at. The restore is refused, and nothing
+        is changed, when the chosen backup has another one by then (a newer backup took its slot,
+        or Comexio's logic blocks changed). The plan card sends it together with
+        'omit_unresolved_blocks', so a copy is only cut by what its dialog listed. Taken from the
+        'omit.snapshot_hash' of the backup selector's 'block_check' attribute (only an offer to
+        restore without blocks carries one); it guards every restore it is sent with.
+      required: false
+      advanced: true
+      selector:
+        text:
     auto_start:
       name: Auto-start after restore
       description: >

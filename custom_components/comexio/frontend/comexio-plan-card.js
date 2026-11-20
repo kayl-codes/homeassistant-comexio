@@ -1990,9 +1990,17 @@ ${warning}`;
       data.accept_unverified_blocks = true;
     }
     // The user ticked "without these blocks" after the dialog listed them and what their
-    // wires cost. The service cuts them out of a copy only.
+    // wires cost. The service cuts them out of a copy only, and only of the backup that was
+    // listed: should the slot hold another one by the time it resolves it, it refuses.
     if (omitting) {
+      const reviewed = this._restoreShownCheck?.omit?.snapshot_hash;
+      if (!reviewed) {
+        // Nothing names the backup the dialog showed, so nothing could guard the cut: do not send it.
+        console.warn("comexio-plan-card: no backup hash in the block check, restore without blocks not sent");
+        return;
+      }
       data.omit_unresolved_blocks = true;
+      data.expected_hash = reviewed;
     }
     try {
       await this._hass.callService("comexio", "function_plan_restore", data);
