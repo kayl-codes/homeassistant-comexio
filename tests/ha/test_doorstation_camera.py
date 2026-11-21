@@ -1139,6 +1139,29 @@ async def test_a_refresh_of_a_known_address_that_times_out_is_not_repeated_by_ev
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_failed_read_during_a_timed_out_refresh_keeps_its_reset_of_the_address_check(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        camera._direct_failed("stream failed meanwhile")  # a failure lands while the lookup is pending
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    api.get_doorstation_address.side_effect = slow_lookup
+    camera._address, camera._address_checked_at = ADDRESS, None
+
+    with patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05):
+        assert await camera._address_within_budget() == (ADDRESS, True)
+
+    assert camera._direct_paused()  # the failure inside the lookup started the pause
+    assert camera._address_checked_at is None  # ... and its reset was not undone by the timeout
+    assert not camera._address_lock.locked()  # the cancelled lookup let go of the lock
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_lookup_that_times_out_with_no_address_known_is_asked_again(
     hass: HomeAssistant, entry: MockConfigEntry
 ) -> None:

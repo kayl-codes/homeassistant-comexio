@@ -414,10 +414,11 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
                 self.coordinator.server_id,
                 self._ext_id,
             )
-            if self._address is not None:
+            if self._address is not None and not self._direct_paused():
                 # The known address stays (as in `_look_up_address`) and is not asked for again by every read
                 # that follows: each would spend its budget on the same slow answer. Should the address have
                 # changed, the next read fails, which starts the refresh afresh (one failed read and the pause).
+                # Not during the pause: a read that failed meanwhile reset the check, and that stays.
                 self._address_checked_at = time.monotonic()
             return self._address, True
 
