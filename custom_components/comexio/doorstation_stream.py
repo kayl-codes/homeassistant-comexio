@@ -25,6 +25,10 @@ from .const import (
 # allocated before any cap could apply); a stream that comes encoded anyway is refused before a byte of it is read.
 DIRECT_REQUEST_HEADERS = {"Accept-Encoding": "identity"}
 _CHUNK_BYTES = 64 * 1024
+# The only type a live stream is passed on with. The frontend gets the Doorstation's header unchanged, and the answer
+# comes over plain HTTP from a device on the network: a type like text/html would let a browser run what the body
+# holds on Home Assistant's own origin.
+LIVE_STREAM_MEDIA_TYPE = "multipart/x-mixed-replace"
 
 
 def doorstation_direct_url(address: str) -> str:
@@ -47,6 +51,14 @@ def response_problem(resp: aiohttp.ClientResponse) -> str | None:
     if resp.headers.get(aiohttp.hdrs.CONTENT_ENCODING):
         return "the stream came encoded"
     return None
+
+
+def live_stream_problem(resp: aiohttp.ClientResponse) -> str | None:
+    """Why the answer is not to be passed on to the frontend as a live stream, None if it may be."""
+    if (problem := response_problem(resp)) is not None:
+        return problem
+    media_type = resp.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").split(";")[0].strip().lower()
+    return None if media_type == LIVE_STREAM_MEDIA_TYPE else "the answer is not an MJPEG stream"
 
 
 async def collect_frame(resp: aiohttp.ClientResponse, received: bytearray) -> tuple[bytes | None, str | None]:
@@ -79,7 +91,7 @@ async def live_stream_start(resp: aiohttp.ClientResponse) -> tuple[bytes, str | 
     sends nothing, ends, or sends no picture is not a stream, and the frontend must not get an empty one. Everything
     read is returned (the frame and what came with it), to be passed on first. Waits DOORSTATION_DIRECT_TIMEOUT_SEC.
     """
-    if (problem := response_problem(resp)) is not None:
+    if (problem := live_stream_problem(resp)) is not None:
         return b"", problem
     received = bytearray()
     try:

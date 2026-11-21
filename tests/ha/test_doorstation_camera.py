@@ -306,6 +306,27 @@ async def test_a_live_stream_answered_with_an_error_status_falls_back_and_pauses
     assert ADDRESS not in caplog.text
 
 
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_of_another_type_is_not_passed_on_to_the_frontend(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The type reaches the browser as the Doorstation sent it, over plain HTTP: text/html would run on HA's origin.
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers={"Content-Type": "text/html"})
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert camera._direct_failed_at is not None
+    assert "the answer is not an MJPEG stream" in caplog.text
+    assert camera._streams_open == 0
+
+
 @pytest.mark.usefixtures("mock_comexio_api")
 @pytest.mark.parametrize(("case", "lookups"), [("no address", 1), ("extension offline", 0), ("no Doorstation", 0)])
 async def test_the_live_stream_stays_on_still_images_without_a_direct_way(

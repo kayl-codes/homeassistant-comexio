@@ -17,6 +17,7 @@ from custom_components.comexio.doorstation_stream import doorstation_direct_url,
 # data, EOI. The multipart head in front of it is what the Doorstation sends before each image.
 FRAME = bytes.fromhex("ffd8 ffe0 0004 4a46 ffda 0008 01 0100 003f00 123456 ffd9".replace(" ", ""))
 PART_HEAD = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+LIVE_HEADERS = {"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -156,7 +157,7 @@ async def _live_start(url: str) -> tuple[bytes, str | None]:
 
 def test_a_live_stream_is_passed_on_once_it_delivered_a_whole_frame_and_with_everything_read() -> None:
     async def handler(request: web.Request) -> web.StreamResponse:
-        response = web.StreamResponse()
+        response = web.StreamResponse(headers=LIVE_HEADERS)
         await response.prepare(request)
         await response.write(PART_HEAD + FRAME + b"--frame\r\n")
         await asyncio.sleep(30)
@@ -173,7 +174,7 @@ def test_a_live_stream_is_passed_on_once_it_delivered_a_whole_frame_and_with_eve
 
 def test_a_live_stream_that_ends_without_data_is_a_failure() -> None:
     async def handler(request: web.Request) -> web.StreamResponse:
-        return web.Response(body=b"")
+        return web.Response(body=b"", headers=LIVE_HEADERS)
 
     async def check(url: str) -> None:
         assert await _live_start(url) == (b"", "the stream ended without a frame")
@@ -183,7 +184,7 @@ def test_a_live_stream_that_ends_without_data_is_a_failure() -> None:
 
 def test_a_live_stream_that_ends_inside_its_first_frame_is_a_failure() -> None:
     async def handler(request: web.Request) -> web.StreamResponse:
-        return web.Response(body=PART_HEAD + FRAME[:-1])
+        return web.Response(body=PART_HEAD + FRAME[:-1], headers=LIVE_HEADERS)
 
     async def check(url: str) -> None:
         assert await _live_start(url) == (b"", "the stream ended without a frame")
@@ -197,7 +198,7 @@ def test_a_live_stream_that_sends_a_head_and_no_picture_is_a_failure_after_the_t
     monkeypatch.setattr(doorstation_stream, "DOORSTATION_DIRECT_TIMEOUT_SEC", 0.3)
 
     async def handler(request: web.Request) -> web.StreamResponse:
-        response = web.StreamResponse()
+        response = web.StreamResponse(headers=LIVE_HEADERS)
         await response.prepare(request)
         await response.write(PART_HEAD)  # data, but no frame, then silence
         await asyncio.sleep(30)
@@ -213,7 +214,7 @@ def test_a_live_stream_that_sends_nothing_is_a_failure_after_the_timeout(monkeyp
     monkeypatch.setattr(doorstation_stream, "DOORSTATION_DIRECT_TIMEOUT_SEC", 0.3)
 
     async def handler(request: web.Request) -> web.StreamResponse:
-        response = web.StreamResponse()
+        response = web.StreamResponse(headers=LIVE_HEADERS)
         await response.prepare(request)  # the head of the answer, then silence
         await asyncio.sleep(30)
         return response
@@ -226,7 +227,7 @@ def test_a_live_stream_that_sends_nothing_is_a_failure_after_the_timeout(monkeyp
 
 def test_a_live_stream_with_a_malformed_frame_is_a_failure_that_says_so() -> None:
     async def handler(request: web.Request) -> web.StreamResponse:
-        return web.Response(body=PART_HEAD + bytes.fromhex("ffd8ffd9"))
+        return web.Response(body=PART_HEAD + bytes.fromhex("ffd8ffd9"), headers=LIVE_HEADERS)
 
     async def check(url: str) -> None:
         prefix, cause = await _live_start(url)
@@ -239,7 +240,10 @@ def test_a_live_stream_with_a_malformed_frame_is_a_failure_that_says_so() -> Non
 
 @pytest.mark.parametrize(
     ("status", "headers", "cause"),
-    [(404, {}, "HTTP 404"), (200, {"Content-Encoding": "gzip"}, "the stream came encoded")],
+    [
+        (404, {}, "HTTP 404"),
+        (200, {**LIVE_HEADERS, "Content-Encoding": "gzip"}, "the stream came encoded"),
+    ],
 )
 def test_a_live_stream_answer_that_is_not_a_stream_is_a_failure(
     status: int, headers: dict[str, str], cause: str
@@ -249,6 +253,40 @@ def test_a_live_stream_answer_that_is_not_a_stream_is_a_failure(
 
     async def check(url: str) -> None:
         assert await _live_start(url) == (b"", cause)
+
+    _serve(handler, check)
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {},
+        {"Content-Type": "text/html"},
+        {"Content-Type": "image/jpeg"},
+        {"Content-Type": "multipart/mixed; boundary=frame"},
+    ],
+    ids=["none", "html", "jpeg", "other multipart"],
+)
+def test_a_live_stream_answer_of_another_type_is_not_passed_on(headers: dict[str, str]) -> None:
+    """The type goes to the frontend as the Doorstation sent it: only an MJPEG stream may go through."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME, headers=headers)
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", "the answer is not an MJPEG stream")
+
+    _serve(handler, check)
+
+
+def test_the_type_is_read_whatever_its_case_and_parameters() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME, headers={"Content-Type": "Multipart/X-Mixed-Replace;boundary=x"})
+
+    async def check(url: str) -> None:
+        prefix, cause = await _live_start(url)
+        assert cause is None
+        assert prefix.startswith(PART_HEAD + FRAME)
 
     _serve(handler, check)
 
