@@ -202,9 +202,10 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         """
         async with self._lock:
             doorstation = self._doorstation
-            if doorstation is None or self._extension_offline:
-                # What was cached belongs to a Doorstation that is not there: a rediscovery within the interval
-                # must read afresh, not hand out the picture from before it went. (A failed read stays throttled.)
+            if doorstation is None or not self._is_current(doorstation):
+                # What was cached belongs to a Doorstation that is not there (or an entry that unloads): a
+                # rediscovery within the interval must read afresh, not hand out the picture from before it went.
+                # (A failed read stays throttled.)
                 self._frame = None
                 return None
             now = time.monotonic()
@@ -248,7 +249,13 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         direct way is paused. A stream that breaks off once it runs is the frontend's to reconnect.
         """
         doorstation = self._doorstation
-        if doorstation is not None and self.available and (address := await self._direct_address()) is not None:
+        # A second viewer (a stream runs already) asks no address: `_proxy_direct_stream` turns it away anyway.
+        if (
+            doorstation is not None
+            and self.available
+            and not self._streams_open
+            and (address := await self._direct_address()) is not None
+        ):
             response = await self._proxy_direct_stream(request, doorstation_direct_url(address), doorstation)
             if response is not None:
                 return response
@@ -263,6 +270,15 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         or an empty stream included, and so would never reach the fallback. The session's default limit of 300 s for
         a whole request would cut a live stream off every five minutes, so only the connection is limited.
         """
+        if self._streams_open:
+            # A stream runs or starts already: whether the Doorstation takes a second viewer is not known, and a
+            # refusal would pause the direct way for the first one as well. The second viewer gets the default.
+            _LOGGER.debug(
+                "[%s] Doorstation camera %d: another live stream runs, this viewer gets stills over the IO-Server",
+                self.coordinator.server_id,
+                self._ext_id,
+            )
+            return None
         # Counted from the connect on: a still read that starts meanwhile opens no second connection.
         self._streams_open += 1
         resp = None
@@ -270,6 +286,14 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             # Behind a still read that is under way (it ends within DOORSTATION_DIRECT_TIMEOUT_SEC): whether the
             # Doorstation takes two viewers at once is not known, and a refusal would pause the direct way.
             async with self._direct_gate:
+                if self._direct_paused():
+                    # The still read ahead of us failed: the pause holds, whatever the address said.
+                    _LOGGER.debug(
+                        "[%s] Doorstation camera %d: direct way paused, this live viewer goes over the IO-Server",
+                        self.coordinator.server_id,
+                        self._ext_id,
+                    )
+                    return None
                 if (resp := await self._connect_direct_stream(url, doorstation)) is None:
                     return None
                 prefix, problem = await live_stream_start(resp)
@@ -385,6 +409,16 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             async with asyncio.timeout(DOORSTATION_DIRECT_TIMEOUT_SEC):
                 return await self._direct_address(), False
         except TimeoutError:
+            _LOGGER.debug(
+                "[%s] Doorstation camera %d: address lookup used up the budget, the IO-Server answers",
+                self.coordinator.server_id,
+                self._ext_id,
+            )
+            if self._address is not None:
+                # The known address stays (as in `_look_up_address`) and is not asked for again by every read
+                # that follows: each would spend its budget on the same slow answer. Should the address have
+                # changed, the next read fails, which starts the refresh afresh (one failed read and the pause).
+                self._address_checked_at = time.monotonic()
             return self._address, True
 
     async def _direct_address(self) -> str | None:

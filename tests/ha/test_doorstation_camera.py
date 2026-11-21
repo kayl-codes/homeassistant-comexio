@@ -1045,3 +1045,136 @@ async def test_a_lookup_that_leaves_too_little_of_the_budget_starts_no_read_and_
 
     read.assert_not_called()
     assert camera._direct_failed_at is None
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_second_live_viewer_opens_no_second_connection_and_pauses_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    camera._streams_open = 1  # another viewer's stream runs
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            raise AssertionError("a second connection to the Doorstation was opened")
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        assert await camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation) is None
+
+    assert camera._streams_open == 1  # the other stream's count is left alone
+    assert camera._direct_failed_at is None
+    assert not camera._direct_warned
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_second_live_viewer_gets_the_default_stream_and_no_address_lookup(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+    camera._streams_open = 1  # another viewer's stream runs
+    default = AsyncMock(return_value="default stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "default stream"
+
+    default.assert_awaited_once()
+    api.get_doorstation_address.assert_not_called()  # no lookup for a viewer that is turned away anyway
+    assert camera._direct_failed_at is None
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_queued_behind_a_failing_still_read_honours_the_pause(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    connects: list[str] = []
+
+    class _Session:
+        async def get(self, url: str, **_kwargs: object) -> MagicMock:
+            connects.append(url)
+            return MagicMock(status=503, headers={})
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        async with camera._direct_gate:  # a still read is under way
+            live = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
+            await asyncio.sleep(0.05)
+            assert camera._streams_open == 1  # counted and waiting at the gate
+            camera._direct_failed("HTTP 500")  # ... and fails, the pause starts
+            failed_at = camera._direct_failed_at
+        assert await live is None
+
+    assert connects == []  # the Doorstation was not asked during the pause
+    assert camera._direct_failed_at == failed_at  # the turned-away viewer neither extends nor ends the pause
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_refresh_of_a_known_address_that_times_out_is_not_repeated_by_every_read(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    api.get_doorstation_address.side_effect = slow_lookup
+    camera._address, camera._address_checked_at = ADDRESS, None  # known, refresh due after a failed read
+
+    with patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05):
+        assert await camera._address_within_budget() == (ADDRESS, True)
+        assert not camera._address_is_due()  # the next read does not ask again
+        asked = api.get_doorstation_address.await_count
+        assert await camera._address_within_budget() == (ADDRESS, False)
+
+    assert api.get_doorstation_address.await_count == asked
+    assert camera._address == ADDRESS
+    assert camera._direct_failed_at is None  # a slow IO-Server is no failure of the Doorstation
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_lookup_that_times_out_with_no_address_known_is_asked_again(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.side_effect = slow_lookup
+    camera._address, camera._address_checked_at = None, None
+
+    with patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05):
+        assert await camera._address_within_budget() == (None, True)
+
+    assert camera._address_is_due()  # nothing is known: the next read looks again
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_cached_frame_is_not_handed_out_while_the_entry_unloads(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    doorstation = coordinator.doorstations.known[2]
+    camera._frame, camera._frame_at, camera._frame_camera_id = FRAME, time.monotonic(), doorstation.camera_id
+    assert await camera.async_camera_image() == FRAME  # fresh, as long as the entry is up
+
+    coordinator.unloading = True
+    try:
+        assert await camera.async_camera_image() is None
+        assert camera._frame is None
+        # Nothing cached either: no read starts, so no failure streak can start.
+        assert await camera.async_camera_image() is None
+        coordinator.api.get_doorstation_snapshot.assert_not_called()
+        assert camera._failed_at is None
+        assert camera._warned_camera_id is None
+    finally:
+        coordinator.unloading = False
