@@ -916,6 +916,7 @@ async def test_the_read_of_a_still_gets_what_the_address_lookup_left_of_the_budg
 
     with (
         patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.5),
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_MIN_READ_SEC", 0.1),
         patch("custom_components.comexio.camera.read_direct_frame", read),
     ):
         await camera._read_direct_frame(doorstation)
@@ -991,3 +992,56 @@ async def test_a_still_read_that_is_cancelled_in_the_address_lookup_lets_the_gat
 
     assert not camera._direct_gate.locked()
     assert not camera._address_lock.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_lookup_that_runs_out_of_time_beside_a_known_address_asks_the_io_server_and_pauses_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    api.get_doorstation_address.side_effect = slow_lookup
+    camera._address = ADDRESS  # known; the lookup is only the refresh after a failed read
+    read = AsyncMock(return_value=(DIRECT_FRAME, None))
+
+    with (
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05),
+        patch("custom_components.comexio.camera.read_direct_frame", read),
+    ):
+        assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+
+    read.assert_not_called()  # the budget went in the lookup, the Doorstation was not asked
+    api.get_doorstation_snapshot.assert_awaited_once_with(7)
+    assert camera._direct_failed_at is None
+    assert "Doorstation itself" not in caplog.text
+    assert camera._address == ADDRESS
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_lookup_that_leaves_too_little_of_the_budget_starts_no_read_and_no_streak(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+
+    async def lookup(_ext_id: int) -> tuple[str, None]:
+        await asyncio.sleep(0.12)
+        return ADDRESS, None
+
+    api.get_doorstation_address.side_effect = lookup
+    read = AsyncMock(return_value=(DIRECT_FRAME, None))
+
+    with (
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.15),
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_MIN_READ_SEC", 0.1),
+        patch("custom_components.comexio.camera.read_direct_frame", read),
+    ):
+        assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+
+    read.assert_not_called()
+    assert camera._direct_failed_at is None

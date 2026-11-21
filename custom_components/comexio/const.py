@@ -250,6 +250,9 @@ DOORSTATION_ADDRESS_RECHECK_SEC = 600.0
 DOORSTATION_ADDRESS_LOOKUP_TIMEOUT_SEC = 10.0
 DOORSTATION_DIRECT_RETRY_SEC = 300.0
 DOORSTATION_DIRECT_TIMEOUT_SEC = 5.0
+# A still read that finds less than this left of that budget after the address lookup is not started: a read that
+# is cut off at once would blame the Doorstation, which was never asked.
+DOORSTATION_DIRECT_MIN_READ_SEC = 1.0
 # A frame is read from at most this many bytes of the stream (aiocomexio's cap for the IO-Server's stream).
 DOORSTATION_DIRECT_MAX_BYTES = 4 * 1024 * 1024
 # The bell buttons of a Doorstation (its inputs DI1-DI3, the identifiers compared in upper case) and the one event type

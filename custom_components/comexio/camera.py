@@ -30,6 +30,7 @@ from .const import (
     DOMAIN,
     DOORSTATION_ADDRESS_LOOKUP_TIMEOUT_SEC,
     DOORSTATION_ADDRESS_RECHECK_SEC,
+    DOORSTATION_DIRECT_MIN_READ_SEC,
     DOORSTATION_DIRECT_RETRY_SEC,
     DOORSTATION_DIRECT_TIMEOUT_SEC,
     DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC,
@@ -350,17 +351,19 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             return None
         async with self._direct_gate:
             started = asyncio.get_running_loop().time()
-            try:
-                async with asyncio.timeout(DOORSTATION_DIRECT_TIMEOUT_SEC):
-                    # The lookup can wait behind other requests, so the count is checked again after it.
-                    if (address := await self._direct_address()) is None or self._streams_open:
-                        return None
-            except TimeoutError:
-                # The IO-Server (or the wait behind its other requests) did not answer: not the Doorstation's fault.
-                frame, error = None, _LOOKUP_TIMED_OUT
+            address, lookup_timed_out = await self._address_within_budget()
+            left = DOORSTATION_DIRECT_TIMEOUT_SEC - (asyncio.get_running_loop().time() - started)
+            # The lookup can wait behind other requests, so the live stream count is looked at again after it.
+            if self._streams_open:
+                return None
+            if address is None:
+                if not lookup_timed_out:
+                    return None
+                frame, error = None, _LOOKUP_TIMED_OUT  # no address known and none read in time
+            elif left < DOORSTATION_DIRECT_MIN_READ_SEC:
+                return None  # the budget went in the lookup: the IO-Server answers, the Doorstation was not asked
             else:
                 # The read gets what is left of the budget and names its own cause (no answer / no frame in time).
-                left = max(DOORSTATION_DIRECT_TIMEOUT_SEC - (asyncio.get_running_loop().time() - started), 0.1)
                 frame, error = await read_direct_frame(
                     async_get_clientsession(self.hass), doorstation_direct_url(address), timeout=left
                 )
@@ -371,6 +374,18 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             return frame, None
         self._direct_failed(error)
         return None
+
+    async def _address_within_budget(self) -> tuple[str | None, bool]:
+        """(address, False) as `_direct_address` has it; (the address known, True) if the lookup used up the budget.
+
+        The IO-Server did not answer in time (it is asked behind its other requests): not the Doorstation's fault. A
+        known address (the lookup was a refresh after a failed read) stays, as in `_look_up_address`.
+        """
+        try:
+            async with asyncio.timeout(DOORSTATION_DIRECT_TIMEOUT_SEC):
+                return await self._direct_address(), False
+        except TimeoutError:
+            return self._address, True
 
     async def _direct_address(self) -> str | None:
         """The Doorstation's own address while reading from it is worth a try, else None (use the IO-Server).
