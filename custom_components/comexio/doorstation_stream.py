@@ -24,6 +24,9 @@ from .const import (
 # The stream is asked for unencoded, so the byte cap counts bytes of the stream itself (a decompressed chunk would be
 # allocated before any cap could apply); a stream that comes encoded anyway is refused before a byte of it is read.
 DIRECT_REQUEST_HEADERS = {"Accept-Encoding": "identity"}
+# Both requests to the Doorstation are made with allow_redirects=False: its answer comes over plain HTTP, and a
+# redirect would make Home Assistant call whatever address a device on the network names. A redirect counts as
+# an error status (response_problem).
 _CHUNK_BYTES = 64 * 1024
 # The only type a live stream is passed on with. The frontend gets the Doorstation's header unchanged, and the answer
 # comes over plain HTTP from a device on the network: a type like text/html would let a browser run what the body
@@ -58,7 +61,10 @@ def live_stream_problem(resp: aiohttp.ClientResponse) -> str | None:
     if (problem := response_problem(resp)) is not None:
         return problem
     media_type = resp.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").split(";")[0].strip().lower()
-    return None if media_type == LIVE_STREAM_MEDIA_TYPE else "the answer is not an MJPEG stream"
+    if media_type == LIVE_STREAM_MEDIA_TYPE:
+        return None
+    # The type comes from a device on the network: one line, cut short, before it reaches a log.
+    return f"the answer is not an MJPEG stream (Content-Type {one_line(media_type)[:40] or 'missing'})"
 
 
 async def collect_frame(resp: aiohttp.ClientResponse, received: bytearray) -> tuple[bytes | None, str | None]:
@@ -123,17 +129,20 @@ class PrefetchedStream:
         return await self._rest.read(n)
 
 
-async def read_direct_frame(session: aiohttp.ClientSession, url: str) -> tuple[bytes | None, str | None]:
+async def read_direct_frame(
+    session: aiohttp.ClientSession, url: str, timeout: float = DOORSTATION_DIRECT_TIMEOUT_SEC
+) -> tuple[bytes | None, str | None]:
     """The first complete JPEG frame of the stream at `url`, or None and the failure cause.
 
-    Gives up after DOORSTATION_DIRECT_TIMEOUT_SEC and after DOORSTATION_DIRECT_MAX_BYTES without a frame. The cause
-    is a short text with no address in it, fit for a log line.
+    Gives up after `timeout` seconds (a caller that has used up part of its budget passes the rest) and after
+    DOORSTATION_DIRECT_MAX_BYTES without a frame. The cause is a short text with no address in it, fit for a log
+    line.
     """
     answered = False
     try:
         async with (
-            asyncio.timeout(DOORSTATION_DIRECT_TIMEOUT_SEC),
-            session.get(url, headers=DIRECT_REQUEST_HEADERS) as resp,
+            asyncio.timeout(timeout),
+            session.get(url, headers=DIRECT_REQUEST_HEADERS, allow_redirects=False) as resp,
         ):
             answered = True
             if (problem := response_problem(resp)) is not None:

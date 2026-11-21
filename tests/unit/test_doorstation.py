@@ -101,6 +101,7 @@ def _camera(
     coordinator.server_id = SERVER
     coordinator.data = {"io": [{"ext_id": "14", "ext_name": "DOOR"}]}
     coordinator.offline_extensions = set()
+    coordinator.unloading = False
     coordinator.doorstations = tracker or DoorstationTracker()
     if tracker is None:
         coordinator.doorstations.update({14: _doorstation()})

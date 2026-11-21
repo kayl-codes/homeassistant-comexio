@@ -54,6 +54,23 @@ def _expect(handler: Handler, frame: bytes | None, cause: str | None) -> None:
     _serve(handler, check)
 
 
+def test_a_redirect_is_a_failure_and_is_not_followed() -> None:
+    """The answer comes over plain HTTP: a device on the network must not make Home Assistant call another address."""
+    followed: list[str] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        if request.match_info["camera_id"] == "1":
+            raise web.HTTPFound("/proxy/cam/2/")
+        followed.append(request.path)
+        return web.Response(body=PART_HEAD + FRAME)
+
+    async def check(url: str) -> None:
+        assert await _read(url) == (None, "HTTP 302")
+        assert not followed
+
+    _serve(handler, check)
+
+
 def test_the_url_is_the_doorstations_own_camera_one_whatever_the_io_servers_camera_id_is() -> None:
     # The IO-Server knows the camera of a real Doorstation as 7; the Doorstation itself serves it as camera 1.
     assert doorstation_direct_url("192.0.2.10") == "http://192.0.2.10/proxy/cam/1/"
@@ -258,23 +275,24 @@ def test_a_live_stream_answer_that_is_not_a_stream_is_a_failure(
 
 
 @pytest.mark.parametrize(
-    "headers",
+    ("headers", "shown"),
     [
-        {},
-        {"Content-Type": "text/html"},
-        {"Content-Type": "image/jpeg"},
-        {"Content-Type": "multipart/mixed; boundary=frame"},
+        ({}, "application/octet-stream"),  # aiohttp's default for an answer with no type of its own
+        ({"Content-Type": "text/html"}, "text/html"),
+        ({"Content-Type": "image/jpeg"}, "image/jpeg"),
+        ({"Content-Type": "multipart/mixed; boundary=frame"}, "multipart/mixed"),
     ],
-    ids=["none", "html", "jpeg", "other multipart"],
+    ids=["octet-stream", "html", "jpeg", "other multipart"],
 )
-def test_a_live_stream_answer_of_another_type_is_not_passed_on(headers: dict[str, str]) -> None:
+def test_a_live_stream_answer_of_another_type_is_not_passed_on(headers: dict[str, str], shown: str) -> None:
     """The type goes to the frontend as the Doorstation sent it: only an MJPEG stream may go through."""
 
     async def handler(request: web.Request) -> web.StreamResponse:
         return web.Response(body=PART_HEAD + FRAME, headers=headers)
 
     async def check(url: str) -> None:
-        assert await _live_start(url) == (b"", "the answer is not an MJPEG stream")
+        # The cause names the type (a different one is the first thing to know), without its parameters.
+        assert await _live_start(url) == (b"", f"the answer is not an MJPEG stream (Content-Type {shown})")
 
     _serve(handler, check)
 
