@@ -235,6 +235,23 @@ DOORSTATION_EMPTY_POLLS_BEFORE_DROP = 3
 # A camera snapshot is the first frame of the stream, which Comexio opens for each request (it serves one request at
 # a time): a frame younger than this is handed to a second request instead of opening the stream again.
 DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC = 5.0
+# The Doorstation also serves the stream under its own address, which the camera prefers (no IO-Server in between).
+# An address that was not found (`local`, none readable) is looked for again after this long, a direct read that failed
+# is tried again after the retry pause (the address is then read afresh, it may have changed), and a direct read gives
+# up after the timeout. A still image whose direct read fails and that then waits for the IO-Server can run past Home
+# Assistant's own image timeout: Home Assistant cancels it, the pause is set by then, so the next request is served
+# from the IO-Server at once.
+# The Doorstation numbers its own cameras from 1 (`http://<ip>/proxy/cam/1/`); the IO-Server's `camera_id` (the
+# extension id in practice, 7 on a real installation) only addresses the stream on the IO-Server's proxy.
+DOORSTATION_OWN_CAMERA_ID = 1
+DOORSTATION_ADDRESS_RECHECK_SEC = 600.0
+# The look for the address reads the IO-Server's extension page, behind its other requests (one at a time): a look
+# that takes longer counts as failed, so it does not hold back every read of the camera.
+DOORSTATION_ADDRESS_LOOKUP_TIMEOUT_SEC = 10.0
+DOORSTATION_DIRECT_RETRY_SEC = 300.0
+DOORSTATION_DIRECT_TIMEOUT_SEC = 5.0
+# A frame is read from at most this many bytes of the stream (aiocomexio's cap for the IO-Server's stream).
+DOORSTATION_DIRECT_MAX_BYTES = 4 * 1024 * 1024
 # The bell buttons of a Doorstation (its inputs DI1-DI3, the identifiers compared in upper case) and the one event type
 # of their `event` entities.
 DOORSTATION_BELL_IDENTIFIERS = frozenset({"DI1", "DI2", "DI3"})
