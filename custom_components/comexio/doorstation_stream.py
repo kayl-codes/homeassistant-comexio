@@ -130,18 +130,18 @@ class PrefetchedStream:
 
 
 async def read_direct_frame(
-    session: aiohttp.ClientSession, url: str, timeout: float = DOORSTATION_DIRECT_TIMEOUT_SEC
+    session: aiohttp.ClientSession, url: str, budget_sec: float = DOORSTATION_DIRECT_TIMEOUT_SEC
 ) -> tuple[bytes | None, str | None]:
     """The first complete JPEG frame of the stream at `url`, or None and the failure cause.
 
-    Gives up after `timeout` seconds (a caller that has used up part of its budget passes the rest) and after
+    Gives up after `budget_sec` seconds (a caller that has used up part of its budget passes the rest) and after
     DOORSTATION_DIRECT_MAX_BYTES without a frame. The cause is a short text with no address in it, fit for a log
     line.
     """
     answered = False
     try:
         async with (
-            asyncio.timeout(timeout),
+            asyncio.timeout(budget_sec),
             session.get(url, headers=DIRECT_REQUEST_HEADERS, allow_redirects=False) as resp,
         ):
             answered = True

@@ -365,7 +365,7 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             else:
                 # The read gets what is left of the budget and names its own cause (no answer / no frame in time).
                 frame, error = await read_direct_frame(
-                    async_get_clientsession(self.hass), doorstation_direct_url(address), timeout=left
+                    async_get_clientsession(self.hass), doorstation_direct_url(address), budget_sec=left
                 )
         if not self._is_current(doorstation):
             return frame, error

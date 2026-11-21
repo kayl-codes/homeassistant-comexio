@@ -921,8 +921,8 @@ async def test_the_read_of_a_still_gets_what_the_address_lookup_left_of_the_budg
     ):
         await camera._read_direct_frame(doorstation)
 
-    (timeout,) = (call.kwargs["timeout"] for call in read.await_args_list)
-    assert 0.1 <= timeout <= 0.35  # 0.5 s in all, 0.15 s of it gone in the lookup
+    (budget,) = (call.kwargs["budget_sec"] for call in read.await_args_list)
+    assert 0.1 <= budget <= 0.35  # 0.5 s in all, 0.15 s of it gone in the lookup
     assert camera._direct_failed_at is not None
     assert not camera._direct_gate.locked()
 
