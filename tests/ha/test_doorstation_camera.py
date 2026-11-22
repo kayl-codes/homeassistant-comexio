@@ -527,7 +527,9 @@ async def test_an_address_lookup_that_uses_up_the_budget_of_a_still_read_blames_
 
     # The pause is set inside Home Assistant's own image timeout, and the IO-Server was asked after it.
     assert camera._direct_failed_at is not None
-    assert "the IO-Server did not answer in time" in caplog.text
+    # The line says what was missing (the IO-Server's answer for the address), not that a read failed.
+    assert "no image from the Doorstation itself (the IO-Server did not answer in time)" in caplog.text
+    assert "reading from the Doorstation itself failed" not in caplog.text
     api.get_doorstation_snapshot.assert_awaited_once_with(7)
     assert not camera._address_lock.locked()
 

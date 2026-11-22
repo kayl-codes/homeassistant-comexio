@@ -364,15 +364,16 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             )
 
     def _direct_failed(self, error: str | None) -> None:
-        """A read from the Doorstation itself failed: pause the direct way and look the address up afresh later.
+        """No image from the Doorstation itself: pause the direct way and look the address up afresh later.
 
-        Warns once per failure streak, the camera goes on over the IO-Server meanwhile.
+        The cause names what was missing (a failed read, or the address that could not be read in time: not every
+        cause is the Doorstation's). Warns once per failure streak, the camera goes on over the IO-Server meanwhile.
         """
         self._direct_failed_at = time.monotonic()
         self._address_checked_at = None
         _LOGGER.log(
             logging.DEBUG if self._direct_warned else logging.WARNING,
-            "[%s] Doorstation camera %d: reading from the Doorstation itself failed (%s), using the IO-Server for %d s",
+            "[%s] Doorstation camera %d: no image from the Doorstation itself (%s), using the IO-Server for %d s",
             self.coordinator.server_id,
             self._ext_id,
             one_line(error or "unknown error"),
