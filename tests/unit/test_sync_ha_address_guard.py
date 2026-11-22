@@ -77,6 +77,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
         async_ha_address=AsyncMock(return_value=ha_address),
         ha_address=HaAddressResolver(MagicMock()),
         required_webio_classes=list(WEBIO_CLASSES),
+        active_webio_classes=tuple(WEBIO_CLASSES),
         last_audit_results={},
         cancel_sync=False,
         data={},
@@ -315,6 +316,204 @@ def test_the_function_plan_stages_run_in_order_with_the_knx_slice_carved_out() -
         "Checking trigger pairs...",
     ]
     assert ctx.skipped_stages == []
+
+
+def test_without_the_knx_import_the_knx_stage_neither_runs_nor_shows_in_the_status() -> None:
+    """No KNX class opted in: no "Checking KNX ..." status and no config read for nothing; the others run as before."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    ctx = _ctx(button, REACHABLE)
+
+    # A KNX gap the audit found before the sync is not work of this sync: it does not bring the stage back.
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], [{"marker_id": 1}, {"knx_id": 5}]))
+
+    assert button._wire_knx_full.await_count == 0
+    assert [name for name in _STAGES if getattr(button, name).await_count] == [
+        "_wire_created_pairs",
+        "_wire_trigger_pairs",
+    ]
+    button._wire_created_pairs.assert_awaited_once_with(ctx, ["HA M1 Pump"], [{"marker_id": 1}])
+    assert [c.args[0] for c in ctx.update_status.call_args_list] == [
+        "Checking function plan wiring of the Web-IO commands...",
+        "Checking trigger pairs...",
+    ]
+
+
+def test_the_knx_stage_runs_with_the_knx_import_though_the_sync_created_no_knx_command() -> None:
+    """The import is on: the stage runs on its own account, whatever this sync created."""
+    button = _button(REACHABLE)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], [{"marker_id": 1}]))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, ["HA M1 Pump"], [{"marker_id": 1}], refresh_audit=True)
+    assert "Checking KNX write path and wiring..." in [c.args[0] for c in ctx.update_status.call_args_list]
+
+
+def test_the_knx_stage_stays_when_the_sync_created_knx_commands_though_the_import_was_switched_off() -> None:
+    """The import turned off mid-sync: KNX commands this sync created still get their read path wired."""
+    names: list[str] = ["HA K5 Door"]
+    gaps: list[dict] = [{"knx_id": 5}]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    button._wire_knx_full.return_value = ["K5 linked"]
+    order = MagicMock()
+    for name in _STAGES:
+        order.attach_mock(getattr(button, name), name)
+    ctx = _ctx(button, REACHABLE)
+
+    lines = asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    # Same order and the same KNX carve-out as with the import on: no K pair is wired twice.
+    assert order.mock_calls == [
+        call._wire_created_pairs(ctx, [], []),
+        call._wire_knx_full(ctx, names, gaps, refresh_audit=True),
+        call._wire_trigger_pairs(ctx, refresh_audit=True),
+    ]
+    assert [c.args[0] for c in ctx.update_status.call_args_list] == [
+        "Checking function plan wiring of the Web-IO commands...",
+        "Checking KNX write path and wiring...",
+        "Checking trigger pairs...",
+    ]
+    assert "K5 linked" in lines
+
+
+def test_with_the_import_off_the_knx_stage_gets_only_the_gaps_of_the_commands_this_sync_created() -> None:
+    """A KNX gap the audit found before the sync is no work of this sync, even if the stage runs for another one."""
+    names: list[str] = ["HA K5 Door", "HA M1 Pump"]
+    gaps: list[dict] = [{"knx_id": 5}, {"knx_id": 9}, {"marker_id": 1}]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, [{"knx_id": 5}], refresh_audit=True)
+    button._wire_created_pairs.assert_awaited_once_with(ctx, ["HA M1 Pump"], [{"marker_id": 1}])
+
+
+def test_with_the_import_off_a_created_knx_command_without_a_gap_still_runs_the_stage_with_no_gaps() -> None:
+    names: list[str] = ["HA K5 Door"]
+    gaps: list[dict] = [{"marker_id": 1}]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, [], refresh_audit=True)
+    button._wire_created_pairs.assert_awaited_once_with(ctx, [], [{"marker_id": 1}])
+
+
+def _switch_import_when_the_plan_pairs_are_wired(button: ComexioSyncButton, *, knx_on: bool) -> None:
+    """The import is changed after the stage list is built, while the stage before the KNX stage runs."""
+
+    async def switch(*_args: Any, **_kwargs: Any) -> list[str]:
+        button.coordinator.active_webio_classes = tuple(
+            cls for cls in WEBIO_CLASSES if knx_on or cls is not WebioClass.KNX
+        )
+        return []
+
+    button._wire_created_pairs.side_effect = switch
+
+
+def test_an_import_switched_off_after_the_stage_list_was_built_cuts_the_gaps_down_when_the_stage_starts() -> None:
+    names: list[str] = ["HA K5 Door"]
+    gaps: list[dict] = [{"knx_id": 5}, {"knx_id": 9}]
+    button = _button(REACHABLE)
+    _switch_import_when_the_plan_pairs_are_wired(button, knx_on=False)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, [{"knx_id": 5}], refresh_audit=True)
+
+
+def test_an_import_switched_on_after_the_stage_list_was_built_lets_every_gap_through_when_the_stage_starts() -> None:
+    names: list[str] = ["HA K5 Door"]
+    gaps: list[dict] = [{"knx_id": 5}, {"knx_id": 9}]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    _switch_import_when_the_plan_pairs_are_wired(button, knx_on=True)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, gaps, refresh_audit=True)
+
+
+def test_the_knx_stage_stays_in_the_run_when_the_import_goes_off_and_the_sync_created_no_knx_command() -> None:
+    """Stage membership is decided with the list: it was on then, so the stage starts, with no gap left for it."""
+    names: list[str] = ["HA M1 Pump"]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = WEBIO_CLASSES
+    _switch_import_when_the_plan_pairs_are_wired(button, knx_on=False)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, [{"knx_id": 9}]))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, [], refresh_audit=True)
+
+
+def test_the_knx_stage_stays_out_of_the_run_when_the_import_goes_on_and_the_sync_created_no_knx_command() -> None:
+    """Stage membership is decided with the list: it was off then, so a later switch-on does not bring it in."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    _switch_import_when_the_plan_pairs_are_wired(button, knx_on=True)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], []))
+
+    button._wire_knx_full.assert_not_awaited()
+
+
+def test_with_the_import_on_every_gap_reaches_the_knx_stage_whatever_the_sync_created() -> None:
+    names: list[str] = ["HA M1 Pump"]
+    gaps: list[dict] = [{"marker_id": 1}, {"knx_id": 9}]
+    button = _button(REACHABLE)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, gaps, refresh_audit=True)
+
+
+def test_a_cancel_without_the_knx_import_does_not_name_the_knx_stage_as_not_started() -> None:
+    """The stage is not part of the run, so the cancel banner must not list it among the ones a cancel skipped."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    _cancel_in(button, "_wire_created_pairs")
+
+    _press(button)
+
+    text = button.coordinator.sync_progress_text
+    assert button._wire_trigger_pairs.await_count == 0
+    assert "Not started: trigger pair wiring\n" in text
+    assert "KNX write path wiring" not in text
+
+
+def test_a_cancel_names_the_knx_stage_as_not_started_when_the_sync_created_knx_commands_with_the_import_off() -> None:
+    """The stage is part of the run then (the created K command needs its read path), so a cancel lists it."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    _cancel_in(button, "_wire_created_pairs")
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA K5 Door"], []))
+
+    assert button._wire_knx_full.await_count == 0
+    assert ctx.skipped_stages == ["KNX write path wiring", "trigger pair wiring"]
+
+
+def test_the_standalone_knx_action_still_runs_without_the_knx_import() -> None:
+    """Only the full sync's stage list is gated; knx_bridge_add_missing keeps running its KNX stage."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    button._wire_knx_full.return_value = []
+
+    _press(button, "knx_bridge_add_missing")
+
+    assert button._wire_knx_full.await_count == 1
 
 
 def test_a_cancelled_sync_names_the_skipped_classes_but_reports_no_error() -> None:
