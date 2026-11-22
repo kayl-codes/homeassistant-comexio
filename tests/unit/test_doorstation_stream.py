@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-import socket
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import aiohttp
@@ -222,15 +222,17 @@ def test_any_other_runtime_error_is_not_swallowed(session_closed: bool, message:
 
 
 def test_an_unreachable_doorstation_is_a_failure_that_names_no_address() -> None:
-    async def run() -> tuple[bytes | None, str | None]:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            port = probe.getsockname()[1]
-        # The port is free again: nothing listens, the connection is refused.
-        return await _read(f"http://127.0.0.1:{port}/proxy/cam/1/")
+    # aiohttp's own error for a refused connection, whose message names the address: a fixed failure instead of a
+    # port that was free a moment ago, which another process could take in between. The connection key is a
+    # stand-in with the three fields the error reads (the real key's constructor changes between aiohttp versions).
+    key = SimpleNamespace(host="192.0.2.10", port=80, ssl=True)
+    refused = aiohttp.ClientConnectorError(key, OSError(111, "refused"))  # type: ignore[arg-type]
+    assert "192.0.2.10" in str(refused)  # the text is what the cause must not carry
+    session = MagicMock()
+    session.get.side_effect = refused
 
-    frame, cause = asyncio.run(run())
+    frame, cause = asyncio.run(read_direct_frame(session, "http://192.0.2.10/proxy/cam/1/"))
 
     assert frame is None
     assert cause == "ClientConnectorError"
-    assert "127.0.0.1" not in cause
+    assert "192.0.2.10" not in cause
