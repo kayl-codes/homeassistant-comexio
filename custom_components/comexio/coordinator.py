@@ -902,6 +902,21 @@ def _fallback_audit_key(full_name: str) -> str:
     return full_name
 
 
+def _io_gap_key(io: Mapping[str, Any]) -> str:
+    """Audit key of an IO as the audit map keys it (a Quickbus IO by its id, any other by extension + identifier)."""
+    if io.get("quickbus"):
+        return source_audit_key(SOURCE_CATEGORIES[WebioClass.QUICKBUS], io["id"])
+    return io_audit_key(io["ext_name"], io["identifier"])
+
+
+def _closed_by_rewiring(key: str, fub_ids: Collection[int], wiring_gap_keys: Collection[str]) -> bool:
+    """Whether the one unconnected element of a source with a wiring gap is left to the wiring, not cleaned up.
+
+    A source that dangles in more than one plan has a duplicate: that is debris, whatever the gap.
+    """
+    return key in wiring_gap_keys and len(fub_ids) == 1
+
+
 def _serves_sources(
     name: str, info: dict[str, Any], category: SourceCategory, match: tuple[set[str], set[str], set[str]]
 ) -> bool:
@@ -2357,7 +2372,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {}, None
         data = issue.data or {}
         counts = data.get("counts", {})
-        keys = (*_PLAN_AUDIT_BUCKETS, "function_plan_missing_eta_sec")
+        keys = (*_PLAN_AUDIT_BUCKETS, "function_plan_missing_eta_sec", "function_plan_missing_full_eta_sec")
         return {key: counts[key] for key in keys if key in counts}, data.get("function_plan_missing_detail")
 
     def _build_ha_audit_map(
@@ -2751,19 +2766,22 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         every Web-IO check since those all pivot on webio_commands/ha_map, never the raw plan
         elements themselves.
 
-        wiring_gap_keys: audit keys ("M220") of the sources whose Web-IO command is not wired anywhere (the
-        gap check of _compare_audit_key). A marker/KNX/1-Wire element of such a source is no debris, whatever
-        its connections: it is a wiring gap that the sync closes by reconnecting the element (Comexio cuts the
-        connection of a marker whose type changed, and the element would otherwise be deleted and placed
-        again). A source whose pair is wired in one plan keeps its unconnected duplicate in another as debris.
+        wiring_gap_keys: audit keys ("M220", "QB211", "IO_Ext1_I1") of the sources whose Web-IO command is not
+        wired anywhere (the gap check of _compare_audit_key). The element of such a source is no debris while
+        it is the only one: it is a wiring gap that the sync closes by reconnecting the element (Comexio cuts
+        the connection of a marker whose type changed, and the element would otherwise be deleted and the gap
+        found only by the next poll). A source that dangles in several plans has a duplicate: that stays
+        debris, the cleanup removes every unconnected element of it and the wiring places a fresh one. A
+        source whose pair is wired in one plan keeps its unconnected duplicate in another as debris as well.
         """
         items: list[dict[str, Any]] = []
         if has_active_plan:
             for cat in _RANGE_CATEGORIES:
                 names_by_id = {str(item["id"]): item["name"] for item in final_data.get(cat.data_key, [])}
                 prefix = cat.audit_key_prefix
-                for rid in self._dangling_source_ids(cat.fub_module_type, *wired[cat.fub_module_type]):
-                    if f"{prefix}{rid}" in wiring_gap_keys:
+                dangling = self._dangling_source_ids(cat.fub_module_type, *wired[cat.fub_module_type])
+                for rid, fub_ids in dangling.items():
+                    if _closed_by_rewiring(f"{prefix}{rid}", fub_ids, wiring_gap_keys):
                         continue
                     items.append(
                         {"name": names_by_id.get(rid, f"{prefix}{rid}"), "ref_id": rid, "webio_class": cat.key}
@@ -2771,7 +2789,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     mismatches.add(f"function_plan_dangling_{prefix}{rid}")
         if managed_io_groups:
             wired_io, connected_io = wired[_REF_TYPE_IO]
-            items.extend(self._dangling_io_items(final_data, wired_io, connected_io, managed_io_groups, mismatches))
+            items.extend(
+                self._dangling_io_items(
+                    final_data, wired_io, connected_io, managed_io_groups, mismatches, wiring_gap_keys
+                )
+            )
         return items
 
     def _dangling_io_items(
@@ -2781,6 +2803,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         connected_io: set[str] | None,
         managed_io_groups: set[tuple[str, str]],
         mismatches: set[str],
+        wiring_gap_keys: Collection[str] = (),
     ) -> list[dict[str, Any]]:
         """IO part of _function_plan_dangling_items: debris of every IO plan kind with a managed member."""
         # io_all (not "io"): inactive IOs are excluded from "io" but can still sit as
@@ -2791,6 +2814,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         items: list[dict[str, Any]] = []
         for rid, fub_ids in self._dangling_source_ids("1", wired_io, connected_io).items():
             io = io_by_id.get(rid)
+            if io and _closed_by_rewiring(_io_gap_key(io), fub_ids, wiring_gap_keys):
+                continue
             kind = self._dangling_io_kind(io, fub_ids)
             if kind.label not in managed_kinds:
                 # Its kind has no managed member: no sync pass of its class would remove it.
@@ -2989,6 +3014,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "cleanup_function_plan_count": self._cleanup_function_plan_count,
             "function_plan_missing": len(wiring_gaps),
             "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(wiring_gaps),
+            # The full sync wires the gaps waiting for a rename as well: its estimate counts them (repairs.py).
+            "function_plan_missing_full_eta_sec": self._function_plan_missing_eta_sec(audit["function_plan_missing"]),
             "function_plan_dangling": len(audit["function_plan_dangling"]),
             "function_plan_trigger_missing": _count_by_ref(audit["function_plan_trigger_missing"]),
             "function_plan_trigger_orphan": _count_by_ref(audit["function_plan_trigger_orphan"]),
@@ -11662,7 +11689,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         checked against that category's pairs; IO and Quickbus keys only when their extension /
         Quickbus device is a managed column-plan member (managed_io_groups).
         """
-        web_id = str(best_match.get("webIoId"))
+        if best_match.get("webIoId") is None:
+            # Not a wiring gap: nothing to wire without the command's id (the stuck-command repair reports it).
+            return None
+        web_id = str(best_match["webIoId"])
         if (cat := _range_category_of_key(key)) is not None:
             source_id = key[len(cat.audit_key_prefix) :]
             pairs = wired[cat.fub_module_type][0]

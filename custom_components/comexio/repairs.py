@@ -760,6 +760,10 @@ class ComexioRepairFlow(RepairsFlow):
                 lp_missing_c * SYNC_DURATION_FUNCTION_PLAN_PAIR
                 + SYNC_DURATION_FUNCTION_PLAN_FINALIZE * affected_plan_count,
             )
+            # The full sync also wires the gaps that wait for a rename (counted in "rename", not in lp_missing_c).
+            lp_full_wiring_eta_sec = counts.get(
+                "function_plan_missing_full_eta_sec", lp_missing_eta_sec if lp_missing_c > 0 else 0
+            )
 
             config_issues = t_c + m_c + r_c + o_c + ce_c + lp_missing_c + lp_dangling_c + kb_c + kb_lb_c
             ha_count = placeholders.get("ha_count", "0")
@@ -783,8 +787,7 @@ class ComexioRepairFlow(RepairsFlow):
                 total_sec += SYNC_DURATION_WRITE
             if lp_c > 0:
                 total_sec += lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN
-            if lp_missing_c > 0:
-                total_sec += lp_missing_eta_sec
+            total_sec += lp_full_wiring_eta_sec
             if kb_c > 0:
                 total_sec += kb_c * SYNC_DURATION_WRITE
             if kb_lb_c > 0:
@@ -968,8 +971,7 @@ class ComexioRepairFlow(RepairsFlow):
                 total_sec += SYNC_DURATION_WRITE
             if lp_c > 0:
                 total_sec += lp_c * SYNC_DURATION_FUNCTION_PLAN_PLAN
-            if lp_missing_c > 0:
-                total_sec += lp_missing_eta_sec
+            total_sec += lp_full_wiring_eta_sec
             if kb_c > 0:
                 total_sec += kb_c * SYNC_DURATION_WRITE
             if kb_lb_c > 0:

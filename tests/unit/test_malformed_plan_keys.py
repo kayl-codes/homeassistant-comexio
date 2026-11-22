@@ -1012,6 +1012,7 @@ def test_the_audit_tells_the_debris_check_which_sources_have_a_wiring_gap() -> N
 def test_the_repair_leaves_the_gaps_that_wait_for_a_rename_to_the_full_sync() -> None:
     """The "wire in function plan" option cannot close them (the command still has its old name)."""
     coordinator = _issue_writer(MALFORMED_FUBS)
+    coordinator._function_plan_missing_eta_sec = MagicMock(side_effect=lambda items: 10 * len(items))
     gaps = [{"name": "HA M1", "marker_id": 1}, {"name": "HA M2", "marker_id": 2, "pending_rename": True}]
     coordinator.last_audit_results["function_plan_missing"] = gaps
     registry = SimpleNamespace(async_get_issue=MagicMock(return_value=None))
@@ -1021,6 +1022,28 @@ def test_the_repair_leaves_the_gaps_that_wait_for_a_rename_to_the_full_sync() ->
     ):
         coordinator._update_sync_mismatch_issue({"missing_m1"}, {}, {}, {})
 
-    assert create_issue.call_args.kwargs["data"]["counts"]["function_plan_missing"] == 1
-    assert coordinator._function_plan_missing_eta_sec.call_args.args[0] == gaps[:1]
+    counts = create_issue.call_args.kwargs["data"]["counts"]
+    assert counts["function_plan_missing"] == 1
+    # The wiring option's estimate leaves them out, the full sync's counts them (repairs.py adds it to its own).
+    assert (counts["function_plan_missing_eta_sec"], counts["function_plan_missing_full_eta_sec"]) == (10, 20)
     assert coordinator._function_plan_missing_detail.call_args.args[0] == gaps[:1]
+
+
+@pytest.mark.parametrize(("known", "full_eta"), [(False, 40), (True, 0)])
+def test_the_repair_keeps_the_full_sync_wiring_estimate_only_while_the_plan_findings_are_unknown(
+    known: bool, full_eta: int
+) -> None:
+    """A poll that cannot read the plans keeps the estimate; without it the repair would fall back to a lower one."""
+    coordinator = _issue_writer(MALFORMED_FUBS)
+    open_issue = SimpleNamespace(
+        translation_key="sync_mismatch",
+        data={"counts": {"missing": 0, "function_plan_missing_full_eta_sec": 40}},
+    )
+    registry = SimpleNamespace(async_get_issue=MagicMock(return_value=open_issue))
+    with (
+        patch.object(coordinator_module.ir, "async_get", return_value=registry),
+        patch.object(coordinator_module.ir, "async_create_issue") as create_issue,
+    ):
+        coordinator._update_sync_mismatch_issue({"missing_m1"}, {}, {}, {}, plan_audit_known=known)
+
+    assert create_issue.call_args.kwargs["data"]["counts"]["function_plan_missing_full_eta_sec"] == full_eta

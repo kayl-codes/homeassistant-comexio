@@ -755,6 +755,24 @@ def test_the_address_fix_is_one_device_write(language: str, label: str, summary:
     assert "HTTP" not in text
 
 
+def test_the_full_sync_eta_counts_the_wiring_of_the_gaps_that_wait_for_a_rename() -> None:
+    """Those gaps are in no "function_plan_missing" count, but the full sync wires them after the rename."""
+    counts = {"type": 1, "rename": 1, "ip_mismatch": 1}
+
+    without = _repair_form(counts)
+    with_wiring = _repair_form({**counts, "function_plan_missing_full_eta_sec": 40})
+
+    assert _eta(3 * SYNC_DURATION_WRITE) in _options(without)["full_sync"]
+    assert _eta(3 * SYNC_DURATION_WRITE + 40) in _options(with_wiring)["full_sync"]
+
+
+def test_the_full_sync_eta_of_an_issue_from_before_the_full_estimate_counts_the_wiring_once() -> None:
+    """Issue data saved by an older version has no full estimate: the wiring option's estimate stands in for it."""
+    form = _repair_form({"type": 1, "function_plan_missing": 2, "function_plan_missing_eta_sec": 30})
+
+    assert _eta(SYNC_DURATION_WRITE + 30) in _options(form)["full_sync"]
+
+
 def test_the_full_sync_eta_counts_the_address_as_one_write() -> None:
     form = _repair_form({"type": 1, "ip_mismatch": 1})
     assert _eta(2 * SYNC_DURATION_WRITE) in _options(form)["full_sync"]
