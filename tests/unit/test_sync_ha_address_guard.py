@@ -337,6 +337,41 @@ def test_without_the_knx_import_the_knx_stage_neither_runs_nor_shows_in_the_stat
     ]
 
 
+@pytest.mark.parametrize(
+    ("names", "gaps"),
+    [
+        (["HA K5 Door"], []),
+        ([], [{"knx_id": 5}]),
+    ],
+)
+def test_the_knx_stage_stays_when_the_sync_made_knx_work_though_the_import_was_switched_off(
+    names: list[str], gaps: list[dict]
+) -> None:
+    """The import turned off mid-sync: KNX commands this sync created still get their read path wired."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    button._wire_knx_full.return_value = ["K5 linked"]
+    order = MagicMock()
+    for name in _STAGES:
+        order.attach_mock(getattr(button, name), name)
+    ctx = _ctx(button, REACHABLE)
+
+    lines = asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    # Same order and the same KNX carve-out as with the import on: no K pair is wired twice.
+    assert order.mock_calls == [
+        call._wire_created_pairs(ctx, [], []),
+        call._wire_knx_full(ctx, names, gaps, refresh_audit=True),
+        call._wire_trigger_pairs(ctx, refresh_audit=True),
+    ]
+    assert [c.args[0] for c in ctx.update_status.call_args_list] == [
+        "Checking function plan wiring of the Web-IO commands...",
+        "Checking KNX write path and wiring...",
+        "Checking trigger pairs...",
+    ]
+    assert "K5 linked" in lines
+
+
 def test_a_cancel_without_the_knx_import_does_not_name_the_knx_stage_as_not_started() -> None:
     """The stage is not part of the run, so the cancel banner must not list it among the ones a cancel skipped."""
     button = _button(REACHABLE)

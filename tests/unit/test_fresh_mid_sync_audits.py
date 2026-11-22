@@ -227,6 +227,24 @@ def _summaries(coordinator: _FakeSyncCoordinator) -> tuple[list[str], list[str]]
     return asyncio.run(_run())
 
 
+def test_the_knx_step_still_wires_the_read_path_of_new_commands_when_its_audit_does_not_apply() -> None:
+    """Import switched off mid-sync: the audit says "does not apply", the new K command's read path stays."""
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.knx_result = ([], [], None)
+    resolved: list[list[int]] = []
+
+    async def resolve_knx_clusters(k_ids: list[int]):
+        resolved.append(k_ids)
+        return {}, [], []
+
+    coordinator.resolve_knx_clusters = resolve_knx_clusters
+    button, ctx = _sync_button(coordinator)
+
+    asyncio.run(button._wire_knx_full(ctx, ["HA K5 Door"], [], refresh_audit=True))
+
+    assert resolved == [[5]]
+
+
 def test_trigger_step_reuses_the_knx_snapshot_once_when_nothing_was_written() -> None:
     assert _sync_run(bridge=[]) == [_PARSED, None]
 
