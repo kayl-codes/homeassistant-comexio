@@ -1,23 +1,27 @@
 """Camera platform: one camera per Doorstation of the IO-Server.
 
 The Doorstation serves its MJPEG stream under its own address, with no login (confirmed on a real installation,
-#180). The camera prefers that way for its still image: the address comes from the extension's settings on the
-IO-Server (``ComexioAPI.get_doorstation_address``), and the image is the first frame of the Doorstation's stream.
-Without a usable address (`local`, not readable), or while a direct read fails, the camera falls back to the
-IO-Server: there the stream needs the admin session, and the image is the first frame of the stream (aiocomexio's
-``get_doorstation_snapshot``). The frontend asks for a new still image every few seconds (Home Assistant's default
-stream of a camera that has no stream of its own).
+#180). The camera prefers that way: the address comes from the extension's settings on the IO-Server
+(``ComexioAPI.get_doorstation_address``), the live stream is passed on from the Doorstation to the frontend
+(``handle_async_mjpeg_stream``), and the still image is the first frame of the same stream. Without a usable address
+(`local`, not readable), or while a direct read fails, the camera falls back to the IO-Server: there the stream needs
+the admin session, so Home Assistant cannot hand its URL to a player, and the image is the first frame of the
+stream (aiocomexio's ``get_doorstation_snapshot``); the frontend then asks for a new still image every few seconds.
 """
 
 import asyncio
 import logging
 import time
+from typing import cast
 
 from aiocomexio.doorstation import Doorstation
+import aiohttp
+from aiohttp import web
+from aiohttp.hdrs import CONTENT_TYPE
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_aiohttp_proxy_stream, async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -35,12 +39,23 @@ from .const import (
 )
 from .coordinator import ComexioCoordinator
 from .doorstation import doorstation_ext_name
-from .doorstation_stream import doorstation_direct_url, read_direct_frame
+from .doorstation_stream import (
+    DIRECT_REQUEST_HEADERS,
+    SESSION_CLOSED_CAUSE,
+    PrefetchedStream,
+    closed_session_refusal,
+    doorstation_direct_url,
+    live_stream_start,
+    read_direct_frame,
+)
 from .entity import ComexioStableEntityIdMixin, build_device_info, extension_device_identifier
 
 _LOGGER = logging.getLogger(__name__)
 
 _LOOKUP_TIMED_OUT = "the IO-Server did not answer in time"
+# A live stream runs as long as it is watched: Home Assistant's session limits a whole request to 300 s by default,
+# so only the connection is limited here (a stream that stalls ends in the proxy helper's own read timeout).
+_STREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=DOORSTATION_DIRECT_TIMEOUT_SEC)
 
 # Device name of a camera whose Doorstation lost its extension name after the camera was added.
 _FALLBACK_EXTENSION_NAME = "Doorstation"
@@ -110,7 +125,7 @@ class _DoorstationCameraSync:
 
 
 class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[ComexioCoordinator], Camera):
-    """The still image of a Doorstation camera, on the device of the Doorstation's extension."""
+    """The live picture and the still image of a Doorstation camera, on the device of the Doorstation's extension."""
 
     _attr_has_entity_name = True
     _attr_translation_key = "doorstation_camera"
@@ -137,6 +152,10 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         self._direct_warned = False
         # Defence for a second reader of the address (reads of one camera are serialised by `_lock` today).
         self._address_lock = asyncio.Lock()
+        # How many live streams are passed on from the Doorstation right now (counted from their connect on).
+        self._streams_open = 0
+        # Held while the Doorstation is opened for a still read or a live stream's start: the two never overlap.
+        self._direct_gate = asyncio.Lock()
 
     @property
     def _doorstation(self) -> Doorstation | None:
@@ -224,6 +243,137 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             self._frame, self._frame_at, self._frame_camera_id = frame, time.monotonic(), doorstation.camera_id
             return frame
 
+    async def handle_async_mjpeg_stream(self, request: web.Request) -> web.StreamResponse | None:
+        """The live stream: passed on from the Doorstation itself; without that, still images like before.
+
+        The Doorstation's stream goes to the frontend as it comes (no copy kept, no frame cache). A Doorstation that
+        cannot be reached or answers with anything but a stream (no usable address, a failed connection, an error
+        status) leaves the default, which polls async_camera_image and so reads over the IO-Server as long as the
+        direct way is paused. A stream that breaks off once it runs is the frontend's to reconnect.
+        """
+        doorstation = self._doorstation
+        if doorstation is not None and self.available:
+            if self._streams_open:
+                # A second viewer asks no address: `_proxy_direct_stream` would turn it away anyway.
+                self._note_second_viewer()
+            elif (response := await self._proxy_live_stream(request, doorstation)) is not None:
+                return response
+        return await super().handle_async_mjpeg_stream(request)
+
+    def _note_second_viewer(self) -> None:
+        _LOGGER.debug(
+            "[%s] Doorstation camera %d: another live stream runs, this viewer gets stills over the IO-Server",
+            self.coordinator.server_id,
+            self._ext_id,
+        )
+
+    async def _proxy_live_stream(self, request: web.Request, doorstation: Doorstation) -> web.StreamResponse | None:
+        """Look the address up (bounded like the still read's) and pass the stream on; None to leave it to the default.
+
+        An address that could not be read in time and is not known (as for a still read) pauses the direct way, so not
+        every reconnect of the frontend waits for the same slow answer.
+        """
+        address, lookup_timed_out = await self._address_within_budget()
+        if address is None:
+            if lookup_timed_out:
+                self._stream_failed(doorstation, _LOOKUP_TIMED_OUT)
+            return None
+        return await self._proxy_direct_stream(request, doorstation_direct_url(address), doorstation)
+
+    async def _proxy_direct_stream(
+        self, request: web.Request, url: str, doorstation: Doorstation
+    ) -> web.StreamResponse | None:
+        """Pass the stream at `url` on to the frontend, None (and the direct way paused) if it cannot be had.
+
+        The request is made here, not by Home Assistant's proxy helper: that one hands any answer on, an error page
+        or an empty stream included, and so would never reach the fallback. The session's default limit of 300 s for
+        a whole request would cut a live stream off every five minutes, so only the connection is limited.
+        """
+        if self._streams_open:
+            # A stream runs or starts already: whether the Doorstation takes a second viewer is not known, and a
+            # refusal would pause the direct way for the first one as well. The second viewer gets the default.
+            self._note_second_viewer()
+            return None
+        # Counted from the connect on: a still read that starts meanwhile opens no second connection.
+        self._streams_open += 1
+        resp = None
+        try:
+            # Behind a still read that is under way (it ends within DOORSTATION_DIRECT_TIMEOUT_SEC): whether the
+            # Doorstation takes two viewers at once is not known, and a refusal would pause the direct way.
+            async with self._direct_gate:
+                if self._direct_paused() or not self._is_current(doorstation):
+                    # The still read ahead of us failed (the pause holds, whatever the address said), or the camera
+                    # went while this viewer waited: no request to a Doorstation nobody asks for, no streak.
+                    _LOGGER.debug(
+                        "[%s] Doorstation camera %d: no direct live stream now, this viewer goes over the IO-Server",
+                        self.coordinator.server_id,
+                        self._ext_id,
+                    )
+                    return None
+                if (resp := await self._connect_direct_stream(url, doorstation)) is None:
+                    return None
+                prefix, problem = await live_stream_start(resp)
+            if problem is not None:
+                self._stream_failed(doorstation, problem)
+                return None
+            if not self._is_current(doorstation):
+                # The camera went while the stream started: nothing to pass on, and no streak either way.
+                _LOGGER.debug(
+                    "[%s] Doorstation camera %d: the camera changed while the live stream started, nothing passed on",
+                    self.coordinator.server_id,
+                    self._ext_id,
+                )
+                return None
+            self._direct_worked()
+            # The stream ends with the camera it was started for: an offline extension, a Doorstation that is gone or
+            # changed its camera, an unloading entry (Home Assistant's own still stream ends there as well).
+            stream = cast(
+                aiohttp.StreamReader,
+                PrefetchedStream(prefix, resp.content, lambda: self._is_current(doorstation)),
+            )
+            response = await async_aiohttp_proxy_stream(self.hass, request, stream, resp.headers.get(CONTENT_TYPE))
+            # Home Assistant's helper ends quietly when the Doorstation stalls or breaks off: the frontend reconnects.
+            _LOGGER.debug("[%s] Doorstation camera %d: the live stream ended", self.coordinator.server_id, self._ext_id)
+            return response
+        finally:
+            self._streams_open -= 1
+            if resp is not None:
+                resp.close()
+
+    async def _connect_direct_stream(self, url: str, doorstation: Doorstation) -> aiohttp.ClientResponse | None:
+        """The Doorstation's answer to the stream request, None (and the failure noted) if there is none in time."""
+        session = async_get_clientsession(self.hass)
+        try:
+            async with asyncio.timeout(DOORSTATION_DIRECT_TIMEOUT_SEC):
+                return await session.get(
+                    url,
+                    headers=DIRECT_REQUEST_HEADERS,
+                    timeout=_STREAM_TIMEOUT,
+                    allow_redirects=False,
+                    auto_decompress=False,
+                )
+        except TimeoutError:
+            self._stream_failed(doorstation, "no answer in time")
+        except aiohttp.ClientError as err:
+            self._stream_failed(doorstation, type(err).__name__)
+        except RuntimeError as err:
+            if not closed_session_refusal(session, err):
+                raise
+            self._stream_failed(doorstation, SESSION_CLOSED_CAUSE)
+        return None
+
+    def _stream_failed(self, doorstation: Doorstation, cause: str) -> None:
+        """The live stream could not be had: the direct way is paused, unless the camera is gone meanwhile."""
+        if self._is_current(doorstation):
+            self._direct_failed(f"live stream: {cause}")
+        else:
+            _LOGGER.debug(
+                "[%s] Doorstation camera %d: live stream failure dropped, the camera changed meanwhile (%s)",
+                self.coordinator.server_id,
+                self._ext_id,
+                one_line(cause),
+            )
+
     async def _read_frame(self, doorstation: Doorstation) -> tuple[bytes | None, str | None]:
         """One frame from the Doorstation itself if it has a usable address and answers, else from the IO-Server."""
         if (direct := await self._read_direct_frame(doorstation)) is not None:
@@ -235,31 +385,46 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
     async def _read_direct_frame(self, doorstation: Doorstation) -> tuple[bytes | None, str | None] | None:
         """(frame, None) read from the Doorstation itself; None when the IO-Server is to be asked.
 
-        None for no usable address, a pause, and for a failed read (noted here). A camera that is gone meanwhile gives
-        (None, None) when that is seen after the address lookup (the Doorstation is not asked), else what was read as it
-        is (see async_camera_image); either way it starts or ends no failure streak. Reads of one camera
-        never overlap (`async_camera_image` holds `_lock`), so the Doorstation is asked by one request at a time.
+        None for no usable address, a pause, a live stream that runs or starts (no second connection is opened beside
+        it: whether the Doorstation takes one is not known, and a refusal would pause the direct way for the stream
+        as well) and for a failed read (noted here). A camera that is gone meanwhile gives (None, None) when that is
+        seen after the address lookup (the Doorstation is not asked), else what was read as it is (see
+        async_camera_image); either way it starts or ends no failure streak. Still reads of one camera never overlap
+        (`async_camera_image` holds `_lock`), and `_direct_gate` keeps them from overlapping a live stream's start.
 
         The address lookup and the read share DOORSTATION_DIRECT_TIMEOUT_SEC: Home Assistant gives an image request
         10 s in all, so the IO-Server, asked after a failed attempt, must keep time to answer, and the pause must be
         set before Home Assistant cancels the request.
         """
-        started = asyncio.get_running_loop().time()
-        address, lookup_timed_out = await self._address_within_budget()
-        if not self._is_current(doorstation):
-            return None, None  # went during the lookup: no request to a Doorstation nobody asks for, no streak
-        left = DOORSTATION_DIRECT_TIMEOUT_SEC - (asyncio.get_running_loop().time() - started)
-        if address is None:
-            if not lookup_timed_out:
-                return None
-            frame, error = None, _LOOKUP_TIMED_OUT  # no address known and none read in time
-        elif left < DOORSTATION_DIRECT_MIN_READ_SEC:
-            return None  # the budget went in the lookup: the IO-Server answers, the Doorstation was not asked
-        else:
-            # The read gets what is left of the budget and names its own cause (no answer / no frame in time).
-            frame, error = await read_direct_frame(
-                async_get_clientsession(self.hass), doorstation_direct_url(address), budget_sec=left
+        if self._streams_open or self._direct_gate.locked():
+            _LOGGER.debug(
+                "[%s] Doorstation camera %d: still read over the IO-Server, a live stream is %s",
+                self.coordinator.server_id,
+                self._ext_id,
+                "running or starting" if self._streams_open else "connecting",
             )
+            return None
+        async with self._direct_gate:
+            started = asyncio.get_running_loop().time()
+            address, lookup_timed_out = await self._address_within_budget()
+            if not self._is_current(doorstation):
+                return None, None  # went during the lookup: no request to a Doorstation nobody asks for, no streak
+            left = DOORSTATION_DIRECT_TIMEOUT_SEC - (asyncio.get_running_loop().time() - started)
+            # The lookup can wait behind other requests, so the live stream count is looked at again after it (no
+            # await since the `_is_current` check above: the camera is still the one that was asked).
+            if self._streams_open:
+                return None
+            if address is None:
+                if not lookup_timed_out:
+                    return None
+                frame, error = None, _LOOKUP_TIMED_OUT  # no address known and none read in time
+            elif left < DOORSTATION_DIRECT_MIN_READ_SEC:
+                return None  # the budget went in the lookup: the IO-Server answers, the Doorstation was not asked
+            else:
+                # The read gets what is left of the budget and names its own cause (no answer / no frame in time).
+                frame, error = await read_direct_frame(
+                    async_get_clientsession(self.hass), doorstation_direct_url(address), budget_sec=left
+                )
         if not self._is_current(doorstation):
             return frame, error
         if frame is not None:

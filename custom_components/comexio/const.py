@@ -238,8 +238,9 @@ DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC = 5.0
 # The Doorstation also serves the stream under its own address, which the camera prefers (no IO-Server in between).
 # The address is looked up again after this long (a known one too, so a changed address is noticed), a direct read
 # that failed is tried again after the retry pause (the address is then read afresh), and a direct read gives up after
-# the timeout. The timeout covers the address lookup and the read together (Home Assistant gives an image request 10 s
-# in all, and the IO-Server, asked after a failed attempt, needs time too).
+# the timeout. For a still image the timeout covers the address lookup and the read together (Home Assistant gives an
+# image request 10 s in all, and the IO-Server, asked after a failed attempt, needs time too); a live stream times its
+# address lookup, its connect and its first frame each.
 # The Doorstation numbers its own cameras from 1 (`http://<ip>/proxy/cam/1/`); the IO-Server's `camera_id` (the
 # extension id in practice, 7 on a real installation) only addresses the stream on the IO-Server's proxy.
 DOORSTATION_OWN_CAMERA_ID = 1

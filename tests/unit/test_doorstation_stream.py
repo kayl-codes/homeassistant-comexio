@@ -22,6 +22,7 @@ from custom_components.comexio.doorstation_stream import (
 # data, EOI. The multipart head in front of it is what the Doorstation sends before each image.
 FRAME = bytes.fromhex("ffd8 ffe0 0004 4a46 ffda 0008 01 0100 003f00 123456 ffd9".replace(" ", ""))
 PART_HEAD = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n"
+LIVE_HEADERS = {"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
 
 Handler = Callable[[web.Request], Awaitable[web.StreamResponse]]
 
@@ -236,3 +237,215 @@ def test_an_unreachable_doorstation_is_a_failure_that_names_no_address() -> None
     assert frame is None
     assert cause == "ClientConnectorError"
     assert "192.0.2.10" not in cause
+
+
+async def _live_start(url: str) -> tuple[bytes, str | None]:
+    async with aiohttp.ClientSession() as session, session.get(url, allow_redirects=False) as resp:
+        return await doorstation_stream.live_stream_start(resp)
+
+
+def test_a_live_stream_is_passed_on_once_it_delivered_a_whole_frame_and_with_everything_read() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers=LIVE_HEADERS)
+        await response.prepare(request)
+        await response.write(PART_HEAD + FRAME + b"--frame\r\n")
+        await asyncio.sleep(30)
+        return response
+
+    async def check(url: str) -> None:
+        prefix, cause = await _live_start(url)
+        assert cause is None
+        # The frame and what came with it are handed on first: the frontend sees the stream from its start.
+        assert prefix.startswith(PART_HEAD + FRAME)
+
+    _serve(handler, check)
+
+
+def test_a_live_stream_that_ends_without_data_is_a_failure() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=b"", headers=LIVE_HEADERS)
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", "the stream ended without a frame")
+
+    _serve(handler, check)
+
+
+def test_a_live_stream_that_ends_inside_its_first_frame_is_a_failure() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME[:-1], headers=LIVE_HEADERS)
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", "the stream ended without a frame")
+
+    _serve(handler, check)
+
+
+def test_a_live_stream_that_sends_a_head_and_no_picture_is_a_failure_after_the_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(doorstation_stream, "DOORSTATION_DIRECT_TIMEOUT_SEC", 0.3)
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers=LIVE_HEADERS)
+        await response.prepare(request)
+        await response.write(PART_HEAD)  # data, but no frame, then silence
+        await asyncio.sleep(30)
+        return response
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", "no frame in time")
+
+    _serve(handler, check)
+
+
+def test_a_live_stream_that_sends_nothing_is_a_failure_after_the_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doorstation_stream, "DOORSTATION_DIRECT_TIMEOUT_SEC", 0.3)
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers=LIVE_HEADERS)
+        await response.prepare(request)  # the head of the answer, then silence
+        await asyncio.sleep(30)
+        return response
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", "no frame in time")
+
+    _serve(handler, check)
+
+
+def test_a_live_stream_with_a_malformed_frame_is_a_failure_that_says_so() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + bytes.fromhex("ffd8ffd9"), headers=LIVE_HEADERS)
+
+    async def check(url: str) -> None:
+        prefix, cause = await _live_start(url)
+        assert prefix == b""
+        assert cause is not None
+        assert cause.startswith("malformed frame (")
+
+    _serve(handler, check)
+
+
+@pytest.mark.parametrize(
+    ("status", "headers", "cause"),
+    [
+        (404, {}, "HTTP 404"),
+        (302, {**LIVE_HEADERS, "Location": "http://192.0.2.99/"}, "HTTP 302"),  # a redirect is an error status
+        (200, {**LIVE_HEADERS, "Content-Encoding": "gzip"}, "the stream came encoded"),
+    ],
+)
+def test_a_live_stream_answer_that_is_not_a_stream_is_a_failure(
+    status: int, headers: dict[str, str], cause: str
+) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(status=status, body=PART_HEAD + FRAME, headers=headers)
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", cause)
+
+    _serve(handler, check)
+
+
+@pytest.mark.parametrize(
+    ("headers", "shown"),
+    [
+        ({}, "application/octet-stream"),  # aiohttp's default for an answer with no type of its own
+        ({"Content-Type": "text/html"}, "text/html"),
+        ({"Content-Type": "image/jpeg"}, "image/jpeg"),
+        ({"Content-Type": "multipart/mixed; boundary=frame"}, "multipart/mixed"),
+    ],
+    ids=["octet-stream", "html", "jpeg", "other multipart"],
+)
+def test_a_live_stream_answer_of_another_type_is_not_passed_on(headers: dict[str, str], shown: str) -> None:
+    """The type goes to the frontend as the Doorstation sent it: only an MJPEG stream may go through."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME, headers=headers)
+
+    async def check(url: str) -> None:
+        # The cause names the type (a different one is the first thing to know), without its parameters.
+        assert await _live_start(url) == (b"", f"the answer is not an MJPEG stream (Content-Type {shown})")
+
+    _serve(handler, check)
+
+
+def test_the_type_is_read_whatever_its_case_and_parameters() -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME, headers={"Content-Type": "Multipart/X-Mixed-Replace;boundary=x"})
+
+    async def check(url: str) -> None:
+        prefix, cause = await _live_start(url)
+        assert cause is None
+        assert prefix.startswith(PART_HEAD + FRAME)
+
+    _serve(handler, check)
+
+
+def test_a_prefetched_stream_hands_out_what_was_read_first_and_then_the_rest() -> None:
+    class _Rest:
+        async def read(self, n: int = -1) -> bytes:
+            return b"rest"
+
+    stream = doorstation_stream.PrefetchedStream(b"first", _Rest())  # type: ignore[arg-type]
+
+    async def read_all() -> list[bytes]:
+        return [await stream.read(1), await stream.read(100), await stream.read(100)]
+
+    # The prefetched bytes come whole, whatever the size asked for.
+    assert asyncio.run(read_all()) == [b"first", b"rest", b"rest"]
+
+
+def test_a_prefetched_stream_ends_once_its_camera_is_gone() -> None:
+    class _Rest:
+        async def read(self, n: int = -1) -> bytes:
+            return b"rest"
+
+    alive = [True]
+    stream = doorstation_stream.PrefetchedStream(b"first", _Rest(), lambda: alive[0])  # type: ignore[arg-type]
+
+    async def read_all() -> list[bytes]:
+        out = [await stream.read(100)]
+        alive[0] = False
+        out += [await stream.read(100), await stream.read(100)]
+        return out
+
+    assert asyncio.run(read_all()) == [b"first", b"", b""]
+
+
+def test_a_prefetched_stream_hands_the_size_asked_for_on_and_gives_nothing_of_a_camera_that_is_gone() -> None:
+    """read() without a size reads a live stream to its end, which never comes: the size must reach the stream."""
+    asked: list[int] = []
+
+    class _Rest:
+        async def read(self, n: int = -1) -> bytes:
+            asked.append(n)
+            return b"rest"
+
+    stream = doorstation_stream.PrefetchedStream(b"first", _Rest())  # type: ignore[arg-type]
+    gone = doorstation_stream.PrefetchedStream(b"first", _Rest(), lambda: False)  # type: ignore[arg-type]
+
+    async def read() -> tuple[bytes, bytes, bytes]:
+        return await stream.read(1), await stream.read(4096), await gone.read(4096)
+
+    # The camera was gone before the very first read: not even what was read ahead is handed out.
+    assert asyncio.run(read()) == (b"first", b"rest", b"")
+    assert asked == [4096]
+
+
+def _answer(status: int, headers: dict[str, str]) -> MagicMock:
+    return MagicMock(status=status, headers=headers)
+
+
+def test_a_type_from_the_network_is_cut_short_and_kept_to_one_line_before_it_reaches_a_log() -> None:
+    hostile = "x" * 60 + "\nWARNING forged log line"
+
+    problem = doorstation_stream.live_stream_problem(_answer(200, {"Content-Type": hostile}))
+
+    assert problem == f"the answer is not an MJPEG stream (Content-Type {'x' * 40})"
+
+
+def test_an_answer_with_no_type_at_all_is_named_so() -> None:
+    problem = doorstation_stream.live_stream_problem(_answer(200, {}))
+
+    assert problem == "the answer is not an MJPEG stream (Content-Type missing)"

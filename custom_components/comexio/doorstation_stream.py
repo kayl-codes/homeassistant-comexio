@@ -3,10 +3,12 @@
 The Doorstation serves its camera as an MJPEG stream under ``http://<its address>/proxy/cam/1/``, with no
 login (confirmed on a real installation, kayl-codes/homeassistant-comexio#180). aiocomexio reads the stream only
 over the IO-Server and its admin session, so the first frame is read here, over a plain Home Assistant web session,
-with aiocomexio's JPEG frame reader. Nothing here touches Home Assistant, so it is tested without it.
+with aiocomexio's JPEG frame reader; the live stream is checked here as well (status, encoding, media type, first
+frame) before the camera passes it on. Nothing here touches Home Assistant, so it is tested without it.
 """
 
 import asyncio
+from collections.abc import Callable
 from http import HTTPStatus
 
 from aiocomexio.doorstation import JpegFrameReader, doorstation_stream_path
@@ -25,12 +27,16 @@ from .const import (
 # The request is made with auto_decompress=False for the same reason: aiohttp would otherwise inflate what arrives
 # before `response_problem` has looked at Content-Encoding.
 DIRECT_REQUEST_HEADERS = {"Accept-Encoding": "identity"}
-# The request to the Doorstation is made with allow_redirects=False: its answer comes over plain HTTP, and a
-# redirect would make Home Assistant call whatever address a device on the network names. A redirect counts as
-# an error status (response_problem).
+# Both requests to the Doorstation (the still read and the live stream) are made with allow_redirects=False: its answer
+# comes over plain HTTP, and a redirect would make Home Assistant call whatever address a device on the network
+# names. A redirect counts as an error status (response_problem).
 _CHUNK_BYTES = 64 * 1024
 _AIOHTTP_SESSION_CLOSED = "Session is closed"  # the text of aiohttp's refusal of a request on a closed session
 SESSION_CLOSED_CAUSE = "the session was closed"
+# The only type a live stream is passed on with. The frontend gets the Doorstation's header unchanged, and the answer
+# comes over plain HTTP from a device on the network: a type like text/html would let a browser run what the body
+# holds on Home Assistant's own origin.
+LIVE_STREAM_MEDIA_TYPE = "multipart/x-mixed-replace"
 
 
 def doorstation_direct_url(address: str) -> str:
@@ -43,12 +49,33 @@ def doorstation_direct_url(address: str) -> str:
 
 
 def response_problem(resp: aiohttp.ClientResponse) -> str | None:
-    """Why the answer of the Doorstation is not a stream to read (a short text, no address in it), None if it is."""
+    """Why the answer of the Doorstation is not a stream to read (a short text, no address in it), None if it is.
+
+    Home Assistant's own proxy helper passes any answer on as it comes, an error page included, so the live stream
+    checks the answer with this before it hands it over.
+    """
     if resp.status != HTTPStatus.OK:
         return f"HTTP {resp.status}"
     if resp.headers.get(aiohttp.hdrs.CONTENT_ENCODING):
         return "the stream came encoded"
     return None
+
+
+def live_stream_problem(resp: aiohttp.ClientResponse) -> str | None:
+    """Why the answer is not to be passed on to the frontend as a live stream, None if it may be."""
+    if (problem := response_problem(resp)) is not None:
+        return problem
+    media_type = resp.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").split(";")[0].strip().lower()
+    if media_type == LIVE_STREAM_MEDIA_TYPE:
+        return None
+    # The type comes from a device on the network: one line, cut short, before it reaches a log.
+    return f"the answer is not an MJPEG stream (Content-Type {one_line(media_type)[:40] or 'missing'})"
+
+
+def closed_session_refusal(session: aiohttp.ClientSession, err: RuntimeError) -> bool:
+    """True if `err` is aiohttp's refusal of a request on a closed session (Home Assistant closes its shared session
+    when it stops); any other RuntimeError is a bug, a closed session or not."""
+    return session.closed and str(err) == _AIOHTTP_SESSION_CLOSED
 
 
 async def collect_frame(resp: aiohttp.ClientResponse, received: bytearray) -> tuple[bytes | None, str | None]:
@@ -72,6 +99,45 @@ async def collect_frame(resp: aiohttp.ClientResponse, received: bytearray) -> tu
     if len(received) >= DOORSTATION_DIRECT_MAX_BYTES:
         return None, "no frame in the first bytes of the stream"
     return None, "the stream ended without a frame"
+
+
+async def live_stream_start(resp: aiohttp.ClientResponse) -> tuple[bytes, str | None]:
+    """What was read of an answer that is to be passed on as a live stream, or b"" and the failure cause.
+
+    The stream is only handed to the frontend once it has delivered a complete frame: an answer of 200 that then
+    sends nothing, ends, or sends no picture is not a stream, and the frontend must not get an empty one. Everything
+    read is returned (the frame and what came with it), to be passed on first. Waits DOORSTATION_DIRECT_TIMEOUT_SEC.
+    """
+    if (problem := live_stream_problem(resp)) is not None:
+        return b"", problem
+    received = bytearray()
+    try:
+        async with asyncio.timeout(DOORSTATION_DIRECT_TIMEOUT_SEC):
+            frame, cause = await collect_frame(resp, received)
+    except TimeoutError:
+        return b"", "no frame in time"
+    return (b"", cause) if frame is None else (bytes(received), None)
+
+
+class PrefetchedStream:
+    """A stream whose first bytes were read already: they come first, then the rest of the stream.
+
+    It ends (empty read) once `alive` says no, so a stream does not outlive the camera it belongs to.
+    """
+
+    def __init__(self, first: bytes, rest: aiohttp.StreamReader, alive: Callable[[], bool] = lambda: True) -> None:
+        self._first = first
+        self._rest = rest
+        self._alive = alive
+
+    async def read(self, n: int = -1) -> bytes:
+        """The prefetched bytes at the first call (whole, whatever n), the stream's own after that; b"" when over."""
+        if not self._alive():
+            return b""
+        if self._first:
+            first, self._first = self._first, b""
+            return first
+        return await self._rest.read(n)
 
 
 async def read_direct_frame(
@@ -98,8 +164,6 @@ async def read_direct_frame(
     except aiohttp.ClientError as err:
         return None, type(err).__name__
     except RuntimeError as err:
-        # aiohttp refuses a request on a closed session with this RuntimeError (Home Assistant closes its shared
-        # session when it stops); any other RuntimeError is a bug and goes through, a closed session or not.
-        if not session.closed or str(err) != _AIOHTTP_SESSION_CLOSED:
+        if not closed_session_refusal(session, err):
             raise
         return None, SESSION_CLOSED_CAUSE
