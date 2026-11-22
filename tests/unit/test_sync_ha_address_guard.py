@@ -77,6 +77,7 @@ def _button(ha_address: str, dev_id: str | None = "7") -> ComexioSyncButton:
         async_ha_address=AsyncMock(return_value=ha_address),
         ha_address=HaAddressResolver(MagicMock()),
         required_webio_classes=list(WEBIO_CLASSES),
+        active_webio_classes=tuple(WEBIO_CLASSES),
         last_audit_results={},
         cancel_sync=False,
         data={},
@@ -315,6 +316,50 @@ def test_the_function_plan_stages_run_in_order_with_the_knx_slice_carved_out() -
         "Checking trigger pairs...",
     ]
     assert ctx.skipped_stages == []
+
+
+def test_without_the_knx_import_the_knx_stage_neither_runs_nor_shows_in_the_status() -> None:
+    """No KNX class opted in: no "Checking KNX ..." status and no config read for nothing; the others run as before."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], [{"marker_id": 1}]))
+
+    assert button._wire_knx_full.await_count == 0
+    assert [name for name in _STAGES if getattr(button, name).await_count] == [
+        "_wire_created_pairs",
+        "_wire_trigger_pairs",
+    ]
+    assert [c.args[0] for c in ctx.update_status.call_args_list] == [
+        "Checking function plan wiring of the Web-IO commands...",
+        "Checking trigger pairs...",
+    ]
+
+
+def test_a_cancel_without_the_knx_import_does_not_name_the_knx_stage_as_not_started() -> None:
+    """The stage is not part of the run, so the cancel banner must not list it among the ones a cancel skipped."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    _cancel_in(button, "_wire_created_pairs")
+
+    _press(button)
+
+    text = button.coordinator.sync_progress_text
+    assert button._wire_trigger_pairs.await_count == 0
+    assert "Not started: trigger pair wiring\n" in text
+    assert "KNX write path wiring" not in text
+
+
+def test_the_standalone_knx_action_still_runs_without_the_knx_import() -> None:
+    """Only the full sync's stage list is gated; knx_bridge_add_missing keeps running its KNX stage."""
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    button._wire_knx_full.return_value = []
+
+    _press(button, "knx_bridge_add_missing")
+
+    assert button._wire_knx_full.await_count == 1
 
 
 def test_a_cancelled_sync_names_the_skipped_classes_but_reports_no_error() -> None:

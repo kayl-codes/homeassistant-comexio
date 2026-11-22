@@ -952,14 +952,19 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         # seconds; the trigger step reuses it when the KNX step wrote nothing, otherwise
         # fetches its own) and reports nothing when there is nothing to wire — without
         # these lines the status sat on the last analysis step for the whole wiring pass.
-        return await self._run_wiring_stages(
-            ctx,
-            [
-                (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
-                (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True)),
-                (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
-            ],
-        )
+        # Without the KNX import there is no KNX Web-IO class and no K-object, so the KNX stage would only
+        # read Comexio's config for nothing (async_fresh_knx_audits answers "does not apply") — and name
+        # itself in the status for the seconds that read takes. It stays out of the run, and out of the
+        # "Not started" list of a cancel.
+        stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]] = [
+            (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
+            (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
+        ]
+        if WebioClass.KNX in self.coordinator.active_webio_classes:
+            stages.insert(
+                1, (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True))
+            )
+        return await self._run_wiring_stages(ctx, stages)
 
     async def _run_wiring_stages(
         self, ctx: _SyncContext, stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]]
