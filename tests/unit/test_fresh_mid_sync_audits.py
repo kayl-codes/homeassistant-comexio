@@ -263,6 +263,42 @@ def test_the_knx_step_still_wires_the_read_path_of_new_commands_when_its_audit_d
     assert wire_cluster.await_args.args[:7] == (ctx, 77, [5], False, {5}, {}, {})
 
 
+def test_a_sync_with_the_import_off_wires_a_new_k_command_through_the_real_knx_stage() -> None:
+    """The whole way in: stage selection, the stage's gap filter, `_wire_knx_full` up to the cluster write."""
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.knx_result = ([], [], None)
+    coordinator.active_webio_classes = tuple(cls for cls in WebioClass if cls is not WebioClass.KNX)
+    coordinator.cancel_sync = False
+    resolved: list[list[int]] = []
+
+    async def resolve_knx_clusters(k_ids: list[int]):
+        resolved.append(k_ids)
+        return {77: [5]}, set(), []
+
+    @asynccontextmanager
+    async def plan_restarted_on_error(*_args: object):
+        yield
+
+    coordinator.resolve_knx_clusters = resolve_knx_clusters
+    button, ctx = _sync_button(coordinator)
+    wire_cluster = AsyncMock(return_value="")
+
+    with patch.multiple(
+        ComexioSyncButton,
+        _wire_created_pairs=AsyncMock(return_value=[]),
+        _wire_trigger_pairs=AsyncMock(return_value=[]),
+        _prestage_knx_webio=AsyncMock(return_value=(SimpleNamespace(allocated=[]), [])),
+        _plan_restarted_on_error=plan_restarted_on_error,
+        _wire_knx_cluster=wire_cluster,
+    ):
+        # K9 is a gap the audit found before the sync: no work of this sync with the import off.
+        asyncio.run(button._wire_plans_after_sync(ctx, ["HA K5 Door"], [{"knx_id": 5}, {"knx_id": 9}]))
+
+    assert resolved == [[5]]
+    wire_cluster.assert_awaited_once()
+    assert wire_cluster.await_args.args[:7] == (ctx, 77, [5], False, {5}, {}, {})
+
+
 def test_the_read_path_leg_adds_the_new_k_command_to_its_plan_through_the_api() -> None:
     """The real cluster and read-path leg, only the API boundary faked: plan 77 is stopped, gets K5, is finalized."""
     coordinator = _FakeSyncCoordinator(bridge=[])
