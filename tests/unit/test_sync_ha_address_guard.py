@@ -324,30 +324,36 @@ def test_without_the_knx_import_the_knx_stage_neither_runs_nor_shows_in_the_stat
     button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
     ctx = _ctx(button, REACHABLE)
 
-    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], [{"marker_id": 1}]))
+    # A KNX gap the audit found before the sync is not work of this sync: it does not bring the stage back.
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], [{"marker_id": 1}, {"knx_id": 5}]))
 
     assert button._wire_knx_full.await_count == 0
     assert [name for name in _STAGES if getattr(button, name).await_count] == [
         "_wire_created_pairs",
         "_wire_trigger_pairs",
     ]
+    button._wire_created_pairs.assert_awaited_once_with(ctx, ["HA M1 Pump"], [{"marker_id": 1}])
     assert [c.args[0] for c in ctx.update_status.call_args_list] == [
         "Checking function plan wiring of the Web-IO commands...",
         "Checking trigger pairs...",
     ]
 
 
-@pytest.mark.parametrize(
-    ("names", "gaps"),
-    [
-        (["HA K5 Door"], []),
-        ([], [{"knx_id": 5}]),
-    ],
-)
-def test_the_knx_stage_stays_when_the_sync_made_knx_work_though_the_import_was_switched_off(
-    names: list[str], gaps: list[dict]
-) -> None:
+def test_the_knx_stage_runs_with_the_knx_import_though_the_sync_created_no_knx_command() -> None:
+    """The import is on: the stage runs on its own account, whatever this sync created."""
+    button = _button(REACHABLE)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, ["HA M1 Pump"], [{"marker_id": 1}]))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, ["HA M1 Pump"], [{"marker_id": 1}], refresh_audit=True)
+    assert "Checking KNX write path and wiring..." in [c.args[0] for c in ctx.update_status.call_args_list]
+
+
+def test_the_knx_stage_stays_when_the_sync_created_knx_commands_though_the_import_was_switched_off() -> None:
     """The import turned off mid-sync: KNX commands this sync created still get their read path wired."""
+    names: list[str] = ["HA K5 Door"]
+    gaps: list[dict] = [{"knx_id": 5}]
     button = _button(REACHABLE)
     button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
     button._wire_knx_full.return_value = ["K5 linked"]

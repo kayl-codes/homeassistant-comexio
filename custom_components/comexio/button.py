@@ -955,15 +955,16 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         # Without the KNX import there is no KNX Web-IO class and no K-object, so the KNX stage would only
         # read Comexio's config for nothing (async_fresh_knx_audits answers "does not apply") — and name
         # itself in the status for the seconds that read takes. It stays out of the run, and out of the
-        # "Not started" list of a cancel. The exception is a sync that itself produced KNX work: the import
-        # may have been switched off after the class sync created the commands (a reload waits for the
-        # sync), and their read path would otherwise stay unwired.
+        # "Not started" list of a cancel. The exception is a sync that itself created KNX commands: the import
+        # may have been switched off after the class sync created them (a reload waits for the sync), and
+        # their read path would otherwise stay unwired. A KNX gap the audit found before the sync is no work
+        # of this sync: with the import off it stays as it is.
         stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]] = [
             (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
             (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
         ]
-        sync_made_knx_work = len(created_names_no_knx) < len(created_names) or len(gap_items_no_knx) < len(gap_items)
-        if sync_made_knx_work or WebioClass.KNX in self.coordinator.active_webio_classes:
+        sync_created_knx_commands = len(created_names_no_knx) < len(created_names)
+        if sync_created_knx_commands or WebioClass.KNX in self.coordinator.active_webio_classes:
             stages.insert(
                 1, (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True))
             )

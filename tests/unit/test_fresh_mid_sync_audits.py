@@ -1,9 +1,11 @@
 """Fresh mid-sync audits: one config fetch for the KNX step, reused by the trigger step only when unchanged."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from custom_components.comexio.button import (
     _FLANKE_UNUSABLE_LINE,
@@ -235,14 +237,29 @@ def test_the_knx_step_still_wires_the_read_path_of_new_commands_when_its_audit_d
 
     async def resolve_knx_clusters(k_ids: list[int]):
         resolved.append(k_ids)
-        return {}, [], []
+        return {77: [5]}, set(), []
+
+    @asynccontextmanager
+    async def plan_restarted_on_error(*_args: object):
+        yield
 
     coordinator.resolve_knx_clusters = resolve_knx_clusters
     button, ctx = _sync_button(coordinator)
+    prestage = (SimpleNamespace(allocated=[]), [])
+    wire_cluster = AsyncMock(return_value="")
 
-    asyncio.run(button._wire_knx_full(ctx, ["HA K5 Door"], [], refresh_audit=True))
+    with patch.multiple(
+        ComexioSyncButton,
+        _prestage_knx_webio=AsyncMock(return_value=prestage),
+        _plan_restarted_on_error=plan_restarted_on_error,
+        _wire_knx_cluster=wire_cluster,
+    ):
+        asyncio.run(button._wire_knx_full(ctx, ["HA K5 Door"], [], refresh_audit=True))
 
     assert resolved == [[5]]
+    # The write itself is reached: plan 77 gets K5 on the read path, no bridge or loopback leg.
+    wire_cluster.assert_awaited_once()
+    assert wire_cluster.await_args.args[:7] == (ctx, 77, [5], False, {5}, {}, {})
 
 
 def test_trigger_step_reuses_the_knx_snapshot_once_when_nothing_was_written() -> None:
