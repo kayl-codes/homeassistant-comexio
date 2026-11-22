@@ -17,11 +17,10 @@ from typing import cast
 from aiocomexio.doorstation import Doorstation
 import aiohttp
 from aiohttp import web
-from aiohttp.hdrs import CONTENT_TYPE
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.aiohttp_client import async_aiohttp_proxy_stream, async_get_clientsession
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -32,6 +31,7 @@ from .const import (
     DOORSTATION_DIRECT_MIN_READ_SEC,
     DOORSTATION_DIRECT_RETRY_SEC,
     DOORSTATION_DIRECT_TIMEOUT_SEC,
+    DOORSTATION_LIVE_STREAM_MIN_RUN_SEC,
     DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC,
     doorstation_camera_unique_id,
     extension_device_name,
@@ -45,6 +45,8 @@ from .doorstation_stream import (
     PrefetchedStream,
     closed_session_refusal,
     doorstation_direct_url,
+    forward_live_stream,
+    live_stream_content_type,
     live_stream_start,
     read_direct_frame,
 )
@@ -54,7 +56,7 @@ _LOGGER = logging.getLogger(__name__)
 
 _LOOKUP_TIMED_OUT = "the IO-Server did not answer in time"
 # A live stream runs as long as it is watched: Home Assistant's session limits a whole request to 300 s by default,
-# so only the connection is limited here (a stream that stalls ends in the proxy helper's own read timeout).
+# so only the connection is limited here (a stream that stalls ends in `forward_live_stream`'s own read timeout).
 _STREAM_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=DOORSTATION_DIRECT_TIMEOUT_SEC)
 
 # Device name of a camera whose Doorstation lost its extension name after the camera was added.
@@ -324,17 +326,24 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
                     self._ext_id,
                 )
                 return None
-            self._direct_worked()
+            if (content_type := live_stream_content_type(resp)) is None:
+                # `live_stream_start` checked the answer: a missing type is a bug, not a Doorstation's doing.
+                raise RuntimeError("the live stream answer has no usable content type")
             # The stream ends with the camera it was started for: an offline extension, a Doorstation that is gone or
             # changed its camera, an unloading entry (Home Assistant's own still stream ends there as well).
             stream = cast(
                 aiohttp.StreamReader,
                 PrefetchedStream(prefix, resp.content, lambda: self._is_current(doorstation)),
             )
-            response = await async_aiohttp_proxy_stream(self.hass, request, stream, resp.headers.get(CONTENT_TYPE))
-            # Home Assistant's helper ends quietly when the Doorstation stalls or breaks off: the frontend reconnects.
-            _LOGGER.debug("[%s] Doorstation camera %d: the live stream ended", self.coordinator.server_id, self._ext_id)
-            return response
+            return await forward_live_stream(
+                self.hass,
+                request,
+                stream,
+                content_type,
+                lambda why, delivered_sec, doorstation_to_blame: self._live_stream_ended(
+                    doorstation, why, delivered_sec, doorstation_to_blame
+                ),
+            )
         finally:
             self._streams_open -= 1
             if resp is not None:
@@ -361,6 +370,29 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
                 raise
             self._stream_failed(doorstation, SESSION_CLOSED_CAUSE)
         return None
+
+    def _live_stream_ended(
+        self, doorstation: Doorstation, why: str, delivered_sec: float, doorstation_to_blame: bool
+    ) -> None:
+        """A live stream that was passed on is over. The direct way counts as working again only now: a Doorstation
+        that sends one picture and then drops or goes quiet (it delivered for less than
+        DOORSTATION_LIVE_STREAM_MIN_RUN_SEC) is a failure like a refused request, with the pause and the one warning
+        per streak (else it would make the frontend reconnect in a loop, unseen, and a start would clear the streak
+        it is about to continue). A stream that delivered for a while, or that the viewer or Home Assistant ended,
+        is no failure."""
+        _LOGGER.debug(
+            "[%s] Doorstation camera %d: the live stream ended after %.0f s of data (%s)",
+            self.coordinator.server_id,
+            self._ext_id,
+            delivered_sec,
+            why,
+        )
+        if not self._is_current(doorstation):
+            return  # it ended with its camera (offline extension, changed or gone, unloading): nobody's doing
+        if doorstation_to_blame and delivered_sec < DOORSTATION_LIVE_STREAM_MIN_RUN_SEC:
+            self._stream_failed(doorstation, f"{why} after {delivered_sec:.0f} s of data")
+        else:
+            self._direct_worked()
 
     def _stream_failed(self, doorstation: Doorstation, cause: str) -> None:
         """The live stream could not be had: the direct way is paused, unless the camera is gone meanwhile."""

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from typing import NamedTuple
+from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 from aiohttp import web
@@ -15,6 +16,8 @@ from custom_components.comexio import doorstation_stream
 from custom_components.comexio.doorstation_stream import (
     SESSION_CLOSED_CAUSE,
     doorstation_direct_url,
+    forward_live_stream,
+    live_stream_content_type,
     read_direct_frame,
 )
 
@@ -380,6 +383,243 @@ def test_the_type_is_read_whatever_its_case_and_parameters() -> None:
         assert prefix.startswith(PART_HEAD + FRAME)
 
     _serve(handler, check)
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("multipart/x-mixed-replace; boundary=frame", 'multipart/x-mixed-replace;boundary="frame"'),
+        ("Multipart/X-Mixed-Replace;boundary=x", 'multipart/x-mixed-replace;boundary="x"'),
+        ('multipart/x-mixed-replace; boundary="my-b.1"; charset=utf-8', 'multipart/x-mixed-replace;boundary="my-b.1"'),
+        ("multipart/x-mixed-replace; boundary=" + "b" * 70, f'multipart/x-mixed-replace;boundary="{"b" * 70}"'),
+        ("multipart/x-mixed-replace", None),
+        ("multipart/x-mixed-replace; boundary=", None),
+        ("multipart/x-mixed-replace; boundary=" + "b" * 71, None),
+        ('multipart/x-mixed-replace; boundary=a"b', None),
+        ("multipart/x-mixed-replace; boundary=a<script>", None),
+        ("multipart/x-mixed-replace; boundary=a b", None),
+        ("multipart/x-mixed-replace; boundary=a\r\nSet-Cookie: x=1", None),
+        ("text/html; boundary=frame", None),
+        ("", None),
+        ('multipart/x-mixed-replace; boundary="frame', None),
+        ("multipart/x-mixed-replace; boundary=frame;", 'multipart/x-mixed-replace;boundary="frame"'),
+        ("multipart/x-mixed-replace; xboundary=frame", None),
+        ('multipart/x-mixed-replace; boundary=" "', None),
+        ("multipart/x-mixed-replace; boundary=K", None),
+        ("multipart/x-mixed-replace; boundary=a; boundary=b", 'multipart/x-mixed-replace;boundary="a"'),
+        ("multipart/x-mixed-replace; BOUNDARY=Frame", 'multipart/x-mixed-replace;boundary="Frame"'),
+        (
+            "multipart/x-mixed-replace; boundary=a'()+_,-./:=?Z9",
+            'multipart/x-mixed-replace;boundary="a\'()+_,-./:=?Z9"',
+        ),
+        ("multipart/x-mixed-replace; boundary=frame ", 'multipart/x-mixed-replace;boundary="frame"'),
+        ("multipart/x-mixed-replace; boundary=\u017f", None),
+    ],
+    ids=[
+        "plain",
+        "case and no blank",
+        "quoted with a parameter after it",
+        "longest boundary",
+        "no boundary",
+        "empty boundary",
+        "boundary too long",
+        "quote inside",
+        "markup inside",
+        "blank inside",
+        "header injection",
+        "other type",
+        "no header",
+        "unterminated quote",
+        "trailing semicolon",
+        "boundary only as the end of another name",
+        "quoted blank",
+        "kelvin sign is no ascii letter",
+        "duplicate boundary, the first counts",
+        "capitals",
+        "every special character",
+        "trailing blank",
+        "long s is no ascii letter",
+    ],
+)
+def test_the_type_a_live_stream_is_passed_on_with_is_rebuilt_from_a_clean_boundary(
+    header: str, expected: str | None
+) -> None:
+    """The frontend never gets the Doorstation's header as it came: a boundary of anything but plain characters is no
+    stream (the type and the boundary are all that is taken over)."""
+    assert live_stream_content_type(SimpleNamespace(headers={"Content-Type": header})) == expected  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("content_type", "cause"),
+    [
+        ("multipart/x-mixed-replace", "no boundary"),
+        ("multipart/x-mixed-replace; boundary=a<b>", "boundary with unsupported characters"),
+        ("multipart/x-mixed-replace; xboundary=frame", "no boundary"),
+        ("multipart/x-mixed-replace; boundary=", "no boundary"),
+    ],
+    ids=["no boundary", "unsupported characters", "only the end of another name", "empty boundary"],
+)
+def test_a_live_stream_answer_without_a_usable_boundary_is_not_passed_on(content_type: str, cause: str) -> None:
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME, headers={"Content-Type": content_type})
+
+    async def check(url: str) -> None:
+        assert await _live_start(url) == (b"", f"the answer is not an MJPEG stream ({cause})")
+
+    _serve(handler, check)
+
+
+class _Chunks:
+    """A stream that hands out `chunks` one by one, then ends, raises `error`, or (stall=True) never answers."""
+
+    def __init__(self, chunks: list[bytes], stall: bool = False, error: Exception | None = None) -> None:
+        self._chunks = list(chunks)
+        self._stall = stall
+        self._error = error
+
+    async def read(self, n: int = -1) -> bytes:
+        if self._chunks:
+            return self._chunks.pop(0)
+        if self._error is not None:
+            raise self._error
+        if self._stall:
+            await asyncio.sleep(30)
+        return b""
+
+
+class _Forwarded(NamedTuple):
+    headers: dict[str, str]
+    body: bytes
+    ended: list[tuple[str, float, bool]]
+
+
+def _forwarded(stream: _Chunks, running: bool = True) -> _Forwarded:
+    """What a viewer gets from `forward_live_stream` for `stream`, and what it told `on_ended`."""
+    sent: list[tuple[dict[str, str], bytes]] = []
+    ended: list[tuple[str, float, bool]] = []
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return await forward_live_stream(
+            SimpleNamespace(is_running=running),  # type: ignore[arg-type]
+            request,
+            stream,  # type: ignore[arg-type]
+            'multipart/x-mixed-replace;boundary="frame"',
+            lambda why, ran_sec, doorstation_to_blame: ended.append((why, ran_sec, doorstation_to_blame)),
+        )
+
+    async def check(url: str) -> None:
+        async with asyncio.timeout(5), aiohttp.ClientSession() as session, session.get(url) as resp:
+            try:
+                body = await resp.read()
+            except aiohttp.ClientError:
+                body = b""
+            sent.append((dict(resp.headers), body))
+
+    _serve(handler, check)
+    return _Forwarded(*sent[0], ended)
+
+
+def test_a_live_stream_is_forwarded_with_headers_that_keep_a_browser_from_running_it() -> None:
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME, b"more"]))
+
+    assert forwarded.body == PART_HEAD + FRAME + b"more"
+    assert forwarded.headers["Content-Type"] == 'multipart/x-mixed-replace;boundary="frame"'
+    assert forwarded.headers["X-Content-Type-Options"] == "nosniff"
+    assert forwarded.headers["Content-Security-Policy"] == "sandbox"
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, *readings: float) -> None:
+    """The forwarder's clock reads `readings` one by one: start, then the end of every chunk passed on."""
+    monkeypatch.setattr(doorstation_stream, "time", SimpleNamespace(monotonic=iter(readings).__next__))
+
+
+def _reported(forwarded: _Forwarded) -> list[tuple[str, float, bool]]:
+    return forwarded.ended
+
+
+def test_a_live_stream_the_doorstation_ends_is_reported_as_its_doing(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clock(monkeypatch, 100.0, 107.5)
+
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME]))
+
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_BY_DOORSTATION, 7.5, True)]
+
+
+def test_a_live_stream_that_stalls_ends_quietly_with_what_came(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(doorstation_stream, "DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC", 0.05)
+    _clock(monkeypatch, 100.0, 100.5)
+
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME], stall=True))
+
+    assert forwarded.body == PART_HEAD + FRAME
+    # The stall itself is no time the Doorstation delivered: it counts up to the last chunk.
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_STALLED, 0.5, True)]
+
+
+def test_a_live_stream_that_breaks_off_names_the_error_class_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    _clock(monkeypatch, 100.0, 103.0)
+
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME], error=aiohttp.ClientPayloadError("secret 192.0.2.7")))
+
+    assert forwarded.body == PART_HEAD + FRAME
+    assert _reported(forwarded) == [("the stream broke off (ClientPayloadError)", 3.0, True)]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionResetError("gone"),
+        aiohttp.ClientConnectionResetError("gone"),
+        aiohttp.ClientPayloadError("gone"),
+    ],
+    ids=["ConnectionResetError", "ClientConnectionResetError", "ClientError that is no ConnectionError"],
+)
+def test_a_viewer_that_leaves_is_not_blamed_on_the_doorstation(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    async def refuse(self: web.StreamResponse, data: bytes) -> None:
+        raise error
+
+    monkeypatch.setattr(web.StreamResponse, "write", refuse)
+    _clock(monkeypatch, 100.0)
+
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME]))
+
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_VIEWER_LEFT, 0.0, False)]
+
+
+def test_a_cancelled_request_is_reported_as_the_viewer_leaving_and_stays_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The browser closes the tab: Home Assistant cancels the handler."""
+    monkeypatch.setattr(web.StreamResponse, "prepare", AsyncMock())
+    monkeypatch.setattr(web.StreamResponse, "write", AsyncMock())
+    _clock(monkeypatch, 100.0, 102.0)
+    ended: list[tuple[str, float, bool]] = []
+    forwarding = forward_live_stream(
+        SimpleNamespace(is_running=True),  # type: ignore[arg-type]
+        MagicMock(),
+        _Chunks([b"picture"], error=asyncio.CancelledError()),  # type: ignore[arg-type]
+        'multipart/x-mixed-replace;boundary="frame"',
+        lambda why, seconds, blame: ended.append((why, seconds, blame)),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(forwarding)
+
+    assert ended == [(doorstation_stream.ENDED_VIEWER_LEFT, 2.0, False)]
+
+
+def test_a_live_stream_is_not_read_while_home_assistant_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    stream = _Chunks([PART_HEAD + FRAME])
+    _clock(monkeypatch, 100.0)
+
+    forwarded = _forwarded(stream, running=False)
+
+    assert forwarded.body == b""
+    assert forwarded.headers["Content-Security-Policy"] == "sandbox"
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_HA_STOPPING, 0.0, False)]
+    assert len(stream._chunks) == 1  # nothing was read
 
 
 def test_a_prefetched_stream_hands_out_what_was_read_first_and_then_the_rest() -> None:

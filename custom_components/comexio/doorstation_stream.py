@@ -4,20 +4,26 @@ The Doorstation serves its camera as an MJPEG stream under ``http://<its address
 login (confirmed on a real installation, kayl-codes/homeassistant-comexio#180). aiocomexio reads the stream only
 over the IO-Server and its admin session, so the first frame is read here, over a plain Home Assistant web session,
 with aiocomexio's JPEG frame reader; the live stream is checked here as well (status, encoding, media type, first
-frame) before the camera passes it on. Nothing here touches Home Assistant, so it is tested without it.
+frame) before the camera passes it on. Apart from the forwarder's `hass.is_running` check nothing here touches
+Home Assistant, so it is tested without it.
 """
 
 import asyncio
 from collections.abc import Callable
 from http import HTTPStatus
+import re
+import time
 
 from aiocomexio.doorstation import JpegFrameReader, doorstation_stream_path
 from aiocomexio.exceptions import ComexioDataError
 import aiohttp
+from aiohttp import web
+from homeassistant.core import HomeAssistant
 
 from .const import (
     DOORSTATION_DIRECT_MAX_BYTES,
     DOORSTATION_DIRECT_TIMEOUT_SEC,
+    DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC,
     DOORSTATION_OWN_CAMERA_ID,
     one_line,
 )
@@ -33,10 +39,21 @@ DIRECT_REQUEST_HEADERS = {"Accept-Encoding": "identity"}
 _CHUNK_BYTES = 64 * 1024
 _AIOHTTP_SESSION_CLOSED = "Session is closed"  # the text of aiohttp's refusal of a request on a closed session
 SESSION_CLOSED_CAUSE = "the session was closed"
-# The only type a live stream is passed on with. The frontend gets the Doorstation's header unchanged, and the answer
-# comes over plain HTTP from a device on the network: a type like text/html would let a browser run what the body
-# holds on Home Assistant's own origin.
+# The only type a live stream is passed on with. The answer comes over plain HTTP from a device on the network: a type
+# like text/html would let a browser run what the body holds on Home Assistant's own origin. The frontend gets a header
+# built here (the type and a boundary of plain characters), never the Doorstation's own, and the response carries
+# headers that keep a browser from running anything in it anyway (`forward_live_stream`).
 LIVE_STREAM_MEDIA_TYPE = "multipart/x-mixed-replace"
+# RFC 2046 boundary characters without the space, at most 70 of them, quoted or not (a quote must be closed). ASCII
+# only: with IGNORECASE alone `[A-Za-z]` also matches U+212A and U+017F. A deliberate approximation: the first
+# `boundary=` parameter wins, and a quoted value of another parameter that holds the text is not told apart.
+_BOUNDARY = re.compile(
+    r"""[;\s]boundary=(?:"([0-9A-Za-z'()+_,\-./:=?]{1,70})"|([0-9A-Za-z'()+_,\-./:=?]{1,70}))\s*(?:;|$)""",
+    re.ASCII | re.IGNORECASE,
+)
+# A `boundary=` parameter with some value, usable or not: tells "no boundary" from "a boundary we do not take over".
+_BOUNDARY_PARAM = re.compile(r"[;\s]boundary=\s*[^;\s]", re.ASCII | re.IGNORECASE)
+LIVE_STREAM_RESPONSE_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}
 
 
 def doorstation_direct_url(address: str) -> str:
@@ -61,14 +78,35 @@ def response_problem(resp: aiohttp.ClientResponse) -> str | None:
     return None
 
 
+def _content_type_header(resp: aiohttp.ClientResponse) -> str:
+    return resp.headers.get(aiohttp.hdrs.CONTENT_TYPE, "")
+
+
+def _media_type(header: str) -> str:
+    return header.split(";")[0].strip().lower()
+
+
+def live_stream_content_type(resp: aiohttp.ClientResponse) -> str | None:
+    """The Content-Type a live stream is passed on with (the media type and the Doorstation's boundary, rebuilt from
+    plain characters only), None if the answer is no multipart stream with a usable boundary."""
+    header = _content_type_header(resp)
+    if _media_type(header) != LIVE_STREAM_MEDIA_TYPE or (found := _BOUNDARY.search(header)) is None:
+        return None
+    return f'{LIVE_STREAM_MEDIA_TYPE};boundary="{found.group(1) or found.group(2)}"'
+
+
 def live_stream_problem(resp: aiohttp.ClientResponse) -> str | None:
     """Why the answer is not to be passed on to the frontend as a live stream, None if it may be."""
     if (problem := response_problem(resp)) is not None:
         return problem
-    media_type = resp.headers.get(aiohttp.hdrs.CONTENT_TYPE, "").split(";")[0].strip().lower()
-    if media_type == LIVE_STREAM_MEDIA_TYPE:
+    if live_stream_content_type(resp) is not None:
         return None
     # The type comes from a device on the network: one line, cut short, before it reaches a log.
+    header = _content_type_header(resp)
+    media_type = _media_type(header)
+    if media_type == LIVE_STREAM_MEDIA_TYPE:
+        detail = "boundary with unsupported characters" if _BOUNDARY_PARAM.search(header) else "no boundary"
+        return f"the answer is not an MJPEG stream ({detail})"
     return f"the answer is not an MJPEG stream (Content-Type {one_line(media_type)[:40] or 'missing'})"
 
 
@@ -138,6 +176,82 @@ class PrefetchedStream:
             first, self._first = self._first, b""
             return first
         return await self._rest.read(n)
+
+
+# (why it ended, seconds the Doorstation delivered data, whether the Doorstation is to blame)
+StreamEnded = Callable[[str, float, bool], None]
+ENDED_BY_DOORSTATION = "the Doorstation ended the stream"
+ENDED_STALLED = "the Doorstation stopped sending"
+ENDED_VIEWER_LEFT = "the viewer left"
+ENDED_HA_STOPPING = "Home Assistant is stopping"
+
+
+class _Delivery:
+    """How long a stream delivered data: from its start to the last chunk passed on. A stall at the end (the read
+    timeout) is not part of it, so a device that sends one picture and then goes quiet delivered for about 0 s."""
+
+    def __init__(self) -> None:
+        self._started = self._last_data = time.monotonic()
+
+    def chunk_passed_on(self) -> None:
+        self._last_data = time.monotonic()
+
+    @property
+    def seconds(self) -> float:
+        return self._last_data - self._started
+
+
+async def _pump(
+    hass: HomeAssistant, response: web.StreamResponse, stream: aiohttp.StreamReader, delivery: _Delivery
+) -> tuple[str, bool]:
+    """Pass `stream` on to `response` until it ends: (why, whether the Doorstation is to blame). No address in it."""
+    while hass.is_running:
+        try:
+            async with asyncio.timeout(DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC):
+                data = await stream.read(_CHUNK_BYTES)
+        except TimeoutError:
+            return ENDED_STALLED, True
+        except aiohttp.ClientError as err:
+            return f"the stream broke off ({type(err).__name__})", True
+        if not data:
+            return ENDED_BY_DOORSTATION, True
+        try:
+            await response.write(data)
+        except (aiohttp.ClientError, ConnectionError):
+            return ENDED_VIEWER_LEFT, False
+        delivery.chunk_passed_on()
+    return ENDED_HA_STOPPING, False
+
+
+async def forward_live_stream(
+    hass: HomeAssistant,
+    request: web.BaseRequest,
+    stream: aiohttp.StreamReader,
+    content_type: str,
+    on_ended: StreamEnded,
+) -> web.StreamResponse:
+    """Pass the stream on to the frontend, like Home Assistant's proxy helper but with protective headers.
+
+    The body is a device's, passed on as it comes: `nosniff` keeps a browser from taking it for another type, and the
+    `sandbox` policy keeps a part that claims to be a page from running anything on Home Assistant's origin if the
+    stream is opened on its own instead of in an image. The helper cannot add headers, hence this copy. Ends quietly
+    (the frontend reconnects) when the Doorstation stalls (DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC), breaks off or
+    ends the stream, when the viewer leaves, and while Home Assistant stops; `on_ended` is told which of them it was,
+    how long the Doorstation delivered data and whether it is to blame, so the caller can tell a device that sends one
+    picture and drops or goes quiet every time from a viewer that closed the tab. A cancelled request (the viewer
+    closed the tab) is reported as the viewer leaving, then the cancellation goes on.
+    """
+    response = web.StreamResponse(headers=LIVE_STREAM_RESPONSE_HEADERS)
+    response.content_type = content_type
+    await response.prepare(request)
+    delivery = _Delivery()
+    try:
+        why, doorstation_to_blame = await _pump(hass, response, stream, delivery)
+    except asyncio.CancelledError:
+        on_ended(ENDED_VIEWER_LEFT, delivery.seconds, False)
+        raise
+    on_ended(why, delivery.seconds, doorstation_to_blame)
+    return response
 
 
 async def read_direct_frame(
