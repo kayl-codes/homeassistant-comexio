@@ -963,10 +963,17 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
             (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
         ]
-        sync_created_knx_commands = len(created_names_no_knx) < len(created_names)
-        if sync_created_knx_commands or WebioClass.KNX in self.coordinator.active_webio_classes:
+        knx_gap_items = gap_items
+        if WebioClass.KNX in self.coordinator.active_webio_classes:
+            run_knx_stage = True
+        else:
+            # Import off: only the KNX work this sync created goes on — its commands, and the gaps of those ids.
+            created_knx_ids = {_parse_source_id_from_webio_name(name, knx_prefix) for name in created_names} - {None}
+            run_knx_stage = bool(created_knx_ids)
+            knx_gap_items = [item for item in gap_items if item.get(knx_gap_key) in created_knx_ids]
+        if run_knx_stage:
             stages.insert(
-                1, (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True))
+                1, (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, knx_gap_items, refresh_audit=True))
             )
         return await self._run_wiring_stages(ctx, stages)
 

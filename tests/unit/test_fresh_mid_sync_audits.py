@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 from custom_components.comexio.button import (
     _FLANKE_UNUSABLE_LINE,
     ComexioSyncButton,
+    _KnxPrestage,
     _SyncContext,
     _unique_failures,
 )
@@ -260,6 +261,36 @@ def test_the_knx_step_still_wires_the_read_path_of_new_commands_when_its_audit_d
     # The write itself is reached: plan 77 gets K5 on the read path, no bridge or loopback leg.
     wire_cluster.assert_awaited_once()
     assert wire_cluster.await_args.args[:7] == (ctx, 77, [5], False, {5}, {}, {})
+
+
+def test_the_read_path_leg_adds_the_new_k_command_to_its_plan_through_the_api() -> None:
+    """The real cluster and read-path leg, only the API boundary faked: plan 77 is stopped, gets K5, is finalized."""
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.async_function_plan_change_backup = AsyncMock()
+    button, ctx = _sync_button(coordinator)
+    api = SimpleNamespace(
+        fub_data={},
+        function_plan_stop_fup=AsyncMock(),
+        function_plan_add_source_pairs=AsyncMock(return_value=([5], [])),
+    )
+    ctx.api = api
+    finalize = AsyncMock(return_value="")
+    state = {"done": 0, "total": 1, "t0": 0.0}
+
+    with patch.multiple(
+        ComexioSyncButton,
+        _plan_name=lambda _self, fub_id: f"HA - KNX plan {fub_id}",
+        _check_plan_rename_mismatch=lambda *_args: None,
+        _finalize_plan_after_pairs=finalize,
+    ):
+        line = asyncio.run(button._wire_knx_cluster(ctx, 77, [5], False, {5}, {}, {}, state, _KnxPrestage()))
+
+    api.function_plan_stop_fup.assert_awaited_once_with(77)
+    api.function_plan_add_source_pairs.assert_awaited_once()
+    assert api.function_plan_add_source_pairs.await_args.args == (77, [5])
+    assert api.function_plan_add_source_pairs.await_args.kwargs["ref_type"] == 11
+    assert finalize.await_args.args[1:4] == (77, "HA - KNX plan 77", [5])
+    assert "read-path +1/1" in line
 
 
 def test_trigger_step_reuses_the_knx_snapshot_once_when_nothing_was_written() -> None:

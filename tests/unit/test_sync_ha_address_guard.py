@@ -378,6 +378,44 @@ def test_the_knx_stage_stays_when_the_sync_created_knx_commands_though_the_impor
     assert "K5 linked" in lines
 
 
+def test_with_the_import_off_the_knx_stage_gets_only_the_gaps_of_the_commands_this_sync_created() -> None:
+    """A KNX gap the audit found before the sync is no work of this sync, even if the stage runs for another one."""
+    names: list[str] = ["HA K5 Door", "HA M1 Pump"]
+    gaps: list[dict] = [{"knx_id": 5}, {"knx_id": 9}, {"marker_id": 1}]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, [{"knx_id": 5}], refresh_audit=True)
+    button._wire_created_pairs.assert_awaited_once_with(ctx, ["HA M1 Pump"], [{"marker_id": 1}])
+
+
+def test_with_the_import_off_a_created_knx_command_without_a_gap_still_runs_the_stage_with_no_gaps() -> None:
+    names: list[str] = ["HA K5 Door"]
+    gaps: list[dict] = [{"marker_id": 1}]
+    button = _button(REACHABLE)
+    button.coordinator.active_webio_classes = tuple(cls for cls in WEBIO_CLASSES if cls is not WebioClass.KNX)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, [], refresh_audit=True)
+    button._wire_created_pairs.assert_awaited_once_with(ctx, [], [{"marker_id": 1}])
+
+
+def test_with_the_import_on_every_gap_reaches_the_knx_stage_whatever_the_sync_created() -> None:
+    names: list[str] = ["HA M1 Pump"]
+    gaps: list[dict] = [{"marker_id": 1}, {"knx_id": 9}]
+    button = _button(REACHABLE)
+    ctx = _ctx(button, REACHABLE)
+
+    asyncio.run(button._wire_plans_after_sync(ctx, names, gaps))
+
+    button._wire_knx_full.assert_awaited_once_with(ctx, names, gaps, refresh_audit=True)
+
+
 def test_a_cancel_without_the_knx_import_does_not_name_the_knx_stage_as_not_started() -> None:
     """The stage is not part of the run, so the cancel banner must not list it among the ones a cancel skipped."""
     button = _button(REACHABLE)
