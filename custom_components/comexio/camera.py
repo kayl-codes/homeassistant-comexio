@@ -203,11 +203,12 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
                 # failure streak.
                 self._frame = None
                 _LOGGER.debug(
-                    "[%s] Doorstation camera %d: dropped the answer of camera %d (%s), it changed meanwhile",
+                    "[%s] Doorstation camera %d: dropped the answer of camera %d (%s), %s",
                     self.coordinator.server_id,
                     self._ext_id,
                     doorstation.camera_id,
                     one_line(error or "image"),
+                    "Home Assistant is stopping" if self.hass.is_stopping else "it changed meanwhile",
                 )
                 return None
             if not frame:
@@ -398,9 +399,11 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
 
     def _is_current(self, asked: Doorstation) -> bool:
         """The Doorstation is still known with the camera that was asked, its extension is not offline and the entry
-        is not unloading: whatever was asked belongs to a camera that is there.
+        is not unloading nor Home Assistant stopping: whatever was asked belongs to a camera that is there.
 
         The unloading flag is set while the entry waits before it unloads, so for that time no image is handed out.
+        While Home Assistant stops, its shared web session is closed under a read: that read ends without a failure
+        streak (no pause, no warning for a Doorstation that is fine).
         """
         current = self._doorstation
         return (
@@ -408,6 +411,7 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             and current.camera_id == asked.camera_id
             and not self._extension_offline
             and not self.coordinator.unloading
+            and not self.hass.is_stopping
         )
 
     def _report_failure(self, doorstation: Doorstation, error: str | None) -> None:

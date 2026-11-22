@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, patch
 from aiocomexio.doorstation import Doorstation
 from homeassistant.components.camera import DATA_COMPONENT, async_get_image
 from homeassistant.const import STATE_UNAVAILABLE
-from homeassistant.core import HomeAssistant
+from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 import pytest
@@ -23,6 +23,7 @@ from custom_components.comexio.const import (
     DOORSTATION_ADDRESS_RECHECK_SEC,
     DOORSTATION_DIRECT_RETRY_SEC,
 )
+from custom_components.comexio.doorstation_stream import SESSION_CLOSED_CAUSE
 
 from .conftest import SERVER_ID, device_by_identifier
 
@@ -632,6 +633,31 @@ async def test_a_camera_that_went_during_a_successful_address_lookup_sends_no_re
     coordinator.api.get_doorstation_snapshot.assert_not_called()
 
 
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_read_that_ends_with_home_assistant_stopping_starts_no_failure_streak(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    async def read_while_home_assistant_stops(*_args: object, **_kwargs: object) -> tuple[None, str]:
+        hass.set_state(CoreState.stopping)  # its shared web session is closed under the read
+        return None, SESSION_CLOSED_CAUSE
+
+    try:
+        with patch("custom_components.comexio.camera.read_direct_frame", read_while_home_assistant_stops):
+            assert await camera.async_camera_image() is None  # dropped like the answer of a camera that went
+    finally:
+        hass.set_state(CoreState.running)
+
+    assert camera._direct_failed_at is None  # no pause, no warning for a Doorstation that is fine
+    assert camera._warned_camera_id is None
+    assert camera._failed_at is None
+    assert camera._frame is None
+    assert not camera._lock.locked()
+    coordinator.api.get_doorstation_snapshot.assert_not_called()
+
+
 @pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_still_read_that_is_cancelled_in_the_address_lookup_lets_the_lock_go(
     hass: HomeAssistant, entry: MockConfigEntry
@@ -775,6 +801,47 @@ async def test_a_lookup_that_times_out_with_no_address_known_is_asked_again(
         assert await camera._address_within_budget() == (None, True)
 
     assert camera._address_is_due()  # nothing is known: the next read looks again
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_closed_session_while_home_assistant_runs_is_an_ordinary_failure(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    # Without HA stopping nobody explains a closed session away: the direct way pauses and the IO-Server answers.
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+
+    with patch(
+        "custom_components.comexio.camera.read_direct_frame", AsyncMock(return_value=(None, SESSION_CLOSED_CAUSE))
+    ):
+        assert await camera.async_camera_image() == FRAME
+
+    assert camera._direct_failed_at is not None
+    coordinator.api.get_doorstation_snapshot.assert_awaited_once()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_nothing_is_read_or_handed_out_once_home_assistant_is_stopping(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    doorstation = coordinator.doorstations.known[2]
+    camera._frame, camera._frame_at, camera._frame_camera_id = FRAME, time.monotonic(), doorstation.camera_id
+    read = AsyncMock()
+
+    hass.set_state(CoreState.stopping)
+    try:
+        with patch("custom_components.comexio.camera.read_direct_frame", read):
+            assert await camera.async_camera_image() is None
+    finally:
+        hass.set_state(CoreState.running)
+
+    read.assert_not_called()
+    coordinator.api.get_doorstation_snapshot.assert_not_called()
+    assert camera._frame is None
+    assert camera._direct_failed_at is None
+    assert camera._failed_at is None
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

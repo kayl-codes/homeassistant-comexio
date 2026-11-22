@@ -29,6 +29,8 @@ DIRECT_REQUEST_HEADERS = {"Accept-Encoding": "identity"}
 # redirect would make Home Assistant call whatever address a device on the network names. A redirect counts as
 # an error status (response_problem).
 _CHUNK_BYTES = 64 * 1024
+_AIOHTTP_SESSION_CLOSED = "Session is closed"  # the text of aiohttp's refusal of a request on a closed session
+SESSION_CLOSED_CAUSE = "the session was closed"
 
 
 def doorstation_direct_url(address: str) -> str:
@@ -95,3 +97,9 @@ async def read_direct_frame(
         return None, "no frame in time" if answered else "no answer in time"
     except aiohttp.ClientError as err:
         return None, type(err).__name__
+    except RuntimeError as err:
+        # aiohttp refuses a request on a closed session with this RuntimeError (Home Assistant closes its shared
+        # session when it stops); any other RuntimeError is a bug and goes through, a closed session or not.
+        if not session.closed or str(err) != _AIOHTTP_SESSION_CLOSED:
+            raise
+        return None, SESSION_CLOSED_CAUSE

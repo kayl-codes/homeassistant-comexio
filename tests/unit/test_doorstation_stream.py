@@ -12,7 +12,11 @@ from aiohttp import web
 import pytest
 
 from custom_components.comexio import doorstation_stream
-from custom_components.comexio.doorstation_stream import doorstation_direct_url, read_direct_frame
+from custom_components.comexio.doorstation_stream import (
+    SESSION_CLOSED_CAUSE,
+    doorstation_direct_url,
+    read_direct_frame,
+)
 
 # The smallest JPEG aiocomexio's frame reader accepts: SOI, one segment, a scan of one component with three bytes of
 # data, EOI. The multipart head in front of it is what the Doorstation sends before each image.
@@ -188,6 +192,33 @@ def test_a_stream_without_a_frame_is_given_up_at_the_byte_cap(monkeypatch: pytes
         return response
 
     _expect(handler, None, "no frame in the first bytes of the stream")
+
+
+def test_a_closed_session_is_a_failure_and_not_an_exception() -> None:
+    """Home Assistant closes its shared session while it stops: aiohttp then refuses the request with RuntimeError."""
+
+    async def run() -> tuple[bytes | None, str | None]:
+        session = aiohttp.ClientSession()
+        await session.close()
+        return await read_direct_frame(session, "http://192.0.2.10/proxy/cam/1/")
+
+    assert asyncio.run(run()) == (None, SESSION_CLOSED_CAUSE)
+
+
+@pytest.mark.parametrize(
+    ("session_closed", "message"),
+    [(False, "Session is closed"), (True, "a bug"), (False, "a bug")],
+)
+def test_any_other_runtime_error_is_not_swallowed(session_closed: bool, message: str) -> None:
+    """Only aiohttp's refusal on a closed session is a failure cause; any other RuntimeError is a bug, visible."""
+    session = MagicMock()
+    session.closed = session_closed
+    session.get.side_effect = RuntimeError(message)
+
+    read = read_direct_frame(session, "http://192.0.2.10/proxy/cam/1/")
+
+    with pytest.raises(RuntimeError, match=message):
+        asyncio.run(read)
 
 
 def test_an_unreachable_doorstation_is_a_failure_that_names_no_address() -> None:

@@ -112,6 +112,7 @@ def _camera(
     )
     with patch("custom_components.comexio.camera.Camera.__init__", autospec=True, return_value=None):
         camera = ComexioDoorstationCamera(coordinator, 14)
+    camera.hass = MagicMock(is_stopping=False)  # what `_is_current` asks (an entity gets its hass when it is added)
     return camera, coordinator
 
 
@@ -161,6 +162,17 @@ def test_the_camera_is_unavailable_while_its_extension_is_offline() -> None:
         assert camera.available is True
         coordinator.offline_extensions = {"DOOR"}
         assert camera.available is False
+
+
+def test_nothing_asked_of_a_camera_is_current_while_home_assistant_stops() -> None:
+    camera, _ = _camera()
+    asked = camera._doorstation  # the one the tracker knows
+    assert asked is not None
+    assert camera._is_current(asked) is True
+
+    camera.hass.is_stopping = True
+
+    assert camera._is_current(asked) is False
 
 
 def test_the_image_is_read_with_the_camera_id_of_the_doorstation() -> None:
