@@ -22,6 +22,8 @@ from .const import (
 
 # The stream is asked for unencoded, so the byte cap counts bytes of the stream itself (a decompressed chunk would be
 # allocated before any cap could apply); a stream that comes encoded anyway is refused before a byte of it is read.
+# The request is made with auto_decompress=False for the same reason: aiohttp would otherwise inflate what arrives
+# before `response_problem` has looked at Content-Encoding.
 DIRECT_REQUEST_HEADERS = {"Accept-Encoding": "identity"}
 # The request to the Doorstation is made with allow_redirects=False: its answer comes over plain HTTP, and a
 # redirect would make Home Assistant call whatever address a device on the network names. A redirect counts as
@@ -83,7 +85,7 @@ async def read_direct_frame(
     try:
         async with (
             asyncio.timeout(budget_sec),
-            session.get(url, headers=DIRECT_REQUEST_HEADERS, allow_redirects=False) as resp,
+            session.get(url, headers=DIRECT_REQUEST_HEADERS, allow_redirects=False, auto_decompress=False) as resp,
         ):
             answered = True
             if (problem := response_problem(resp)) is not None:

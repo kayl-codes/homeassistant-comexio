@@ -747,12 +747,14 @@ def test_no_address_is_asked_for_once_the_session_is_gone(
 def test_a_session_closed_under_the_address_read_is_no_failure(
     comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    comexio_api._client = MagicMock(get_extension=AsyncMock(side_effect=RuntimeError("Session is closed")))
+    get_extension = AsyncMock(side_effect=RuntimeError("Session is closed"))
+    comexio_api._client = MagicMock(get_extension=get_extension)
     comexio_api._client_credentials = comexio_api._credentials()
     # Open before the request, gone when the error is looked at.
     monkeypatch.setattr(comexio_api, "_session_gone_reason", MagicMock(side_effect=[None, "closed"]))
 
     assert asyncio.run(comexio_api.get_doorstation_address(14)) == (None, None)
+    get_extension.assert_awaited_once()  # the request was made: this is not the skip of a session that was gone before
 
 
 def test_another_runtime_error_of_the_address_read_is_a_bug_and_raised(comexio_api: ComexioAPI) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 import socket
+from unittest.mock import MagicMock
 
 import aiohttp
 from aiohttp import web
@@ -158,6 +159,21 @@ def test_the_stream_is_asked_for_unencoded() -> None:
     _expect(handler, FRAME, None)
 
     assert seen == ["identity"]
+
+
+def test_the_stream_is_not_decompressed_by_aiohttp() -> None:
+    """A compressed answer is not inflated before `response_problem` refuses it (the byte cap counts raw bytes)."""
+
+    async def handler(request: web.Request) -> web.StreamResponse:
+        return web.Response(body=PART_HEAD + FRAME)
+
+    async def check(url: str) -> None:
+        async with aiohttp.ClientSession() as session:
+            spy = MagicMock(wraps=session)
+            assert await read_direct_frame(spy, url) == (FRAME, None)
+        assert spy.get.call_args.kwargs["auto_decompress"] is False
+
+    _serve(handler, check)
 
 
 def test_a_stream_without_a_frame_is_given_up_at_the_byte_cap(monkeypatch: pytest.MonkeyPatch) -> None:

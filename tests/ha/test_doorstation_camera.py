@@ -575,7 +575,8 @@ async def test_a_lookup_that_runs_out_of_time_for_a_camera_that_went_starts_no_s
     coordinator.api.get_doorstation_address.side_effect = lookup_while_the_entry_unloads
 
     with patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05):
-        assert await camera._read_frame(doorstation) == (None, "the IO-Server did not answer in time")
+        # The camera went: nothing to report for it (the caller drops the answer), neither a cause nor a streak.
+        assert await camera._read_frame(doorstation) == (None, None)
 
     assert camera._direct_failed_at is None
     coordinator.api.get_doorstation_snapshot.assert_not_called()
@@ -597,6 +598,35 @@ async def test_a_still_read_that_ends_while_the_entry_unloads_starts_no_streak_a
         assert await camera._read_frame(doorstation) == (None, "HTTP 500")
 
     assert camera._direct_failed_at is None
+    coordinator.api.get_doorstation_snapshot.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_camera_that_went_during_a_successful_address_lookup_sends_no_request_to_the_doorstation(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    doorstation = coordinator.doorstations.known[2]
+
+    async def lookup_while_the_entry_unloads(_ext_id: int) -> tuple[str, None]:
+        coordinator.unloading = True
+        return ADDRESS, None
+
+    coordinator.api.get_doorstation_address.side_effect = lookup_while_the_entry_unloads
+    read = AsyncMock(return_value=(None, "HTTP 500"))
+
+    with patch("custom_components.comexio.camera.read_direct_frame", read):
+        assert await camera._read_frame(doorstation) == (None, None)
+        assert await camera.async_camera_image() is None  # the caller drops it: no cache, no streak, lock free
+
+    read.assert_not_called()  # the address was found, but nobody asks for this image any more
+    assert camera._address == ADDRESS
+    assert camera._address_checked_at is not None
+    assert camera._frame is None
+    assert camera._failed_at is None
+    assert camera._direct_failed_at is None
+    assert not camera._lock.locked()
     coordinator.api.get_doorstation_snapshot.assert_not_called()
 
 

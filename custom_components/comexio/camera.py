@@ -227,15 +227,16 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         """One frame from the Doorstation itself if it has a usable address and answers, else from the IO-Server."""
         if (direct := await self._read_direct_frame(doorstation)) is not None:
             return direct
-        if not self._is_current(doorstation):
-            return None, None  # the camera went while the direct way was tried: nobody wants this answer
+        # `_read_direct_frame` returns None only without an await after its own `_is_current` check: the camera
+        # is still the one that was asked.
         return await self.coordinator.api.get_doorstation_snapshot(doorstation.camera_id)
 
     async def _read_direct_frame(self, doorstation: Doorstation) -> tuple[bytes | None, str | None] | None:
         """(frame, None) read from the Doorstation itself; None when the IO-Server is to be asked.
 
         None for no usable address, a pause, and for a failed read (noted here). A camera that is gone meanwhile gives
-        what was read as it is (see async_camera_image) and starts or ends no failure streak. Reads of one camera
+        (None, None) when that is seen after the address lookup (the Doorstation is not asked), else what was read as it
+        is (see async_camera_image); either way it starts or ends no failure streak. Reads of one camera
         never overlap (`async_camera_image` holds `_lock`), so the Doorstation is asked by one request at a time.
 
         The address lookup and the read share DOORSTATION_DIRECT_TIMEOUT_SEC: Home Assistant gives an image request
@@ -244,6 +245,8 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         """
         started = asyncio.get_running_loop().time()
         address, lookup_timed_out = await self._address_within_budget()
+        if not self._is_current(doorstation):
+            return None, None  # went during the lookup: no request to a Doorstation nobody asks for, no streak
         left = DOORSTATION_DIRECT_TIMEOUT_SEC - (asyncio.get_running_loop().time() - started)
         if address is None:
             if not lookup_timed_out:
