@@ -74,17 +74,34 @@ def test_every_range_category_skips_the_elements_of_its_sources_with_a_gap() -> 
     assert {item["webio_class"] for item in unjudged} == {cat.key for cat in _RANGE_CATEGORIES}
 
 
-def test_a_source_that_dangles_in_several_plans_keeps_its_duplicate_as_debris_whatever_the_gap() -> None:
+@pytest.mark.parametrize("fub_ids", [[36, 37], [36, 36]], ids=["two plans", "twice in one plan"])
+def test_a_source_with_several_unconnected_elements_keeps_its_duplicate_as_debris_whatever_the_gap(
+    fub_ids: list[int],
+) -> None:
     """Only a lone gap element is left to the wiring: with a duplicate the cleanup takes both, the wiring places one."""
 
     class _Duplicate(_FakeCoordinator):
         def _dangling_source_ids(self, source_type: str, *_args: Any) -> dict[str, list[int]]:
-            return {"220": [36, 37]} if source_type == "2" else {}
+            return {"220": fub_ids} if source_type == "2" else {}
 
     data = {"markers": [{"id": 220, "name": "M220 Fenster"}], "knx": [], "onewire": []}
     items = _Duplicate({})._function_plan_dangling_items(data, _NO_WIRING, True, set(), set(), wiring_gap_keys={"M220"})
 
     assert [item["ref_id"] for item in items] == ["220"]
+
+
+@pytest.mark.parametrize("source_type", ["1", "2"], ids=["io", "marker"])
+def test_the_scan_lists_a_plan_twice_that_holds_two_unconnected_elements_of_one_source(source_type: str) -> None:
+    """The element count per plan is what tells a duplicate in the same plan from a lone element."""
+    coordinator = ComexioCoordinator.__new__(ComexioCoordinator)
+    element = {"reference": {"type": source_type, "ref_id": "220"}}
+    coordinator.function_plan_plans = {36: {"elements": {"1": element, "2": element}}, 37: {"elements": {"1": element}}}
+    coordinator._function_plan_check_fub_ids = lambda: {36, 37}  # type: ignore[method-assign]
+    coordinator._is_managed_function_plan = lambda _fub_id: True  # type: ignore[method-assign]
+    coordinator._plan_wired_pairs = lambda _plan, _type: set()  # type: ignore[method-assign]
+    coordinator._plan_connected_source_ids = lambda _plan, _type: set()  # type: ignore[method-assign]
+
+    assert coordinator._dangling_source_ids(source_type, set(), set()) == {"220": [36, 36, 37]}
 
 
 class _IoCoordinator:
@@ -118,6 +135,7 @@ def _dangling_ios(unconnected: dict[str, list[int]], wiring_gap_keys: set[str]) 
         ({"5": [36]}, set(), True),  # no gap: debris as before
         ({"5": [36]}, {io_audit_key("Ext1", "I2")}, True),  # the gap belongs to another IO
         ({"5": [36, 37]}, {io_audit_key("Ext1", "I1")}, True),  # a duplicate in a second plan
+        ({"5": [36, 36]}, {io_audit_key("Ext1", "I1")}, True),  # a duplicate in the same plan
     ],
 )
 def test_the_unconnected_element_of_an_io_with_a_wiring_gap_is_no_debris(
@@ -129,7 +147,9 @@ def test_the_unconnected_element_of_an_io_with_a_wiring_gap_is_no_debris(
     assert [item["ref_id"] for item in items] == (["5"] if debris else [])
 
 
-@pytest.mark.parametrize(("unconnected", "debris"), [({"211": [36]}, False), ({"211": [36, 37]}, True)])
+@pytest.mark.parametrize(
+    ("unconnected", "debris"), [({"211": [36]}, False), ({"211": [36, 37]}, True), ({"211": [36, 36]}, True)]
+)
 def test_the_unconnected_element_of_a_quickbus_io_with_a_wiring_gap_is_no_debris(
     unconnected: dict[str, list[int]], debris: bool
 ) -> None:

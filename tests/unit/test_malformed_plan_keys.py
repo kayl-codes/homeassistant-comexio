@@ -1027,17 +1027,19 @@ def test_the_repair_leaves_the_gaps_that_wait_for_a_rename_to_the_full_sync() ->
     # The wiring option's estimate leaves them out, the full sync's counts them (repairs.py adds it to its own).
     assert (counts["function_plan_missing_eta_sec"], counts["function_plan_missing_full_eta_sec"]) == (10, 20)
     assert coordinator._function_plan_missing_detail.call_args.args[0] == gaps[:1]
+    # The repair needs to know that the rename alone would leave one of them unwired (it then offers the full sync).
+    assert counts["function_plan_waiting_rename"] == 1
 
 
-@pytest.mark.parametrize(("known", "full_eta"), [(False, 40), (True, 0)])
+@pytest.mark.parametrize(("known", "full_eta", "waiting"), [(False, 40, 2), (True, 0, 0)])
 def test_the_repair_keeps_the_full_sync_wiring_estimate_only_while_the_plan_findings_are_unknown(
-    known: bool, full_eta: int
+    known: bool, full_eta: int, waiting: int
 ) -> None:
     """A poll that cannot read the plans keeps the estimate; without it the repair would fall back to a lower one."""
     coordinator = _issue_writer(MALFORMED_FUBS)
     open_issue = SimpleNamespace(
         translation_key="sync_mismatch",
-        data={"counts": {"missing": 0, "function_plan_missing_full_eta_sec": 40}},
+        data={"counts": {"missing": 0, "function_plan_missing_full_eta_sec": 40, "function_plan_waiting_rename": 2}},
     )
     registry = SimpleNamespace(async_get_issue=MagicMock(return_value=open_issue))
     with (
@@ -1046,4 +1048,6 @@ def test_the_repair_keeps_the_full_sync_wiring_estimate_only_while_the_plan_find
     ):
         coordinator._update_sync_mismatch_issue({"missing_m1"}, {}, {}, {}, plan_audit_known=known)
 
-    assert create_issue.call_args.kwargs["data"]["counts"]["function_plan_missing_full_eta_sec"] == full_eta
+    counts = create_issue.call_args.kwargs["data"]["counts"]
+    assert counts["function_plan_missing_full_eta_sec"] == full_eta
+    assert counts["function_plan_waiting_rename"] == waiting  # kept while unknown, else recounted from the audit

@@ -766,6 +766,17 @@ def test_the_full_sync_eta_counts_the_wiring_of_the_gaps_that_wait_for_a_rename(
     assert _eta(3 * SYNC_DURATION_WRITE + 40) in _options(with_wiring)["full_sync"]
 
 
+@pytest.mark.parametrize(("waiting", "offered"), [(0, False), (1, True)])
+def test_the_full_sync_is_offered_beside_a_lone_rename_while_a_wiring_waits_for_it(waiting: int, offered: bool) -> None:
+    """ "Update Names Only" renames the command but leaves it unwired: the full sync wires it in the same run."""
+    form = _repair_form({"rename": 1, "function_plan_waiting_rename": waiting})
+
+    assert ("full_sync" in _options(form)) is offered
+    assert "update_renames" in _options(form)
+    default = next(key.default() for key in form["data_schema"].schema if key == "action")
+    assert default == ("full_sync" if offered else "update_renames")
+
+
 def test_the_full_sync_eta_of_an_issue_from_before_the_full_estimate_counts_the_wiring_once() -> None:
     """Issue data saved by an older version has no full estimate: the wiring option's estimate stands in for it."""
     form = _repair_form({"type": 1, "function_plan_missing": 2, "function_plan_missing_eta_sec": 30})

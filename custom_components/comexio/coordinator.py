@@ -1,6 +1,6 @@
 # Version: 0.8.2
 import asyncio
-from collections import deque
+from collections import Counter, deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -572,14 +572,14 @@ def _plan_ref_ids(elements: dict[str, Any]) -> dict[str, set[str]]:
     return ref_ids
 
 
-def _plan_source_ref_ids(plan_data: dict[str, Any], source_type: str) -> set[str]:
-    """ref_ids of the `source_type` (marker "2" / IO "1" / KNX "11") elements in one plan."""
-    ids: set[str] = set()
+def _plan_source_ref_counts(plan_data: dict[str, Any], source_type: str) -> Counter[str]:
+    """How many elements of each ref_id the plan holds, for the `source_type` (marker "2" / IO "1" / KNX "11")."""
+    counts: Counter[str] = Counter()
     for elem in (plan_data.get("elements") or {}).values():
         ref = elem.get("reference") or {}
         if str(ref.get("type")) == source_type:
-            ids.add(str(ref.get("ref_id")))
-    return ids
+            counts[str(ref.get("ref_id"))] += 1
+    return counts
 
 
 # The class suffixes of our Web-IO devices (" [m]", " [io]", ...), as `_is_own_web_device_name` compares them.
@@ -912,7 +912,8 @@ def _io_gap_key(io: Mapping[str, Any]) -> str:
 def _closed_by_rewiring(key: str, fub_ids: Collection[int], wiring_gap_keys: Collection[str]) -> bool:
     """Whether the one unconnected element of a source with a wiring gap is left to the wiring, not cleaned up.
 
-    A source that dangles in more than one plan has a duplicate: that is debris, whatever the gap.
+    A source with more than one unconnected element (in several plans or twice in one) has a duplicate: that is
+    debris, whatever the gap.
     """
     return key in wiring_gap_keys and len(fub_ids) == 1
 
@@ -2372,7 +2373,12 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return {}, None
         data = issue.data or {}
         counts = data.get("counts", {})
-        keys = (*_PLAN_AUDIT_BUCKETS, "function_plan_missing_eta_sec", "function_plan_missing_full_eta_sec")
+        keys = (
+            *_PLAN_AUDIT_BUCKETS,
+            "function_plan_missing_eta_sec",
+            "function_plan_missing_full_eta_sec",
+            "function_plan_waiting_rename",
+        )
         return {key: counts[key] for key in keys if key in counts}, data.get("function_plan_missing_detail")
 
     def _build_ha_audit_map(
@@ -2770,9 +2776,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         wired anywhere (the gap check of _compare_audit_key). The element of such a source is no debris while
         it is the only one: it is a wiring gap that the sync closes by reconnecting the element (Comexio cuts
         the connection of a marker whose type changed, and the element would otherwise be deleted and the gap
-        found only by the next poll). A source that dangles in several plans has a duplicate: that stays
-        debris, the cleanup removes every unconnected element of it and the wiring places a fresh one. A
-        source whose pair is wired in one plan keeps its unconnected duplicate in another as debris as well.
+        found only by the next poll). A source with several unconnected elements (in several plans, or twice in
+        one) has a duplicate: that stays debris, the cleanup removes every unconnected element of it and the
+        wiring places a fresh one. A source whose pair is wired in one plan keeps its unconnected duplicate in
+        another as debris as well.
         """
         items: list[dict[str, Any]] = []
         if has_active_plan:
@@ -3016,6 +3023,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "function_plan_missing_eta_sec": self._function_plan_missing_eta_sec(wiring_gaps),
             # The full sync wires the gaps waiting for a rename as well: its estimate counts them (repairs.py).
             "function_plan_missing_full_eta_sec": self._function_plan_missing_eta_sec(audit["function_plan_missing"]),
+            # How many of those wait for their rename: with one of them the repair offers the full sync even when
+            # the rename is its only other action, as the rename alone would leave the command unwired.
+            "function_plan_waiting_rename": len(audit["function_plan_missing"]) - len(wiring_gaps),
             "function_plan_dangling": len(audit["function_plan_dangling"]),
             "function_plan_trigger_missing": _count_by_ref(audit["function_plan_trigger_missing"]),
             "function_plan_trigger_orphan": _count_by_ref(audit["function_plan_trigger_orphan"]),
@@ -11608,7 +11618,8 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         wired or otherwise connected in one, genuinely orphaned in another — so subtracting
         a floor combined across all plans (as an earlier version of this method did) would
         hide real debris in the second plan just because the first one still uses it.
-        Maps each ref_id to the plans it dangles in.
+        Maps each ref_id to the plans it dangles in, one entry per dangling element (a plan holding two of them
+        is listed twice, so that a duplicate in one plan is told from a lone element).
         """
         if wired_pairs is None or connected_ids is None or not self.function_plan_plans:
             return {}
@@ -11617,13 +11628,14 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         for fub_id, plan_data in self.function_plan_plans.items():
             if fub_id not in relevant_fub_ids or not self._is_managed_function_plan(fub_id):
                 continue
-            present_ids = _plan_source_ref_ids(plan_data, source_type)
-            if not present_ids:
+            present = _plan_source_ref_counts(plan_data, source_type)
+            if not present:
                 continue
             plan_wired_ids = {rid for rid, _ in self._plan_wired_pairs(plan_data, source_type)}
             plan_connected_ids = self._plan_connected_source_ids(plan_data, source_type)
-            for rid in present_ids - plan_wired_ids - plan_connected_ids:
-                dangling.setdefault(rid, []).append(fub_id)
+            for rid in present.keys() - plan_wired_ids - plan_connected_ids:
+                # One entry per element: two unconnected elements of one id in one plan list that plan twice.
+                dangling.setdefault(rid, []).extend([fub_id] * present[rid])
         return dangling
 
     async def delete_dangling_plan_elements(self, source_type: str, ref_ids: list[str]) -> dict[str, Any]:

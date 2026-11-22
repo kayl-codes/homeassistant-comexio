@@ -1,5 +1,6 @@
 # Version: 0.7.5
 import asyncio
+from collections.abc import Mapping
 import logging
 import time
 
@@ -208,6 +209,15 @@ def _column_noun(n_extensions: int, n_quickbus_devices: int) -> str:
     if not n_extensions:
         return "Quickbus device" if n_quickbus_devices == 1 else "Quickbus devices"
     return "extensions and Quickbus devices"
+
+
+def _offers_full_sync(specific_options: Mapping[str, str], counts: Mapping[str, int]) -> bool:
+    """Whether the repair lists the full sync beside its specific actions.
+
+    More than one specific action: yes. A lone one: no, unless a command still to be renamed waits for its wiring
+    (counts "function_plan_waiting_rename"): only the full sync wires it, "Update Names Only" would leave it unwired.
+    """
+    return len(specific_options) > 1 or counts.get("function_plan_waiting_rename", 0) > 0
 
 
 def _function_plan_option_label(lp_missing_c: int, detail: dict, eta: str) -> str:
@@ -980,7 +990,7 @@ class ComexioRepairFlow(RepairsFlow):
             t_full = format_time(total_sec)
 
             options = {}
-            if len(specific_options) > 1:
+            if _offers_full_sync(specific_options, counts):
                 label = f"{ICON_SYNC} Full Sync ({'Alles korrigieren' if is_de else 'Fix everything'}, {t_full})"
                 options["full_sync"] = label
                 default_action = "full_sync"
