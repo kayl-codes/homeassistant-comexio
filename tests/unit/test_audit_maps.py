@@ -172,6 +172,8 @@ def test_renamed_command_is_checked_for_its_wiring_too() -> None:
         set(),
         mismatches,
     )
+    # The sync reads this list to rename: the gap must not take the command out of it.
+    assert [(item["id"], item["name"]) for item in found["rename"]] == [(20, "HA M2 Neu")]
     assert found["function_plan_missing"] == [{"name": "HA M2 Neu", "pending_rename": True}]
     assert found["type"] == []
     assert mismatches == {"rename_M2", "function_plan_missing_M2"}
