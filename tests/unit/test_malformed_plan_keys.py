@@ -635,14 +635,14 @@ def _missing_m1(*args) -> dict:
 def _waiting_for_plans(coordinator: ComexioCoordinator):
     """A dangling check whose plans are not loaded yet: it flags the recheck and judges nothing."""
 
-    def check(*_args) -> dict:
+    def check(*_args, **_kwargs) -> dict:
         coordinator._lp_missing_recheck_pending = True
         return {}
 
     return check
 
 
-def _dangling_m5(_final_data, _wired, _has_plan, _exts, mismatches: set[str]) -> dict:
+def _dangling_m5(_final_data, _wired, _has_plan, _exts, mismatches: set[str], **_kwargs) -> dict:
     mismatches.add("function_plan_dangling_M5")
     return {"M": [5]}
 
@@ -651,12 +651,14 @@ def _open_repair(translation_key: str, **counts: int) -> SimpleNamespace:
     return SimpleNamespace(translation_key=translation_key, data={"counts": counts})
 
 
-def _run_audit(coordinator: ComexioCoordinator, open_issue: SimpleNamespace | None = None) -> None:
+def _run_audit(
+    coordinator: ComexioCoordinator, open_issue: SimpleNamespace | None = None, com_map: dict | None = None
+) -> None:
     registry = SimpleNamespace(async_get_issue=MagicMock(return_value=open_issue))
     with (
         patch.object(coordinator_module.ir, "async_get", return_value=registry),
         patch.object(coordinator_module, "_split_disabled_commands", return_value=({}, {})),
-        patch.object(coordinator_module, "_build_com_audit_map", return_value={}),
+        patch.object(coordinator_module, "_build_com_audit_map", return_value=com_map or {}),
         patch.object(coordinator_module, "active_webio_classes", return_value=[]),
         patch.object(coordinator_module, "webio_device_hints", return_value=()),
     ):
@@ -988,3 +990,37 @@ def test_the_ignored_source_audit_counts_wiring_in_a_plan_with_an_unreadable_ent
 
     assert sorted(plans) == loaded
     assert load_failures == [12]  # the cleanup reports it as skipped either way
+
+
+def test_the_audit_tells_the_debris_check_which_sources_have_a_wiring_gap() -> None:
+    """A source with a wiring gap is no debris: without this argument its element is deleted again."""
+    coordinator = _audit_coordinator({"7": {"Name": "Pumps"}})
+
+    found = coordinator._compare_audit_maps.return_value
+
+    def compare(*args) -> dict:
+        args[-1].update({"function_plan_missing_M5", "rename_M6", "missing_M7"})
+        return found
+
+    coordinator._compare_audit_maps = MagicMock(side_effect=compare)
+
+    _run_audit(coordinator)
+
+    assert coordinator._function_plan_dangling_items.call_args.kwargs["wiring_gap_keys"] == {"M5"}
+
+
+def test_the_repair_leaves_the_gaps_that_wait_for_a_rename_to_the_full_sync() -> None:
+    """The "wire in function plan" option cannot close them (the command still has its old name)."""
+    coordinator = _issue_writer(MALFORMED_FUBS)
+    gaps = [{"name": "HA M1", "marker_id": 1}, {"name": "HA M2", "marker_id": 2, "pending_rename": True}]
+    coordinator.last_audit_results["function_plan_missing"] = gaps
+    registry = SimpleNamespace(async_get_issue=MagicMock(return_value=None))
+    with (
+        patch.object(coordinator_module.ir, "async_get", return_value=registry),
+        patch.object(coordinator_module.ir, "async_create_issue") as create_issue,
+    ):
+        coordinator._update_sync_mismatch_issue({"missing_m1"}, {}, {}, {})
+
+    assert create_issue.call_args.kwargs["data"]["counts"]["function_plan_missing"] == 1
+    assert coordinator._function_plan_missing_eta_sec.call_args.args[0] == gaps[:1]
+    assert coordinator._function_plan_missing_detail.call_args.args[0] == gaps[:1]

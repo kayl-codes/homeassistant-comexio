@@ -397,6 +397,24 @@ def test_a_full_sync_still_runs_while_the_plan_list_has_unreadable_entries() -> 
     button._sync_class.assert_awaited()
 
 
+_RENAMED_GAP = {"marker_id": 2, "pending_rename": True}
+
+
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [("full_sync", [{"marker_id": 1}, _RENAMED_GAP]), ("function_plan_add_missing", [{"marker_id": 1}])],
+)
+def test_only_a_full_sync_wires_the_gap_of_a_command_that_is_still_to_be_renamed(
+    action: str, expected: list[dict]
+) -> None:
+    """A wiring-only action finds the command by its new name; before the rename ran it still has the old one."""
+    button = _button(REACHABLE)
+    button.coordinator.last_audit_results = {"function_plan_missing": [{"marker_id": 1}, _RENAMED_GAP]}
+    _press(button, action)
+
+    assert button._wire_created_pairs.await_args.args[2] == expected
+
+
 _PLAN_FINDINGS = {
     "function_plan_missing": [{"marker_id": 1}],
     "function_plan_dangling": [{"ref_id": "5", "webio_class": WebioClass.MARKER}],
