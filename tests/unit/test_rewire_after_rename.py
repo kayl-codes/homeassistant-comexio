@@ -174,21 +174,45 @@ def test_the_gap_key_of_an_io_is_the_key_the_audit_map_gives_it(io: dict[str, An
     assert _io_gap_key(io) == key
 
 
-@pytest.mark.parametrize("web_io_id", [None, 12])
-def test_a_command_without_a_readable_id_is_no_wiring_gap(web_io_id: int | None) -> None:
-    """Nothing can be wired without the command's id: the gap would block the debris cleanup and fail the wiring."""
+@pytest.mark.parametrize(
+    ("web_io_id", "readable"),
+    [(None, False), ("n/a", False), (True, False), (12.5, False), (12, True), ("12", True)],
+    ids=["none", "text", "bool", "fraction", "int", "numeric text"],
+)
+def test_a_command_without_a_readable_id_is_no_wiring_gap(web_io_id: object, readable: bool) -> None:
+    """Nothing can be wired without the command's id as an int: the gap would block the debris cleanup, and the pair
+    writer would fail on the id.
+    """
     best_match = {"name": "HA M220 Fenster", "webIoId": web_io_id}
 
     gap = ComexioCoordinator._function_plan_gap_item("M220", "HA M220 Fenster", best_match, _NO_WIRING, None, set())
 
-    assert gap == (None if web_io_id is None else {"name": "HA M220 Fenster", "marker_id": 220})
+    assert gap == ({"name": "HA M220 Fenster", "marker_id": 220} if readable else None)
+
+
+@pytest.mark.parametrize("web_io_id", [12, "12", 12.0], ids=["int", "numeric text", "whole float"])
+def test_a_readable_command_id_finds_its_wired_pair_whatever_its_type(web_io_id: object) -> None:
+    """The pair is looked up by the id as an int, so a pair wired under it is no gap."""
+    wired = {**_NO_WIRING, "2": ({("220", "12")}, set())}
+    best_match = {"name": "HA M220 Fenster", "webIoId": web_io_id}
+
+    gap = ComexioCoordinator._function_plan_gap_item("M220", "HA M220 Fenster", best_match, wired, None, set())
+
+    assert gap is None
+
+
+_ORDINARY_GAP = {"name": "HA M1", "marker_id": 1}
+_RENAME_GAP = {"name": "HA M2", "marker_id": 2, "pending_rename": True}
 
 
 @pytest.mark.parametrize(
-    ("action", "kept"), [("full_sync", 2), ("function_plan_add_missing", 1), ("knx_bridge_add_missing", 1)]
+    ("action", "kept"),
+    [
+        ("full_sync", [_ORDINARY_GAP, _RENAME_GAP]),
+        ("function_plan_add_missing", [_ORDINARY_GAP]),
+        ("knx_bridge_add_missing", [_ORDINARY_GAP]),
+    ],
 )
-def test_only_a_full_sync_wires_a_command_that_still_has_to_be_renamed(action: str, kept: int) -> None:
+def test_only_a_full_sync_wires_a_command_that_still_has_to_be_renamed(action: str, kept: list[dict[str, Any]]) -> None:
     """The pair writer finds a command by its new name, so a wiring-only action would fail on the old one."""
-    gaps = [{"name": "HA M1", "marker_id": 1}, {"name": "HA M2", "marker_id": 2, "pending_rename": True}]
-
-    assert len(_gap_items_for_action(action, gaps)) == kept
+    assert _gap_items_for_action(action, [_ORDINARY_GAP, _RENAME_GAP]) == kept

@@ -11701,10 +11701,12 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         checked against that category's pairs; IO and Quickbus keys only when their extension /
         Quickbus device is a managed column-plan member (managed_io_groups).
         """
-        if best_match.get("webIoId") is None:
-            # Not a wiring gap: nothing to wire without the command's id (the stuck-command repair reports it).
+        command_id = ComexioAPI._reference_id({"ref_id": best_match.get("webIoId")})
+        if command_id is None:
+            # Not a wiring gap: nothing to wire without a readable command id (the pair writer takes int(): a text id
+            # fails it, a bool or fraction would wire another command; the stuck-command repair reports the command).
             return None
-        web_id = str(best_match["webIoId"])
+        web_id = str(command_id)
         if (cat := _range_category_of_key(key)) is not None:
             source_id = key[len(cat.audit_key_prefix) :]
             pairs = wired[cat.fub_module_type][0]
