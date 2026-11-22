@@ -139,9 +139,10 @@ def test_compare_finds_every_audit_category() -> None:
     }
 
 
-def test_renamed_command_skips_the_type_and_wiring_checks() -> None:
+def test_renamed_command_skips_the_type_check() -> None:
+    """The rename saves the whole command, the new type with it: no separate type finding."""
     mismatches: set[str] = set()
-    found = _FakeCoordinator(unwired={"M2"})._compare_audit_maps(
+    found = _FakeCoordinator(unwired=set())._compare_audit_maps(
         {"M2": {"name": "HA M2 Neu", "type": "analog"}},
         {"M2": [_com("HA M2 Alt", 20)]},
         {},
@@ -153,6 +154,42 @@ def test_renamed_command_skips_the_type_and_wiring_checks() -> None:
     assert mismatches == {"rename_M2"}
     assert found["type"] == []
     assert found["function_plan_missing"] == []
+
+
+def test_renamed_command_is_checked_for_its_wiring_too() -> None:
+    """Comexio cuts the connection of a marker whose type changed; the sync closes it along with the rename.
+
+    The rename keeps the command's webIoId, so the pair can be judged before the rename ran. The gap says its
+    command is still to be renamed, and the sync's later steps are told so (button._gap_items_for_action).
+    """
+    mismatches: set[str] = set()
+    found = _FakeCoordinator(unwired={"M2"})._compare_audit_maps(
+        {"M2": {"name": "HA M2 Neu", "type": "analog"}},
+        {"M2": [_com("HA M2 Alt", 20)]},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        mismatches,
+    )
+    # The sync reads this list to rename: the gap must not take the command out of it.
+    assert [(item["id"], item["name"]) for item in found["rename"]] == [(20, "HA M2 Neu")]
+    assert found["function_plan_missing"] == [{"name": "HA M2 Neu", "pending_rename": True}]
+    assert found["type"] == []
+    assert mismatches == {"rename_M2", "function_plan_missing_M2"}
+
+
+def test_a_gap_of_a_command_with_its_name_carries_no_rename_flag() -> None:
+    found = _FakeCoordinator(unwired={"M2"})._compare_audit_maps(
+        {"M2": {"name": "HA M2 Neu", "type": "digital"}},
+        {"M2": [_com("HA M2 Neu", 20)]},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        set(),
+    )
+    assert found["function_plan_missing"] == [{"name": "HA M2 Neu"}]
 
 
 def test_commands_of_a_switched_off_class_leave_the_audit() -> None:

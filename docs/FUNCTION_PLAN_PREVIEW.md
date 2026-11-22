@@ -417,6 +417,22 @@ function_plan_restore:
       default: false
       selector:
         boolean:
+    accept_unverified_blocks:
+      name: Accept unverified logic blocks
+      description: >
+        Restore a backup anyway whose logic blocks cannot be checked against Comexio's
+        logic-block IDs, which shift after an app install or firmware update. That covers any
+        backup whose block IDs cannot be verified: one that predates such a change and whose
+        wiring does not fit today's blocks, one with a block that was unknown when it was taken,
+        and any backup while the check is not possible right now. Some blocks may then
+        be different ones — check the preview first. A backup with a block that no longer
+        exists is never restored, unless it is restored as a copy without that block
+        ('omit_unresolved_blocks'). The plan card sends 'accept_unverified_blocks' once its
+        restore dialog has named the affected blocks and the user confirmed it.
+      default: false
+      advanced: true
+      selector:
+        boolean:
     as_copy:
       name: Restore as copy
       description: >
@@ -430,6 +446,34 @@ function_plan_restore:
     new_plan_name:
       name: Name for the copy
       description: "Required when 'Restore as copy' is enabled — must not already be in use by a live plan."
+      required: false
+      advanced: true
+      selector:
+        text:
+    omit_unresolved_blocks:
+      name: Leave out missing logic blocks
+      description: >
+        Only together with 'Restore as copy': build the copy without the logic blocks Comexio no
+        longer has (or has more than one of under the stored block id), and without the connections
+        that end at them. An element that was fed by a left-out block loses that input. A
+        notification and the log name the left-out blocks. Such a copy is not started unless the call
+        passes 'auto_start' itself. A block that is merely unknown to the catalog is not left out and
+        still needs 'accept_unverified_blocks'. Refused for a restore onto the live plan: only a copy
+        may differ from the backup.
+      default: false
+      advanced: true
+      selector:
+        boolean:
+    expected_hash:
+      name: Expected backup hash
+      description: >
+        Optional: the fingerprint of the backup the caller looked at (of all of it, settings and
+        paper format included). The restore is refused, and nothing is changed, when the chosen
+        backup has another one by then (a newer backup took its slot, or Comexio's logic blocks
+        changed). The plan card sends it together with
+        'omit_unresolved_blocks', so a copy is only cut by what its dialog listed. Taken from the
+        'omit.snapshot_hash' of the backup selector's 'block_check' attribute (only an offer to
+        restore without blocks carries one); it guards every restore it is sent with.
       required: false
       advanced: true
       selector:

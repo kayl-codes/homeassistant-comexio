@@ -321,6 +321,17 @@ def _known_source_names(
     return {name: source for name, source in names.items() if name not in ambiguous}
 
 
+# Key of a KNX source id in an audit gap item.
+_KNX_GAP_KEY = f"{SOURCE_CATEGORIES[WebioClass.KNX].key.value}_id"
+
+
+def _created_knx_ids(created_names: list[str]) -> set[int]:
+    """Source ids of the KNX commands among freshly created Web-IO command names (read from the name)."""
+    knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
+    ids = (_parse_source_id_from_webio_name(name, knx_prefix) for name in created_names)
+    return {source_id for source_id in ids if source_id is not None}
+
+
 def _items_of_class(seq: list[dict], cls: str) -> list[dict]:
     """Filter an audit-result list (missing/renamed/type/orphan) down to one Web-IO class."""
     return [i for i in seq if i.get("webio_class") == cls]
@@ -509,6 +520,17 @@ def _plan_audit_for_action(action: str, bad_keys: list[str], audit_data: dict[st
             "plan findings are unknown. Fix them in Comexio, then retry."
         )
     return {**audit_data, "function_plan_missing": [], "function_plan_dangling": []}
+
+
+def _gap_items_for_action(action: str, gap_items: list[dict]) -> list[dict]:
+    """The wiring gaps an action closes: those of a command still to be renamed only in a full sync.
+
+    Such a command (pending_rename, see coordinator._compare_audit_key) carries its old name until the sync's
+    rename ran, and the pair writer finds a command by its new name — a wiring-only action would fail on it.
+    """
+    if action == "full_sync":
+        return gap_items
+    return [item for item in gap_items if not item.get("pending_rename")]
 
 
 def _unknown_plan_findings_lines(bad_keys: list[str]) -> list[str]:
@@ -843,7 +865,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             # Read once: the KNX step's fresh config may change the list before the result is written.
             bad_plan_keys = unreadable_plan_keys(api.fub_data)
             audit_data = _plan_audit_for_action(action, bad_plan_keys, audit_data)
-            gap_items = audit_data.get("function_plan_missing", [])
+            gap_items = _gap_items_for_action(action, audit_data.get("function_plan_missing", []))
             cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
 
             if action == "cleanup_entities":
@@ -937,11 +959,10 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         # commands from created_names exactly like _wire_knx_full does, and its gap-item
         # merge does the same for gap_items — both need the KNX slice removed).
         knx_prefix = SOURCE_CATEGORIES[WebioClass.KNX].audit_key_prefix
-        knx_gap_key = f"{SOURCE_CATEGORIES[WebioClass.KNX].key.value}_id"
         created_names_no_knx = [
             name for name in created_names if _parse_source_id_from_webio_name(name, knx_prefix) is None
         ]
-        gap_items_no_knx = [item for item in gap_items if knx_gap_key not in item]
+        gap_items_no_knx = [item for item in gap_items if _KNX_GAP_KEY not in item]
         # _wire_knx_full must run BEFORE _wire_trigger_pairs: a KNX [TRIG]/[TP] source's
         # self-reset pair is now wired via its write-path bridge Marker (see
         # _resolve_knx_trigger_bridge_markers), which _wire_knx_full's leg 2 is what
@@ -952,14 +973,34 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         # seconds; the trigger step reuses it when the KNX step wrote nothing, otherwise
         # fetches its own) and reports nothing when there is nothing to wire — without
         # these lines the status sat on the last analysis step for the whole wiring pass.
-        return await self._run_wiring_stages(
-            ctx,
-            [
-                (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
-                (*_STAGE_KNX, partial(self._wire_knx_full, ctx, created_names, gap_items, refresh_audit=True)),
-                (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
-            ],
-        )
+        # Without the KNX import there is no KNX Web-IO class and no K-object, so the KNX stage would only
+        # read Comexio's config for nothing (async_fresh_knx_audits answers "does not apply") — and name
+        # itself in the status for the seconds that read takes. It stays out of the run, and out of the
+        # "Not started" list of a cancel. The exception is a sync that itself created KNX commands: the import
+        # may have been switched off after the class sync created them (the option is live at once, the reload
+        # is skipped while the sync runs), and their read path would otherwise stay unwired. A KNX gap the audit
+        # found before the sync is no work of this sync: with the import off it stays as it is.
+        stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]] = [
+            (*_STAGE_PLAN_PAIRS, partial(self._wire_created_pairs, ctx, created_names_no_knx, gap_items_no_knx)),
+            (*_STAGE_TRIGGER_PAIRS, partial(self._wire_trigger_pairs, ctx, refresh_audit=True)),
+        ]
+        # Whether the stage is part of the run is decided here, once. Which gaps it takes is decided when it starts.
+        if WebioClass.KNX in self.coordinator.active_webio_classes or _created_knx_ids(created_names):
+            stages.insert(1, (*_STAGE_KNX, partial(self._wire_knx_stage, ctx, created_names, gap_items)))
+        return await self._run_wiring_stages(ctx, stages)
+
+    async def _wire_knx_stage(self, ctx: _SyncContext, created_names: list[str], gap_items: list[dict]) -> list[str]:
+        """The KNX stage of the wiring pass, with the gaps the import setting of this moment allows.
+
+        With the import on every gap goes along. With it off (never on for this sync, or switched off since the
+        stage list was built: the option is live at once, the reload is skipped while the sync runs) only the KNX
+        work this sync created goes on: its commands and the gaps of those ids. A KNX gap the audit found before
+        the sync is no work of this sync.
+        """
+        if WebioClass.KNX not in self.coordinator.active_webio_classes:
+            created_ids = _created_knx_ids(created_names)
+            gap_items = [item for item in gap_items if item.get(_KNX_GAP_KEY) in created_ids]
+        return await self._wire_knx_full(ctx, created_names, gap_items, refresh_audit=True)
 
     async def _run_wiring_stages(
         self, ctx: _SyncContext, stages: list[tuple[str, str, Callable[[], Awaitable[list[str]]]]]

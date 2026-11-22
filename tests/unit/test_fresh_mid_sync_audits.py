@@ -1,13 +1,16 @@
 """Fresh mid-sync audits: one config fetch for the KNX step, reused by the trigger step only when unchanged."""
 
 import asyncio
+from contextlib import asynccontextmanager
 import datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from custom_components.comexio.button import (
     _FLANKE_UNUSABLE_LINE,
     ComexioSyncButton,
+    _KnxPrestage,
     _SyncContext,
     _unique_failures,
 )
@@ -225,6 +228,105 @@ def _summaries(coordinator: _FakeSyncCoordinator) -> tuple[list[str], list[str]]
         return knx, await button._wire_trigger_pairs(ctx, refresh_audit=True)
 
     return asyncio.run(_run())
+
+
+def test_the_knx_step_still_wires_the_read_path_of_new_commands_when_its_audit_does_not_apply() -> None:
+    """Import switched off mid-sync: the audit says "does not apply", the new K command's read path stays."""
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.knx_result = ([], [], None)
+    resolved: list[list[int]] = []
+
+    async def resolve_knx_clusters(k_ids: list[int]):
+        resolved.append(k_ids)
+        return {77: [5]}, set(), []
+
+    @asynccontextmanager
+    async def plan_restarted_on_error(*_args: object):
+        yield
+
+    coordinator.resolve_knx_clusters = resolve_knx_clusters
+    button, ctx = _sync_button(coordinator)
+    prestage = (SimpleNamespace(allocated=[]), [])
+    wire_cluster = AsyncMock(return_value="")
+
+    with patch.multiple(
+        ComexioSyncButton,
+        _prestage_knx_webio=AsyncMock(return_value=prestage),
+        _plan_restarted_on_error=plan_restarted_on_error,
+        _wire_knx_cluster=wire_cluster,
+    ):
+        asyncio.run(button._wire_knx_full(ctx, ["HA K5 Door"], [], refresh_audit=True))
+
+    assert resolved == [[5]]
+    # The write itself is reached: plan 77 gets K5 on the read path, no bridge or loopback leg.
+    wire_cluster.assert_awaited_once()
+    assert wire_cluster.await_args.args[:7] == (ctx, 77, [5], False, {5}, {}, {})
+
+
+def test_a_sync_with_the_import_off_wires_a_new_k_command_through_the_real_knx_stage() -> None:
+    """The whole way in: stage selection, the stage's gap filter, `_wire_knx_full` up to the cluster write."""
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.knx_result = ([], [], None)
+    coordinator.active_webio_classes = tuple(cls for cls in WebioClass if cls is not WebioClass.KNX)
+    coordinator.cancel_sync = False
+    resolved: list[list[int]] = []
+
+    async def resolve_knx_clusters(k_ids: list[int]):
+        resolved.append(k_ids)
+        return {77: [5]}, set(), []
+
+    @asynccontextmanager
+    async def plan_restarted_on_error(*_args: object):
+        yield
+
+    coordinator.resolve_knx_clusters = resolve_knx_clusters
+    button, ctx = _sync_button(coordinator)
+    wire_cluster = AsyncMock(return_value="")
+
+    with patch.multiple(
+        ComexioSyncButton,
+        _wire_created_pairs=AsyncMock(return_value=[]),
+        _wire_trigger_pairs=AsyncMock(return_value=[]),
+        _prestage_knx_webio=AsyncMock(return_value=(SimpleNamespace(allocated=[]), [])),
+        _plan_restarted_on_error=plan_restarted_on_error,
+        _wire_knx_cluster=wire_cluster,
+    ):
+        # K9 is a gap the audit found before the sync: no work of this sync with the import off.
+        asyncio.run(button._wire_plans_after_sync(ctx, ["HA K5 Door"], [{"knx_id": 5}, {"knx_id": 9}]))
+
+    assert resolved == [[5]]
+    wire_cluster.assert_awaited_once()
+    assert wire_cluster.await_args.args[:7] == (ctx, 77, [5], False, {5}, {}, {})
+
+
+def test_the_read_path_leg_adds_the_new_k_command_to_its_plan_through_the_api() -> None:
+    """The real cluster and read-path leg, only the API boundary faked: plan 77 is stopped, gets K5, is finalized."""
+    coordinator = _FakeSyncCoordinator(bridge=[])
+    coordinator.async_function_plan_change_backup = AsyncMock()
+    button, ctx = _sync_button(coordinator)
+    api = SimpleNamespace(
+        fub_data={},
+        function_plan_stop_fup=AsyncMock(),
+        function_plan_add_source_pairs=AsyncMock(return_value=([5], [])),
+    )
+    ctx.api = api
+    finalize = AsyncMock(return_value="")
+    state = {"done": 0, "total": 1, "t0": 0.0}
+
+    with patch.multiple(
+        ComexioSyncButton,
+        _plan_name=lambda _self, fub_id: f"HA - KNX plan {fub_id}",
+        _check_plan_rename_mismatch=lambda *_args: None,
+        _finalize_plan_after_pairs=finalize,
+    ):
+        line = asyncio.run(button._wire_knx_cluster(ctx, 77, [5], False, {5}, {}, {}, state, _KnxPrestage()))
+
+    api.function_plan_stop_fup.assert_awaited_once_with(77)
+    api.function_plan_add_source_pairs.assert_awaited_once()
+    assert api.function_plan_add_source_pairs.await_args.args == (77, [5])
+    assert api.function_plan_add_source_pairs.await_args.kwargs["ref_type"] == 11
+    assert finalize.await_args.args[1:4] == (77, "HA - KNX plan 77", [5])
+    assert "read-path +1/1" in line
 
 
 def test_trigger_step_reuses_the_knx_snapshot_once_when_nothing_was_written() -> None:

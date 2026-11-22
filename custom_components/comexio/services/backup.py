@@ -10,6 +10,7 @@ than acting on the live plan directly.
 import asyncio
 from collections.abc import Mapping
 from datetime import datetime, timedelta
+import hashlib
 import json
 import logging
 import time
@@ -44,7 +45,17 @@ from ..function_plan_backup import (
     retention_cutoff,
     snapshot_paper_format,
 )
-from ..function_plan_block_keys import CHECK_PLAUSIBLE, CHECK_UNRESOLVED, CHECK_UNVERIFIED, block_check
+from ..function_plan_block_keys import (
+    BLOCK_IDS_UNCHECKED,
+    CHECK_PLAUSIBLE,
+    CHECK_UNRESOLVED,
+    CHECK_UNVERIFIED,
+    OMITTED_BLOCKS,
+    block_check,
+    omit_unresolved_blocks,
+    omitted_block_lines,
+    snapshot_identity,
+)
 from ..function_plan_block_settings import (
     block_settings_diff,
     live_only_settings,
@@ -77,6 +88,7 @@ _LOGGER = logging.getLogger(__name__)
 _TITLE_RESTORE_ERR = "Function Plan Restore — Error"
 _TITLE_RESTORE_PROGRESS = "Function Plan Restore — IN PROGRESS"
 _TITLE_RESTORE_FIRMWARE = "Function Plan Restore — Other Firmware"
+_TITLE_RESTORE_OMITTED = "Function Plan Restore — Blocks Left Out"
 _TITLE_LIST_BACKUPS_ERR = "Function Plan Backups — Error"
 _TITLE_DELETE_BACKUPS_ERR = "Function Plan Delete Backups — Error"
 _TITLE_PURGE_ORPHANED_BACKUPS_ERR = "Function Plan Purge Orphaned Backups — Error"
@@ -1011,7 +1023,8 @@ def _new_plan_status(
     structurally_complete = elements_created == len(snapshot.get("elements", {})) and connections_created == len(
         snapshot.get("connections", {})
     )
-    complete = structurally_complete and not warnings
+    # A copy without the blocks Comexio no longer has is what the user asked for, but not the whole backup.
+    complete = structurally_complete and not warnings and not snapshot.get(OMITTED_BLOCKS)
     return "OK" if complete and _block_settings_ok(block_settings) and module_restore.ok() else "PARTIAL"
 
 
@@ -1042,9 +1055,20 @@ async def _start_new_plan(api, new_fub_id: int, plan_name: str, auto_start: bool
         return False, _error_label(exc)
 
 
-def _new_plan_activation_line(run_ok: bool | None, auto_start: bool, start_error: str | None = None) -> str:
-    """Activation line of a restore that built a new plan (as new ID or as copy)."""
+def _new_plan_activation_line(
+    run_ok: bool | None, auto_start: bool, start_error: str | None = None, lacks_blocks: bool = False
+) -> str:
+    """Activation line of a restore that built a new plan (as new ID or as copy).
+
+    lacks_blocks: the plan was built without logic blocks. A call that did not pass auto_start is
+    held back for that reason; one that passed it as false chose it, so the line names both facts.
+    """
     if not auto_start:
+        if lacks_blocks:
+            return (
+                f"Activation: {ICON_INACTIVE} not started (auto-start is off and the copy lacks logic blocks — "
+                "check it, then start it in Comexio Studio)"
+            )
         return f"Activation: {ICON_INACTIVE} not started (auto-start disabled for this restore)"
     if start_error is not None:
         return f"Activation: {ICON_WARNING} starting it failed ({start_error}) — start it in Comexio Studio"
@@ -1344,6 +1368,19 @@ async def _restore_plan_as_copy(
             )
             return
 
+        # A copy exists from here on, so it is told what it lacks now: a build that fails halfway leaves
+        # a partial copy, and the user should still see which blocks were left out on purpose.
+        _warn_blocks_omitted(
+            hass,
+            snapshot,
+            coordinator.server_id,
+            source_fub_id,
+            source_name,
+            new_plan_name,
+            new_fub_id,
+            (kind, slot),
+            auto_start,
+        )
         id_map, connections_created, warnings, block_settings, module_restore = await _rebuild_new_plan(
             api, new_fub_id, snapshot
         )
@@ -1376,7 +1413,9 @@ async def _restore_plan_as_copy(
     captured_ts = dt_util.parse_datetime(str(captured_raw)) if captured_raw else None
     captured_label = dt_util.as_local(captured_ts).strftime(TIMESTAMP_DISPLAY_FORMAT) if captured_ts else "?"
 
-    activation_line = _new_plan_activation_line(run_ok, auto_start, start_error)
+    activation_line = _new_plan_activation_line(
+        run_ok, auto_start, start_error, lacks_blocks=bool(snapshot.get(OMITTED_BLOCKS))
+    )
 
     msg = (
         f"Plan '{one_line(new_plan_name)}' created as a COPY of '{one_line(source_name)}' "
@@ -1384,6 +1423,7 @@ async def _restore_plan_as_copy(
         f"Source: {kind}[{slot}], captured {captured_label}\n"
         f"Elements: {elements_created}/{elem_count} recreated\n"
         f"Connections: {connections_created}/{conn_count} recreated\n"
+        f"{_omitted_blocks_line(snapshot)}"
         f"{_block_settings_line(block_settings)}"
         f"{module_configs_line(snapshot, module_restore)}"
         f"Paper: {paper} @ {dpi} DPI, {orientation}{_paper_default_note(snapshot)}\n"
@@ -1399,7 +1439,7 @@ async def _restore_plan_as_copy(
 
     _LOGGER.info(
         "Function Plan Restore (copy): source_fub=%s new_fub=%s new_name=%s status=%s elements=%d "
-        "connections=%d/%d block_settings=%s run_ok=%s auto_start=%s duration=%.1fs",
+        "connections=%d/%d block_settings=%s run_ok=%s auto_start=%s omitted=%d duration=%.1fs",
         source_fub_id,
         new_fub_id,
         one_line(new_plan_name),
@@ -1410,6 +1450,7 @@ async def _restore_plan_as_copy(
         block_settings,
         run_ok,
         auto_start,
+        len(snapshot.get(OMITTED_BLOCKS) or ()),
         duration,
     )
     persistent_notification.async_create(hass, msg, title=f"Function Plan Restore — {status}", notification_id=notif_id)
@@ -1462,6 +1503,53 @@ async def _resolve_restore_snapshot(
 
 
 _ACCEPT_UNVERIFIED_HINT = "Check the preview, then restore with 'accept_unverified_blocks: true' to restore it anyway."
+_OMIT_HINT = (
+    "To get a copy without these blocks and the connections that end at them, restore with "
+    "'as_copy: true' and 'omit_unresolved_blocks: true'."
+)
+_OMITTED_NOTICE_LINES = 10  # lines of the omitted blocks one notice names; the log has them all
+# Why a block is left out: missing, or ambiguous (the stored block id fits more than one block Comexio has)
+_OMITTED_REASON = "that Comexio no longer has (or has more than one of)"
+
+
+class _BlockOptIns(NamedTuple):
+    """The two choices a restore makes about logic blocks that cannot be placed as the backup has them."""
+
+    accept_unverified: bool
+    omit_unresolved: bool
+    expected_hash: str | None = None  # the hash of the backup the caller reviewed; another one is refused
+
+
+def _expected_hash(call: ServiceCall) -> str | None:
+    """The hash of the backup the caller reviewed; none when the field is absent or blank."""
+    return str(call.data.get("expected_hash") or "").strip() or None
+
+
+def _refuse_changed_backup(
+    hass: HomeAssistant, snapshot: dict[str, Any], expected_hash: str | None, plan_name: str, kind: str, slot: int
+) -> bool:
+    """True (user told, nothing touched) when the slot no longer holds the backup the caller reviewed.
+
+    The plan card's restore dialog names the blocks a copy would leave out; a backup rotating into
+    the slot (or a catalog change that resolves the blocks otherwise) after that must not be cut
+    by what the user was shown for another one.
+    """
+    if expected_hash is None or snapshot_identity(snapshot) == expected_hash:
+        return False
+    _LOGGER.warning(
+        "Function Plan Restore of '%s' %s[%s] refused: the backup is not the one that was reviewed",
+        one_line(plan_name),
+        one_line(kind),
+        slot,
+    )
+    persistent_notification.async_create(
+        hass,
+        f"The backup {one_line(kind)}[{slot}] of '{one_line(plan_name)}' is not the one the restore dialog showed — "
+        "a newer backup took its place, or the logic blocks of Comexio changed meanwhile. Nothing was changed. "
+        "Open the restore dialog again.",
+        title=_TITLE_RESTORE_ERR,
+    )
+    return True
 
 
 def _problem_lines(check: dict[str, Any]) -> str:
@@ -1485,7 +1573,7 @@ def _block_ids_restore_error(snapshot: dict[str, Any], accept_unverified: bool) 
         return (
             f"Restore refused: {len(check['problems'])} logic block(s) of this backup have no unique matching "
             "block on Comexio today (block ids shift after an app install or firmware update):\n"
-            f"{_problem_lines(check)}"
+            f"{_problem_lines(check)}\n{_OMIT_HINT}"
         )
     if check["status"] == CHECK_UNVERIFIED and not accept_unverified:
         return (
@@ -1536,6 +1624,96 @@ def _warn_firmware_differs(
     )
 
 
+def _omitted_blocks_line(snapshot: dict[str, Any]) -> str:
+    """The line of a copy's result that says logic blocks were left out ('' when none were)."""
+    if not (omitted := snapshot.get(OMITTED_BLOCKS)):
+        return ""
+    return f"Left out: {len(omitted)} logic block(s) {_OMITTED_REASON}, with their connections (see the notice)\n"
+
+
+def _hold_back_auto_start(call: ServiceCall, snapshot: dict[str, Any], plan_name: str, auto_start: bool) -> bool:
+    """auto_start of a restore: off for a copy that lacks blocks, unless the caller asked for it by name.
+
+    A plan whose elements lost their inputs would run against the building before anyone read the
+    notice. The default of the flag is "on", so only a call that does not pass it is held back.
+    """
+    if not (auto_start and snapshot.get(OMITTED_BLOCKS) and "auto_start" not in call.data):
+        return auto_start
+    _LOGGER.info(
+        "Function Plan Restore of '%s': the copy lacks logic blocks, so it is not started "
+        "(pass auto_start to start it)",
+        one_line(plan_name),
+    )
+    return False
+
+
+def _omitted_notification_id(
+    server_id: str, fub_id: int, plan_name: str, copy_fub_id: int, backup: tuple[str, int]
+) -> str:
+    """Id of the notice for one copy (server, plan, copy's plan id, kind, slot), safe against names with the delimiter.
+
+    Joined with underscores, (server "a", fub 1, plan "2_x") and (server "a_1", fub 2, plan "x") would
+    be one id; the digest of the JSON list keeps every part apart and the id free of a plan's characters.
+    The copy is told apart by its plan id, not its name: a copy can be renamed and its old name taken by
+    the next copy of the same backup. So a later copy never replaces another copy's notice, and a copy
+    that leaves no block out takes none down; a notice stays until the user dismisses it.
+    """
+    identity = json.dumps([server_id, fub_id, plan_name, copy_fub_id, *backup])
+    return f"comexio_restore_omitted_{hashlib.sha256(identity.encode()).hexdigest()[:24]}"
+
+
+def _warn_blocks_omitted(
+    hass: HomeAssistant,
+    snapshot: dict[str, Any],
+    server_id: str,
+    fub_id: int,
+    plan_name: str,
+    copy_name: str,
+    copy_fub_id: int,
+    backup: tuple[str, int],
+    auto_start: bool,
+) -> None:
+    """Warn (log + notification, the restore goes on) which logic blocks the copy is built without.
+
+    Called as soon as the copy exists, before its structure is built, so a build that fails halfway
+    still leaves the list. Silent when the snapshot left nothing out. The lines come from
+    omitted_block_lines, which keep ids, keys and names on one line each; the notification names
+    the first ones, the log all.
+    The notification is one per copy (see _omitted_notification_id): a copy of the same backup that
+    leaves no block out posts nothing and leaves the warning of an earlier copy standing, as that
+    copy still lacks its blocks. backup is the (kind, slot) the snapshot came from.
+    """
+    if not (omitted := snapshot.get(OMITTED_BLOCKS)):
+        return
+    lines = omitted_block_lines(omitted)
+    _LOGGER.warning(
+        "Function Plan Restore of '%s' (fub=%s): %d logic block(s) left out of the copy '%s' (fub=%s):\n%s",
+        one_line(plan_name),
+        fub_id,
+        len(lines),
+        one_line(copy_name),
+        copy_fub_id,
+        "\n".join(lines),
+    )
+    shown = lines[:_OMITTED_NOTICE_LINES]
+    message = (
+        f"The copy '{one_line(copy_name)}' of '{one_line(plan_name)}' is built without {len(lines)} logic "
+        f"block(s) {_OMITTED_REASON}, and without the connections that end at them:\n"
+        + "\n".join(f"- {line}" for line in shown)
+    )
+    if len(lines) > len(shown):
+        message += f"\n… and {len(lines) - len(shown)} more (see log)"
+    message += "\nCheck the copy before relying on it: an element that lost its input needs a new wire."
+    if not auto_start:
+        message += " It was not started."
+    persistent_notification.async_create(
+        hass,
+        message,
+        title=_TITLE_RESTORE_OMITTED,
+        notification_id=_omitted_notification_id(server_id, fub_id, plan_name, copy_fub_id, backup),
+    )
+
+
 async def _load_restorable_snapshot(
     hass: HomeAssistant,
     coordinator: ComexioCoordinator,
@@ -1543,12 +1721,29 @@ async def _load_restorable_snapshot(
     plan_name: str,
     kind: str,
     slot: int,
-    accept_unverified: bool,
+    opt_ins: _BlockOptIns,
 ) -> dict[str, Any] | None:
-    """The backup snapshot to restore, or None (already reported) if it is missing or its blocks cannot be placed."""
+    """The backup snapshot to restore, or None (already reported) if it is missing or its blocks cannot be placed.
+
+    With omit_unresolved the blocks Comexio no longer has are cut out first (the caller allows that
+    for a copy only), so what the block check judges is what the copy will be built from.
+    """
     snapshot = await _resolve_restore_snapshot(hass, coordinator, fub_id, plan_name, kind, slot)
-    if snapshot is None:
+    if snapshot is None or _refuse_changed_backup(hass, snapshot, opt_ins.expected_hash, plan_name, kind, slot):
         return None
+    accept_unverified = opt_ins.accept_unverified
+    if opt_ins.omit_unresolved:
+        cut = omit_unresolved_blocks(snapshot)
+        if cut is snapshot:
+            _LOGGER.info(
+                "Function Plan Restore of '%s' (fub=%s): omit_unresolved_blocks is set, but %s — nothing is left out",
+                one_line(plan_name),
+                fub_id,
+                "the blocks of this backup could not be checked (keys or catalog unavailable)"
+                if snapshot.get(BLOCK_IDS_UNCHECKED)
+                else "no block of this backup was found missing or ambiguous",
+            )
+        snapshot = cut
     if block_error := _block_ids_restore_error(snapshot, accept_unverified):
         _LOGGER.warning(
             "Function Plan Restore of '%s' (fub=%s) %s[%s]: %s", one_line(plan_name), fub_id, kind, slot, block_error
@@ -1785,6 +1980,35 @@ def _restore_identity_conflict(
     return live_fub is None or live_name != snapshot_name, snapshot_name, live_name
 
 
+def _refuse_copy_options(
+    hass: HomeAssistant, fub_id: int, plan_name: str, as_copy: bool, new_plan_name: str, omit_unresolved: bool
+) -> bool:
+    """True (user told, nothing touched) when the copy options of a restore do not fit together.
+
+    A copy needs a name, and only a copy may leave blocks out: the plan that is live now is never
+    rebuilt without a block.
+    """
+    if as_copy and not new_plan_name:
+        persistent_notification.async_create(
+            hass, "A name is required for 'Restore as copy' ('new_plan_name').", title=_TITLE_RESTORE_ERR
+        )
+        return True
+    if omit_unresolved and not as_copy:
+        _LOGGER.warning(
+            "Function Plan Restore of '%s' (fub=%s) refused: omit_unresolved_blocks needs as_copy",
+            one_line(plan_name),
+            fub_id,
+        )
+        persistent_notification.async_create(
+            hass,
+            "'omit_unresolved_blocks' only works together with 'Restore as copy' ('as_copy'): the plan that is "
+            "live now is never rebuilt without blocks. Nothing was changed.",
+            title=_TITLE_RESTORE_ERR,
+        )
+        return True
+    return False
+
+
 async def _run_function_plan_restore(
     hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api, plan_hash
 ) -> None:
@@ -1805,9 +2029,10 @@ async def _run_function_plan_restore(
     new_plan_name = str(call.data.get("new_plan_name", "")).strip()
     auto_start = service_flag(call, "auto_start", True)
     accept_unverified = service_flag(call, "accept_unverified_blocks", False)
+    omit_unresolved = service_flag(call, "omit_unresolved_blocks", False)
     _LOGGER.info(
         "Function Plan Restore: fub_id=%s plan_name=%s kind=%s slot=%s on_conflict=%s confirm=%s "
-        "as_copy=%s new_plan_name=%s auto_start=%s accept_unverified_blocks=%s",
+        "as_copy=%s new_plan_name=%s auto_start=%s accept_unverified_blocks=%s omit_unresolved_blocks=%s",
         fub_id,
         one_line(plan_name),
         kind,
@@ -1818,14 +2043,20 @@ async def _run_function_plan_restore(
         one_line(new_plan_name),
         auto_start,
         accept_unverified,
+        omit_unresolved,
     )
-    if as_copy and not new_plan_name:
-        persistent_notification.async_create(
-            hass, "A name is required for 'Restore as copy' ('new_plan_name').", title=_TITLE_RESTORE_ERR
-        )
+    if _refuse_copy_options(hass, fub_id, plan_name, as_copy, new_plan_name, omit_unresolved):
         return
 
-    snapshot = await _load_restorable_snapshot(hass, coordinator, fub_id, plan_name, kind, slot, accept_unverified)
+    snapshot = await _load_restorable_snapshot(
+        hass,
+        coordinator,
+        fub_id,
+        plan_name,
+        kind,
+        slot,
+        _BlockOptIns(accept_unverified, omit_unresolved, _expected_hash(call)),
+    )
     if snapshot is None:
         return
 
@@ -1849,6 +2080,7 @@ async def _run_function_plan_restore(
     if as_copy:
         # The source plan is never touched here — no conflict/identity check applies.
         warn_firmware()
+        auto_start = _hold_back_auto_start(call, snapshot, plan_name, auto_start)
         await _restore_plan_as_copy(hass, coordinator, api, fub_id, snapshot, kind, slot, new_plan_name, auto_start)
         return
 

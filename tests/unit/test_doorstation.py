@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import ComexioCertificateMismatchError, ComexioConnectionError, ComexioDataError
 from aiocomexio.doorstation import Doorstation
+from aiocomexio.extension import ExtensionInfo
 from homeassistant.exceptions import ConfigEntryAuthFailed
 import pytest
 
@@ -100,12 +101,18 @@ def _camera(
     coordinator.server_id = SERVER
     coordinator.data = {"io": [{"ext_id": "14", "ext_name": "DOOR"}]}
     coordinator.offline_extensions = set()
+    coordinator.unloading = False
     coordinator.doorstations = tracker or DoorstationTracker()
     if tracker is None:
         coordinator.doorstations.update({14: _doorstation()})
-    coordinator.api = MagicMock(get_doorstation_snapshot=snapshot or AsyncMock(return_value=(FRAME, None)))
+    # No address of its own: these tests are about the way over the IO-Server (the direct way is in tests/ha).
+    coordinator.api = MagicMock(
+        get_doorstation_snapshot=snapshot or AsyncMock(return_value=(FRAME, None)),
+        get_doorstation_address=AsyncMock(return_value=(None, None)),
+    )
     with patch("custom_components.comexio.camera.Camera.__init__", autospec=True, return_value=None):
         camera = ComexioDoorstationCamera(coordinator, 14)
+    camera.hass = MagicMock(is_stopping=False)  # what `_is_current` asks (an entity gets its hass when it is added)
     return camera, coordinator
 
 
@@ -155,6 +162,17 @@ def test_the_camera_is_unavailable_while_its_extension_is_offline() -> None:
         assert camera.available is True
         coordinator.offline_extensions = {"DOOR"}
         assert camera.available is False
+
+
+def test_nothing_asked_of_a_camera_is_current_while_home_assistant_stops() -> None:
+    camera, _ = _camera()
+    asked = camera._doorstation  # the one the tracker knows
+    assert asked is not None
+    assert camera._is_current(asked) is True
+
+    camera.hass.is_stopping = True
+
+    assert camera._is_current(asked) is False
 
 
 def test_the_image_is_read_with_the_camera_id_of_the_doorstation() -> None:
@@ -691,6 +709,113 @@ def test_the_snapshot_fetch_reports_a_changed_certificate_without_raising(comexi
 
     assert asyncio.run(comexio_api.get_doorstation_snapshot(1)) == (None, SYSTEM_INFO_CERTIFICATE_CHANGED)
     assert comexio_api.certificate_mismatch is err
+
+
+def _extension(location: str | None) -> ExtensionInfo:
+    return ExtensionInfo(ext_id=14, type_id=16, name="DOOR", serial=None, location=location)
+
+
+@pytest.mark.parametrize(
+    ("location", "address"),
+    [("192.0.2.10", "192.0.2.10"), ("local", None), (None, None), ("doorstation.lan", None), ("fe80::1", None)],
+)
+def test_the_address_of_a_doorstation_is_its_usable_ipv4_address_or_none(
+    comexio_api: ComexioAPI, location: str | None, address: str | None
+) -> None:
+    comexio_api._client = MagicMock(get_extension=AsyncMock(return_value=_extension(location)))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    assert asyncio.run(comexio_api.get_doorstation_address(14)) == (address, None)
+    comexio_api._client.get_extension.assert_awaited_once_with(14)
+
+
+def test_a_failed_read_of_the_address_is_a_cause(comexio_api: ComexioAPI) -> None:
+    comexio_api._client = MagicMock(get_extension=AsyncMock(side_effect=ComexioDataError("unknown extension")))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    assert asyncio.run(comexio_api.get_doorstation_address(14)) == (None, "unknown extension")
+
+
+def test_a_connection_error_of_the_address_read_is_a_cause(comexio_api: ComexioAPI) -> None:
+    comexio_api._client = MagicMock(get_extension=AsyncMock(side_effect=ComexioConnectionError("timed out")))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    assert asyncio.run(comexio_api.get_doorstation_address(14)) == (None, "timed out")
+
+
+def test_no_address_is_asked_for_once_the_session_is_gone(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At unload or while Home Assistant stops: no request, and no failure to report either."""
+    get_extension = AsyncMock(return_value=_extension("192.0.2.10"))
+    comexio_api._client = MagicMock(get_extension=get_extension)
+    comexio_api._client_credentials = comexio_api._credentials()
+    monkeypatch.setattr(comexio_api, "_closed", True)
+
+    assert asyncio.run(comexio_api.get_doorstation_address(14)) == (None, None)
+    get_extension.assert_not_called()
+
+
+def test_a_session_closed_under_the_address_read_is_no_failure(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    get_extension = AsyncMock(side_effect=RuntimeError("Session is closed"))
+    comexio_api._client = MagicMock(get_extension=get_extension)
+    comexio_api._client_credentials = comexio_api._credentials()
+    # Open before the request, gone when the error is looked at.
+    monkeypatch.setattr(comexio_api, "_session_gone_reason", MagicMock(side_effect=[None, "closed"]))
+
+    assert asyncio.run(comexio_api.get_doorstation_address(14)) == (None, None)
+    get_extension.assert_awaited_once()  # the request was made: this is not the skip of a session that was gone before
+
+
+def test_another_runtime_error_of_the_address_read_is_a_bug_and_raised(comexio_api: ComexioAPI) -> None:
+    comexio_api._client = MagicMock(get_extension=AsyncMock(side_effect=RuntimeError("something else")))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    read = comexio_api.get_doorstation_address(14)
+
+    with pytest.raises(RuntimeError, match="something else"):
+        asyncio.run(read)
+
+
+def test_the_address_read_reports_a_changed_certificate_without_raising(comexio_api: ComexioAPI) -> None:
+    err = ComexioCertificateMismatchError("changed", expected="a" * 64, actual="b" * 64)
+    comexio_api._client = MagicMock(get_extension=AsyncMock(side_effect=err))
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    assert asyncio.run(comexio_api.get_doorstation_address(14)) == (None, SYSTEM_INFO_CERTIFICATE_CHANGED)
+    assert comexio_api.certificate_mismatch is err
+
+
+def test_the_address_read_waits_for_the_snapshot_reads(comexio_api: ComexioAPI) -> None:
+    """Comexio serves one request at a time: the form read does not run beside a stream read."""
+    running = 0
+    most = 0
+
+    async def _slow(*_args: Any) -> Any:
+        nonlocal running, most
+        running += 1
+        most = max(most, running)
+        await asyncio.sleep(0.01)
+        running -= 1
+        return FRAME
+
+    async def _form(_ext_id: int) -> ExtensionInfo:
+        await _slow()
+        return _extension("192.0.2.10")
+
+    comexio_api._client = MagicMock(
+        get_doorstation_snapshot=AsyncMock(side_effect=_slow), get_extension=AsyncMock(side_effect=_form)
+    )
+    comexio_api._client_credentials = comexio_api._credentials()
+
+    async def _together() -> None:
+        await asyncio.gather(comexio_api.get_doorstation_snapshot(1), comexio_api.get_doorstation_address(14))
+
+    asyncio.run(_together())
+
+    assert most == 1
 
 
 @pytest.mark.parametrize("method", ["get_doorstations", "get_doorstation_snapshot"])

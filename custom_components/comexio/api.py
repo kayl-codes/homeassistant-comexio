@@ -1983,6 +1983,38 @@ class ComexioAPI:
             self._note_certificate_mismatch(err, "Doorstation snapshot not fetched")
             return None, SYSTEM_INFO_CERTIFICATE_CHANGED
 
+    async def get_doorstation_address(self, ext_id: int) -> tuple[str | None, str | None]:
+        """The IPv4 address a Doorstation's extension is configured with, or None and the failure cause.
+
+        Read from the extension's edit form (admin session, one small request; see aiocomexio's get_extension). The
+        address is None without a cause for an extension with no usable one (`local`, a host name, IPv6): the camera
+        then stays on the IO-Server. A failure is only debug-logged here, the caller falls back. A lapsed admin
+        session is logged in again once. Runs one after the other with the snapshot reads (Comexio serves one
+        request at a time). With the session gone (unload, Home Assistant stopping) nothing is asked and the answer is
+        "no address" without a cause: that is no failure to report.
+        """
+        if self._session_gone_reason() is not None:
+            return None, None
+        try:
+            async with self._doorstation_snapshot_lock:
+                extension, cause = await self._system_info_part(lambda: self.client.get_extension(ext_id), [])
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, "Doorstation address not fetched")
+            return None, SYSTEM_INFO_CERTIFICATE_CHANGED
+        except RuntimeError as err:
+            # The session was closed under the request (unload, Home Assistant stopping): no failure to report.
+            if not self.met_the_closed_session(err):
+                raise
+            return None, None
+        address = extension.ip if extension is not None else None
+        if address is None:
+            _LOGGER.debug(
+                "Doorstation extension %d has no usable address of its own (%s), its camera is read over the IO-Server",
+                ext_id,
+                cause or "none configured",
+            )
+        return address, cause
+
     def _load_config_names(self) -> tuple[str, str, str, str, str]:
         """Load configuration names from config_entry."""
         webio_name = "HomeAssistant"
