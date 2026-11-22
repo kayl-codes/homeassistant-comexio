@@ -41,7 +41,7 @@ from custom_components.comexio.const import (
     selected_quickbus_devices,
     webio_quickbus_ios,
 )
-from custom_components.comexio.coordinator import ComexioCoordinator
+from custom_components.comexio.coordinator import ComexioCoordinator, _io_gap_key
 from custom_components.comexio.options_flow import (
     ComexioOptionsFlow,
     _drop_unchanged_quickbus_default,
@@ -190,6 +190,14 @@ def test_managed_io_groups_with_no_quickbus_device_selected_are_the_online_exten
     options = {CONF_FUNCTION_PLAN_IO_EXTENSIONS: ["BASE", "UD1"], CONF_FUNCTION_PLAN_QUICKBUS_DEVICES: []}
 
     assert _coordinator(options, quickbus_result, offline={"UD1"}).managed_io_groups() == {("IO", "BASE")}
+
+
+def test_the_debris_check_looks_up_an_io_under_the_key_the_audit_gives_it(quickbus_result: dict[str, Any]) -> None:
+    """The audit names a wiring gap by its audit key; the debris check finds the IO again by `_io_gap_key`."""
+    entries = list(_coordinator({}, quickbus_result)._io_audit_entries(quickbus_result))
+
+    assert any(io.get("quickbus") for _key, io, _name in entries)
+    assert all(key == _io_gap_key(io) for key, io, _name in entries)
 
 
 @pytest.mark.parametrize(

@@ -511,6 +511,17 @@ def _plan_audit_for_action(action: str, bad_keys: list[str], audit_data: dict[st
     return {**audit_data, "function_plan_missing": [], "function_plan_dangling": []}
 
 
+def _gap_items_for_action(action: str, gap_items: list[dict]) -> list[dict]:
+    """The wiring gaps an action closes: those of a command still to be renamed only in a full sync.
+
+    Such a command (pending_rename, see coordinator._compare_audit_key) carries its old name until the sync's
+    rename ran, and the pair writer finds a command by its new name — a wiring-only action would fail on it.
+    """
+    if action == "full_sync":
+        return gap_items
+    return [item for item in gap_items if not item.get("pending_rename")]
+
+
 def _unknown_plan_findings_lines(bad_keys: list[str]) -> list[str]:
     """Function Plan block line for a full sync that left the plan findings alone (see _plan_audit_for_action)."""
     if not bad_keys:
@@ -843,7 +854,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             # Read once: the KNX step's fresh config may change the list before the result is written.
             bad_plan_keys = unreadable_plan_keys(api.fub_data)
             audit_data = _plan_audit_for_action(action, bad_plan_keys, audit_data)
-            gap_items = audit_data.get("function_plan_missing", [])
+            gap_items = _gap_items_for_action(action, audit_data.get("function_plan_missing", []))
             cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
 
             if action == "cleanup_entities":
