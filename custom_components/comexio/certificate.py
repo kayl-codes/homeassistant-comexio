@@ -22,6 +22,7 @@ from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed, ConfigEntryNotReady, HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
 from .api import ComexioAPI
@@ -29,6 +30,7 @@ from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
     CONF_CERTIFICATE_FINGERPRINT,
+    CONF_CERTIFICATE_PINNED_AT,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
     CONF_HOST,
     CONF_PASSWORD,
@@ -102,6 +104,21 @@ CONNECTION_HTTPS = "https"
 CONNECTION_HTTP = "http"
 CONNECTION_CERTIFICATE_CHANGED = ISSUE_CERTIFICATE_CHANGED
 CONNECTION_STATES = [CONNECTION_HTTPS, CONNECTION_HTTP, CONNECTION_CERTIFICATE_CHANGED]
+
+
+def pin_data(fingerprint: str) -> dict[str, str]:
+    """The entry data that pins fingerprint: the fingerprint and when it was pinned (now, ISO 8601 UTC).
+
+    Every pin goes through here, so the date always belongs to the fingerprint beside it; dropping the pin
+    drops both (unpin_data).
+    """
+    return {CONF_CERTIFICATE_FINGERPRINT: fingerprint, CONF_CERTIFICATE_PINNED_AT: dt_util.utcnow().isoformat()}
+
+
+def unpin_data(data: dict[str, Any]) -> bool:
+    """Remove the pin and its date from data in place; whether there was a pin."""
+    data.pop(CONF_CERTIFICATE_PINNED_AT, None)
+    return data.pop(CONF_CERTIFICATE_FINGERPRINT, None) is not None
 
 
 def certificate_issue_id(entry_id: str) -> str:
@@ -480,7 +497,7 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
         )
         # A loaded entry reloads through its update listener on the data change below.
         reload = entry.state is not ConfigEntryState.LOADED
-        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: current})
+        hass.config_entries.async_update_entry(entry, data={**entry.data, **pin_data(current)})
         async_clear_certificate_changed(hass, entry.entry_id)  # also removes the push from the phones
         if reload:
             hass.config_entries.async_schedule_reload(entry.entry_id)
@@ -650,7 +667,7 @@ async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAP
         return _new_api(hass, entry.data, None)
     api = _new_api(hass, entry.data, fingerprint)
     if await api.login():
-        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: fingerprint})
+        hass.config_entries.async_update_entry(entry, data={**entry.data, **pin_data(fingerprint)})
         _LOGGER.info("Comexio at %s: switched to HTTPS, certificate %s pinned", host, format_fingerprint(fingerprint))
         notify_https_enabled(hass, str(entry.data[CONF_SERVER_ID]), host, fingerprint)
         return api

@@ -340,6 +340,12 @@
           "http": "HTTP (sin cifrar)",
           "certificate_changed": "Certificado cambiado"
         }
+      },
+      "certificate_expiry": {
+        "name": "Certificado válido hasta",
+        "state_attributes": {
+          "valid_from": { "name": "Válido desde" }
+        }
       }
     },
     "binary_sensor": {

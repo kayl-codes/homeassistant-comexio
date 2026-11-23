@@ -22,6 +22,8 @@ from .certificate import (
     is_valid_host,
     notify_https_disabled,
     notify_https_enabled,
+    pin_data,
+    unpin_data,
 )
 from .const import (
     CONF_API_PASSWORD,
@@ -317,7 +319,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input[CONF_SERVER_ID] = chosen_id
                 user_input["scan_interval"] = int(user_input["scan_interval"])
                 if fingerprint is not None:
-                    user_input[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+                    user_input.update(pin_data(fingerprint))
                 self._pending_entry = user_input
                 self._checked_hosts = set(configured_hosts)
             except (ServerIdExists, ServerIdInvalid, HostAlreadyConfigured):
@@ -584,15 +586,15 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
         fingerprint = await async_read_fingerprint(merged[CONF_HOST])
         if fingerprint is None:
-            return None if merged.pop(CONF_CERTIFICATE_FINGERPRINT, None) is None else _HTTPS_DROPPED
+            return _HTTPS_DROPPED if unpin_data(merged) else None
         if pinned is None:
-            merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+            merged.update(pin_data(fingerprint))
             return _HTTPS_ENABLED
         if fingerprint == pinned:
             return None
         if merged[CONF_HOST] == entry.data.get(CONF_HOST):
             raise CertificateChanged(fingerprint)
-        merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+        merged.update(pin_data(fingerprint))
         return _HTTPS_REPLACED
 
     def _certificate_error(self, entry, merged, actual: str | None) -> str:
@@ -662,7 +664,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return user_input, await self._connection_errors(entry, merged)
         fingerprint = await async_read_fingerprint(merged[CONF_HOST])
         if fingerprint is not None:
-            pinned = {**user_input, CONF_CERTIFICATE_FINGERPRINT: fingerprint}
+            pinned = {**user_input, **pin_data(fingerprint)}
             errors = await self._connection_errors(entry, merged | pinned)
             if not errors:
                 notify_https_enabled(self.hass, entry.data[CONF_SERVER_ID], merged[CONF_HOST], fingerprint)

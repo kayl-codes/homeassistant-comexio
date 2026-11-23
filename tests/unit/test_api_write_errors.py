@@ -329,7 +329,9 @@ def test_the_setup_builds_the_counter_sensor_once() -> None:
     # Reads the source only: a quick check that runs without Home Assistant. That the sensor really is registered
     # and follows a failed write is asserted on a running entry, in
     # tests/ha/test_certificate.py::test_a_restart_meeting_another_certificate_sets_up_read_only_from_the_saved_config.
-    setup = ast.parse(inspect.getsource(sensor_module.async_setup_entry))
+    setup = ast.parse(
+        inspect.getsource(sensor_module.async_setup_entry) + inspect.getsource(sensor_module._server_sensors)
+    )
     added = [
         node
         for node in ast.walk(setup)
