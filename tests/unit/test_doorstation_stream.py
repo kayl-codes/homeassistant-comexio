@@ -242,6 +242,37 @@ def test_an_unreachable_doorstation_is_a_failure_that_names_no_address() -> None
     assert "192.0.2.10" not in cause
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ConnectionResetError("secret 192.0.2.7"),
+        BrokenPipeError("secret 192.0.2.7"),
+        aiohttp.ClientPayloadError("secret 192.0.2.7"),
+    ],
+    ids=["ConnectionResetError", "BrokenPipeError", "ClientPayloadError"],
+)
+def test_a_reset_while_the_first_frame_is_read_is_a_failure_cause_not_an_exception(error: Exception) -> None:
+    """The raw OS error and aiohttp's own both end the start with a cause (so the caller falls back and pauses)."""
+    resp = SimpleNamespace(content=SimpleNamespace(read=AsyncMock(side_effect=error)))
+
+    frame, cause = asyncio.run(doorstation_stream.collect_frame(resp, bytearray()))  # type: ignore[arg-type]
+
+    assert frame is None
+    assert cause == type(error).__name__
+    assert "192.0.2.7" not in cause
+
+
+@pytest.mark.parametrize("error", [ConnectionResetError("secret 192.0.2.7"), aiohttp.ClientPayloadError("x")])
+def test_a_reset_while_the_still_request_is_made_is_a_failure_cause_not_an_exception(error: Exception) -> None:
+    session = MagicMock()
+    session.get.side_effect = error
+
+    frame, cause = asyncio.run(read_direct_frame(session, "http://192.0.2.7/proxy/cam/1/"))
+
+    assert frame is None
+    assert cause == type(error).__name__
+
+
 async def _live_start(url: str) -> tuple[bytes, str | None]:
     async with aiohttp.ClientSession() as session, session.get(url, allow_redirects=False) as resp:
         return await doorstation_stream.live_stream_start(resp)

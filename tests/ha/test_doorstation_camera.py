@@ -45,6 +45,7 @@ DIRECT_URL = f"http://{ADDRESS}/proxy/cam/1/"  # the Doorstation's own camera 1,
 DIRECT_FRAME = bytes.fromhex("ffd8 ffe0 0004 4a46 ffda 0008 01 0100 003f00 123456 ffd9".replace(" ", ""))
 DIRECT_STREAM = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + DIRECT_FRAME + b"\r\n--frame\r\n"
 DIRECT_HEADERS = {"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
+CANARY = "canary-text-of-an-error-203.0.113.9"  # an error text that must never reach a log line
 
 
 @pytest.fixture
@@ -922,7 +923,7 @@ async def test_the_live_stream_is_passed_on_from_the_doorstation(
 
 
 @pytest.mark.usefixtures("mock_comexio_api", "direct_address")
-@pytest.mark.parametrize("failure", [aiohttp.ClientError, TimeoutError])
+@pytest.mark.parametrize("failure", [aiohttp.ClientError, TimeoutError, ConnectionResetError])
 async def test_a_live_stream_that_cannot_connect_falls_back_to_the_default_and_pauses_the_direct_way(
     hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker, failure: type[Exception]
 ) -> None:
@@ -936,6 +937,37 @@ async def test_a_live_stream_that_cannot_connect_falls_back_to_the_default_and_p
     default_stream.assert_awaited_once()
     assert camera._direct_failed_at is not None
     assert await camera._direct_address() is None  # paused: the stills go over the IO-Server meanwhile
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionResetError(CANARY), BrokenPipeError(CANARY), aiohttp.ClientPayloadError(CANARY)],
+    ids=["ConnectionResetError", "BrokenPipeError", "ClientPayloadError"],
+)
+async def test_a_reset_while_the_first_frame_is_read_falls_back_and_pauses_the_direct_way(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """The answer is fine, the reset comes while the first frame is read (as the raw OS error or aiohttp's own)."""
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            return MagicMock(status=200, headers=DIRECT_HEADERS, content=MagicMock(read=AsyncMock(side_effect=error)))
+
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert camera._direct_failed_at is not None  # paused: the stills go over the IO-Server meanwhile
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+    assert type(error).__name__ in caplog.text
+    assert CANARY not in caplog.text
 
 
 @pytest.mark.usefixtures("mock_comexio_api", "direct_address")
@@ -1488,15 +1520,29 @@ async def test_a_still_read_that_starts_while_the_live_stream_connects_opens_no_
 ) -> None:
     camera = await _online_camera(hass, entry)
     doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    api = hass.data[DOMAIN][entry.entry_id].api
     counted: list[int] = []
+    connecting, release = asyncio.Event(), asyncio.Event()
 
     class _Session:
         async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
             counted.append(camera._streams_open)  # the request is under way
+            connecting.set()
+            await release.wait()
             return MagicMock(status=503, headers={})
 
     with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
-        await camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation)
+        viewer = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
+        async with asyncio.timeout(5):
+            await connecting.wait()
+        assert camera._streams_open == 1  # counted from the connect on (the gate is held as well)
+        # A still read asked for now, while the live request is connecting: it is answered over the IO-Server and
+        # opens no second connection to the Doorstation (`session.get` is reached once, by the live request).
+        assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+        api.get_doorstation_snapshot.assert_awaited_once_with(7)
+        assert counted == [1]
+        release.set()
+        assert await viewer is None  # the live request itself ended as a failure: the default stream takes over
 
     assert counted == [1]
     assert camera._streams_open == 0

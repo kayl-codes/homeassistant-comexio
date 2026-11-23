@@ -142,7 +142,9 @@ async def collect_frame(resp: aiohttp.ClientResponse, received: bytearray) -> tu
                 return frame, None
     except ComexioDataError as err:
         return None, f"malformed frame ({one_line(str(err))})"
-    except aiohttp.ClientError as err:
+    except (aiohttp.ClientError, ConnectionError) as err:
+        # A reset can reach the reader as aiohttp's own error or as the raw OS one (as in `_pump`): either is a
+        # failure cause here, so the caller falls back to the IO-Server and pauses, instead of raising.
         return None, type(err).__name__
     if len(received) >= DOORSTATION_DIRECT_MAX_BYTES:
         return None, "no frame in the first bytes of the stream"
@@ -301,7 +303,7 @@ async def read_direct_frame(
             return await collect_frame(resp, bytearray())
     except TimeoutError:
         return None, "no frame in time" if answered else "no answer in time"
-    except aiohttp.ClientError as err:
+    except (aiohttp.ClientError, ConnectionError) as err:
         return None, type(err).__name__
     except RuntimeError as err:
         if not closed_session_refusal(session, err):

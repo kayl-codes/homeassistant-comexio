@@ -363,7 +363,7 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
                 )
         except TimeoutError:
             self._stream_failed(doorstation, "no answer in time")
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, ConnectionError) as err:
             self._stream_failed(doorstation, type(err).__name__)
         except RuntimeError as err:
             if not closed_session_refusal(session, err):
