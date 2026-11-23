@@ -2730,6 +2730,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         item = {
             "id": best_match["id"],
             "name": ha["name"],
+            # The name the command has in Comexio now, set only when the rename changes nothing else (same type):
+            # the webhook path and protocol stay, so its write needs no Comexio restart
+            # (WebhookSecurity.mark_written). A rename that changes the type too saves a new body, which is not
+            # verified to push at once, so it counts as a rewrite.
+            "previous_name": best_match["name"] if ha["type"] == best_match.get("type") is not None else None,
             "payload": payload_map.get(ha["name"]),
             "webio_class": best_match.get("webio_class") or classify_audit_key(key),
         }

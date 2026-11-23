@@ -2252,10 +2252,15 @@ class ComexioAPI:
         device_id: str | int,
         cmd_payload: dict[str, Any],
         existing_cmd_id: str | int | None = None,
+        replaces: str | None = None,
     ) -> bool:
         """
         Adds or updates a single command in an existing device (Delta Sync).
         If existing_cmd_id is provided, an UPDATE is performed.
+
+        replaces is the name the updated command had before: set only by a rename that changes nothing but the name.
+        A new command and such a rename push at once, so they do not ask for a Comexio restart (see
+        WebhookSecurity.mark_written); every other update does.
 
         header_modifier/post_get/authentication are read from cmd_payload (defaulting to the
         JSON-POST-no-auth shape every HA-webhook command uses) rather than hardcoded — the
@@ -2279,10 +2284,12 @@ class ComexioAPI:
             # ValueError: a command id that is no number, rejected before anything is sent.
             _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
-        self._note_command_written(cmd_payload)
+        self._note_command_written(cmd_payload, created=existing_cmd_id is None, replaces=replaces)
         return True
 
-    def _note_command_written(self, cmd_payload: Mapping[str, Any]) -> None:
+    def _note_command_written(
+        self, cmd_payload: Mapping[str, Any], *, created: bool = False, replaces: str | None = None
+    ) -> None:
         """Record that a command now carries a webhook id of its own and its protocol, so the migration skips it."""
         security = self.webhook_security
         path = cmd_payload.get("Parameter")
@@ -2294,7 +2301,11 @@ class ComexioAPI:
             and not path.endswith(legacy_webhook_id(security.server_id))
         ):
             security.mark_written(
-                name, dt_util.utcnow(), https=cmd_payload.get("Protocol") == comexio_webio.WEBIO_PROTOCOL_HTTPS
+                name,
+                dt_util.utcnow(),
+                https=cmd_payload.get("Protocol") == comexio_webio.WEBIO_PROTOCOL_HTTPS,
+                created=created,
+                replaces=replaces,
             )
             security.schedule_save()
 

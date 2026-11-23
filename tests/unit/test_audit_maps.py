@@ -123,8 +123,12 @@ def test_compare_finds_every_audit_category() -> None:
     )
 
     assert found["missing"] == [{"name": "HA M4 Fehlt", "payload": "p4", "webio_class": "marker"}]
-    assert found["rename"] == [{"id": 20, "name": "HA M2 Neu", "payload": "p2", "webio_class": "marker"}]
-    assert found["type"] == [{"id": 30, "name": "HA M3 Typ", "payload": "p3", "webio_class": "marker"}]
+    assert found["rename"] == [
+        {"id": 20, "name": "HA M2 Neu", "previous_name": "HA M2 Alt", "payload": "p2", "webio_class": "marker"}
+    ]
+    assert found["type"] == [
+        {"id": 30, "name": "HA M3 Typ", "previous_name": None, "payload": "p3", "webio_class": "marker"}
+    ]
     assert found["function_plan_missing"] == [{"name": "HA M1 Ok"}]
     # The duplicate next to the exact name match first, then the command whose source is gone.
     assert [o["id"] for o in found["orphan"]] == [10, 90]
@@ -154,6 +158,23 @@ def test_renamed_command_skips_the_type_check() -> None:
     assert mismatches == {"rename_M2"}
     assert found["type"] == []
     assert found["function_plan_missing"] == []
+    # A rename that changes the type is more than a rename: it names no previous name (it asks for a restart).
+    assert found["rename"][0]["previous_name"] is None
+
+
+def test_a_rename_of_a_command_without_a_type_names_no_previous_name() -> None:
+    """Two unknown types are no proof that nothing but the name changes."""
+    command = {k: v for k, v in _com("HA M2 Alt", 20).items() if k != "type"}
+    found = _FakeCoordinator(unwired=set())._compare_audit_maps(
+        {"M2": {"name": "HA M2 Neu", "type": None}},
+        {"M2": [command]},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        set(),
+    )
+    assert found["rename"][0]["previous_name"] is None
 
 
 def test_renamed_command_is_checked_for_its_wiring_too() -> None:

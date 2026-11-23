@@ -107,6 +107,12 @@ catch up at the next poll (default every 15 minutes). That is why the integratio
 
 A restart before the commands are rewritten does not count; the integration waits for one after the last write.
 
+**Only a changed path, server field or protocol counts as such a write.** A command that is **new** (for example for a
+new marker) and a **plain rename** of a command that is already switched over push to their ID right away (measured on
+a live installation: both arrived within seconds, without a Comexio restart). Neither asks for a restart and neither
+brings the notification back. Everything else the integration writes (the nightly rewrite, a type fix, a range
+correction, an uploaded class) still does.
+
 ## 5. What you have to do
 
 Nothing, until the notification **"Comexio: restart needed"** appears. Then:
@@ -116,7 +122,8 @@ Nothing, until the notification **"Comexio: restart needed"** appears. Then:
    and the notification disappears.
 
 If you have no reason to wait, you can restart Comexio right after the notification appears. If a sync or a
-reconfiguration writes commands again later, the notification returns and one more restart is due.
+reconfiguration rewrites commands again later (not for a new or renamed one, see section 4), the notification returns
+and one more restart is due.
 
 ## 6. Good to know
 
@@ -286,6 +293,12 @@ beim nächsten Poll (Standard alle 15 Minuten) nachziehen. Deshalb
 Ein Neustart, bevor die Commands umgeschrieben sind, zählt nicht; die Integration wartet auf einen nach dem letzten
 Schreiben.
 
+**Nur ein geänderter Pfad, ein geändertes Server-Feld oder ein anderes Protokoll zählt als solches Schreiben.** Ein
+**neues** Command (etwa für einen neuen Merker) und ein **reines Umbenennen** eines bereits umgestellten Commands
+pushen sofort an ihre ID (an einer Live-Anlage gemessen: beide kamen binnen Sekunden an, ohne Comexio-Neustart). Beides
+verlangt keinen Neustart und bringt die Benachrichtigung nicht zurück. Alles andere, was die Integration schreibt (der
+Nachtlauf, eine Typkorrektur, eine Bereichskorrektur, eine hochgeladene Klasse), tut das weiterhin.
+
 ## 5. Was du tun musst
 
 Nichts, bis die Benachrichtigung **„Comexio: restart needed“** erscheint. Dann:
@@ -295,8 +308,8 @@ Nichts, bis die Benachrichtigung **„Comexio: restart needed“** erscheint. Da
    und die Benachrichtigung verschwindet.
 
 Wenn nichts dagegen spricht, kannst du Comexio gleich nach dem Erscheinen der Benachrichtigung neu starten. Schreibt
-später ein Sync oder eine Neukonfiguration wieder Commands, kehrt die Benachrichtigung zurück, und ein weiterer
-Neustart steht an.
+später ein Sync oder eine Neukonfiguration Commands wieder um (nicht bei einem neuen oder umbenannten, siehe Abschnitt
+4), kehrt die Benachrichtigung zurück, und ein weiterer Neustart steht an.
 
 ## 6. Gut zu wissen
 
