@@ -1366,6 +1366,20 @@ async def test_a_camera_that_goes_while_the_live_stream_starts_gets_no_stream_an
     resp.close.assert_called_once()
 
 
+async def _settled(condition: Callable[[], bool]) -> None:
+    """Let the event loop run until `condition` holds, then a bounded number of further loop turns.
+
+    No fixed sleep: a loaded test runner only takes longer, as the turns after it are loop iterations, not time.
+    The further turns are a heuristic, not proof of quiescence: a test that asserts something did NOT happen also
+    needs a positive check afterwards.
+    """
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0)
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
 @pytest.mark.usefixtures("mock_comexio_api", "direct_address")
 @pytest.mark.parametrize("hang", ["gate", "connect", "first frame", "stream"])
 async def test_a_viewer_that_goes_away_gives_back_the_stream_count_the_gate_and_the_connection(
@@ -1375,9 +1389,11 @@ async def test_a_viewer_that_goes_away_gives_back_the_stream_count_the_gate_and_
     camera = await _online_camera(hass, entry)
     doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
     never = asyncio.Event()
+    waiting = asyncio.Event()  # set where the viewer hangs (all but "gate"), so it is cancelled there and not before
     resp = MagicMock(status=200, headers=DIRECT_HEADERS)
 
     async def read_never(*_args: object) -> bytes:
+        waiting.set()
         await never.wait()
         return b""
 
@@ -1386,10 +1402,12 @@ async def test_a_viewer_that_goes_away_gives_back_the_stream_count_the_gate_and_
     class _Session:
         async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
             if hang == "connect":
+                waiting.set()
                 await never.wait()
             return resp
 
     async def proxy(*_args: object) -> str:
+        waiting.set()
         await never.wait()
         return "never"
 
@@ -1400,7 +1418,11 @@ async def test_a_viewer_that_goes_away_gives_back_the_stream_count_the_gate_and_
         patch("custom_components.comexio.camera.forward_live_stream", proxy),
     ):
         viewer = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
-        await asyncio.sleep(0.05)
+        if hang == "gate":
+            await _settled(lambda: camera._streams_open == 1)  # counted, and queued at the gate that is held
+        else:
+            async with asyncio.timeout(5):
+                await waiting.wait()
         assert not viewer.done()
         assert camera._streams_open == 1
         viewer.cancel()
@@ -1611,7 +1633,7 @@ async def test_a_live_stream_waits_for_a_still_read_that_is_under_way(
         still = asyncio.create_task(camera._read_direct_frame(doorstation))
         await in_lookup.wait()
         live = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
-        await asyncio.sleep(0.05)
+        await _settled(lambda: camera._streams_open == 1)  # the live stream is counted and queued at the gate
         assert not connects  # the live stream has not opened its connection beside the still read
         release.set()
         await live
@@ -1702,7 +1724,7 @@ async def test_a_live_stream_queued_behind_a_failing_still_read_honours_the_paus
     with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
         async with camera._direct_gate:  # a still read is under way
             live = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
-            await asyncio.sleep(0.05)
+            await _settled(lambda: camera._streams_open == 1)
             assert camera._streams_open == 1  # counted and waiting at the gate
             camera._direct_failed("HTTP 500")  # ... and fails, the pause starts
             failed_at = camera._direct_failed_at
