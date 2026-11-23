@@ -1,20 +1,23 @@
 """Doorstation cameras: entity, device, image and what survives a page that shows no Doorstation."""
 
 import asyncio
+from collections.abc import Callable
 import logging
 import time
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio.doorstation import Doorstation
-from homeassistant.components.camera import DATA_COMPONENT, async_get_image
+import aiohttp
+from homeassistant.components.camera import DATA_COMPONENT, Camera, async_get_image
 from homeassistant.const import STATE_UNAVAILABLE
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker
+from pytest_homeassistant_custom_component.test_util.aiohttp import AiohttpClientMocker, AiohttpClientMockResponse
+from pytest_homeassistant_custom_component.typing import ClientSessionGenerator
 
 from custom_components.comexio.camera import ComexioDoorstationCamera
 from custom_components.comexio.const import (
@@ -22,8 +25,13 @@ from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_ADDRESS_RECHECK_SEC,
     DOORSTATION_DIRECT_RETRY_SEC,
+    DOORSTATION_DIRECT_TIMEOUT_SEC,
 )
-from custom_components.comexio.doorstation_stream import SESSION_CLOSED_CAUSE
+from custom_components.comexio.doorstation_stream import (
+    DIRECT_REQUEST_HEADERS,
+    SESSION_CLOSED_CAUSE,
+    PrefetchedStream,
+)
 
 from .conftest import SERVER_ID, device_by_identifier
 
@@ -37,6 +45,7 @@ DIRECT_URL = f"http://{ADDRESS}/proxy/cam/1/"  # the Doorstation's own camera 1,
 DIRECT_FRAME = bytes.fromhex("ffd8 ffe0 0004 4a46 ffda 0008 01 0100 003f00 123456 ffd9".replace(" ", ""))
 DIRECT_STREAM = b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + DIRECT_FRAME + b"\r\n--frame\r\n"
 DIRECT_HEADERS = {"Content-Type": "multipart/x-mixed-replace; boundary=frame"}
+CANARY = "canary-text-of-an-error-203.0.113.9"  # an error text that must never reach a log line
 
 
 @pytest.fixture
@@ -865,3 +874,1079 @@ async def test_a_cached_frame_is_not_handed_out_while_the_entry_unloads(
         assert camera._warned_camera_id is None
     finally:
         coordinator.unloading = False
+
+
+@pytest.fixture(autouse=True)
+def one_stream_per_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`resp.content` is one stream, as in aiohttp: the mock builds a fresh one at every access, which would hand the
+    live stream's first bytes out twice (once as the prefetch, once as the rest)."""
+    original = AiohttpClientMockResponse.content
+
+    def content(self: AiohttpClientMockResponse) -> Any:
+        if (stream := getattr(self, "_one_stream", None)) is None:
+            stream = self._one_stream = original.fget(self)  # type: ignore[attr-defined]
+        return stream
+
+    monkeypatch.setattr(AiohttpClientMockResponse, "content", property(content))
+
+
+@pytest.fixture(autouse=True)
+def mock_streams_end_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The mock streams hold a few bytes and end: that is no device dropping the connection (the tests that mean it
+    set the minimum run time back)."""
+    monkeypatch.setattr("custom_components.comexio.camera.DOORSTATION_LIVE_STREAM_MIN_RUN_SEC", 0.0)
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_the_live_stream_is_passed_on_from_the_doorstation(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    hass_client: ClientSessionGenerator,
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+    await _online_camera(hass, entry)
+    client = await hass_client()
+
+    response = await client.get(f"/api/camera_proxy_stream/{CAMERA_ENTITY_ID}")
+
+    assert response.status == 200
+    # Rebuilt from the media type and the boundary, never the Doorstation's header as it came; the response keeps a
+    # browser from running anything in the stream of a device on the network.
+    assert response.headers["Content-Type"] == 'multipart/x-mixed-replace;boundary="frame"'
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Content-Security-Policy"] == "sandbox"
+    assert await response.read() == DIRECT_STREAM
+    hass.data[DOMAIN][entry.entry_id].api.get_doorstation_snapshot.assert_not_called()
+    # Asked for unencoded: the byte cap of the still image counts bytes of the stream itself.
+    assert aioclient_mock.mock_calls[0][3]["Accept-Encoding"] == "identity"
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize("failure", [aiohttp.ClientError, TimeoutError, ConnectionResetError])
+async def test_a_live_stream_that_cannot_connect_falls_back_to_the_default_and_pauses_the_direct_way(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker, failure: type[Exception]
+) -> None:
+    aioclient_mock.get(DIRECT_URL, exc=failure)
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert camera._direct_failed_at is not None
+    assert await camera._direct_address() is None  # paused: the stills go over the IO-Server meanwhile
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize(
+    "error",
+    [ConnectionResetError(CANARY), BrokenPipeError(CANARY), aiohttp.ClientPayloadError(CANARY)],
+    ids=["ConnectionResetError", "BrokenPipeError", "ClientPayloadError"],
+)
+async def test_a_reset_while_the_first_frame_is_read_falls_back_and_pauses_the_direct_way(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """The answer is fine, the reset comes while the first frame is read (as the raw OS error or aiohttp's own)."""
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            return MagicMock(status=200, headers=DIRECT_HEADERS, content=MagicMock(read=AsyncMock(side_effect=error)))
+
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert camera._direct_failed_at is not None  # paused: the stills go over the IO-Server meanwhile
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+    assert type(error).__name__ in caplog.text
+    assert CANARY not in caplog.text
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_answered_with_an_error_status_falls_back_and_pauses_the_direct_way(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Home Assistant's own proxy helper would hand this error page on as the stream: it is checked first.
+    aioclient_mock.get(DIRECT_URL, status=503)
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert camera._direct_failed_at is not None
+    assert "HTTP 503" in caplog.text
+    assert ADDRESS not in caplog.text
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_of_another_type_is_not_passed_on_to_the_frontend(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The type reaches the browser as the Doorstation sent it, over plain HTTP: text/html would run on HA's origin.
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers={"Content-Type": "text/html"})
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert camera._direct_failed_at is not None
+    assert "the answer is not an MJPEG stream (Content-Type text/html)" in caplog.text
+    assert not camera._direct_gate.locked()
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+@pytest.mark.parametrize(("case", "lookups"), [("no address", 1), ("extension offline", 0), ("no Doorstation", 0)])
+async def test_the_live_stream_stays_on_still_images_without_a_direct_way(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    api_returns: dict[str, Any],
+    case: str,
+    lookups: int,
+) -> None:
+    if case != "no address":
+        api_returns["get_doorstation_address"] = (ADDRESS, None)
+    await _setup(hass, entry)
+    camera = hass.data[DATA_COMPONENT].get_entity(CAMERA_ENTITY_ID)
+    assert isinstance(camera, ComexioDoorstationCamera)
+    if case != "extension offline":
+        hass.data[DOMAIN][entry.entry_id].offline_extensions = set()
+    default_stream = AsyncMock(return_value="the still stream")
+
+    if case == "no Doorstation":
+        # The page no longer shows it (the camera is unavailable then, which is what keeps the direct way shut).
+        hass.data[DOMAIN][entry.entry_id].doorstations.known.pop(2)
+        assert not camera.available
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    default_stream.assert_awaited_once()
+    assert aioclient_mock.call_count == 0
+    assert hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.await_count == lookups
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_answered_with_200_and_no_data_falls_back_and_pauses_the_direct_way(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=b"", headers=DIRECT_HEADERS)
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert camera._direct_failed_at is not None
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_no_second_connection_is_opened_to_the_doorstation_beside_a_running_live_stream(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    camera = await _online_camera(hass, entry)
+    camera._streams_open = 1
+
+    assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+
+    assert aioclient_mock.call_count == 0
+    api = hass.data[DOMAIN][entry.entry_id].api
+    api.get_doorstation_address.assert_not_called()
+    api.get_doorstation_snapshot.assert_awaited_once_with(7)
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_that_works_again_ends_the_failure_streak(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    hass_client: ClientSessionGenerator,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    aioclient_mock.get(DIRECT_URL, status=503)
+    camera = await _online_camera(hass, entry)
+    await async_get_image(hass, CAMERA_ENTITY_ID)  # the failure, warned about
+    assert camera._direct_warned
+
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+    assert camera._direct_failed_at is not None
+    camera._direct_failed_at -= DOORSTATION_DIRECT_RETRY_SEC + 1
+    client = await hass_client()
+    assert await (await client.get(f"/api/camera_proxy_stream/{CAMERA_ENTITY_ID}")).read() == DIRECT_STREAM
+
+    assert camera._direct_failed_at is None
+    assert not camera._direct_warned
+    assert "works again" in caplog.text
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_doorstation_that_does_not_answer_the_live_stream_request_is_given_up_on(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    camera = await _online_camera(hass, entry)
+
+    class _Hanging:
+        async def get(self, *_args: object, **_kwargs: object) -> None:
+            await asyncio.sleep(30)
+
+    default_stream = AsyncMock(return_value="the still stream")
+    with (
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05),
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Hanging()),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert camera._direct_failed_at is not None
+    assert "no answer in time" in caplog.text
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_the_answer_of_a_live_stream_that_is_not_passed_on_is_closed(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    resp = MagicMock(status=503, headers={})
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            return resp
+
+    default_stream = AsyncMock(return_value="the still stream")
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    resp.close.assert_called_once_with()
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize("body", [b"--frame\r\nContent-Type: image/jpeg\r\n\r\n", b"--frame\r\n" + DIRECT_FRAME[:-1]])
+async def test_a_live_stream_answered_with_200_and_data_but_no_whole_frame_falls_back(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+) -> None:
+    """Bytes alone do not make a stream: it counts once a whole picture came."""
+    aioclient_mock.get(DIRECT_URL, content=body, headers=DIRECT_HEADERS)
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert camera._direct_failed_at is not None
+    assert "the stream ended without a frame" in caplog.text
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize(
+    ("content_type", "cause"),
+    [
+        ("multipart/x-mixed-replace", "no boundary"),
+        ("multipart/x-mixed-replace; boundary=a<b>", "unsupported characters"),
+    ],
+    ids=["no boundary", "unsupported characters"],
+)
+async def test_a_live_stream_without_a_usable_boundary_falls_back_and_pauses_the_direct_way(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+    content_type: str,
+    cause: str,
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers={"Content-Type": content_type})
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert camera._direct_failed_at is not None
+    assert cause in caplog.text
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_the_forwarder_gets_the_clean_content_type_and_a_callback_for_the_end(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    seen: list[tuple[object, ...]] = []
+
+    async def proxy(*args: object) -> str:
+        seen.append(args)
+        return "ended"
+
+    request = MagicMock()
+    with patch("custom_components.comexio.camera.forward_live_stream", proxy):
+        assert await camera._proxy_direct_stream(request, DIRECT_URL, doorstation) == "ended"
+
+    ((got_hass, got_request, _stream, content_type, on_ended),) = seen
+    assert (got_hass, got_request) == (hass, request)
+    assert content_type == 'multipart/x-mixed-replace;boundary="frame"'
+    with patch.object(camera, "_live_stream_ended") as ended:
+        on_ended("why", 1.5, True)
+    ended.assert_called_once_with(doorstation, "why", 1.5, True)
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize(
+    ("delivered_sec", "blame", "failure"),
+    [
+        (1.0, True, True),
+        (1.0, False, False),
+        (5.0, True, False),
+        (6.0, True, False),
+    ],
+    ids=[
+        "device cut it off after one second of data",
+        "viewer left after one second of data",
+        "exactly the minimum is no failure",
+        "device cut it off after a while",
+    ],
+)
+async def test_only_a_stream_the_doorstation_cut_off_early_counts_as_a_failure(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    delivered_sec: float,
+    blame: bool,
+    failure: bool,
+) -> None:
+    monkeypatch.setattr("custom_components.comexio.camera.DOORSTATION_LIVE_STREAM_MIN_RUN_SEC", 5.0)
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+
+    camera._live_stream_ended(doorstation, "the Doorstation ended the stream", delivered_sec, blame)
+
+    assert (camera._direct_failed_at is not None) is failure
+    assert ("live stream: the Doorstation ended the stream after 1 s of data" in caplog.text) is (
+        failure and delivered_sec == 1.0
+    )
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize(
+    ("delivered_sec", "blame", "recovers"),
+    [
+        (1.0, False, False),
+        (1.0, True, False),
+        (5.0, False, True),
+        (6.0, True, True),
+    ],
+    ids=[
+        "viewer left after one second: proves nothing",
+        "device cut it off after one second",
+        "viewer left after the minimum: the stream worked",
+        "device cut it off after a while: the stream worked",
+    ],
+)
+async def test_only_a_stream_that_delivered_for_a_while_ends_a_failure_streak(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    delivered_sec: float,
+    blame: bool,
+    recovers: bool,
+) -> None:
+    """A viewer that leaves after a second must not wipe a streak the Doorstation has earned."""
+    monkeypatch.setattr("custom_components.comexio.camera.DOORSTATION_LIVE_STREAM_MIN_RUN_SEC", 5.0)
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    camera._direct_failed("earlier")
+    earlier = camera._direct_failed_at
+
+    camera._live_stream_ended(doorstation, "the stream ended", delivered_sec, blame)
+
+    assert ("works again" in caplog.text) is recovers
+    assert (camera._direct_failed_at is None) is recovers
+    # Neutral (not blamed, too short) is told from a failure by the streak: a failure renews its time, neutral keeps it.
+    renewed = not recovers and camera._direct_failed_at != earlier
+    assert renewed is (blame and not recovers)
+    assert ("the stream ended after 1 s of data" in caplog.text) is renewed
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_device_that_cuts_every_stream_short_keeps_one_warning_and_never_works_again(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    hass_client: ClientSessionGenerator,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The start of a stream must not clear the streak the end of that stream continues."""
+    monkeypatch.setattr("custom_components.comexio.camera.DOORSTATION_LIVE_STREAM_MIN_RUN_SEC", 5.0)
+    camera = await _online_camera(hass, entry)
+    client = await hass_client()
+
+    for _ in range(2):
+        aioclient_mock.clear_requests()  # a mock answer's stream can be read once
+        aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+        assert await (await client.get(f"/api/camera_proxy_stream/{CAMERA_ENTITY_ID}")).read() == DIRECT_STREAM
+        assert camera._direct_failed_at is not None
+        camera._direct_failed_at -= DOORSTATION_DIRECT_RETRY_SEC + 1  # the pause is over
+
+    assert "works again" not in caplog.text
+    assert caplog.text.count("no image from the Doorstation itself") == 2
+    assert [r.levelno for r in caplog.records if "no image from the Doorstation itself" in r.message] == [
+        logging.WARNING,
+        logging.DEBUG,
+    ]
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_answer_without_a_content_type_that_got_through_the_check_fails_loudly(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    request = MagicMock()
+
+    with (
+        patch("custom_components.comexio.camera.live_stream_content_type", return_value=None),
+        pytest.raises(RuntimeError, match="no usable content type"),
+    ):
+        await camera._proxy_direct_stream(request, DIRECT_URL, doorstation)
+
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_stream_that_ends_at_once_for_a_camera_that_changed_starts_no_failure_streak(
+    hass: HomeAssistant, entry: MockConfigEntry, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("custom_components.comexio.camera.DOORSTATION_LIVE_STREAM_MIN_RUN_SEC", 5.0)
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    doorstation = coordinator.doorstations.known[2]
+    coordinator.offline_extensions = {"UD 1"}
+
+    camera._live_stream_ended(doorstation, "the Doorstation ended the stream", 0.2, True)
+
+    assert camera._direct_failed_at is None
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize("ending", ["extension offline", "entry unloading", "camera changed", "doorstation gone"])
+async def test_a_running_live_stream_ends_with_the_camera_it_was_started_for(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker, ending: str
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    alive_calls: list[Callable[[], bool]] = []
+
+    def spy(first: bytes, rest: object, alive: Callable[[], bool]) -> PrefetchedStream:
+        alive_calls.append(alive)
+        return PrefetchedStream(first, rest, alive)  # type: ignore[arg-type]
+
+    async def proxy(_hass: object, _request: object, _stream: object, _content_type: object, _on_ended: object) -> str:
+        return "ended"
+
+    with (
+        patch("custom_components.comexio.camera.PrefetchedStream", spy),
+        patch("custom_components.comexio.camera.forward_live_stream", proxy),
+    ):
+        doorstation = coordinator.doorstations.known[2]
+        assert await camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation) == "ended"
+
+    (alive,) = alive_calls
+    assert alive()  # the camera it was started for is there
+    if ending == "extension offline":
+        coordinator.offline_extensions = {"UD 1"}
+    elif ending == "entry unloading":
+        coordinator.unloading = True
+    elif ending == "camera changed":
+        coordinator.doorstations.known[2] = Doorstation(ext_id=2, camera_id=8, name="UD 1")
+    else:
+        coordinator.doorstations.known.pop(2)
+    assert not alive()  # the stream ends at its next read, the connection is let go
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize("failing", [False, True], ids=["delivering", "failing"])
+async def test_a_camera_that_goes_while_the_live_stream_starts_gets_no_stream_and_no_failure_streak(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+    failing: bool,
+) -> None:
+    camera = await _online_camera(hass, entry)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    doorstation = coordinator.doorstations.known[2]
+    resp = MagicMock(status=503 if failing else 200, headers={} if failing else DIRECT_HEADERS)
+    resp.content.read = AsyncMock(side_effect=[DIRECT_STREAM, b""])
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            # The camera was fine when the request went out (the check at the gate passed) and is gone by the time
+            # the Doorstation has answered.
+            coordinator.offline_extensions = {"UD 1"}
+            return resp
+
+    async def proxy(*_args: object) -> str:
+        raise AssertionError("nothing is passed on for a camera that is gone")
+
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()),
+        patch("custom_components.comexio.camera.forward_live_stream", proxy),
+    ):
+        assert await camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation) is None
+
+    assert camera._direct_failed_at is None
+    assert not camera._direct_warned
+    assert "Doorstation itself" not in caplog.text
+    assert camera._streams_open == 0
+    resp.close.assert_called_once()
+
+
+async def _settled(condition: Callable[[], bool]) -> None:
+    """Let the event loop run until `condition` holds, then a bounded number of further loop turns.
+
+    No fixed sleep: a loaded test runner only takes longer, as the turns after it are loop iterations, not time.
+    The further turns are a heuristic, not proof of quiescence: a test that asserts something did NOT happen also
+    needs a positive check afterwards.
+    """
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0)
+    for _ in range(20):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize("hang", ["gate", "connect", "first frame", "stream"])
+async def test_a_viewer_that_goes_away_gives_back_the_stream_count_the_gate_and_the_connection(
+    hass: HomeAssistant, entry: MockConfigEntry, hang: str
+) -> None:
+    """The browser closes the tab: the viewer's task is cancelled wherever it waits."""
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    never = asyncio.Event()
+    waiting = asyncio.Event()  # set where the viewer hangs (all but "gate"), so it is cancelled there and not before
+    resp = MagicMock(status=200, headers=DIRECT_HEADERS)
+
+    async def read_never(*_args: object) -> bytes:
+        waiting.set()
+        await never.wait()
+        return b""
+
+    resp.content.read = read_never if hang == "first frame" else AsyncMock(side_effect=[DIRECT_STREAM, b""])
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            if hang == "connect":
+                waiting.set()
+                await never.wait()
+            return resp
+
+    async def proxy(*_args: object) -> str:
+        waiting.set()
+        await never.wait()
+        return "never"
+
+    if hang == "gate":
+        await camera._direct_gate.acquire()  # a still read is under way
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()),
+        patch("custom_components.comexio.camera.forward_live_stream", proxy),
+    ):
+        viewer = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
+        if hang == "gate":
+            await _settled(lambda: camera._streams_open == 1)  # counted, and queued at the gate that is held
+        else:
+            async with asyncio.timeout(5):
+                await waiting.wait()
+        assert not viewer.done()
+        assert camera._streams_open == 1
+        viewer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await viewer
+    if hang == "gate":
+        camera._direct_gate.release()
+
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+    assert camera._direct_failed_at is None  # a viewer that left is no failure of the Doorstation
+    if hang in {"first frame", "stream"}:
+        resp.close.assert_called_once()
+    else:
+        resp.close.assert_not_called()  # nothing was opened (the request did not answer / was not sent)
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_still_read_that_starts_while_the_live_stream_connects_opens_no_second_connection(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    api = hass.data[DOMAIN][entry.entry_id].api
+    counted: list[int] = []
+    connecting, release = asyncio.Event(), asyncio.Event()
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            counted.append(camera._streams_open)  # the request is under way
+            connecting.set()
+            await release.wait()
+            return MagicMock(status=503, headers={})
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        viewer = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
+        async with asyncio.timeout(5):
+            await connecting.wait()
+        assert camera._streams_open == 1  # counted from the connect on (the gate is held as well)
+        # A still read asked for now, while the live request is connecting: it is answered over the IO-Server and
+        # opens no second connection to the Doorstation (`session.get` is reached once, by the live request).
+        assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+        api.get_doorstation_snapshot.assert_awaited_once_with(7)
+        assert counted == [1]
+        release.set()
+        assert await viewer is None  # the live request itself ended as a failure: the default stream takes over
+
+    assert counted == [1]
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_live_stream_that_starts_while_the_address_is_looked_up_gets_no_second_connection(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    camera = await _online_camera(hass, entry)
+
+    async def lookup_while_a_stream_starts(_ext_id: int) -> tuple[str, None]:
+        camera._streams_open = 1
+        return ADDRESS, None
+
+    api = hass.data[DOMAIN][entry.entry_id].api
+    api.get_doorstation_address.side_effect = lookup_while_a_stream_starts
+
+    assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+
+    assert aioclient_mock.call_count == 0
+    api.get_doorstation_snapshot.assert_awaited_once_with(7)
+    assert camera._direct_failed_at is None  # the IO-Server answered because of the stream, nothing failed
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_the_live_stream_request_does_not_follow_a_redirect(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    seen: list[dict[str, Any]] = []
+
+    class _Session:
+        async def get(self, *_args: object, **kwargs: Any) -> MagicMock:
+            seen.append(kwargs)
+            return MagicMock(status=302, headers={})
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        await camera._connect_direct_stream(DIRECT_URL, doorstation)
+
+    assert [kwargs.get("allow_redirects") for kwargs in seen] == [False]
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_the_live_stream_request_is_limited_only_at_the_connect_and_asks_for_the_stream_unencoded(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The shared session cuts a whole request off after 300 s: a live stream must not run into that."""
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    seen: list[dict[str, Any]] = []
+
+    class _Session:
+        async def get(self, *_args: object, **kwargs: Any) -> MagicMock:
+            seen.append(kwargs)
+            return MagicMock(status=302, headers={})
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        await camera._connect_direct_stream(DIRECT_URL, doorstation)
+
+    (kwargs,) = seen
+    assert kwargs["timeout"].total is None
+    assert kwargs["timeout"].sock_connect == DOORSTATION_DIRECT_TIMEOUT_SEC
+    assert kwargs["auto_decompress"] is False  # the check of Content-Encoding sees what the Doorstation sent
+    assert kwargs["headers"] == DIRECT_REQUEST_HEADERS
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_live_stream_failures_warn_once_per_streak_name_the_live_stream_and_hold_the_pause(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    aioclient_mock.get(DIRECT_URL, status=503)
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        await camera.handle_async_mjpeg_stream(MagicMock())
+        failed_at = camera._direct_failed_at
+        await camera.handle_async_mjpeg_stream(MagicMock())  # inside the pause: nobody is asked
+        assert aioclient_mock.call_count == 1
+        assert camera._direct_failed_at == failed_at
+        camera._direct_failed_at = time.monotonic() - DOORSTATION_DIRECT_RETRY_SEC - 1
+        await camera.handle_async_mjpeg_stream(MagicMock())  # after the pause: asked again, fails again
+
+    assert aioclient_mock.call_count == 2
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "Doorstation camera" in r.message]
+    assert len(warnings) == 1  # one per streak
+    assert "live stream: HTTP 503" in warnings[0].message
+    assert default_stream.await_count == 3
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_whose_address_lookup_runs_out_of_time_pauses_the_direct_way(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker, caplog: pytest.LogCaptureFixture
+) -> None:
+    camera = await _online_camera(hass, entry)
+    camera._address = None
+    camera._address_checked_at = None
+    default_stream = AsyncMock(return_value="the still stream")
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.side_effect = slow_lookup
+    with (
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert aioclient_mock.call_count == 0  # no address, nobody asked
+    assert camera._direct_failed_at is not None  # as for a still read: the next viewer does not wait for it again
+    assert "the IO-Server did not answer in time" in caplog.text
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_second_viewer_is_turned_away_before_any_address_lookup(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+    lookups = hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.await_count
+    camera._streams_open = 1  # a live stream runs
+    caplog.set_level(logging.DEBUG)
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.await_count == lookups
+    assert "another live stream runs" in caplog.text
+    assert camera._direct_failed_at is None  # a second viewer is no failure
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_still_read_does_not_overlap_a_live_stream_that_is_starting(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    camera = await _online_camera(hass, entry)
+
+    async with camera._direct_gate:  # the live stream is connecting
+        assert (await async_get_image(hass, CAMERA_ENTITY_ID)).content == FRAME
+
+    assert aioclient_mock.call_count == 0  # no second connection to the Doorstation
+    hass.data[DOMAIN][entry.entry_id].api.get_doorstation_snapshot.assert_awaited_once_with(7)
+    assert camera._direct_failed_at is None  # nothing failed, the IO-Server answered because of the stream
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_live_stream_waits_for_a_still_read_that_is_under_way(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    release = asyncio.Event()
+    in_lookup = asyncio.Event()
+    connects: list[str] = []
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        in_lookup.set()
+        await release.wait()
+        return ADDRESS, None
+
+    hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.side_effect = slow_lookup
+
+    class _Session:
+        async def get(self, url: str, **_kwargs: object) -> MagicMock:
+            connects.append(url)
+            return MagicMock(status=503, headers={})
+
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()),
+    ):
+        still = asyncio.create_task(camera._read_direct_frame(doorstation))
+        await in_lookup.wait()
+        live = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
+        await _settled(lambda: camera._streams_open == 1)  # the live stream is counted and queued at the gate
+        assert not connects  # the live stream has not opened its connection beside the still read
+        release.set()
+        await live
+        # The stream is counted from its start on: the still read, back from its lookup, leaves the Doorstation to it.
+        assert await still is None
+
+    assert DIRECT_URL in connects
+    assert camera._streams_open == 0
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_still_read_that_is_cancelled_in_the_address_lookup_lets_the_gate_go(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    in_lookup = asyncio.Event()
+
+    async def lookup(_ext_id: int) -> tuple[str, None]:
+        in_lookup.set()
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    hass.data[DOMAIN][entry.entry_id].api.get_doorstation_address.side_effect = lookup
+    read = asyncio.create_task(camera._read_direct_frame(doorstation))
+    await in_lookup.wait()
+    assert camera._direct_gate.locked()  # a live stream that starts now waits for it
+
+    read.cancel()  # Home Assistant's own image timeout
+    with pytest.raises(asyncio.CancelledError):
+        await read
+
+    assert not camera._direct_gate.locked()
+    assert not camera._address_lock.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_second_live_viewer_opens_no_second_connection_and_pauses_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    camera._streams_open = 1  # another viewer's stream runs
+
+    class _Session:
+        async def get(self, *_args: object, **_kwargs: object) -> MagicMock:
+            raise AssertionError("a second connection to the Doorstation was opened")
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        assert await camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation) is None
+
+    assert camera._streams_open == 1  # the other stream's count is left alone
+    assert camera._direct_failed_at is None
+    assert not camera._direct_warned
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_second_live_viewer_gets_the_default_stream_and_no_address_lookup(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+    camera._streams_open = 1  # another viewer's stream runs
+    default = AsyncMock(return_value="default stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "default stream"
+
+    default.assert_awaited_once()
+    api.get_doorstation_address.assert_not_called()  # no lookup for a viewer that is turned away anyway
+    assert camera._direct_failed_at is None
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_queued_behind_a_failing_still_read_honours_the_pause(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    connects: list[str] = []
+
+    class _Session:
+        async def get(self, url: str, **_kwargs: object) -> MagicMock:
+            connects.append(url)
+            return MagicMock(status=503, headers={})
+
+    with patch("custom_components.comexio.camera.async_get_clientsession", return_value=_Session()):
+        async with camera._direct_gate:  # a still read is under way
+            live = asyncio.create_task(camera._proxy_direct_stream(MagicMock(), DIRECT_URL, doorstation))
+            await _settled(lambda: camera._streams_open == 1)
+            assert camera._streams_open == 1  # counted and waiting at the gate
+            camera._direct_failed("HTTP 500")  # ... and fails, the pause starts
+            failed_at = camera._direct_failed_at
+        assert await live is None
+
+    assert not connects  # the Doorstation was not asked during the pause
+    assert camera._direct_failed_at == failed_at  # the turned-away viewer neither extends nor ends the pause
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+
+
+def _closed_session(on_get: Callable[[], None] | None = None, *, closed: bool = True) -> MagicMock:
+    """A shared web session that refuses the live stream request the way aiohttp refuses one on a closed session."""
+
+    async def get(*_args: object, **_kwargs: object) -> None:
+        if on_get is not None:
+            on_get()
+        raise RuntimeError("Session is closed")
+
+    session = MagicMock()
+    session.closed = closed
+    session.get = get
+    return session
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_closed_session_while_home_assistant_runs_is_an_ordinary_live_stream_failure(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    # Without HA stopping nobody explains a closed session away: the direct way pauses, the default stream answers.
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_closed_session()),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert camera._direct_failed_at is not None
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_stream_refused_while_home_assistant_stops_starts_no_failure_streak(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    camera = await _online_camera(hass, entry)
+    default_stream = AsyncMock(return_value="the still stream")
+
+    try:
+        with (
+            patch(
+                "custom_components.comexio.camera.async_get_clientsession",
+                # Its shared web session is closed under the request: Home Assistant is stopping.
+                return_value=_closed_session(lambda: hass.set_state(CoreState.stopping)),
+            ),
+            patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+        ):
+            assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+    finally:
+        hass.set_state(CoreState.running)
+
+    assert camera._direct_failed_at is None  # no pause, no warning for a Doorstation that is fine
+    assert camera._warned_camera_id is None
+    assert "no image from the Doorstation itself" not in caplog.text
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_any_other_runtime_error_of_the_live_stream_request_is_not_swallowed(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    camera = await _online_camera(hass, entry)
+    request = MagicMock()
+
+    # The session is open: this RuntimeError is not aiohttp's refusal of a closed one, so it is a bug and visible.
+    with (
+        patch("custom_components.comexio.camera.async_get_clientsession", return_value=_closed_session(closed=False)),
+        pytest.raises(RuntimeError, match="Session is closed"),
+    ):
+        await camera.handle_async_mjpeg_stream(request)
+
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+async def test_a_live_viewer_waiting_at_the_gate_for_a_camera_that_goes_sends_no_request(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    aioclient_mock.get(DIRECT_URL, content=DIRECT_STREAM, headers=DIRECT_HEADERS)
+    camera = await _online_camera(hass, entry)
+    doorstations = hass.data[DOMAIN][entry.entry_id].doorstations
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with patch.object(Camera, "handle_async_mjpeg_stream", default_stream):
+        async with camera._direct_gate:  # a still read is under way
+            viewer = asyncio.create_task(camera.handle_async_mjpeg_stream(MagicMock()))
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+            assert camera._streams_open == 1  # queued behind the read, counted from its connect on
+            doorstations.known.pop(2)  # the page no longer shows the Doorstation
+        assert await viewer == "the still stream"
+
+    assert aioclient_mock.call_count == 0  # no request to a Doorstation nobody asks for
+    assert camera._direct_failed_at is None  # and no failure streak
+    assert camera._streams_open == 0
+    assert not camera._direct_gate.locked()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_live_viewer_whose_address_lookup_runs_out_of_time_gets_the_default_stream(
+    hass: HomeAssistant, entry: MockConfigEntry, aioclient_mock: AiohttpClientMocker
+) -> None:
+    camera = await _online_camera(hass, entry)
+    api = hass.data[DOMAIN][entry.entry_id].api
+
+    async def slow_lookup(_ext_id: int) -> tuple[str, None]:
+        await asyncio.sleep(30)
+        return ADDRESS, None
+
+    api.get_doorstation_address.side_effect = slow_lookup
+    default_stream = AsyncMock(return_value="the still stream")
+
+    with (
+        patch("custom_components.comexio.camera.DOORSTATION_DIRECT_TIMEOUT_SEC", 0.05),
+        patch.object(Camera, "handle_async_mjpeg_stream", default_stream),
+    ):
+        # The lookup is bounded like the still read's: the viewer is not held until the IO-Server answers.
+        assert await camera.handle_async_mjpeg_stream(MagicMock()) == "the still stream"
+
+    assert aioclient_mock.call_count == 0
+    assert camera._streams_open == 0
+    assert not camera._address_lock.locked()
