@@ -238,14 +238,24 @@ DOORSTATION_SNAPSHOT_MIN_INTERVAL_SEC = 5.0
 # The Doorstation also serves the stream under its own address, which the camera prefers (no IO-Server in between).
 # The address is looked up again after this long (a known one too, so a changed address is noticed), a direct read
 # that failed is tried again after the retry pause (the address is then read afresh), and a direct read gives up after
-# the timeout. The timeout covers the address lookup and the read together (Home Assistant gives an image request 10 s
-# in all, and the IO-Server, asked after a failed attempt, needs time too).
+# the timeout. For a still image the timeout covers the address lookup and the read together (Home Assistant gives an
+# image request 10 s in all, and the IO-Server, asked after a failed attempt, needs time too); a live stream times its
+# address lookup, its connect and its first frame each.
 # The Doorstation numbers its own cameras from 1 (`http://<ip>/proxy/cam/1/`); the IO-Server's `camera_id` (the
 # extension id in practice, 7 on a real installation) only addresses the stream on the IO-Server's proxy.
 DOORSTATION_OWN_CAMERA_ID = 1
 DOORSTATION_ADDRESS_RECHECK_SEC = 600.0
 DOORSTATION_DIRECT_RETRY_SEC = 300.0
 DOORSTATION_DIRECT_TIMEOUT_SEC = 5.0
+# A running live stream that delivers nothing for this long is let go (the frontend reconnects).
+DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC = 10.0
+# A chunk that cannot be written to the viewer for this long (it stays connected but does not read) ends the stream;
+# the viewer is to blame, not the Doorstation, so it neither pauses the direct way nor counts as a failure.
+DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC = 10.0
+# A live stream the Doorstation ends, drops or lets stall after delivering data for less than this long counts as a
+# failed stream (the direct way is paused, one warning per streak); a longer one was a stream that worked.
+# Delivering time ends with the last chunk, so the stall at the end (the read timeout above) does not count in it.
+DOORSTATION_LIVE_STREAM_MIN_RUN_SEC = 5.0
 # A still read that finds less than this left of that budget after the address lookup is not started: a read that
 # is cut off at once would blame the Doorstation, which was never asked.
 DOORSTATION_DIRECT_MIN_READ_SEC = 1.0
