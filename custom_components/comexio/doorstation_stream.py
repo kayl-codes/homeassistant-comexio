@@ -24,6 +24,7 @@ from .const import (
     DOORSTATION_DIRECT_MAX_BYTES,
     DOORSTATION_DIRECT_TIMEOUT_SEC,
     DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC,
+    DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC,
     DOORSTATION_OWN_CAMERA_ID,
     one_line,
 )
@@ -45,12 +46,17 @@ SESSION_CLOSED_CAUSE = "the session was closed"
 # headers that keep a browser from running anything in it anyway (`forward_live_stream`).
 LIVE_STREAM_MEDIA_TYPE = "multipart/x-mixed-replace"
 # RFC 2046 boundary characters without the space, at most 70 of them, quoted or not (a quote must be closed). ASCII
-# only: with IGNORECASE alone `[A-Za-z]` also matches U+212A and U+017F. A deliberate approximation: the first
-# `boundary=` parameter wins, and a quoted value of another parameter that holds the text is not told apart.
+# only: re.ASCII keeps `[A-Za-z]` from matching U+212A and U+017F under a case-insensitive match. Only the parameter
+# name is matched case-insensitively (`(?i:boundary)`), the character class stays explicit and case-sensitive. A
+# deliberate approximation: the first `boundary=` parameter is the one that counts (`_BOUNDARY_NAME` finds it, a
+# duplicate after an unusable first one is not a way round), and a quoted value of another parameter that holds the
+# text is not told apart.
 _BOUNDARY = re.compile(
-    r"""[;\s]boundary=(?:"([0-9A-Za-z'()+_,\-./:=?]{1,70})"|([0-9A-Za-z'()+_,\-./:=?]{1,70}))\s*(?:;|$)""",
-    re.ASCII | re.IGNORECASE,
+    r"""[;\s](?i:boundary)=(?:"([0-9A-Za-z'()+_,\-./:=?]{1,70})"|([0-9A-Za-z'()+_,\-./:=?]{1,70}))\s*(?:;|$)""",
+    re.ASCII,
 )
+# The first `boundary=` parameter, whatever its value (even none): the only one `_BOUNDARY` is tried on.
+_BOUNDARY_NAME = re.compile(r"[;\s]boundary=", re.ASCII | re.IGNORECASE)
 # A `boundary=` parameter with some value, usable or not: tells "no boundary" from "a boundary we do not take over".
 _BOUNDARY_PARAM = re.compile(r"[;\s]boundary=\s*[^;\s]", re.ASCII | re.IGNORECASE)
 LIVE_STREAM_RESPONSE_HEADERS = {"X-Content-Type-Options": "nosniff", "Content-Security-Policy": "sandbox"}
@@ -90,7 +96,11 @@ def live_stream_content_type(resp: aiohttp.ClientResponse) -> str | None:
     """The Content-Type a live stream is passed on with (the media type and the Doorstation's boundary, rebuilt from
     plain characters only), None if the answer is no multipart stream with a usable boundary."""
     header = _content_type_header(resp)
-    if _media_type(header) != LIVE_STREAM_MEDIA_TYPE or (found := _BOUNDARY.search(header)) is None:
+    if _media_type(header) != LIVE_STREAM_MEDIA_TYPE or (first := _BOUNDARY_NAME.search(header)) is None:
+        return None
+    # Only the first `boundary=` parameter counts: a browser that reads the header another way than this does (a later
+    # parameter taken, or the first) would split the stream at a boundary the Doorstation never sent.
+    if (found := _BOUNDARY.match(header, first.start())) is None:
         return None
     return f'{LIVE_STREAM_MEDIA_TYPE};boundary="{found.group(1) or found.group(2)}"'
 
@@ -175,7 +185,10 @@ class PrefetchedStream:
         if self._first:
             first, self._first = self._first, b""
             return first
-        return await self._rest.read(n)
+        data = await self._rest.read(n)
+        # The read can take a while (up to the forwarder's read timeout): what arrives after the camera went is stale
+        # data of a stream that no longer belongs to it, and must not reach the viewer.
+        return data if self._alive() else b""
 
 
 # (why it ended, seconds the Doorstation delivered data, whether the Doorstation is to blame)
@@ -183,17 +196,20 @@ StreamEnded = Callable[[str, float, bool], None]
 ENDED_BY_DOORSTATION = "the Doorstation ended the stream"
 ENDED_STALLED = "the Doorstation stopped sending"
 ENDED_VIEWER_LEFT = "the viewer left"
+ENDED_VIEWER_STALLED = "the viewer stopped reading"
 ENDED_HA_STOPPING = "Home Assistant is stopping"
 
 
 class _Delivery:
-    """How long a stream delivered data: from its start to the last chunk passed on. A stall at the end (the read
-    timeout) is not part of it, so a device that sends one picture and then goes quiet delivered for about 0 s."""
+    """How long the Doorstation delivered data: from the start of the stream to the last chunk that arrived from it
+    (stamped on arrival, before the chunk is written to the viewer, so a slow viewer does not make the Doorstation
+    look slower). A stall at the end (the read timeout) is not part of it, so a device that sends one picture and
+    then goes quiet delivered for about 0 s."""
 
     def __init__(self) -> None:
         self._started = self._last_data = time.monotonic()
 
-    def chunk_passed_on(self) -> None:
+    def chunk_arrived(self) -> None:
         self._last_data = time.monotonic()
 
     @property
@@ -211,15 +227,20 @@ async def _pump(
                 data = await stream.read(_CHUNK_BYTES)
         except TimeoutError:
             return ENDED_STALLED, True
-        except aiohttp.ClientError as err:
+        except (aiohttp.ClientError, ConnectionError) as err:
             return f"the stream broke off ({type(err).__name__})", True
         if not data:
             return ENDED_BY_DOORSTATION, True
+        delivery.chunk_arrived()
         try:
-            await response.write(data)
+            # A viewer that stays connected but stops reading would hold the write (and the stream, the open-stream
+            # count and the Doorstation's one connection) for as long as its socket buffer is full.
+            async with asyncio.timeout(DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC):
+                await response.write(data)
+        except TimeoutError:
+            return ENDED_VIEWER_STALLED, False
         except (aiohttp.ClientError, ConnectionError):
             return ENDED_VIEWER_LEFT, False
-        delivery.chunk_passed_on()
     return ENDED_HA_STOPPING, False
 
 
@@ -236,10 +257,11 @@ async def forward_live_stream(
     `sandbox` policy keeps a part that claims to be a page from running anything on Home Assistant's origin if the
     stream is opened on its own instead of in an image. The helper cannot add headers, hence this copy. Ends quietly
     (the frontend reconnects) when the Doorstation stalls (DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC), breaks off or
-    ends the stream, when the viewer leaves, and while Home Assistant stops; `on_ended` is told which of them it was,
-    how long the Doorstation delivered data and whether it is to blame, so the caller can tell a device that sends one
-    picture and drops or goes quiet every time from a viewer that closed the tab. A cancelled request (the viewer
-    closed the tab) is reported as the viewer leaving, then the cancellation goes on.
+    ends the stream, when the viewer leaves or stops reading (DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC), and while
+    Home Assistant stops; `on_ended` is told which of them it was, how long the Doorstation delivered data and whether
+    it is to blame, so the caller can tell a device that sends one picture and drops or goes quiet every time from a
+    viewer that closed the tab. The connection of a viewer that stopped reading is aborted. A cancelled request (the
+    viewer closed the tab) is reported as the viewer leaving, then the cancellation goes on.
     """
     response = web.StreamResponse(headers=LIVE_STREAM_RESPONSE_HEADERS)
     response.content_type = content_type
@@ -251,6 +273,10 @@ async def forward_live_stream(
         on_ended(ENDED_VIEWER_LEFT, delivery.seconds, False)
         raise
     on_ended(why, delivery.seconds, doorstation_to_blame)
+    if why == ENDED_VIEWER_STALLED and request.transport is not None:
+        # aiohttp ends a returned response with a write that waits for the full send buffer to drain, without a time
+        # limit of its own: for a viewer that stopped reading it would hang the handler (and the socket) again.
+        request.transport.abort()
     return response
 
 

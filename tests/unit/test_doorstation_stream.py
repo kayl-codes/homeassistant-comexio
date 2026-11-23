@@ -414,6 +414,9 @@ def test_the_type_is_read_whatever_its_case_and_parameters() -> None:
         ),
         ("multipart/x-mixed-replace; boundary=frame ", 'multipart/x-mixed-replace;boundary="frame"'),
         ("multipart/x-mixed-replace; boundary=\u017f", None),
+        ("multipart/x-mixed-replace; boundary=; boundary=ok", None),
+        ("multipart/x-mixed-replace; boundary=a<b>; boundary=ok", None),
+        ('multipart/x-mixed-replace; boundary="a b"; boundary=ok', None),
     ],
     ids=[
         "plain",
@@ -439,6 +442,9 @@ def test_the_type_is_read_whatever_its_case_and_parameters() -> None:
         "every special character",
         "trailing blank",
         "long s is no ascii letter",
+        "empty first boundary, a usable second one is no way round",
+        "unusable first boundary, a usable second one is no way round",
+        "quoted blank in the first boundary, a usable second one is no way round",
     ],
 )
 def test_the_type_a_live_stream_is_passed_on_with_is_rebuilt_from_a_clean_boundary(
@@ -491,21 +497,25 @@ class _Forwarded(NamedTuple):
     headers: dict[str, str]
     body: bytes
     ended: list[tuple[str, float, bool]]
+    cut_off: bool  # the viewer's connection was closing when the forwarder returned
 
 
 def _forwarded(stream: _Chunks, running: bool = True) -> _Forwarded:
     """What a viewer gets from `forward_live_stream` for `stream`, and what it told `on_ended`."""
     sent: list[tuple[dict[str, str], bytes]] = []
     ended: list[tuple[str, float, bool]] = []
+    closing: list[bool] = []
 
     async def handler(request: web.Request) -> web.StreamResponse:
-        return await forward_live_stream(
+        response = await forward_live_stream(
             SimpleNamespace(is_running=running),  # type: ignore[arg-type]
             request,
             stream,  # type: ignore[arg-type]
             'multipart/x-mixed-replace;boundary="frame"',
             lambda why, ran_sec, doorstation_to_blame: ended.append((why, ran_sec, doorstation_to_blame)),
         )
+        closing.append(request.transport is None or request.transport.is_closing())
+        return response
 
     async def check(url: str) -> None:
         async with asyncio.timeout(5), aiohttp.ClientSession() as session, session.get(url) as resp:
@@ -516,7 +526,7 @@ def _forwarded(stream: _Chunks, running: bool = True) -> _Forwarded:
             sent.append((dict(resp.headers), body))
 
     _serve(handler, check)
-    return _Forwarded(*sent[0], ended)
+    return _Forwarded(*sent[0], ended, closing[0])
 
 
 def test_a_live_stream_is_forwarded_with_headers_that_keep_a_browser_from_running_it() -> None:
@@ -526,6 +536,7 @@ def test_a_live_stream_is_forwarded_with_headers_that_keep_a_browser_from_runnin
     assert forwarded.headers["Content-Type"] == 'multipart/x-mixed-replace;boundary="frame"'
     assert forwarded.headers["X-Content-Type-Options"] == "nosniff"
     assert forwarded.headers["Content-Security-Policy"] == "sandbox"
+    assert not forwarded.cut_off
 
 
 def _clock(monkeypatch: pytest.MonkeyPatch, *readings: float) -> None:
@@ -556,13 +567,20 @@ def test_a_live_stream_that_stalls_ends_quietly_with_what_came(monkeypatch: pyte
     assert _reported(forwarded) == [(doorstation_stream.ENDED_STALLED, 0.5, True)]
 
 
-def test_a_live_stream_that_breaks_off_names_the_error_class_only(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    "error",
+    [aiohttp.ClientPayloadError("secret 192.0.2.7"), ConnectionResetError("secret 192.0.2.7")],
+    ids=["ClientError", "ConnectionError"],
+)
+def test_a_live_stream_that_breaks_off_names_the_error_class_only(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
     _clock(monkeypatch, 100.0, 103.0)
 
-    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME], error=aiohttp.ClientPayloadError("secret 192.0.2.7")))
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME], error=error))
 
     assert forwarded.body == PART_HEAD + FRAME
-    assert _reported(forwarded) == [("the stream broke off (ClientPayloadError)", 3.0, True)]
+    assert _reported(forwarded) == [(f"the stream broke off ({type(error).__name__})", 3.0, True)]
 
 
 @pytest.mark.parametrize(
@@ -581,11 +599,50 @@ def test_a_viewer_that_leaves_is_not_blamed_on_the_doorstation(
         raise error
 
     monkeypatch.setattr(web.StreamResponse, "write", refuse)
-    _clock(monkeypatch, 100.0)
+    _clock(monkeypatch, 100.0, 104.0)
 
     forwarded = _forwarded(_Chunks([PART_HEAD + FRAME]))
 
-    assert _reported(forwarded) == [(doorstation_stream.ENDED_VIEWER_LEFT, 0.0, False)]
+    # The chunk arrived from the Doorstation (at 104), so it counts as delivered although the viewer could not take it.
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_VIEWER_LEFT, 4.0, False)]
+
+
+def test_a_viewer_that_stops_reading_ends_the_stream_and_is_not_blamed_on_the_doorstation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A write that never finishes is cut off: it would hold the stream, its count and the Doorstation's connection."""
+
+    async def hang(self: web.StreamResponse, data: bytes) -> None:
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(web.StreamResponse, "write", hang)
+    monkeypatch.setattr(doorstation_stream, "DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC", 0.05)
+    _clock(monkeypatch, 100.0, 103.0)
+
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME]))
+
+    # The time the write hung is no time of the Doorstation's: the chunk is stamped when it arrived.
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_VIEWER_STALLED, 3.0, False)]
+    # aiohttp would drain the returned response against the same full buffer: the connection is aborted instead.
+    assert forwarded.cut_off
+
+
+def test_a_slow_write_within_the_limit_does_not_end_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    original = web.StreamResponse.write
+
+    async def slow(self: web.StreamResponse, data: bytes) -> None:
+        await asyncio.sleep(0.01)
+        await original(self, data)
+
+    monkeypatch.setattr(web.StreamResponse, "write", slow)
+    monkeypatch.setattr(doorstation_stream, "DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC", 0.5)
+    _clock(monkeypatch, 100.0, 101.0)
+
+    forwarded = _forwarded(_Chunks([PART_HEAD + FRAME]))
+
+    assert forwarded.body == PART_HEAD + FRAME
+    assert _reported(forwarded) == [(doorstation_stream.ENDED_BY_DOORSTATION, 1.0, True)]
+    assert not forwarded.cut_off
 
 
 def test_a_cancelled_request_is_reported_as_the_viewer_leaving_and_stays_cancelled(
@@ -651,6 +708,23 @@ def test_a_prefetched_stream_ends_once_its_camera_is_gone() -> None:
         return out
 
     assert asyncio.run(read_all()) == [b"first", b"", b""]
+
+
+def test_a_prefetched_stream_drops_what_arrives_after_its_camera_went() -> None:
+    """The read can wait long: data that comes in once the camera is gone is stale and must not reach the viewer."""
+    alive = [True]
+
+    class _Rest:
+        async def read(self, n: int = -1) -> bytes:
+            alive[0] = False  # the camera goes while the read waits
+            return b"late"
+
+    stream = doorstation_stream.PrefetchedStream(b"first", _Rest(), lambda: alive[0])  # type: ignore[arg-type]
+
+    async def read() -> tuple[bytes, bytes]:
+        return await stream.read(100), await stream.read(100)
+
+    assert asyncio.run(read()) == (b"first", b"")
 
 
 def test_a_prefetched_stream_hands_the_size_asked_for_on_and_gives_nothing_of_a_camera_that_is_gone() -> None:

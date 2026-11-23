@@ -1228,6 +1228,48 @@ async def test_only_a_stream_the_doorstation_cut_off_early_counts_as_a_failure(
 
 
 @pytest.mark.usefixtures("mock_comexio_api", "direct_address")
+@pytest.mark.parametrize(
+    ("delivered_sec", "blame", "recovers"),
+    [
+        (1.0, False, False),
+        (1.0, True, False),
+        (5.0, False, True),
+        (6.0, True, True),
+    ],
+    ids=[
+        "viewer left after one second: proves nothing",
+        "device cut it off after one second",
+        "viewer left after the minimum: the stream worked",
+        "device cut it off after a while: the stream worked",
+    ],
+)
+async def test_only_a_stream_that_delivered_for_a_while_ends_a_failure_streak(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    delivered_sec: float,
+    blame: bool,
+    recovers: bool,
+) -> None:
+    """A viewer that leaves after a second must not wipe a streak the Doorstation has earned."""
+    monkeypatch.setattr("custom_components.comexio.camera.DOORSTATION_LIVE_STREAM_MIN_RUN_SEC", 5.0)
+    camera = await _online_camera(hass, entry)
+    doorstation = hass.data[DOMAIN][entry.entry_id].doorstations.known[2]
+    camera._direct_failed("earlier")
+    earlier = camera._direct_failed_at
+
+    camera._live_stream_ended(doorstation, "the stream ended", delivered_sec, blame)
+
+    assert ("works again" in caplog.text) is recovers
+    assert (camera._direct_failed_at is None) is recovers
+    # Neutral (not blamed, too short) is told from a failure by the streak: a failure renews its time, neutral keeps it.
+    renewed = not recovers and camera._direct_failed_at != earlier
+    assert renewed is (blame and not recovers)
+    assert ("the stream ended after 1 s of data" in caplog.text) is renewed
+
+
+@pytest.mark.usefixtures("mock_comexio_api", "direct_address")
 async def test_a_device_that_cuts_every_stream_short_keeps_one_warning_and_never_works_again(
     hass: HomeAssistant,
     entry: MockConfigEntry,

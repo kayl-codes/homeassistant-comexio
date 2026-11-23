@@ -378,8 +378,9 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         that sends one picture and then drops or goes quiet (it delivered for less than
         DOORSTATION_LIVE_STREAM_MIN_RUN_SEC) is a failure like a refused request, with the pause and the one warning
         per streak (else it would make the frontend reconnect in a loop, unseen, and a start would clear the streak
-        it is about to continue). A stream that delivered for a while, or that the viewer or Home Assistant ended,
-        is no failure."""
+        it is about to continue). A stream that delivered for a while worked, and clears the streak. One that the
+        viewer or Home Assistant ended before that proves nothing about the Doorstation (a viewer that leaves after
+        a second would otherwise wipe a streak the Doorstation has earned): it is neither a failure nor a success."""
         _LOGGER.debug(
             "[%s] Doorstation camera %d: the live stream ended after %.0f s of data (%s)",
             self.coordinator.server_id,
@@ -389,10 +390,10 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
         )
         if not self._is_current(doorstation):
             return  # it ended with its camera (offline extension, changed or gone, unloading): nobody's doing
-        if doorstation_to_blame and delivered_sec < DOORSTATION_LIVE_STREAM_MIN_RUN_SEC:
-            self._stream_failed(doorstation, f"{why} after {delivered_sec:.0f} s of data")
-        else:
+        if delivered_sec >= DOORSTATION_LIVE_STREAM_MIN_RUN_SEC:
             self._direct_worked()
+        elif doorstation_to_blame:
+            self._stream_failed(doorstation, f"{why} after {delivered_sec:.0f} s of data")
 
     def _stream_failed(self, doorstation: Doorstation, cause: str) -> None:
         """The live stream could not be had: the direct way is paused, unless the camera is gone meanwhile."""

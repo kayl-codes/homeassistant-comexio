@@ -249,6 +249,9 @@ DOORSTATION_DIRECT_RETRY_SEC = 300.0
 DOORSTATION_DIRECT_TIMEOUT_SEC = 5.0
 # A running live stream that delivers nothing for this long is let go (the frontend reconnects).
 DOORSTATION_LIVE_STREAM_READ_TIMEOUT_SEC = 10.0
+# A chunk that cannot be written to the viewer for this long (it stays connected but does not read) ends the stream;
+# the viewer is to blame, not the Doorstation, so it neither pauses the direct way nor counts as a failure.
+DOORSTATION_LIVE_STREAM_WRITE_TIMEOUT_SEC = 10.0
 # A live stream the Doorstation ends, drops or lets stall after delivering data for less than this long counts as a
 # failed stream (the direct way is paused, one warning per streak); a longer one was a stream that worked.
 # Delivering time ends with the last chunk, so the stall at the end (the read timeout above) does not count in it.
