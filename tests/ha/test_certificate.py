@@ -129,9 +129,9 @@ def pinned_entry() -> MockConfigEntry:
 
 
 def _pinned_recently(data: Any) -> bool:
-    """Whether data carries a pin date written by this test run (not PINNED_AT_BEFORE, not missing)."""
+    """Whether data carries a pin date written just now (not PINNED_AT_BEFORE, not missing, not another date)."""
     pinned_at = data.get(CONF_CERTIFICATE_PINNED_AT)
-    return pinned_at is not None and datetime.fromisoformat(pinned_at) > datetime.fromisoformat(PINNED_AT_BEFORE)
+    return pinned_at is not None and abs(dt_util.utcnow() - datetime.fromisoformat(pinned_at)) < timedelta(minutes=5)
 
 
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
@@ -2207,6 +2207,10 @@ async def test_the_certificate_expiry_sensor_reads_again_every_day_until_unloade
     await hass.async_block_till_done(wait_background_tasks=True)
     assert certificate_read.await_count == 1  # at setup
 
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC - 60))
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert certificate_read.await_count == 1  # not before the day is over
+
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC + 1))
     await hass.async_block_till_done(wait_background_tasks=True)
     assert certificate_read.await_count == 2
@@ -2238,6 +2242,7 @@ async def test_dropping_the_pin_removes_the_certificate_expiry_sensor(
     assert pinned_entry.state is ConfigEntryState.LOADED
     assert CONF_CERTIFICATE_FINGERPRINT not in pinned_entry.data
     assert registry.async_get(CERTIFICATE_EXPIRY_SENSOR) is None
+    assert registry.async_get(CONNECTION_SENSOR) is not None  # only the expiry sensor goes
 
 
 # Repair

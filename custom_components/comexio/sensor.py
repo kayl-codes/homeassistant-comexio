@@ -879,11 +879,17 @@ class ComexioCertificateExpirySensor(ComexioStableEntityIdMixin, RestoreEntity, 
         """Take the dates stored at the last stop, if they belong to the pin of this setup."""
         if stored.get("fingerprint") != self._pin:
             return
-        valid_from = dt_util.parse_datetime(str(stored.get("not_valid_before")))
-        valid_until = dt_util.parse_datetime(str(stored.get("not_valid_after")))
+        try:
+            # parse_datetime gives None for text that is no date, but raises for a well-formed impossible one.
+            valid_from = dt_util.parse_datetime(str(stored.get("not_valid_before")))
+            valid_until = dt_util.parse_datetime(str(stored.get("not_valid_after")))
+        except ValueError:
+            valid_from = valid_until = None
         # A date without a zone (stored data edited by hand) would make every state write of a timestamp fail.
         if all(date is not None and date.utcoffset() is not None for date in (valid_from, valid_until)):
             self._valid_from, self._attr_native_value = valid_from, valid_until
+        else:
+            _LOGGER.debug("Comexio at %s: stored certificate dates unreadable, waiting for the next read", self._host)
 
     @callback
     def _start_read(self, _now: datetime | None = None) -> None:

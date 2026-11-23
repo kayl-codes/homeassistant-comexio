@@ -158,12 +158,15 @@ def test_an_unexpected_error_is_logged_with_its_traceback_and_keeps_the_dates(
     assert record.exc_info is not None
 
 
-@pytest.mark.parametrize(("done", "starts"), [(False, False), (True, True)], ids=["running", "finished"])
-def test_a_second_read_starts_only_once_the_first_is_over(done: bool, starts: bool) -> None:
+@pytest.mark.parametrize(
+    ("done", "starts"), [(None, True), (False, False), (True, True)], ids=["first read", "running", "finished"]
+)
+def test_a_read_starts_only_while_no_other_runs(done: bool | None, starts: bool) -> None:
     sensor = _sensor()
-    earlier = MagicMock()
-    earlier.done.return_value = done
-    sensor._read_task = earlier
+    sensor._async_read = MagicMock()  # type: ignore[method-assign]  # no coroutine left unawaited
+    if done is not None:
+        sensor._read_task = MagicMock()
+        sensor._read_task.done.return_value = done
 
     sensor._start_read()
 
@@ -178,6 +181,10 @@ def test_removing_the_sensor_cancels_a_running_read() -> None:
     asyncio.run(sensor.async_will_remove_from_hass())
 
     running.cancel.assert_called_once()
+
+
+def test_removing_the_sensor_before_any_read_is_fine() -> None:
+    asyncio.run(_sensor().async_will_remove_from_hass())
 
 
 # Restore
@@ -214,9 +221,29 @@ def test_restored_dates_stay_when_the_handshake_presents_another_certificate() -
         {"fingerprint": PINNED, "not_valid_before": VALID_FROM.isoformat()},
         {"fingerprint": PINNED, "not_valid_before": "garbage", "not_valid_after": VALID_UNTIL.isoformat()},
         {"fingerprint": PINNED, "not_valid_before": VALID_FROM.isoformat(), "not_valid_after": "2027-01-01T00:00:00"},
+        {"fingerprint": PINNED, "not_valid_before": "2026-01-01T00:00:00", "not_valid_after": VALID_UNTIL.isoformat()},
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": VALID_FROM.isoformat(),
+            "not_valid_after": "2026-13-45T10:00:00+00:00",
+        },
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": "2026-01-01T00:00:00+99:00",
+            "not_valid_after": VALID_UNTIL.isoformat(),
+        },
         {},
     ],
-    ids=["another pin", "one date missing", "unparsable date", "date without zone", "nothing"],
+    ids=[
+        "another pin",
+        "one date missing",
+        "unparsable date",
+        "end date without zone",
+        "start date without zone",
+        "no such day",
+        "no such zone",
+        "nothing",
+    ],
 )
 def test_stored_dates_that_do_not_belong_to_the_pin_are_not_restored(stored: dict[str, Any]) -> None:
     sensor = _sensor()
