@@ -46,14 +46,14 @@ SESSION_CLOSED_CAUSE = "the session was closed"
 # headers that keep a browser from running anything in it anyway (`forward_live_stream`).
 LIVE_STREAM_MEDIA_TYPE = "multipart/x-mixed-replace"
 # RFC 2046 boundary characters without the space, at most 70 of them, quoted or not (a quote must be closed). ASCII
-# only: re.ASCII keeps `[A-Za-z]` from matching U+212A and U+017F under a case-insensitive match. Only the parameter
-# name is matched case-insensitively (`(?i:boundary)`), the character class stays explicit and case-sensitive. A
+# only: re.ASCII keeps `A-Z` from matching U+212A and U+017F under the case-insensitive match, which also lets `A-Z`
+# stand for the lower-case letters (naming both ranges would be a duplicate in the class, SonarQube S5869). A
 # deliberate approximation: the first `boundary=` parameter is the one that counts (`_BOUNDARY_NAME` finds it, a
 # duplicate after an unusable first one is not a way round), and a quoted value of another parameter that holds the
 # text is not told apart.
 _BOUNDARY = re.compile(
-    r"""[;\s](?i:boundary)=(?:"([0-9A-Za-z'()+_,\-./:=?]{1,70})"|([0-9A-Za-z'()+_,\-./:=?]{1,70}))\s*(?:;|$)""",
-    re.ASCII,
+    r"""[;\s]boundary=(?:"([0-9A-Z'()+_,\-./:=?]{1,70})"|([0-9A-Z'()+_,\-./:=?]{1,70}))\s*(?:;|$)""",
+    re.ASCII | re.IGNORECASE,
 )
 # The first `boundary=` parameter, whatever its value (even none): the only one `_BOUNDARY` is tried on.
 _BOUNDARY_NAME = re.compile(r"[;\s]boundary=", re.ASCII | re.IGNORECASE)
