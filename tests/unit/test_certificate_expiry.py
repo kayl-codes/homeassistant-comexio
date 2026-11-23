@@ -201,6 +201,22 @@ def test_the_stored_dates_round_trip() -> None:
     assert restored.extra_state_attributes == {"valid_from": VALID_FROM}
 
 
+def test_restored_dates_in_another_zone_come_back_in_utc() -> None:
+    sensor = _sensor()
+
+    sensor._restore(
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": "2026-01-01T05:00:00+05:00",
+            "not_valid_after": "2026-12-31T19:00:00-05:00",
+        }
+    )
+
+    assert sensor.native_value == VALID_UNTIL
+    assert sensor.native_value.utcoffset() == VALID_UNTIL.utcoffset()
+    assert sensor.extra_state_attributes == {"valid_from": VALID_FROM}
+
+
 def test_restored_dates_stay_when_the_handshake_presents_another_certificate() -> None:
     sensor = _sensor()
     sensor._restore(
@@ -232,6 +248,16 @@ def test_restored_dates_stay_when_the_handshake_presents_another_certificate() -
             "not_valid_before": "2026-01-01T00:00:00+99:00",
             "not_valid_after": VALID_UNTIL.isoformat(),
         },
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": "0001-01-01T00:00:00+05:00",
+            "not_valid_after": VALID_UNTIL.isoformat(),
+        },
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": VALID_FROM.isoformat(),
+            "not_valid_after": "9999-12-31T23:59:59-05:00",
+        },
         {},
     ],
     ids=[
@@ -242,6 +268,8 @@ def test_restored_dates_stay_when_the_handshake_presents_another_certificate() -
         "start date without zone",
         "no such day",
         "no such zone",
+        "start before the calendar in UTC",
+        "end after the calendar in UTC",
         "nothing",
     ],
 )
