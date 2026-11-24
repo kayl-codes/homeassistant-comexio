@@ -21,6 +21,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **No KNX check in the sync when KNX is not imported:** the wiring pass at the end of a sync no longer shows "Checking KNX write path and wiring..." and no longer runs that step with the KNX import switched off, and a cancel does not list it as not started. The step stays in the run when the sync itself created KNX commands, so their read path is still wired; it then takes only the gaps of those commands. Whether the step belongs to a run is decided once when the wiring pass starts, which gaps it takes when the step begins, so switching the import while a sync runs cannot hand it gaps chosen under the old setting (#333).
 
 ### ⚠️ Requirements & Notes
+- **In the default catalog:** the integration is now listed in the Marketplace (Home Assistant 2026.11 and newer) and in HACS without adding it as a custom repository. The README has a My Home Assistant button that opens its page directly.
 - **Dependency:** `aiocomexio==0.15.0` (was 0.14.1), installed automatically by Home Assistant.
 
 ---
