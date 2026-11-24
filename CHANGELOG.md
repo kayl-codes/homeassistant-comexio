@@ -14,6 +14,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **A copy without blocks is not started on its own:** a call that does not pass `auto_start` leaves the copy stopped, so a plan with unfed elements does not run against the building before anyone has read the notice. Passing `auto_start: true` explicitly starts it anyway.
 - **Plan card:** the restore dialog of a backup with missing blocks offers **Restore without these blocks as a copy**. It lists the blocks and what their connections cost, turns the copy option on (with a name for the copy) and **Start automatically** off. The card needs the updated `comexio-plan-card.js` (card 0.9.60) in `config/www`.
 
+### 🐛 Bug Fixes & Refactoring
+- **No "Comexio: restart needed" notice for a new or renamed command:** every command the sync saved moved the stamp the notice and the switch-off of the old webhook id wait for, so a plain rename or a new marker raised the notice again after every sync, although Comexio pushes both within seconds without a restart (measured on a live installation: renamed marker and new marker, each synced, each pushed at once). Now only a change of path, server field or protocol of an existing command asks for a restart; a new command and a plain rename of a command that is already switched over do not. The nightly rewrite, a type fix, a range correction and an uploaded class still do. The ledger remembers that no restart is due, so a Home Assistant restart does not bring the notice back.
+
 ---
 
 ## [0.43.0] — 2026-11-18

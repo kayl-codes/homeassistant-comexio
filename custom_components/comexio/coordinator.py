@@ -1078,6 +1078,20 @@ def _audited_duplicates(
     return list(kept.values()), disabled
 
 
+def _flag_contested_renames(renames: Iterable[dict[str, Any]]) -> None:
+    """Mark the renames of one sync that give up a name another of them takes, or take one another gives up.
+
+    Two commands swapping names, or A to B together with B to C, are such an exchange: the ledger writes of one sync
+    run one after the other, so the first rename would move or retire the state of a name before the other has read
+    it (see WebhookSecurity.mark_written, contested). A name an orphan or a plain create wants is no exchange.
+    """
+    renames = list(renames)
+    old_names = {item["previous_name"] for item in renames}
+    new_names = {item["name"] for item in renames}
+    for item in renames:
+        item["rename_contested"] = item["name"] in old_names or item["previous_name"] in new_names
+
+
 def _add_audit_orphan(orphans: list[dict[str, Any]], mismatches: set[str], com: dict[str, Any]) -> None:
     """Record a Web-IO command no HA source needs (a duplicate, or one whose source is gone)."""
     orphans.append(
@@ -2710,6 +2724,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if key not in ha_map:
                 for com in com_list:
                     _add_audit_orphan(found["orphan"], mismatches, com)
+        _flag_contested_renames(found["rename"])
         return found
 
     def _compare_audit_key(
@@ -2730,10 +2745,19 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         item = {
             "id": best_match["id"],
             "name": ha["name"],
+            # The name the command has in Comexio now: its ledger state moves to the new name. When the rename
+            # changes nothing else (same type) the webhook path and protocol stay, so its write needs no Comexio
+            # restart (WebhookSecurity.mark_written). A rename that changes the type too saves a new body, which is
+            # not verified to push at once, so it counts as a rewrite (rename_changes_type). A rename that is part of
+            # an exchange of names is marked afterwards (rename_contested): it cannot tell the ledger whose state
+            # it moves.
+            "previous_name": best_match["name"],
+            "rename_changes_type": best_match.get("type") is None or ha["type"] != best_match["type"],
             "payload": payload_map.get(ha["name"]),
             "webio_class": best_match.get("webio_class") or classify_audit_key(key),
         }
         renamed = ha["name"] != best_match["name"]
+        item["rename_contested"] = False  # _flag_contested_renames settles it once every rename is known
         if renamed:
             found["rename"].append(item)
             mismatches.add(f"rename_{key}")

@@ -14,6 +14,12 @@ The old id (``comexio_<server_id>``) stays registered while commands still use i
 commands already rewritten to their own path; once all are, and Comexio has restarted since the last write
 (Comexio only sends a changed command after a restart), the old id is switched off for good.
 
+Not every write is such a change. A command the sync creates, and a command that only gets another name (its path
+and protocol stay), push at once, without a Comexio restart (measured live 2026-11-22: a renamed marker and a new
+marker pushed within seconds of the write). ``mark_written`` leaves the stamp of ``last_write`` alone for these two,
+so the sync of a rename or a new marker raises no "restart needed" notice. Every other write (the nightly rewrite of a
+path or protocol, a type fix, a range correction, an uploaded class) still moves it.
+
 ``https_written`` lists the commands this entry last wrote with the protocol HTTPS (#165). Comexio's scrape does
 not show a command's protocol, so the ledger is how the integration knows it without reading every command's form:
 a command that is not in it was written with HTTP, as every command was before HTTPS was supported. It is the
@@ -52,6 +58,7 @@ _KEY_SECRET = "secret"  # nosec B105 - a storage key, not a password
 _KEY_MIGRATED = "migrated"
 _KEY_LEGACY = "legacy"
 _KEY_WRITTEN = "last_write"
+_KEY_RESTART_FREE = "restart_free"
 _KEY_HOST = "host"
 _KEY_HOST_CHANGED = "host_changed"
 _KEY_HTTPS = "https_written"
@@ -239,9 +246,10 @@ class WebhookSecurity:
         self.last_write = _stored_stamp(stored.get(_KEY_WRITTEN))
         self.protocol_write = _stored_stamp(stored.get(_KEY_PROTOCOL_WRITE))
         self.protocol_moved = _stored_names(stored.get(_KEY_PROTOCOL_MOVED))
-        if self.migrated and self.last_write is None:
+        if self.migrated and self.last_write is None and stored.get(_KEY_RESTART_FREE) is not True:
             # Commands were rewritten but their stamp is lost: count the write as now, so the old id is only
-            # switched off after a Comexio restart that happens from here on.
+            # switched off after a Comexio restart that happens from here on. Not when the ledger says that no
+            # write of it needed a restart (restart_free): there is no stamp to lose then.
             self.last_write = dt_util.utcnow()
         await self._async_adopt_host(stored.get(_KEY_HOST))
 
@@ -287,6 +295,8 @@ class WebhookSecurity:
             _KEY_MIGRATED: sorted(self.migrated),
             _KEY_HTTPS: sorted(self.https_written),
             _KEY_WRITTEN: self.last_write.isoformat() if self.last_write else None,
+            # Names are in the ledger but no write of them needs a restart: a missing stamp is meant, not lost.
+            _KEY_RESTART_FREE: self.last_write is None and bool(self.migrated),
             _KEY_PROTOCOL_WRITE: self.protocol_write.isoformat() if self.protocol_write else None,
             _KEY_PROTOCOL_MOVED: sorted(self.protocol_moved),
             _KEY_HOST: self.host or None,
@@ -309,11 +319,79 @@ class WebhookSecurity:
     def path_for(self, webio_class: WebioClass, item: Mapping[str, Any] | OneWireSensor) -> str:
         return command_path(self.secret, webio_class, item)
 
-    def mark_written(self, name: str, now: datetime, *, https: bool = False) -> None:
-        """A command of this name now carries its own path, and the given protocol, in Comexio's configuration."""
-        if name in self.migrated and self.carries_https(name) != https:
+    def mark_written(
+        self,
+        name: str,
+        now: datetime,
+        *,
+        https: bool = False,
+        created: bool = False,
+        replaces: str | None = None,
+        type_changed: bool = False,
+        contested: bool = False,
+    ) -> bool:
+        """A command of this name now carries its own path, and the given protocol, in Comexio's configuration.
+
+        created: the command is new in Comexio. replaces: the name it had before a rename; its protocol state
+        (HTTPS record, pending move proof) moves to the new name, whatever kind of rename. A new command and a plain
+        rename leave ``last_write`` alone, because Comexio pushes such a command at once: a new command has nothing
+        to restart, and a rename keeps the path
+        and the protocol the ledger already records for the old name. type_changed: the rename saves a new body
+        too, which is not verified to push at once, so it is a rewrite. A rename of a command the ledger does not
+        know is a rewrite like any other, and so is every write that changes the protocol of a command the ledger
+        knows (also a created one that reuses a name, or a rename: the protocol is compared with the old name's).
+        contested: the rename is part of an exchange of names within one sync (two commands swapping, or A to B
+        together with B to C): the writes run one after the other, so the state of either name may belong to the
+        other command. Nothing is moved or retired then; both names stay known, both owe the proof where either may
+        have carried HTTPS, and the write is a rewrite (``_mark_contested``). Returns whether ``last_write`` moved.
+        """
+        if contested and replaces is not None and replaces != name:
+            return self._mark_contested(name, replaces, now, https)
+        renamed = replaces is not None and replaces != name and replaces in self.migrated
+        origin = replaces if renamed else name
+        protocol_changed = self._record_write(name, origin, now, https)
+        if replaces is not None and replaces != name:
+            self._retire_protocol_state(replaces, name, https=https)
+        if not protocol_changed and (created or (renamed and not type_changed)):
+            return False
+        self.last_write = now
+        return True
+
+    def _mark_contested(self, name: str, old: str, now: datetime, https: bool) -> bool:
+        """Book a rename within an exchange of names: a superset of what either command may owe, never less.
+
+        A name in ``protocol_moved`` counts as one that may have carried HTTPS: an earlier write of the same exchange
+        may already have taken its HTTPS record away.
+        """
+        names = (name, old)
+        if any(n in self.migrated and self.carries_https(n) != https for n in names):
             self.protocol_write = now
-        if not https and self.carries_https(name):
+        if not https and any(self.carries_https(n) or n in self.protocol_moved for n in names):
+            self.protocol_moved.update(names)
+            self.protocol_write = now
+        self.migrated.update(names)
+        # The old name's state stays: in a swap the other command's write has just set it. The head of a chain leaves
+        # its name behind in ``migrated`` (and its HTTPS record, if it had one) although no command carries it; a
+        # later command of that name meets it, which at worst costs a proof or a restart notice it did not need
+        # (a new command whose protocol differs from the head's) or takes it for written with HTTPS (HTTPS target,
+        # and only a command created by hand under the head's old name).
+        if https:
+            self.protocol_moved.discard(name)
+            self.https_written.add(name)
+        else:
+            self.https_written.discard(name)
+        self.last_write = now
+        return True
+
+    def _record_write(self, name: str, origin: str, now: datetime, https: bool) -> bool:
+        """Book a write in the per-command state; True when it changed the protocol of a command the ledger knows.
+
+        origin is the name the ledger knew the command by before the write (the old name of a rename, else name).
+        """
+        protocol_changed = origin in self.migrated and self.carries_https(origin) != https
+        if protocol_changed:
+            self.protocol_write = now
+        if not https and self.carries_https(origin):
             # It left HTTPS: the read-back has to prove that (protocol_unproven), and a restart has to come first.
             self.protocol_moved.add(name)
             self.protocol_write = now
@@ -323,7 +401,22 @@ class WebhookSecurity:
             self.https_written.add(name)
         else:
             self.https_written.discard(name)
-        self.last_write = now
+        return protocol_changed
+
+    def _retire_protocol_state(self, old: str, new: str, *, https: bool) -> None:
+        """A command gave up its name: its protocol state follows it, and a later command of that name meets none.
+
+        A move to HTTP that still waits for its proof stays due under the new name. The old name leaves ``migrated``
+        too: a later command that takes the name over is a new one, not the known command it would be taken for
+        (an HTTPS one would otherwise look like a protocol change and ask for a restart it does not need). Renames
+        that cross each other in one sync never get here (``_mark_contested`` keeps both names).
+        """
+        if old in self.protocol_moved:
+            self.protocol_moved.discard(old)
+            if not https:
+                self.protocol_moved.add(new)
+        self.https_written.discard(old)
+        self.migrated.discard(old)
 
     def end_protocol_move(self) -> None:
         """Every command is read back right: nothing waits for a restart or a proof any more."""
