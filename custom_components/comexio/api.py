@@ -2253,14 +2253,15 @@ class ComexioAPI:
         cmd_payload: dict[str, Any],
         existing_cmd_id: str | int | None = None,
         replaces: str | None = None,
+        type_changed: bool = False,
     ) -> bool:
         """
         Adds or updates a single command in an existing device (Delta Sync).
         If existing_cmd_id is provided, an UPDATE is performed.
 
-        replaces is the name the updated command had before: set only by a rename that changes nothing but the name.
-        A new command and such a rename push at once, so they do not ask for a Comexio restart (see
-        WebhookSecurity.mark_written); every other update does.
+        replaces is the name the updated command had before (a rename); type_changed says the rename changes the
+        type too. A new command and a rename that changes nothing but the name push at once, so they do not ask for
+        a Comexio restart (see WebhookSecurity.mark_written); every other update does.
 
         header_modifier/post_get/authentication are read from cmd_payload (defaulting to the
         JSON-POST-no-auth shape every HA-webhook command uses) rather than hardcoded — the
@@ -2282,7 +2283,9 @@ class ComexioAPI:
             # ValueError: a command id that is no number, rejected before anything is sent.
             _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
-        if self._note_command_written(cmd_payload, created=not existing_cmd_id, replaces=replaces):
+        if self._note_command_written(
+            cmd_payload, created=not existing_cmd_id, replaces=replaces, type_changed=type_changed
+        ):
             await self._async_save_moved_stamp()
         return True
 
@@ -2311,7 +2314,12 @@ class ComexioAPI:
             security.schedule_save()
 
     def _note_command_written(
-        self, cmd_payload: Mapping[str, Any], *, created: bool = False, replaces: str | None = None
+        self,
+        cmd_payload: Mapping[str, Any],
+        *,
+        created: bool = False,
+        replaces: str | None = None,
+        type_changed: bool = False,
     ) -> bool:
         """Record that a command now carries a webhook id of its own and its protocol, so the migration skips it.
 
@@ -2332,6 +2340,7 @@ class ComexioAPI:
                 https=cmd_payload.get("Protocol") == comexio_webio.WEBIO_PROTOCOL_HTTPS,
                 created=created,
                 replaces=replaces,
+                type_changed=type_changed,
             )
             security.schedule_save()
             return stamped

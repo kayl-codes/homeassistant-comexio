@@ -109,7 +109,8 @@ A restart before the commands are rewritten does not count; the integration wait
 
 **Only a changed path, server field or protocol counts as such a write.** A command that is **new** (for example for a
 new marker) and a **plain rename** of a command that is already switched over push to their ID right away (measured on
-a live installation: both arrived within seconds, without a Comexio restart). Neither asks for a restart and neither
+a live installation with marker commands: both arrived within seconds, without a Comexio restart; the other command
+classes save the same way but were not measured on their own). Neither asks for a restart and neither
 brings the notification back. Everything else the integration writes (the nightly rewrite, a type fix, a range
 correction, an uploaded class) still does, and so does any write that changes a command's protocol.
 
@@ -295,7 +296,8 @@ Schreiben.
 
 **Nur ein geänderter Pfad, ein geändertes Server-Feld oder ein anderes Protokoll zählt als solches Schreiben.** Ein
 **neues** Command (etwa für einen neuen Merker) und ein **reines Umbenennen** eines bereits umgestellten Commands
-pushen sofort an ihre ID (an einer Live-Anlage gemessen: beide kamen binnen Sekunden an, ohne Comexio-Neustart). Beides
+pushen sofort an ihre ID (an einer Live-Anlage mit Merker-Commands gemessen: beide kamen binnen Sekunden an, ohne Comexio-Neustart; die
+anderen Command-Klassen speichern genauso, wurden aber nicht einzeln gemessen). Beides
 verlangt keinen Neustart und bringt die Benachrichtigung nicht zurück. Alles andere, was die Integration schreibt (der
 Nachtlauf, eine Typkorrektur, eine Bereichskorrektur, eine hochgeladene Klasse), tut das weiterhin, ebenso jedes Schreiben, das das Protokoll eines Commands ändert.
 

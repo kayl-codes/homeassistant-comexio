@@ -1,9 +1,9 @@
 """A new command and a plain rename ask for no Comexio restart; every other write still does (measured 2026-11-22).
 
-Live on iosrv1: a marker renamed in Comexio and a marker created after that, each synced by the integration, pushed
-to Home Assistant within seconds, with no Comexio restart in between. Only a command whose path, server field or
-protocol changes is sent by Comexio after a restart, so only that write moves the stamp the "restart needed" notice
-and the switch-off of the old id wait for.
+Live on a real installation: a marker renamed in Comexio and a marker created after that, each synced by the
+integration, pushed to Home Assistant within seconds, with no Comexio restart in between. Only a command whose
+path, server field or protocol changes is sent by Comexio after a restart, so only that write moves the stamp the
+"restart needed" notice and the switch-off of the old id wait for.
 """
 
 import asyncio
@@ -76,7 +76,7 @@ def test_a_plain_rename_of_a_migrated_command_leaves_the_stamp_alone(
 
     assert _run(api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces=old["Name"]))
 
-    assert security.migrated == {old["Name"], RENAMED}
+    assert security.migrated == {old["Name"], RENAMED}  # a superset is kept on purpose
     assert security.last_write is None
     assert security.protocol_write is None
     assert not security.protocol_moved
@@ -160,27 +160,65 @@ def test_the_restart_notice_waits_only_for_a_stamped_write(
 
 
 @pytest.mark.parametrize(
-    ("task_type", "previous_name", "replaces", "existing"),
+    ("task_type", "changes_type", "replaces", "type_changed", "existing"),
     [
-        ("rename", "HA M1 Alt", "HA M1 Alt", "11"),
-        ("rename", None, None, "11"),
-        ("type", "HA M1 Alt", None, "11"),
-        ("create", None, None, None),
+        ("rename", False, "HA M1 Alt", False, "11"),
+        ("rename", True, "HA M1 Alt", True, "11"),
+        ("type", True, None, False, "11"),
+        ("create", False, None, False, None),
+        ("create", True, None, False, None),
     ],
 )
-def test_the_delta_sync_names_the_old_command_only_for_a_plain_rename(
-    task_type: str, previous_name: str | None, replaces: str | None, existing: str | None
+def test_the_delta_sync_names_the_old_command_only_for_a_rename(
+    task_type: str, changes_type: bool, replaces: str | None, type_changed: bool, existing: str | None
 ) -> None:
+    """A rename carries the old name (its ledger state moves) and says whether the type changed too."""
     api = MagicMock()
     api.save_single_command = AsyncMock(return_value=True)
-    item = {"name": "HA M1 Neu", "id": "11", "payload": {"Name": "HA M1 Neu"}, "previous_name": previous_name}
+    item = {
+        "name": "HA M1 Neu",
+        "id": "11",
+        "payload": {"Name": "HA M1 Neu"},
+        "previous_name": "HA M1 Alt",
+        "rename_changes_type": changes_type,
+    }
     result = {"renamed": 0, "removed": 0, "updated": 0, "added": 0, "created_names": []}
 
     _run(ComexioSyncButton._apply_delta_task(api, "7", "3", {"type": task_type, "item": item}, result, []))
 
     api.save_single_command.assert_awaited_once_with(
-        "7", "3", item["payload"], existing_cmd_id=existing, replaces=replaces
+        "7", "3", item["payload"], existing_cmd_id=existing, replaces=replaces, type_changed=type_changed
     )
+
+
+def test_a_rename_that_changes_the_type_is_a_rewrite_that_moves_the_old_name_s_state(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The new body is not verified to push at once, so it stamps; the pending proof of a move to HTTP follows it."""
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api)
+    security.migrated, security.protocol_moved = {old["Name"]}, {old["Name"]}
+
+    assert _run(
+        api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces=old["Name"], type_changed=True)
+    )
+
+    assert security.last_write is not None
+    assert security.protocol_moved == {RENAMED}
+
+
+def test_a_command_that_takes_over_a_name_given_up_by_a_rename_meets_no_state_of_the_old_one(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api, https=True)
+    security.migrated, security.https_written = {old["Name"]}, {old["Name"]}
+    _run(api.save_single_command(1, 2, _own(api, RENAMED, https=True), existing_cmd_id=3, replaces=old["Name"]))
+
+    assert _run(api.save_single_command(1, 2, _own(api), existing_cmd_id=None))  # a new HTTP command, old name
+
+    assert security.last_write is None
+    assert security.https_written == {RENAMED}
 
 
 def test_a_rename_that_stays_on_https_leaves_the_stamp_alone(
@@ -193,7 +231,7 @@ def test_a_rename_that_stays_on_https_leaves_the_stamp_alone(
     assert _run(api.save_single_command(1, 2, _own(api, RENAMED, https=True), existing_cmd_id=3, replaces=old["Name"]))
 
     assert security.last_write is None
-    assert RENAMED in security.https_written
+    assert security.https_written == {RENAMED}
     assert security.protocol_write is None
     assert not security.protocol_moved
 
@@ -442,3 +480,49 @@ def test_a_restart_free_ledger_keeps_its_missing_stamp_on_load(monkeypatch: pyte
     _run(security.async_load())
 
     assert security.last_write is None
+
+
+def test_a_rename_that_changes_the_type_waits_for_the_save_of_the_ledger(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api)
+    security.migrated = {old["Name"]}
+
+    assert _run(
+        api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces=old["Name"], type_changed=True)
+    )
+
+    security._store.async_save.assert_awaited_once()
+    assert security._store.stored["last_write"] is not None
+    assert security.protocol_write is None
+
+
+def test_a_rename_that_changes_type_and_protocol_moves_everything_to_the_new_name(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api)
+    security.migrated = {old["Name"]}
+
+    assert _run(
+        api.save_single_command(
+            1, 2, _own(api, RENAMED, https=True), existing_cmd_id=3, replaces=old["Name"], type_changed=True
+        )
+    )
+
+    assert security.last_write is not None
+    assert security.protocol_write is not None
+    assert security.https_written == {RENAMED}
+    assert not security.protocol_moved
+
+
+def test_a_rename_of_an_unknown_old_name_leaves_the_other_ledger_names_alone(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    security.migrated = {"HA M9 Fremd"}
+
+    assert _run(api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces="HA M5 Alt"))
+
+    assert security.migrated == {"HA M9 Fremd", RENAMED}

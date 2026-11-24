@@ -320,19 +320,42 @@ class WebhookSecurity:
         return command_path(self.secret, webio_class, item)
 
     def mark_written(
-        self, name: str, now: datetime, *, https: bool = False, created: bool = False, replaces: str | None = None
+        self,
+        name: str,
+        now: datetime,
+        *,
+        https: bool = False,
+        created: bool = False,
+        replaces: str | None = None,
+        type_changed: bool = False,
     ) -> bool:
         """A command of this name now carries its own path, and the given protocol, in Comexio's configuration.
 
-        created: the command is new in Comexio. replaces: the name it had before a rename. Either one leaves
-        ``last_write`` alone, because Comexio pushes such a command at once: a new command has nothing to restart,
-        and a rename keeps the path and the protocol the ledger already records for the old name. A rename of a
-        command the ledger does not know is a rewrite like any other, and so is every write that changes the
-        protocol of a command the ledger knows (also a created one that reuses a name, or a rename: the protocol
-        is compared with the old name's). Returns whether ``last_write`` moved.
+        created: the command is new in Comexio. replaces: the name it had before a rename; its protocol state
+        (HTTPS record, pending move proof) moves to the new name, whatever kind of rename. A new command and a plain
+        rename leave ``last_write`` alone, because Comexio pushes such a command at once: a new command has nothing
+        to restart, and a rename keeps the path
+        and the protocol the ledger already records for the old name. type_changed: the rename saves a new body
+        too, which is not verified to push at once, so it is a rewrite. A rename of a command the ledger does not
+        know is a rewrite like any other, and so is every write that changes the protocol of a command the ledger
+        knows (also a created one that reuses a name, or a rename: the protocol is compared with the old name's).
+        Returns whether ``last_write`` moved.
         """
         renamed = replaces is not None and replaces != name and replaces in self.migrated
         origin = replaces if renamed else name
+        protocol_changed = self._record_write(name, origin, now, https)
+        if replaces is not None and replaces != name:
+            self._retire_protocol_state(replaces, name, https=https)
+        if not protocol_changed and (created or (renamed and not type_changed)):
+            return False
+        self.last_write = now
+        return True
+
+    def _record_write(self, name: str, origin: str, now: datetime, https: bool) -> bool:
+        """Book a write in the per-command state; True when it changed the protocol of a command the ledger knows.
+
+        origin is the name the ledger knew the command by before the write (the old name of a rename, else name).
+        """
         protocol_changed = origin in self.migrated and self.carries_https(origin) != https
         if protocol_changed:
             self.protocol_write = now
@@ -340,22 +363,26 @@ class WebhookSecurity:
             # It left HTTPS: the read-back has to prove that (protocol_unproven), and a restart has to come first.
             self.protocol_moved.add(name)
             self.protocol_write = now
-        if origin != name and origin in self.protocol_moved:
-            # A rename of a command whose move to HTTP still waits for its proof: the proof stays due, under the name
-            # the command has now.
-            self.protocol_moved.discard(origin)
-            self.protocol_moved.add(name)
-        restart_free = not protocol_changed and (created or renamed)
         self.migrated.add(name)
         if https:
             self.protocol_moved.discard(name)  # back on HTTPS: a form without a protocol is judged by the target again
             self.https_written.add(name)
         else:
             self.https_written.discard(name)
-        if restart_free:
-            return False
-        self.last_write = now
-        return True
+        return protocol_changed
+
+    def _retire_protocol_state(self, old: str, new: str, *, https: bool) -> None:
+        """A command gave up its name: its protocol state follows it, and a later command of that name meets none.
+
+        A move to HTTP that still waits for its proof stays due under the new name; the old name stays in
+        ``migrated`` (a superset is safe: nothing reads it for names the data no longer has, and two renames that
+        cross each other in one sync would lose an entry otherwise).
+        """
+        if old in self.protocol_moved:
+            self.protocol_moved.discard(old)
+            if not https:
+                self.protocol_moved.add(new)
+        self.https_written.discard(old)
 
     def end_protocol_move(self) -> None:
         """Every command is read back right: nothing waits for a restart or a proof any more."""
