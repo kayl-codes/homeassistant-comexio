@@ -370,9 +370,10 @@ class WebhookSecurity:
             self.protocol_moved.update(names)
             self.protocol_write = now
         self.migrated.update(names)
-        # The old name's HTTPS record stays: in a swap the other command's write has just set it. The head of a chain
-        # leaves one behind that no command carries; a later command of that name meets it, which at worst costs a
-        # proof or a restart notice it did not need (HTTP target) or takes it for written with HTTPS (HTTPS target,
+        # The old name's state stays: in a swap the other command's write has just set it. The head of a chain leaves
+        # its name behind in ``migrated`` (and its HTTPS record, if it had one) although no command carries it; a
+        # later command of that name meets it, which at worst costs a proof or a restart notice it did not need
+        # (a new command whose protocol differs from the head's) or takes it for written with HTTPS (HTTPS target,
         # and only a command created by hand under the head's old name).
         if https:
             self.protocol_moved.discard(name)
@@ -405,15 +406,17 @@ class WebhookSecurity:
     def _retire_protocol_state(self, old: str, new: str, *, https: bool) -> None:
         """A command gave up its name: its protocol state follows it, and a later command of that name meets none.
 
-        A move to HTTP that still waits for its proof stays due under the new name; the old name stays in
-        ``migrated`` (a superset is safe: nothing reads it for names the data no longer has, and two renames that
-        cross each other in one sync would lose an entry otherwise).
+        A move to HTTP that still waits for its proof stays due under the new name. The old name leaves ``migrated``
+        too: a later command that takes the name over is a new one, not the known command it would be taken for
+        (an HTTPS one would otherwise look like a protocol change and ask for a restart it does not need). Renames
+        that cross each other in one sync never get here (``_mark_contested`` keeps both names).
         """
         if old in self.protocol_moved:
             self.protocol_moved.discard(old)
             if not https:
                 self.protocol_moved.add(new)
         self.https_written.discard(old)
+        self.migrated.discard(old)
 
     def end_protocol_move(self) -> None:
         """Every command is read back right: nothing waits for a restart or a proof any more."""

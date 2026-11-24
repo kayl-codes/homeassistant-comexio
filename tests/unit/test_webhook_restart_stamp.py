@@ -76,10 +76,38 @@ def test_a_plain_rename_of_a_migrated_command_leaves_the_stamp_alone(
 
     assert _run(api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces=old["Name"]))
 
-    assert security.migrated == {old["Name"], RENAMED}  # a superset is kept on purpose
+    assert security.migrated == {RENAMED}
     assert security.last_write is None
     assert security.protocol_write is None
     assert not security.protocol_moved
+
+
+def test_a_new_https_command_that_takes_over_the_name_of_a_renamed_one_is_no_rewrite(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.https_written = {"HA M1 Alt"}, {"HA M1 Alt"}
+    moment = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+
+    assert not security.mark_written(RENAMED, moment, https=True, replaces="HA M1 Alt")
+    assert not security.mark_written("HA M1 Alt", moment, https=True, created=True)
+
+    assert security.last_write is None
+    assert security.https_written == {"HA M1 Alt", RENAMED}
+
+
+def test_the_head_of_a_chain_leaves_its_name_known_so_a_new_command_of_it_may_cost_a_notice(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The accepted limit of a conservative exchange: an extra restart notice, never a lost proof."""
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated = {"HA A", "HA B"}
+    moment = datetime(2026, 11, 24, 12, 0, tzinfo=UTC)
+    security.mark_written("HA B", moment, replaces="HA A", contested=True)
+    security.mark_written("HA C", moment, replaces="HA B", contested=True)
+    security.last_write = None
+
+    assert security.mark_written("HA A", moment, https=True, created=True)
 
 
 def test_a_rename_leaves_a_stamp_that_is_still_waiting_for_a_restart_where_it_is(
