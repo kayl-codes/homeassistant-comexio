@@ -50,6 +50,8 @@ def test_a_new_command_enters_the_ledger_without_a_restart_stamp(
 
     assert security.migrated == {command["Name"]}
     assert security.last_write is None
+    assert security.protocol_write is None
+    assert not security.protocol_moved
 
 
 def test_a_ledger_of_new_commands_keeps_its_missing_stamp_over_a_restart_of_home_assistant(
@@ -76,6 +78,8 @@ def test_a_plain_rename_of_a_migrated_command_leaves_the_stamp_alone(
 
     assert security.migrated == {old["Name"], RENAMED}
     assert security.last_write is None
+    assert security.protocol_write is None
+    assert not security.protocol_moved
 
 
 def test_a_rename_leaves_a_stamp_that_is_still_waiting_for_a_restart_where_it_is(
@@ -190,6 +194,8 @@ def test_a_rename_that_stays_on_https_leaves_the_stamp_alone(
 
     assert security.last_write is None
     assert RENAMED in security.https_written
+    assert security.protocol_write is None
+    assert not security.protocol_moved
 
 
 def test_a_rename_that_moves_to_https_is_a_rewrite(comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -202,18 +208,203 @@ def test_a_rename_that_moves_to_https_is_a_rewrite(comexio_api: ComexioAPI, monk
     assert security.last_write is not None
 
 
-def test_a_created_command_that_changes_the_protocol_of_its_name_keeps_the_protocol_stamp(
+def test_a_created_command_that_changes_the_protocol_of_its_name_asks_for_a_restart(
     comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The protocol move has its own stamp: a command of that name was in the ledger with the other protocol."""
+    """A command of that name was in the ledger with the other protocol: the move needs a restart like any other."""
     api, security = _api(comexio_api, monkeypatch)
     command = _own(api)
     security.migrated, security.https_written = {command["Name"]}, {command["Name"]}
 
     assert _run(api.save_single_command(1, 2, command))
 
-    assert security.last_write is None
+    assert security.last_write is not None
     assert security.protocol_write is not None
+    assert command["Name"] in security.protocol_moved
+
+
+@pytest.mark.parametrize("empty_id", ["", 0])
+def test_a_save_with_an_empty_command_id_is_a_new_command(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, empty_id: Any
+) -> None:
+    """The client sends it as a new command (id None), so the ledger counts it as one too."""
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api)
+
+    assert _run(api.save_single_command(1, 2, command, existing_cmd_id=empty_id))
+
+    assert security.last_write is None
+    assert api.client.save_webio_command.await_args.kwargs["command_id"] is None
+
+
+def test_a_rename_that_leaves_https_records_the_move_of_the_old_name(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The protocol is compared with the old name's: the new name is not in the ledger yet."""
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api, https=True)
+    security.migrated, security.https_written = {old["Name"]}, {old["Name"]}
+
+    assert _run(api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces=old["Name"]))
+
+    assert security.last_write is not None
+    assert security.protocol_write is not None
+    assert security.protocol_moved == {RENAMED}
+    assert RENAMED not in security.https_written
+
+
+def test_a_plain_rename_keeps_the_pending_proof_of_a_move_to_http_under_the_new_name(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api)
+    security.migrated, security.protocol_moved = {old["Name"]}, {old["Name"]}
+
+    assert _run(api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces=old["Name"]))
+
+    assert security.last_write is None
+    assert security.protocol_moved == {RENAMED}
+
+
+def test_a_write_that_moved_the_stamp_waits_for_the_save_of_the_ledger(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored restart_free marker must not outlive the stamp that replaces it."""
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api)
+    security.migrated = {command["Name"]}
+
+    assert _run(api.save_single_command(1, 2, command, existing_cmd_id=3))
+
+    security._store.async_save.assert_awaited_once()
+    assert security._store.stored["last_write"] is not None
+    assert security._store.stored["restart_free"] is False
+
+
+@pytest.mark.parametrize("rename", [False, True])
+def test_a_write_that_needs_no_restart_waits_for_no_save(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, rename: bool
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api)
+    security.migrated = {old["Name"]}
+    kwargs = {"existing_cmd_id": 3, "replaces": old["Name"]} if rename else {}
+
+    assert _run(api.save_single_command(1, 2, _own(api, RENAMED), **kwargs))
+
+    security._store.async_save.assert_not_awaited()
+    security._store.async_delay_save.assert_called_once()
+    assert security.protocol_write is None
+    assert not security.protocol_moved
+
+
+def test_a_delayed_save_is_armed_again_after_the_awaited_save_of_a_moved_stamp(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HA's Store.async_save cancels the delayed save and only logs a failed write: the next one is the retry."""
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api)
+    security.migrated = {command["Name"]}
+    order: list[str] = []
+    security._store.async_save.side_effect = lambda _data: order.append("save")
+    security._store.async_delay_save.side_effect = lambda *_a: order.append("delay")
+
+    assert _run(api.save_single_command(1, 2, command, existing_cmd_id=3))
+
+    assert order == ["delay", "save", "delay"]
+
+
+@pytest.mark.parametrize("error", [OSError("disk full"), TypeError("not serialisable")])
+def test_an_error_of_the_save_after_a_moved_stamp_does_not_fail_the_write(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api)
+    security.migrated = {command["Name"]}
+    security._store.async_save.side_effect = error
+
+    assert _run(api.save_single_command(1, 2, command, existing_cmd_id=3))
+
+    assert security.last_write is not None
+    assert security._store.async_delay_save.call_count == 2  # the one of the write and the retry
+    assert "Could not save the Web-IO ledger" in caplog.text
+    assert str(error) not in caplog.text
+
+
+def test_a_rename_whose_old_name_is_unknown_but_whose_new_name_is_known_compares_that_protocol(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.https_written = {RENAMED}, {RENAMED}
+
+    assert _run(api.save_single_command(1, 2, _own(api, RENAMED), existing_cmd_id=3, replaces="HA M5 Alt"))
+
+    assert security.last_write is not None
+    assert security.protocol_write is not None
+    assert RENAMED in security.protocol_moved
+
+
+def test_an_update_that_names_its_own_name_as_the_old_one_is_no_rename(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api)
+    security.migrated = {command["Name"]}
+
+    assert _run(api.save_single_command(1, 2, command, existing_cmd_id=3, replaces=command["Name"]))
+
+    assert security.last_write is not None
+
+
+def test_a_created_command_that_reuses_a_name_with_the_same_protocol_stays_free(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api)
+    security.migrated = {command["Name"]}
+
+    assert _run(api.save_single_command(1, 2, command))
+
+    assert security.last_write is None
+    assert security.protocol_write is None
+
+
+def test_a_created_command_that_reuses_a_name_and_moves_to_https_asks_for_a_restart(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    command = _own(api, https=True)
+    security.migrated = {command["Name"]}
+
+    assert _run(api.save_single_command(1, 2, command))
+
+    assert security.last_write is not None
+    assert security.protocol_write is not None
+    assert command["Name"] not in security.protocol_moved
+    assert command["Name"] in security.https_written
+
+
+def test_a_rename_of_a_command_with_a_pending_move_to_http_that_goes_to_https_ends_the_pending_proof(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    old = _own(api)
+    security.migrated, security.protocol_moved = {old["Name"]}, {old["Name"]}
+
+    assert _run(api.save_single_command(1, 2, _own(api, RENAMED, https=True), existing_cmd_id=3, replaces=old["Name"]))
+
+    assert security.last_write is not None
+    assert not security.protocol_moved
+    assert RENAMED in security.https_written
+
+
+def test_the_stamp_of_an_uploaded_class_is_reported_to_the_caller(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+
+    assert api._note_upload_written(json.dumps({"commands": [_own(api)]})) is True
+    assert api._note_upload_written(json.dumps({"commands": []})) is False
 
 
 @pytest.mark.parametrize(

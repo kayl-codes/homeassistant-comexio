@@ -47,7 +47,8 @@ def test_a_command_saved_with_its_own_path_is_scheduled_for_saving_the_old_path_
     # an update of an existing command (a new one asks for no restart, see test_webhook_restart_stamp)
     assert _run(comexio_api.save_single_command(1, 2, own, existing_cmd_id=3))
 
-    security._store.async_delay_save.assert_called_once()
+    # armed by the write and again after the awaited save of the moved stamp (the retry, see _async_save_moved_stamp)
+    assert security._store.async_delay_save.call_count == 2
     saved = security._store.async_delay_save.call_args.args[0]()
     assert saved["migrated"] == [own["Name"]]
     assert security.migrated == {own["Name"]}
@@ -132,6 +133,7 @@ def _tick_coordinator(monkeypatch: pytest.MonkeyPatch, *, cmd_id: str, boot: Any
     api.client = SimpleNamespace(save_webio_command=AsyncMock(side_effect=_send))
     # `api` is a namespace, not a ComexioAPI: the production method is bound to it for save_single_command to call
     api._note_command_written = lambda payload, **kwargs: ComexioAPI._note_command_written(api, payload, **kwargs)
+    api._async_save_moved_stamp = lambda: ComexioAPI._async_save_moved_stamp(api)
 
     async def _save(base: Any, device: Any, payload: dict[str, Any], **kwargs: Any) -> bool:
         return await ComexioAPI.save_single_command(api, base, device, payload, **kwargs)

@@ -321,35 +321,41 @@ class WebhookSecurity:
 
     def mark_written(
         self, name: str, now: datetime, *, https: bool = False, created: bool = False, replaces: str | None = None
-    ) -> None:
+    ) -> bool:
         """A command of this name now carries its own path, and the given protocol, in Comexio's configuration.
 
         created: the command is new in Comexio. replaces: the name it had before a rename. Either one leaves
         ``last_write`` alone, because Comexio pushes such a command at once: a new command has nothing to restart,
         and a rename keeps the path and the protocol the ledger already records for the old name. A rename of a
-        command the ledger does not know, or one that changes the protocol, is a rewrite like any other. A protocol
-        change keeps its own stamp (``protocol_write``), also for a created command that was in the ledger with the
-        other protocol before.
+        command the ledger does not know is a rewrite like any other, and so is every write that changes the
+        protocol of a command the ledger knows (also a created one that reuses a name, or a rename: the protocol
+        is compared with the old name's). Returns whether ``last_write`` moved.
         """
-        if name in self.migrated and self.carries_https(name) != https:
+        renamed = replaces is not None and replaces != name and replaces in self.migrated
+        origin = replaces if renamed else name
+        protocol_changed = origin in self.migrated and self.carries_https(origin) != https
+        if protocol_changed:
             self.protocol_write = now
-        if not https and self.carries_https(name):
+        if not https and self.carries_https(origin):
             # It left HTTPS: the read-back has to prove that (protocol_unproven), and a restart has to come first.
             self.protocol_moved.add(name)
             self.protocol_write = now
-        restart_free = created or self._is_plain_rename(replaces, https)
+        if origin != name and origin in self.protocol_moved:
+            # A rename of a command whose move to HTTP still waits for its proof: the proof stays due, under the name
+            # the command has now.
+            self.protocol_moved.discard(origin)
+            self.protocol_moved.add(name)
+        restart_free = not protocol_changed and (created or renamed)
         self.migrated.add(name)
         if https:
             self.protocol_moved.discard(name)  # back on HTTPS: a form without a protocol is judged by the target again
             self.https_written.add(name)
         else:
             self.https_written.discard(name)
-        if not restart_free:
-            self.last_write = now
-
-    def _is_plain_rename(self, replaces: str | None, https: bool) -> bool:
-        """Whether a write only gives a command the ledger knows another name (same path, same protocol)."""
-        return replaces is not None and replaces in self.migrated and self.carries_https(replaces) == https
+        if restart_free:
+            return False
+        self.last_write = now
+        return True
 
     def end_protocol_move(self) -> None:
         """Every command is read back right: nothing waits for a restart or a proof any more."""

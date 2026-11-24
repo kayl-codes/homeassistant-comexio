@@ -2269,9 +2269,7 @@ class ComexioAPI:
         for it would silently strip that combination back to the auth-less POST shape,
         reproducing the exact 401 Unauthorized bug the Phase 7 field combination fixes.
         """
-        _LOGGER.info(
-            "Applying command: %s (Update: %s)", one_line(cmd_payload.get("Name")), existing_cmd_id is not None
-        )
+        _LOGGER.info("Applying command: %s (Update: %s)", one_line(cmd_payload.get("Name")), bool(existing_cmd_id))
         try:
             await self.client.save_webio_command(
                 device_id,
@@ -2284,13 +2282,41 @@ class ComexioAPI:
             # ValueError: a command id that is no number, rejected before anything is sent.
             _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
-        self._note_command_written(cmd_payload, created=existing_cmd_id is None, replaces=replaces)
+        if self._note_command_written(cmd_payload, created=not existing_cmd_id, replaces=replaces):
+            await self._async_save_moved_stamp()
         return True
+
+    async def _async_save_moved_stamp(self) -> None:
+        """Wait until the ledger holds a stamp that a write just moved.
+
+        The stored ``restart_free`` marker must not outlive that stamp: with the marker on disk and the stamp lost, a
+        reload would read "no write needed a restart".
+
+        Home Assistant's ``Store.async_save`` cancels the delayed save already armed by ``_note_command_written`` and
+        logs a failed write instead of raising it, so a delayed save is armed again afterwards (also on a
+        cancellation): when the write failed, that one is the retry. The write of the command itself has succeeded
+        by now, so nothing raised here may turn it into a failure; the log names the class of the error only.
+        """
+        security = self.webhook_security
+        if security is None:
+            return
+        try:
+            await security.async_save()
+        except Exception as err:
+            _LOGGER.warning(
+                "Could not save the Web-IO ledger after a write that needs a Comexio restart (%s); retrying shortly",
+                type(err).__name__,
+            )
+        finally:
+            security.schedule_save()
 
     def _note_command_written(
         self, cmd_payload: Mapping[str, Any], *, created: bool = False, replaces: str | None = None
-    ) -> None:
-        """Record that a command now carries a webhook id of its own and its protocol, so the migration skips it."""
+    ) -> bool:
+        """Record that a command now carries a webhook id of its own and its protocol, so the migration skips it.
+
+        Returns whether the write moved the restart stamp (``WebhookSecurity.mark_written``).
+        """
         security = self.webhook_security
         path = cmd_payload.get("Parameter")
         name = cmd_payload.get("Name")
@@ -2300,7 +2326,7 @@ class ComexioAPI:
             and isinstance(path, str)
             and not path.endswith(legacy_webhook_id(security.server_id))
         ):
-            security.mark_written(
+            stamped = security.mark_written(
                 name,
                 dt_util.utcnow(),
                 https=cmd_payload.get("Protocol") == comexio_webio.WEBIO_PROTOCOL_HTTPS,
@@ -2308,6 +2334,8 @@ class ComexioAPI:
                 replaces=replaces,
             )
             security.schedule_save()
+            return stamped
+        return False
 
     async def get_webio_command_form(self, cmd_id: str | int, device_id: str | int) -> WebioCommandForm | None:
         """Reads a single Web-IO command's live Min/Max from its edit form.
@@ -2417,21 +2445,24 @@ class ComexioAPI:
         if not base_id:
             # aiocomexio already raises on a missing id; kept so no caller ever creates a device on None.
             return False, "Comexio returned no base_id for the uploaded class"
-        self._note_upload_written(web_io_json)
+        if self._note_upload_written(web_io_json):
+            await self._async_save_moved_stamp()
         return True, base_id
 
-    def _note_upload_written(self, web_io_json: str) -> None:
-        """Record the commands of an uploaded class template (see _note_command_written)."""
+    def _note_upload_written(self, web_io_json: str) -> bool:
+        """Record the commands of an uploaded class template (see _note_command_written); True if the stamp moved."""
         if not self.webhook_security:
-            return
+            return False
         try:
             commands = json.loads(web_io_json).get("commands", [])
         except (ValueError, AttributeError):
             _LOGGER.warning("The uploaded Web-IO class template is unreadable; its commands are not in the ledger")
-            return
+            return False
+        moved = False
         for cmd in commands:
             if isinstance(cmd, dict):
-                self._note_command_written(cmd)
+                moved |= self._note_command_written(cmd)
+        return moved
 
     async def create_webio_device(
         self,
