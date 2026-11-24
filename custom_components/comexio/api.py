@@ -2254,6 +2254,7 @@ class ComexioAPI:
         existing_cmd_id: str | int | None = None,
         replaces: str | None = None,
         type_changed: bool = False,
+        contested: bool = False,
     ) -> bool:
         """
         Adds or updates a single command in an existing device (Delta Sync).
@@ -2261,7 +2262,8 @@ class ComexioAPI:
 
         replaces is the name the updated command had before (a rename); type_changed says the rename changes the
         type too. A new command and a rename that changes nothing but the name push at once, so they do not ask for
-        a Comexio restart (see WebhookSecurity.mark_written); every other update does.
+        a Comexio restart (see WebhookSecurity.mark_written); every other update does. contested: the rename is part
+        of an exchange of names within the sync, so it moves no ledger state and counts as a rewrite.
 
         header_modifier/post_get/authentication are read from cmd_payload (defaulting to the
         JSON-POST-no-auth shape every HA-webhook command uses) rather than hardcoded — the
@@ -2284,7 +2286,11 @@ class ComexioAPI:
             _LOGGER.warning("Saving Web-IO command %s failed: %s", one_line(cmd_payload.get("Name")), err)
             return False
         if self._note_command_written(
-            cmd_payload, created=not existing_cmd_id, replaces=replaces, type_changed=type_changed
+            cmd_payload,
+            created=not existing_cmd_id,
+            replaces=replaces,
+            type_changed=type_changed,
+            contested=contested,
         ):
             await self._async_save_moved_stamp()
         return True
@@ -2320,6 +2326,7 @@ class ComexioAPI:
         created: bool = False,
         replaces: str | None = None,
         type_changed: bool = False,
+        contested: bool = False,
     ) -> bool:
         """Record that a command now carries a webhook id of its own and its protocol, so the migration skips it.
 
@@ -2341,6 +2348,7 @@ class ComexioAPI:
                 created=created,
                 replaces=replaces,
                 type_changed=type_changed,
+                contested=contested,
             )
             security.schedule_save()
             return stamped

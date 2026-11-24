@@ -328,6 +328,7 @@ class WebhookSecurity:
         created: bool = False,
         replaces: str | None = None,
         type_changed: bool = False,
+        contested: bool = False,
     ) -> bool:
         """A command of this name now carries its own path, and the given protocol, in Comexio's configuration.
 
@@ -339,8 +340,13 @@ class WebhookSecurity:
         too, which is not verified to push at once, so it is a rewrite. A rename of a command the ledger does not
         know is a rewrite like any other, and so is every write that changes the protocol of a command the ledger
         knows (also a created one that reuses a name, or a rename: the protocol is compared with the old name's).
-        Returns whether ``last_write`` moved.
+        contested: the rename is part of an exchange of names within one sync (two commands swapping, or A to B
+        together with B to C): the writes run one after the other, so the state of either name may belong to the
+        other command. Nothing is moved or retired then; both names stay known, both owe the proof where either may
+        have carried HTTPS, and the write is a rewrite (``_mark_contested``). Returns whether ``last_write`` moved.
         """
+        if contested and replaces is not None and replaces != name:
+            return self._mark_contested(name, replaces, now, https)
         renamed = replaces is not None and replaces != name and replaces in self.migrated
         origin = replaces if renamed else name
         protocol_changed = self._record_write(name, origin, now, https)
@@ -348,6 +354,31 @@ class WebhookSecurity:
             self._retire_protocol_state(replaces, name, https=https)
         if not protocol_changed and (created or (renamed and not type_changed)):
             return False
+        self.last_write = now
+        return True
+
+    def _mark_contested(self, name: str, old: str, now: datetime, https: bool) -> bool:
+        """Book a rename within an exchange of names: a superset of what either command may owe, never less.
+
+        A name in ``protocol_moved`` counts as one that may have carried HTTPS: an earlier write of the same exchange
+        may already have taken its HTTPS record away.
+        """
+        names = (name, old)
+        if any(n in self.migrated and self.carries_https(n) != https for n in names):
+            self.protocol_write = now
+        if not https and any(self.carries_https(n) or n in self.protocol_moved for n in names):
+            self.protocol_moved.update(names)
+            self.protocol_write = now
+        self.migrated.update(names)
+        # The old name's HTTPS record stays: in a swap the other command's write has just set it. The head of a chain
+        # leaves one behind that no command carries; a later command of that name meets it, which at worst costs a
+        # proof or a restart notice it did not need (HTTP target) or takes it for written with HTTPS (HTTPS target,
+        # and only a command created by hand under the head's old name).
+        if https:
+            self.protocol_moved.discard(name)
+            self.https_written.add(name)
+        else:
+            self.https_written.discard(name)
         self.last_write = now
         return True
 

@@ -138,6 +138,32 @@ def test_an_uploaded_class_still_asks_for_a_restart(comexio_api: ComexioAPI, mon
     assert security.last_write is not None
 
 
+def test_an_uploaded_class_has_its_stamp_saved_before_the_upload_returns(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Through upload_web_io itself: a restart of Home Assistant before the delayed save must not lose the stamp."""
+    api, security = _api(comexio_api, monkeypatch)
+    api.client.upload_webio_class = AsyncMock(return_value="55")  # type: ignore[method-assign]
+    template = json.dumps({"commands": [_own(api)]})
+
+    assert _run(api.upload_web_io(SERVER, "HA", template)) == (True, "55")
+
+    security._store.async_save.assert_awaited_once()
+    assert security._store.stored[ws._KEY_WRITTEN] is not None
+
+
+def test_an_uploaded_class_without_a_command_saves_nothing_at_once(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    api.client.upload_webio_class = AsyncMock(return_value="55")  # type: ignore[method-assign]
+
+    assert _run(api.upload_web_io(SERVER, "HA", json.dumps({"commands": []}))) == (True, "55")
+
+    security._store.async_save.assert_not_awaited()
+    assert security.last_write is None
+
+
 @pytest.mark.parametrize(
     ("stamped", "restarted_after", "pending"),
     [(False, True, False), (True, False, True), (True, True, False)],
@@ -160,19 +186,27 @@ def test_the_restart_notice_waits_only_for_a_stamped_write(
 
 
 @pytest.mark.parametrize(
-    ("task_type", "changes_type", "replaces", "type_changed", "existing"),
+    ("task_type", "changes_type", "contested", "replaces", "type_changed", "is_contested", "existing"),
     [
-        ("rename", False, "HA M1 Alt", False, "11"),
-        ("rename", True, "HA M1 Alt", True, "11"),
-        ("type", True, None, False, "11"),
-        ("create", False, None, False, None),
-        ("create", True, None, False, None),
+        ("rename", False, False, "HA M1 Alt", False, False, "11"),
+        ("rename", True, False, "HA M1 Alt", True, False, "11"),
+        ("rename", False, True, "HA M1 Alt", False, True, "11"),
+        ("type", True, True, None, False, False, "11"),
+        ("create", False, True, None, False, False, None),
+        ("create", True, False, None, False, False, None),
     ],
 )
 def test_the_delta_sync_names_the_old_command_only_for_a_rename(
-    task_type: str, changes_type: bool, replaces: str | None, type_changed: bool, existing: str | None
+    task_type: str,
+    changes_type: bool,
+    contested: bool,
+    replaces: str | None,
+    type_changed: bool,
+    is_contested: bool,
+    existing: str | None,
 ) -> None:
-    """A rename carries the old name (its ledger state moves) and says whether the type changed too."""
+    """A rename carries the old name (its ledger state moves), whether the type changed too and whether the name is
+    part of an exchange; no other task passes any of that on."""
     api = MagicMock()
     api.save_single_command = AsyncMock(return_value=True)
     item = {
@@ -181,14 +215,162 @@ def test_the_delta_sync_names_the_old_command_only_for_a_rename(
         "payload": {"Name": "HA M1 Neu"},
         "previous_name": "HA M1 Alt",
         "rename_changes_type": changes_type,
+        "rename_contested": contested,
     }
     result = {"renamed": 0, "removed": 0, "updated": 0, "added": 0, "created_names": []}
 
     _run(ComexioSyncButton._apply_delta_task(api, "7", "3", {"type": task_type, "item": item}, result, []))
 
     api.save_single_command.assert_awaited_once_with(
-        "7", "3", item["payload"], existing_cmd_id=existing, replaces=replaces, type_changed=type_changed
+        "7",
+        "3",
+        item["payload"],
+        existing_cmd_id=existing,
+        replaces=replaces,
+        type_changed=type_changed,
+        contested=is_contested,
     )
+
+
+_T1 = datetime(2026, 11, 24, 10, 0, tzinfo=UTC)
+_T2 = _T1 + timedelta(minutes=1)
+# (the renames in the order they run, the name each command ends up with)
+_EXCHANGES = {
+    "swap": ([("HA Erst", "HA Zweit"), ("HA Zweit", "HA Erst")], {"HA Erst": "HA Zweit", "HA Zweit": "HA Erst"}),
+    "chain": ([("HA A", "HA B"), ("HA B", "HA C")], {"HA A": "HA B", "HA B": "HA C"}),
+    "chain_reversed": ([("HA B", "HA C"), ("HA A", "HA B")], {"HA A": "HA B", "HA B": "HA C"}),
+}
+
+
+@pytest.mark.parametrize("exchange", sorted(_EXCHANGES))
+@pytest.mark.parametrize("which", [0, 1])
+def test_an_exchange_of_names_leaves_the_proof_to_the_command_that_left_https(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, exchange: str, which: int
+) -> None:
+    """Writes run one after the other: the first rename must not take the other one's state, nor drop its proof."""
+    steps, final_names = _EXCHANGES[exchange]
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated = {name for step in steps for name in step}
+    https_command = sorted(final_names)[which]  # the command that carried HTTPS, by the name it had at the start
+    security.https_written = {https_command}
+
+    for moment, (old, new) in zip((_T1, _T2), steps, strict=True):
+        security.mark_written(new, moment, replaces=old, contested=True)
+
+    assert final_names[https_command] in security.protocol_moved
+    assert security.last_write == _T2
+    assert security.protocol_write == _T2
+    assert not security.https_written & set(final_names.values())  # written over HTTP, no command carries HTTPS
+
+
+def test_an_exchange_of_names_over_https_moves_both_names_to_https(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.protocol_moved = {"HA Erst", "HA Zweit"}, {"HA Zweit"}
+
+    assert security.mark_written("HA Zweit", _T1, https=True, replaces="HA Erst", contested=True)
+    assert security.mark_written("HA Erst", _T2, https=True, replaces="HA Zweit", contested=True)
+
+    assert security.https_written == {"HA Erst", "HA Zweit"}
+    assert not security.protocol_moved
+    assert security.last_write == _T2
+
+
+@pytest.mark.parametrize("replaces", [None, "HA X"])
+def test_a_contested_flag_without_a_rename_changes_nothing(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, replaces: str | None
+) -> None:
+    """Only a rename can be part of an exchange: a create or a write under the same name books as always."""
+    _api_unused, security = _api(comexio_api, monkeypatch)
+
+    assert not security.mark_written("HA X", _T1, created=True, replaces=replaces, contested=True)
+
+    assert security.migrated == {"HA X"}
+    assert security.last_write is None
+
+
+def test_a_contested_rename_that_changes_the_protocol_to_https_sets_the_protocol_write(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.https_written = {"HA A", "HA B"}, {"HA A"}
+
+    assert security.mark_written("HA B", _T1, https=True, replaces="HA A", contested=True)
+
+    assert security.protocol_write == _T1  # HA B went from HTTP to HTTPS
+    assert security.https_written == {"HA A", "HA B"}
+    assert not security.protocol_moved
+
+
+def test_a_contested_rename_between_commands_that_were_on_https_already_changes_no_protocol(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.https_written = {"HA A", "HA B"}, {"HA A", "HA B"}
+
+    assert security.mark_written("HA B", _T1, https=True, replaces="HA A", contested=True)
+
+    assert security.protocol_write is None
+    assert security.last_write == _T1  # still a rewrite
+
+
+def test_a_contested_rename_off_https_makes_both_names_owe_the_proof(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.https_written = {"HA A", "HA B"}, {"HA A"}
+
+    assert security.mark_written("HA B", _T1, replaces="HA A", contested=True)
+
+    assert security.protocol_moved == {"HA A", "HA B"}
+    assert security.protocol_write == _T1
+    assert "HA B" not in security.https_written
+
+
+@pytest.mark.parametrize("known", [set(), {"HA A"}])
+def test_a_contested_rename_of_names_the_ledger_does_not_know_enters_both_and_stamps(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch, known: set[str]
+) -> None:
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated = set(known)
+
+    assert security.mark_written("HA B", _T1, replaces="HA A", contested=True)
+
+    assert security.migrated == {"HA A", "HA B"}
+    assert security.last_write == _T1
+    assert not security.protocol_moved
+
+
+def test_a_chain_over_http_leaves_the_old_name_s_https_record_and_owes_the_proof_of_both(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The record of a name no command holds any more stays (a superset); the proofs are the exact superset."""
+    _api_unused, security = _api(comexio_api, monkeypatch)
+    security.migrated, security.https_written = {"HA A", "HA B"}, {"HA A"}
+
+    security.mark_written("HA B", _T1, replaces="HA A", contested=True)
+    security.mark_written("HA C", _T2, replaces="HA B", contested=True)
+
+    assert security.https_written == {"HA A"}
+    assert security.protocol_moved == {"HA A", "HA B", "HA C"}
+
+
+def test_a_contested_rename_through_the_api_stamps_the_restart_and_saves_it(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    api, security = _api(comexio_api, monkeypatch)
+    security.migrated = {"HA M5 Erst", "HA M5 Zweit"}
+    command = _own(api, "HA M5 Zweit")
+
+    assert _run(
+        api.save_single_command(
+            1, 2, command, existing_cmd_id=3, replaces="HA M5 Erst", type_changed=False, contested=True
+        )
+    )
+
+    assert security.last_write is not None
+    security._store.async_save.assert_awaited_once()
 
 
 def test_a_rename_that_changes_the_type_is_a_rewrite_that_moves_the_old_name_s_state(

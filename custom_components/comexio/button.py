@@ -2077,6 +2077,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
                 existing_cmd_id=existing_cmd_id,
                 replaces=item.get("previous_name") if t_type == "rename" else None,
                 type_changed=bool(item.get("rename_changes_type", True)) and t_type == "rename",
+                contested=bool(item.get("rename_contested")) and t_type == "rename",
             )
         if not ok:
             failed_writes.append(f"{t_type} {one_line(item['name'])}")
