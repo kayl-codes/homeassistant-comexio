@@ -28,6 +28,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    DoorstationPicture,
     PlacedModuleBlock,
     RawConfig,
     SystemInfo,
@@ -69,6 +70,7 @@ from .const import (
     DEFAULT_SCHEMA_IO,
     DEFAULT_SCHEMA_KNX,
     DEFAULT_SCHEMA_MARKER,
+    DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
     FLANKE_PORT_IN,
     FLANKE_PORT_OUT_RISING,
     FUB_BASE_KEY_FLANKE,
@@ -137,6 +139,10 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 )
 # The same for the API settings text of a failed write (ComexioAPI.last_write_diagnosis): the API and its text.
 _write_diagnosis: ContextVar["tuple[ComexioAPI, str] | None"] = ContextVar("comexio_write_diagnosis", default=None)
+# Whether the Doorstation read of this asyncio task got its turn on the camera's lock (`_doorstation_read` sets it False
+# before it waits and True once it holds the lock). A caller whose own time ran out reads it to tell a Doorstation that
+# did not answer in time from a wait behind other reads; the default (no read made here) is "got it".
+doorstation_read_got_its_turn: ContextVar[bool] = ContextVar("comexio_doorstation_read_got_its_turn", default=True)
 
 
 # Why the main session is gone (_session_gone_reason); the callers add ": not sent", " meanwhile" or
@@ -2014,6 +2020,59 @@ class ComexioAPI:
                 cause or "none configured",
             )
         return address, cause
+
+    async def get_doorstation_pictures(self, ext_id: int) -> tuple[tuple[DoorstationPicture, ...] | None, str | None]:
+        """The pictures a Doorstation stored (newest first), or None and the failure cause.
+
+        Read with the admin session, one small request (see aiocomexio's get_doorstation_pictures). The caller logs a
+        failure, so it is only debug-logged here. An empty tuple means the Doorstation stored none. With the session
+        gone (unload, Home Assistant stopping) nothing is asked and the answer is None without a cause.
+        """
+        return await self._doorstation_read(
+            lambda: self.client.get_doorstation_pictures(ext_id),
+            "Doorstation pictures not fetched",
+            held_for_sec=DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
+        )
+
+    async def get_doorstation_picture(self, ext_id: int, name: str) -> tuple[bytes | None, str | None]:
+        """One stored picture of a Doorstation as JPEG bytes, or None and the failure cause.
+
+        `name` is a file name from get_doorstation_pictures. Same rules as there.
+        """
+        return await self._doorstation_read(
+            lambda: self.client.get_doorstation_picture(ext_id, name), "Doorstation picture not fetched"
+        )
+
+    async def _doorstation_read[T](
+        self, fetch: Callable[[], Awaitable[T]], certificate_note: str, *, held_for_sec: float | None = None
+    ) -> tuple[T | None, str | None]:
+        """fetch()'s result or None and the failure cause, one after the other with the other Doorstation reads.
+
+        Comexio serves one request at a time, so these reads share the camera's lock. A lapsed admin session is logged
+        in again once; a certificate mismatch goes to the repair (the cause says so); a session that was closed
+        under the request, or is gone already, is no failure to report. `held_for_sec` bounds the time the lock is held
+        (waiting for it is not counted); a read that runs out of it is a failure with its own cause.
+        """
+        if self._session_gone_reason() is not None:
+            return None, None
+        doorstation_read_got_its_turn.set(False)
+        try:
+            async with self._doorstation_snapshot_lock:
+                doorstation_read_got_its_turn.set(True)
+                try:
+                    async with asyncio.timeout(held_for_sec) as deadline:
+                        return await self._system_info_part(fetch, [])
+                except TimeoutError:
+                    if not deadline.expired():
+                        raise
+                    return None, f"not read within {held_for_sec:g} s"
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, certificate_note)
+            return None, SYSTEM_INFO_CERTIFICATE_CHANGED
+        except RuntimeError as err:
+            if not self.met_the_closed_session(err):
+                raise
+            return None, None
 
     def _load_config_names(self) -> tuple[str, str, str, str, str]:
         """Load configuration names from config_entry."""

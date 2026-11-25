@@ -274,6 +274,12 @@
       }
     },
     "image": {
+      "doorstation_bell_picture": {
+        "name": "Last bell picture"
+      },
+      "doorstation_motion_picture": {
+        "name": "Last motion picture"
+      },
       "plan_preview": {
         "name": "Preview image"
       }
