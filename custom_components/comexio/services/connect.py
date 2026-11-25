@@ -302,8 +302,8 @@ async def _connect_marker_to_webio(
     elem_marker, err = await _get_or_create_marker_element(
         api, fub_id, marker_id, existing_marker_elem, x_marker_cur, y_new
     )
-    if err:
-        return None, None, err
+    if err or elem_marker is None:
+        return None, None, err or "The marker element could not be created."
 
     elem_webio, err, already_wired = await _get_or_create_webio_element(
         api, fub_id, marker_id, elem_marker, web_ref_id, conn_type, existing_webio_elem, x_webio_cur, y_new, plan_data

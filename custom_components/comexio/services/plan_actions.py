@@ -60,7 +60,7 @@ def _label_for_id(
     markers_by_id: dict,
     webio_by_id: dict,
     ios_by_id: dict,
-    source_maps: Mapping[str, Mapping[str, Any]],
+    source_maps: Mapping[str, Any],
 ) -> str:
     """Human-readable label for a function plan element referenced by id, via the shared resolver
     (also used by function_plan_search and the backup-diff labeler) — covers markers, WebIO
@@ -77,7 +77,7 @@ def _build_visualize_lines(
     connections: dict,
     catalog: dict,
     maps: tuple[dict, dict, dict],
-    source_maps: Mapping[str, Mapping[str, Any]],
+    source_maps: Mapping[str, Any],
 ) -> tuple[list[str], list[str]]:
     """Build the connection lines and orphan-element lines for the function plan visualize text diagram.
 
@@ -133,8 +133,10 @@ async def _resolve_visualize_snapshot_source(
         return None
     fub_id, kind, slot, plan_name_hint = parsed
     plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-    if identity_err:
-        persistent_notification.async_create(hass, identity_err, title=error_title)
+    if identity_err or plan_name is None:
+        persistent_notification.async_create(
+            hass, identity_err or f"No plan identity for fub {fub_id}.", title=error_title
+        )
         return None
     snapshot = await coordinator.function_plan_backup.async_get_snapshot(kind, fub_id, plan_name, slot)
     if snapshot is None:
