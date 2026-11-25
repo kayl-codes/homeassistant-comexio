@@ -106,6 +106,7 @@ ComexioCoordinator (coordinator.py)   ← DataUpdateCoordinator
 | `coordinator.py` | `ComexioCoordinator`: polling, audit logic, webhook state merging, sync lock, nightly webhook-id migration |
 | `http_session.py` | The aiohttp sessions to Comexio: a connector of their own with a 3 s keep-alive (`async_create_session`), taken out of use with `discard_session` |
 | `webhook_security.py` | `WebhookSecurity`: entry secret, HMAC webhook id per command, migration ledger, legacy-id switch |
+| `certificate.py` | HTTPS to Comexio with a pinned certificate: reads the presented certificate, pins its SHA-256 fingerprint, never accepts a changed one on its own: it is pinned only on confirmation (repair or urgent push, `async_accept_certificate`). `_check_entry_unchanged` guards setup, reconfigure and reauth against an entry changed during an await |
 | `button.py` | Sync button (delta vs. recreate strategy), cancel button, `press_action` service |
 | `repairs.py` | HA Repairs flow — lets user pick audit fix action from the UI |
 | `config_flow.py` | Config entry setup wizard with auto-discovery (DNS `comexio.*`) |
