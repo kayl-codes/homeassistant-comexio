@@ -21,10 +21,13 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.comexio.const import (
     DOMAIN,
+    DOORSTATION_GALLERY_CONCURRENT_READS,
     DOORSTATION_GALLERY_MAX_PICTURES,
+    DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_PATH,
 )
+from custom_components.comexio.media_source import _gallery_read_slots
 
 pytestmark = pytest.mark.usefixtures("mock_comexio_api")
 
@@ -426,15 +429,24 @@ async def test_a_motion_picture_and_an_undated_bell_picture_resolve_and_are_serv
 async def test_every_picture_the_folder_lists_resolves_and_is_served(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
-    await _setup(hass, mock_config_entry)
+    coordinator = await _setup(hass, mock_config_entry)
     client = await hass_client()
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
     assert folder.children
-    for child in folder.children:
+    names = [child.identifier.rsplit("/", 1)[-1] for child in folder.children]
+    # Distinct listed names, so the per-picture asserts below cannot all pass on one and the same picture.
+    assert len(set(names)) == len(names)
+    for child, name in zip(folder.children, names, strict=True):
         play = await media_source.async_resolve_media(hass, f"{MEDIA_ROOT}/{child.identifier}", None)
+        # Each listed picture must resolve to its own view path, not merely to some served one.
+        assert play.url == _picture_path(mock_config_entry, name)
         response = await client.get(play.url)
         assert response.status == HTTPStatus.OK
+        # The view read this picture's own name from the Doorstation (the fake serves the same bytes for every name).
+        coordinator.api.get_doorstation_picture.assert_any_await(
+            2, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+        )
 
 
 async def test_an_offline_doorstation_is_neither_resolved_nor_served(
@@ -591,19 +603,28 @@ async def test_the_view_bounds_the_lock_hold_of_its_read_and_answers_what_comes_
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
 
+def test_the_thumbnail_budget_outlasts_the_picture_read() -> None:
+    # The thumbnail budget covers the wait for the lock as well as the read, so it must exceed the read's own bound.
+    assert DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC > DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+
+
 async def test_the_view_serves_a_read_that_finishes_within_its_budget(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
 
     async def _slow_read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
-        await asyncio.sleep(0.01)
+        await asyncio.sleep(0.2)
         return JPEG, None
 
     coordinator.api.get_doorstation_picture.side_effect = _slow_read
     client = await hass_client()
 
-    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.5):
+    # The read outlasts the picture budget (0.05 s) but not the thumbnail budget (0.5 s): only the latter applies.
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.05),
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.5),
+    ):
         response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.OK
@@ -623,11 +644,63 @@ async def test_a_thumbnail_queued_past_the_budget_answers_unavailable(
     coordinator.api.get_doorstation_picture.side_effect = _stuck_read
     client = await hass_client()
 
-    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.05):
+    with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.05):
         response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     coordinator.api.get_doorstation_picture.assert_awaited_once()
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+async def test_a_browser_batch_takes_only_a_couple_of_places_on_the_doorstation_lock(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    running = 0
+    most_at_once = 0
+    places_full = asyncio.Event()
+
+    async def _read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        nonlocal running, most_at_once
+        running += 1
+        most_at_once = max(most_at_once, running)
+        if running == DOORSTATION_GALLERY_CONCURRENT_READS:
+            places_full.set()
+        # The first reads wait until all places run, then hold theirs: the overlap does not depend on timing.
+        async with asyncio.timeout(5):
+            await places_full.wait()
+        await asyncio.sleep(0.05)
+        running -= 1
+        return JPEG, None
+
+    coordinator.api.get_doorstation_picture.side_effect = _read
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+
+    responses = await asyncio.gather(*(client.get(path) for _ in range(5)))
+
+    assert [response.status for response in responses] == [HTTPStatus.OK] * 5
+    assert most_at_once == DOORSTATION_GALLERY_CONCURRENT_READS
+
+
+async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_unavailable(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    places = _gallery_read_slots(hass, mock_config_entry.entry_id)
+    for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+        await places.acquire()
+    client = await hass_client()
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.05):
+            # Every place is taken: the request must still answer within its budget, not wait for a place forever.
+            async with asyncio.timeout(5):
+                response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+    finally:
+        for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+            places.release()
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
 
 
 async def test_a_timeout_from_inside_the_read_is_no_budget_overrun(

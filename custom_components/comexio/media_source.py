@@ -35,9 +35,11 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DOMAIN,
+    DOORSTATION_GALLERY_CONCURRENT_READS,
     DOORSTATION_GALLERY_LINK_EXPIRY_SEC,
     DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
     DOORSTATION_GALLERY_MAX_PICTURES,
+    DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_NAME,
     DOORSTATION_PICTURE_VIEW_PATH,
@@ -57,6 +59,16 @@ _JPEG_MIME = "image/jpeg"
 _MAX_EXT_ID_DIGITS = 9
 _SESSION_GONE_CAUSE = "the integration is unloading or Home Assistant is stopping, try again"
 _LOGGER = logging.getLogger(__name__)
+# The gallery's places on a config entry's Doorstation lock, kept in hass.data (a semaphore binds to the loop it is
+# first used in). One set per entry: each entry has its own lock, so one server must not take another's places.
+_GALLERY_READ_SLOTS_KEY = f"{DOMAIN}_gallery_read_slots"
+
+
+def _gallery_read_slots(hass: HomeAssistant, entry_id: str) -> asyncio.Semaphore:
+    """The gallery's places on the lock of one config entry, created on first use."""
+    return hass.data.setdefault(
+        f"{_GALLERY_READ_SLOTS_KEY}_{entry_id}", asyncio.Semaphore(DOORSTATION_GALLERY_CONCURRENT_READS)
+    )
 
 
 class _Item(NamedTuple):
@@ -305,12 +317,13 @@ class DoorstationPictureView(HomeAssistantView):
         if not _is_gallery_picture(name):
             _LOGGER.debug("Doorstation %s picture not served: not a bell or motion picture", number)
             raise web.HTTPNotFound
-        # The read, its wait for the Doorstation lock included, has DOORSTATION_PICTURE_READ_TIMEOUT_SEC in all, the
-        # same rule as the picture entities: a thumbnail queued behind a stuck read must not keep its request open.
-        # This outer budget ends first: the lock hold (held_for_sec) starts only once the lock is taken, so that bound
-        # is a second safety net that rarely decides.
+        # The read, its wait for the Doorstation lock included, has DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC in all: a
+        # thumbnail queued behind a stuck read must not keep its request open. The gallery's own places come first, so a
+        # browser batch queues on the lock two reads deep at most. Once the lock is taken, the read holds it for at most
+        # DOORSTATION_PICTURE_READ_TIMEOUT_SEC (held_for_sec); the budget ends the read earlier if the wait used it up.
+        slots = _gallery_read_slots(hass, entry_id)
         try:
-            async with asyncio.timeout(DOORSTATION_PICTURE_READ_TIMEOUT_SEC) as deadline:
+            async with asyncio.timeout(DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC) as deadline, slots:
                 data, cause = await coordinator.api.get_doorstation_picture(
                     number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
                 )
@@ -318,7 +331,12 @@ class DoorstationPictureView(HomeAssistantView):
             # A timeout from inside the read (socket or connect) is no budget overrun: not ours to answer as 503.
             if not deadline.expired():
                 raise
-            _LOGGER.debug("Doorstation %s picture not read within %s s", number, DOORSTATION_PICTURE_READ_TIMEOUT_SEC)
+            # The wait for a gallery place and the read both count: the line does not tell which one ran out.
+            _LOGGER.debug(
+                "Doorstation %s picture not answered within %s s (a place or the read)",
+                number,
+                DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
+            )
             raise web.HTTPServiceUnavailable from None
         if not _still_offered(hass, entry_id, coordinator, number):
             # Offline or unloaded while the read waited: no picture is handed out, and 503 says a retry may succeed.

@@ -306,6 +306,15 @@ DOORSTATION_GALLERY_MAX_PICTURES = 20
 # read itself holds the lock for DOORSTATION_PICTURE_LIST_TIMEOUT_SEC): the browser answers a browse request in time or
 # not at all.
 DOORSTATION_GALLERY_LIST_TIMEOUT_SEC = 20.0
+# A thumbnail waits this long in all, the wait for the Doorstation lock included. The gallery view is a plain HTTP view,
+# not an image entity, so Home Assistant's image timeout does not apply to it; a browser batch of thumbnails queues
+# behind the lock, and the shorter picture-entity budget let the last ones of a batch fail. 30 s is a guess, not
+# measured against a real Doorstation. The read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
+DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC = 30.0
+# The gallery puts at most this many reads on a Doorstation lock at a time, per config entry (media_source.py).
+# A browser batch then holds two places in the lock's queue, not twenty, so the camera and the picture entities
+# wait behind two reads only.
+DOORSTATION_GALLERY_CONCURRENT_READS = 2
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600
