@@ -173,6 +173,7 @@ Column plans — IO extensions (`{prefix} - IO [A,B]`, option `logikplan_io_exte
 | API write errors sensor | `comexio_{server_id}_api_write_errors` | `sensor.{server_id}_api_write_errors` |
 | Free storage sensor | `comexio_{server_id}_free_storage_sensor` | `sensor.{server_id}_free_storage_sensor` |
 | Last boot sensor | `comexio_{server_id}_last_boot_sensor` | `sensor.{server_id}_last_boot_sensor` |
+| Certificate expiry sensor (pinned HTTPS entries only) | `comexio_{server_id}_certificate_expiry` | `sensor.{server_id}_certificate_expiry` |
 | Time server setting sensor | `comexio_{server_id}_time_server_problem` | `binary_sensor.{server_id}_time_server_problem` |
 | Plan Auto-Start switches | `comexio_{server_id}_function_plan_auto_start[_user]` | `switch.{server_id}_function_plan_auto_start[_user]` |
 | Sync button | `comexio_{server_id}_webio_sync_start_btn` | HA-derived |

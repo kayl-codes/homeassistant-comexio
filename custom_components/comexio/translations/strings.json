@@ -9,6 +9,7 @@
       "unknown": "An unexpected error occurred.",
       "certificate_changed": "Comexio presents another certificate than the pinned one. Check it under Settings → Repairs.",
       "certificate_unstable": "Comexio presented another certificate at the login test than a moment before. Something in the network may answer in its place — check it and try again.",
+      "reauth_entry_changed": "The settings of this server changed while the login was tested, for example another certificate was accepted. Nothing was saved. Enter the password again.",
       "invalid_host": "This is not a host name or IP address (optionally with :port) — leave out http://, paths and the like.",
       "invalid_ignored_ids": "Invalid ID list. Enter numbers (e.g. 3, M12 or K12), ranges (e.g. 8-12) or lists (e.g. 1, 3, 5).",
       "invalid_ignored_io_types": "Invalid IO type. A type consists of letters only (e.g. QI, TL, UL), without a number."
@@ -81,6 +82,7 @@
     },
     "abort": {
       "reconfigure_successful": "Connection settings updated successfully.",
+      "reconfigure_entry_changed": "The settings of this server changed while the reconfiguration was open, for example a certificate was accepted or the password renewed. Nothing was saved. Start the reconfiguration again.",
       "reauth_successful": "Re-authentication successful.",
       "already_configured": "This Comexio server or instance name was set up in the meantime."
     }
@@ -345,6 +347,12 @@
           "https": "HTTPS (encrypted)",
           "http": "HTTP (not encrypted)",
           "certificate_changed": "Certificate changed"
+        }
+      },
+      "certificate_expiry": {
+        "name": "Certificate valid until",
+        "state_attributes": {
+          "valid_from": { "name": "Valid from" }
         }
       }
     },
