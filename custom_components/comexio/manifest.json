@@ -2,6 +2,7 @@
   "domain": "comexio",
   "name": "Comexio",
   "after_dependencies": ["recorder"],
+  "categories": ["hubs_protocols.building_automation"],
   "codeowners": ["@kayl-codes"],
   "config_flow": true,
   "dependencies": ["network", "webhook"],

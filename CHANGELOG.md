@@ -22,6 +22,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ### ⚠️ Requirements & Notes
 - **In the default catalog:** the integration is now listed in the Marketplace (Home Assistant 2026.11 and newer) and in HACS without adding it as a custom repository. The README has a My Home Assistant button that opens its page directly.
+- **Marketplace category:** the manifest now names the category `hubs_protocols.building_automation`, so the integration is sorted under building automation in the Home Assistant Marketplace. This also silences the HACS check's "manifest has no categories" warning. Nothing changes in how the integration runs.
 - **Dependency:** `aiocomexio==0.15.0` (was 0.14.1), installed automatically by Home Assistant.
 
 ---
