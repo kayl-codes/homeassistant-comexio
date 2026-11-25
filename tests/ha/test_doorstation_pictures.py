@@ -1,12 +1,12 @@
 """Doorstation pictures: the two image entities, their device, the moment as state, and when the list is read."""
 
 import asyncio
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Generator
 from datetime import datetime, timedelta
 import logging
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from aiocomexio import DoorstationPicture, DoorstationPictureKind
 from aiocomexio.doorstation import Doorstation
@@ -80,6 +80,18 @@ def entry(mock_config_entry: MockConfigEntry) -> MockConfigEntry:
         data=mock_config_entry.data,
         options={CONF_INCLUDE_OFFLINE_EXTENSIONS: True},
     )
+
+
+@pytest.fixture(autouse=True)
+def _no_statistics_unit_fix_delay() -> Generator[None]:
+    """The setup's statistics unit fix sleeps 15 s before it starts, and every wait for background tasks waits for it.
+
+    That made each test here take 15 s (the 63 of them ran into the CI job's 15-minute limit); it runs at once instead,
+    as in test_statistics_unit_fix.py. Harmless only while no test here loads the recorder: without it the fix returns
+    at once and has nothing to do.
+    """
+    with patch("custom_components.comexio.STATISTICS_UNIT_FIX_START_DELAY_SEC", 0):
+        yield
 
 
 @pytest.fixture(autouse=True)
