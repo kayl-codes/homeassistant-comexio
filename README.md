@@ -79,7 +79,7 @@ Every contribution is greatly appreciated. Thank you for your support!
 ## 🚀 Installation
 
 ### Option 1: Marketplace / HACS (Recommended)
-The integration is in the default catalog of the Marketplace (Home Assistant 2026.11 and newer) and of HACS (2026.10 and earlier).
+The integration is in the default catalog of the Marketplace (Home Assistant 2026.11 and newer) and of HACS (2026.10; earlier Home Assistant versions are not supported).
 
 [![Open your Home Assistant instance and open this repository in the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kayl-codes&repository=homeassistant-comexio&category=integration)
 
@@ -414,7 +414,7 @@ Jede Unterstützung wird sehr geschätzt. Danke!
 ## 🚀 Installation
 
 ### Option 1: Marketplace / HACS (Empfohlen)
-Die Integration ist im Standard-Katalog des Marketplace (Home Assistant 2026.11 und neuer) und von HACS (bis 2026.10).
+Die Integration ist im Standard-Katalog des Marketplace (Home Assistant 2026.11 und neuer) und von HACS (2026.10; ältere Home-Assistant-Versionen werden nicht unterstützt).
 
 [![Öffne deine Home-Assistant-Instanz und dieses Repository im Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=kayl-codes&repository=homeassistant-comexio&category=integration)
 
