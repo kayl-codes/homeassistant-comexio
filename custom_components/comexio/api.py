@@ -2027,7 +2027,7 @@ class ComexioAPI:
         return await self._doorstation_read(
             lambda: self.client.get_doorstation_pictures(ext_id),
             "Doorstation pictures not fetched",
-            timeout=DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
+            held_for_sec=DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
         )
 
     async def get_doorstation_picture(self, ext_id: int, name: str) -> tuple[bytes | None, str | None]:
@@ -2040,13 +2040,13 @@ class ComexioAPI:
         )
 
     async def _doorstation_read[T](
-        self, fetch: Callable[[], Awaitable[T]], certificate_note: str, *, timeout: float | None = None
+        self, fetch: Callable[[], Awaitable[T]], certificate_note: str, *, held_for_sec: float | None = None
     ) -> tuple[T | None, str | None]:
         """fetch()'s result or None and the failure cause, one after the other with the other Doorstation reads.
 
         Comexio serves one request at a time, so these reads share the camera's lock. A lapsed admin session is logged
         in again once; a certificate mismatch goes to the repair (the cause says so); a session that was closed
-        under the request, or is gone already, is no failure to report. `timeout` bounds the time the lock is held
+        under the request, or is gone already, is no failure to report. `held_for_sec` bounds the time the lock is held
         (waiting for it is not counted); a read that runs out of it is a failure with its own cause.
         """
         if self._session_gone_reason() is not None:
@@ -2054,12 +2054,12 @@ class ComexioAPI:
         try:
             async with self._doorstation_snapshot_lock:
                 try:
-                    async with asyncio.timeout(timeout) as deadline:
+                    async with asyncio.timeout(held_for_sec) as deadline:
                         return await self._system_info_part(fetch, [])
                 except TimeoutError:
                     if not deadline.expired():
                         raise
-                    return None, f"not read within {timeout:g} s"
+                    return None, f"not read within {held_for_sec:g} s"
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, certificate_note)
             return None, SYSTEM_INFO_CERTIFICATE_CHANGED

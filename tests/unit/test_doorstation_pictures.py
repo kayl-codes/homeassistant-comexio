@@ -344,7 +344,7 @@ def test_a_stalled_list_read_ends_at_its_deadline_and_frees_the_lock(
     async def _twice() -> tuple[Any, Any]:
         return await api.get_doorstation_pictures(1), await api.get_doorstation_pictures(1)
 
-    stalled, next_read = asyncio.run(_twice())
+    stalled, next_read = asyncio.run(asyncio.wait_for(_twice(), 5))  # a missing deadline fails, it does not hang
 
     assert stalled == (None, "not read within 0.05 s")
     assert next_read == ((), None)  # the lock was released: the next read ran

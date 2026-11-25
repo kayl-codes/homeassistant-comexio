@@ -238,7 +238,8 @@ class DoorstationPictureFeed:
             )
         # No size check of its own: aiocomexio reads at most 4 MiB of a picture (more is a failure, not data), so the
         # memory kept is two pictures per Doorstation at most.
-        self._jpegs[kind] = (picture.name, data)
+        if self.available:  # poll() may have dropped the kept pictures while this one was on its way
+            self._jpegs[kind] = (picture.name, data)
         return data
 
     # --- when to read the list ---
@@ -282,6 +283,9 @@ class DoorstationPictureFeed:
         """
         if not self.available:
             self._last_read = None
+            # A removed Doorstation keeps its feed until the entry unloads: the pictures it held (up to 4 MiB each) go,
+            # the names stay for the entities. The first image request after it is back reads the JPEG again.
+            self._jpegs = {}
             return
         if self._last_read is None or time.monotonic() - self._last_read >= DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC:
             self._read_soon()
@@ -327,6 +331,7 @@ class DoorstationPictureFeed:
         Only the kinds the pushes asked for count: a new picture of the other kind says nothing about them.
         """
         self._awaited -= changed
+        self._next_awaited -= changed  # this read lists them already: a cycle of their own would read for nothing
         if self._awaited and self._push_tries < DOORSTATION_PICTURE_PUSH_TRIES:
             if self._push_timer is None:
                 self._arm_push_timer(DOORSTATION_PICTURE_PUSH_RETRY_SEC)
@@ -385,6 +390,7 @@ class DoorstationPictureFeed:
         elif self._push_open:
             # A timer or coordinator read that lists a picture a push waits for: its retries need not look for it again.
             self._awaited -= changed
+            self._next_awaited -= changed
 
     async def _refresh_safely(self) -> frozenset[DoorstationPictureKind]:
         """async_refresh, but an error nobody expected is a warning of the streak instead of a lost task."""
@@ -401,6 +407,10 @@ class DoorstationPictureFeed:
         The entities are told when one changed. A list that could not be read changes nothing (no kind).
         """
         async with self._lock:
+            if not self.available:
+                # It went away while this read waited for the lock: no request for a Doorstation that cannot answer.
+                _LOGGER.debug("Doorstation %d: list read skipped, it cannot be reached", self.ext_id)
+                return frozenset()
             pictures, cause = await self._coordinator.api.get_doorstation_pictures(self.ext_id)
             if pictures is None:
                 self._report_list_failure(cause)
