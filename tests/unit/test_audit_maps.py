@@ -9,6 +9,7 @@ from custom_components.comexio.coordinator import (
     ComexioCoordinator,
     _build_com_audit_map,
     _fallback_audit_key,
+    _flag_contested_renames,
     _source_max_ids,
     _split_disabled_commands,
 )
@@ -123,8 +124,28 @@ def test_compare_finds_every_audit_category() -> None:
     )
 
     assert found["missing"] == [{"name": "HA M4 Fehlt", "payload": "p4", "webio_class": "marker"}]
-    assert found["rename"] == [{"id": 20, "name": "HA M2 Neu", "payload": "p2", "webio_class": "marker"}]
-    assert found["type"] == [{"id": 30, "name": "HA M3 Typ", "payload": "p3", "webio_class": "marker"}]
+    assert found["rename"] == [
+        {
+            "id": 20,
+            "name": "HA M2 Neu",
+            "previous_name": "HA M2 Alt",
+            "rename_changes_type": False,
+            "rename_contested": False,
+            "payload": "p2",
+            "webio_class": "marker",
+        }
+    ]
+    assert found["type"] == [
+        {
+            "id": 30,
+            "name": "HA M3 Typ",
+            "previous_name": "HA M3 Typ",
+            "rename_changes_type": True,
+            "rename_contested": False,
+            "payload": "p3",
+            "webio_class": "marker",
+        }
+    ]
     assert found["function_plan_missing"] == [{"name": "HA M1 Ok"}]
     # The duplicate next to the exact name match first, then the command whose source is gone.
     assert [o["id"] for o in found["orphan"]] == [10, 90]
@@ -154,6 +175,93 @@ def test_renamed_command_skips_the_type_check() -> None:
     assert mismatches == {"rename_M2"}
     assert found["type"] == []
     assert found["function_plan_missing"] == []
+    # A rename that changes the type is more than a rename: it names the old name (its ledger state moves along)
+    # and says so, so the write asks for a restart.
+    assert found["rename"][0]["previous_name"] == "HA M2 Alt"
+    assert found["rename"][0]["rename_changes_type"] is True
+
+
+def test_a_rename_of_a_command_without_a_type_counts_as_changing_it() -> None:
+    """Two unknown types are no proof that nothing but the name changes."""
+    command = {k: v for k, v in _com("HA M2 Alt", 20).items() if k != "type"}
+    found = _FakeCoordinator(unwired=set())._compare_audit_maps(
+        {"M2": {"name": "HA M2 Neu", "type": None}},
+        {"M2": [command]},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        set(),
+    )
+    assert found["rename"][0]["previous_name"] == "HA M2 Alt"
+    assert found["rename"][0]["rename_changes_type"] is True
+
+
+def _rename_items(ha_names: dict[str, str], com_names: dict[str, str]) -> list[dict[str, Any]]:
+    """The rename items the audit finds for these names (key -> name in HA, key -> name in Comexio)."""
+    found = _FakeCoordinator(unwired=set())._compare_audit_maps(
+        {key: {"name": name, "type": "digital"} for key, name in ha_names.items()},
+        {key: [_com(name, 10 * (i + 1))] for i, (key, name) in enumerate(com_names.items())},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        set(),
+    )
+    return found["rename"]
+
+
+@pytest.mark.parametrize(
+    ("ha_names", "com_names", "contested"),
+    [
+        pytest.param({"M1": "HA Zweit", "M2": "HA Erst"}, {"M1": "HA Erst", "M2": "HA Zweit"}, [True, True], id="swap"),
+        pytest.param({"M1": "HA B", "M2": "HA C"}, {"M1": "HA A", "M2": "HA B"}, [True, True], id="chain"),
+        pytest.param({"M1": "HA B"}, {"M1": "HA A"}, [False], id="a name nobody holds"),
+        pytest.param({"M1": "HA B", "M2": "HA D"}, {"M1": "HA A", "M2": "HA C"}, [False, False], id="two apart"),
+    ],
+)
+def test_a_rename_that_is_part_of_an_exchange_of_names_is_marked(
+    ha_names: dict[str, str], com_names: dict[str, str], contested: list[bool]
+) -> None:
+    """The ledger writes of a sync run one after the other: an exchange cannot move state name by name."""
+    items = _rename_items(ha_names, com_names)
+
+    assert [item["rename_contested"] for item in items] == contested
+    assert [item["previous_name"] for item in items] == list(com_names.values())
+
+
+def test_a_rename_onto_the_name_of_an_orphan_or_a_create_is_no_exchange() -> None:
+    """An orphan or a command still to be created that wants a name moves no ledger state of a rename."""
+    found = _FakeCoordinator(unwired=set())._compare_audit_maps(
+        {"M1": {"name": "HA B", "type": "digital"}, "M2": {"name": "HA A", "type": "digital"}},
+        {"M1": [_com("HA A", 10)], "M9": [_com("HA B", 90)]},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        set(),
+    )
+
+    assert [item["rename_contested"] for item in found["rename"]] == [False]
+    assert [item["name"] for item in found["missing"]] == ["HA A"]
+
+
+def test_flagging_contested_renames_needs_no_renames() -> None:
+    _flag_contested_renames([])
+
+
+def test_a_command_that_keeps_its_name_is_never_a_contested_rename() -> None:
+    found = _FakeCoordinator(unwired=set())._compare_audit_maps(
+        {"M1": {"name": "HA Gleich", "type": "digital"}},
+        {"M1": [_com("HA Gleich", 10)]},
+        {},
+        (set(), set(), set()),
+        {},
+        set(),
+        set(),
+    )
+
+    assert found["rename"] == []
 
 
 def test_renamed_command_is_checked_for_its_wiring_too() -> None:

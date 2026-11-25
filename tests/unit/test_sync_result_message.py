@@ -40,7 +40,9 @@ class _FakeWebioApi:
         self.calls.append(("delete", cmd_id))
         return cmd_id not in self.failing
 
-    async def save_single_command(self, base_id, device_id, payload, existing_cmd_id=None) -> bool:
+    async def save_single_command(
+        self, base_id, device_id, payload, existing_cmd_id=None, replaces=None, type_changed=False, contested=False
+    ) -> bool:
         self.calls.append(("save", existing_cmd_id))
         return payload["Name"] not in self.failing
 
