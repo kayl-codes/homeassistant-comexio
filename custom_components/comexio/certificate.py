@@ -658,6 +658,19 @@ def _new_api(hass: HomeAssistant, data: Any, fingerprint: str | None) -> Comexio
     )
 
 
+def _check_entry_unchanged(entry: ConfigEntry, read_from: dict[str, Any], api: ComexioAPI) -> None:
+    """Retry the setup when the entry's data changed while the certificate was read and the login tested.
+
+    Pinned now, the fingerprint would be merged into the new data (e.g. another host) and pair it with a
+    certificate of the old connection. The retry reads the certificate afresh.
+    """
+    if dict(entry.data) != read_from:
+        api.close()
+        raise ConfigEntryNotReady(
+            f"The settings of Comexio at {read_from[CONF_HOST]} changed during the switch to HTTPS"
+        )
+
+
 async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAPI:
     """The entry's ComexioAPI; an entry still on plain HTTP is switched to HTTPS when Comexio serves it.
 
@@ -673,11 +686,14 @@ async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAP
     if CONF_CERTIFICATE_FINGERPRINT in entry.data:
         return _new_api(hass, entry.data, entry.data[CONF_CERTIFICATE_FINGERPRINT])
     host = entry.data[CONF_HOST]
+    read_from = dict(entry.data)  # what the handshake and the login below are based on
     fingerprint = await async_read_fingerprint(host)
     if fingerprint is None:
         return _new_api(hass, entry.data, None)
-    api = _new_api(hass, entry.data, fingerprint)
-    if await api.login():
+    api = _new_api(hass, read_from, fingerprint)
+    logged_in = await api.login()
+    _check_entry_unchanged(entry, read_from, api)  # before any outcome: a login of the old settings proves nothing
+    if logged_in:
         hass.config_entries.async_update_entry(entry, data={**entry.data, **pin_data(fingerprint)})
         _LOGGER.info("Comexio at %s: switched to HTTPS, certificate %s pinned", host, format_fingerprint(fingerprint))
         notify_https_enabled(hass, str(entry.data[CONF_SERVER_ID]), host, fingerprint)

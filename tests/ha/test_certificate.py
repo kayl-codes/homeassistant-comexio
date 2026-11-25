@@ -867,6 +867,25 @@ async def test_reauth_does_not_store_what_was_tested_against_an_entry_that_chang
     assert entry.data[CONF_HOST] == change(dict(entry.data))[CONF_HOST]  # the other host is kept
 
 
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_reauth_dates_the_pin_when_it_is_stored_not_when_the_certificate_was_read(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    certificate_handshake: AsyncMock,
+    pin_clock: list[datetime],
+) -> None:
+    # The login test sits between reading the certificate and storing it: the pin takes effect when it is stored.
+    mock_config_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+
+    result = await _reauth(hass, mock_config_entry)
+
+    assert result["reason"] == "reauth_successful"
+    assert len(pin_clock) == 2  # one date when the certificate was read, one when it is stored
+    assert datetime.fromisoformat(mock_config_entry.data[CONF_CERTIFICATE_PINNED_AT]) > pin_clock[0]
+    assert mock_config_entry.data[CONF_CERTIFICATE_PINNED_AT] == pin_clock[-1].isoformat()
+
+
 @pytest.mark.usefixtures("mock_setup_entry")
 @pytest.mark.parametrize(
     ("login_error", "replaced", "error", "fingerprints"),
@@ -1092,6 +1111,77 @@ async def test_setup_meeting_a_changing_certificate_during_the_switch_is_retried
     assert [api.fingerprint for api in mock_comexio_api] == [PINNED]
     mock_comexio_api[0].close.assert_called()
     notify.assert_not_called()
+
+
+@pytest.mark.parametrize("moment", ["handshake", "login", "rejected login"])
+async def test_setup_does_not_pin_what_it_read_for_an_entry_that_changed_meanwhile(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    pin_clock: list[datetime],
+    monkeypatch: pytest.MonkeyPatch,
+    moment: str,
+) -> None:
+    # A reconfigure that lands while the certificate is read or the login tested: the pin of the old host must not
+    # be merged into the new data, and a login of the old settings that fails (rejected) is no reason for a reauth.
+    # The retry reads the certificate afresh and pins it for the new host.
+    changed: list[bool] = []
+
+    def _entry_changes() -> None:
+        changed.append(True)
+        hass.config_entries.async_update_entry(mock_config_entry, data={**mock_config_entry.data, CONF_HOST: NEW_HOST})
+
+    if moment == "handshake":
+
+        async def _handshake(*_args: Any) -> str:
+            _entry_changes()
+            return PINNED
+
+        certificate_handshake.side_effect = _handshake
+    else:
+        _serve(certificate_handshake, PINNED)
+        api_attributes["last_login_error"] = LOGIN_ERROR_REJECTED
+
+        async def _login(*_args: Any) -> bool:
+            if changed:
+                return True
+            _entry_changes()
+            return moment == "login"
+
+        real_new_api = certificate_module._new_api
+
+        def _new_api_whose_login_changes_the_entry(*args: Any) -> ComexioAPI:
+            api = real_new_api(*args)
+            api.login = AsyncMock(name="login", side_effect=_login)
+            return api
+
+        monkeypatch.setattr(certificate_module, "_new_api", _new_api_whose_login_changes_the_entry)
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert mock_config_entry.data[CONF_HOST] == NEW_HOST
+    assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
+    assert CONF_CERTIFICATE_PINNED_AT not in mock_config_entry.data
+    assert not pin_clock  # nothing was dated
+    assert len(mock_comexio_api) == 1
+    mock_comexio_api[0].close.assert_called_once()
+    assert all(flow["context"]["source"] != "reauth" for flow in hass.config_entries.flow.async_progress())
+    notify.assert_not_called()
+
+    _serve(certificate_handshake, PINNED)
+    await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert mock_config_entry.state is ConfigEntryState.LOADED
+    assert mock_config_entry.data[CONF_HOST] == NEW_HOST
+    assert mock_config_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert len(pin_clock) == 1
+    notify.assert_called_once()
+    assert NEW_HOST in notify.call_args.args[1]
 
 
 @pytest.mark.parametrize(

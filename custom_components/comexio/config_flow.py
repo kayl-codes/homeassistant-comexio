@@ -659,10 +659,12 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 )
                 errors = {"base": "reauth_entry_changed"}
             if not errors:
+                newly_pinned = CONF_CERTIFICATE_FINGERPRINT in data_updates and CONF_CERTIFICATE_FINGERPRINT not in base
+                restamp_pin(data_updates)  # dated now, not when the certificate was read before the login test
                 # Like reconfigure: credentials left in options from older versions would shadow the new ones.
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
                 result = self._async_update_and_reload_once(entry, data_updates=data_updates, options=clean_options)
-                if CONF_CERTIFICATE_FINGERPRINT in data_updates and CONF_CERTIFICATE_FINGERPRINT not in base:
+                if newly_pinned:
                     notify_https_enabled(
                         self.hass,
                         entry.data[CONF_SERVER_ID],
