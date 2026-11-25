@@ -924,6 +924,65 @@ async def test_a_picture_read_that_ends_after_the_doorstation_went_away_serves_a
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_list_that_ends_after_the_doorstation_went_away_is_not_applied(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads: AsyncMock = coordinator.api.get_doorstation_pictures
+    newer = DoorstationPicture(name="bell_newer.jpg", kind=BELL, taken_at=datetime(2026, 11, 22, 7, 0, 0))
+    list_opened = _gate(reads, ((newer, MOTION_PICTURE, NEW_BELL), None))
+    told: list[None] = []
+    stop = async_dispatcher_connect(hass, doorstation_pictures_signal(SERVER_ID, 2), lambda: told.append(None))
+    await _later_no_wait(hass, coordinator, clock, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC)
+    assert reads.await_count == 2  # the interval's read is under way
+
+    coordinator.offline_extensions = {EXTENSION}
+    coordinator.async_update_listeners()
+    list_opened.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert not told  # the answer of a Doorstation that went away changed nothing
+
+    reads.side_effect = None
+    reads.return_value = ((NEW_BELL, MOTION_PICTURE), None)  # what the list held before
+    coordinator.offline_extensions = set()
+    await _later(hass, coordinator, clock, 1)
+    stop()
+
+    assert reads.await_count == 3  # read again on return
+    assert not told  # it holds what it held before: had the dropped answer been kept, this read would have changed it
+    state = hass.states.get(BELL_ENTITY_ID)
+    assert state is not None
+    assert state.state == taken_at_utc(NEW_BELL).isoformat()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_failed_list_that_ends_after_the_doorstation_went_away_starts_no_failure_streak(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="custom_components.comexio.doorstation_pictures")
+    coordinator = await _setup_online(hass, entry)
+    reads: AsyncMock = coordinator.api.get_doorstation_pictures
+    list_opened = _gate(reads, (None, "timed out"))
+    await _later_no_wait(hass, coordinator, clock, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC)
+
+    coordinator.offline_extensions = {EXTENSION}
+    coordinator.async_update_listeners()
+    list_opened.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    def warnings() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno == logging.WARNING and "list of its pictures" in r.getMessage()]
+
+    assert warnings() == []  # a read that failed because the Doorstation went away is no failure to warn about
+    coordinator.offline_extensions = set()
+    reads.side_effect = None
+    reads.return_value = (None, "timed out")
+    await _later(hass, coordinator, clock, 1)  # back: the read fails for real
+
+    assert len(warnings()) == 1  # and it did not start the streak either: this one is the first
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_push_that_met_an_offline_doorstation_does_not_block_the_pushes_after_it(
     hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
 ) -> None:

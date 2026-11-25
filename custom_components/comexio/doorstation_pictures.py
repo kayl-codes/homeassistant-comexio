@@ -415,6 +415,11 @@ class DoorstationPictureFeed:
                 _LOGGER.debug("Doorstation %d: list read skipped, it cannot be reached", self.ext_id)
                 return frozenset()
             pictures, cause = await self._coordinator.api.get_doorstation_pictures(self.ext_id)
+            if not self.available:
+                # It went away while the request was on its way: nothing of this answer is kept (as for a picture, see
+                # `_async_read_picture`), and the first update after it is back reads the list again (poll).
+                _LOGGER.debug("Doorstation %d: list read dropped, it went away meanwhile", self.ext_id)
+                return frozenset()
             if pictures is None:
                 self._report_list_failure(cause)
                 return frozenset()
