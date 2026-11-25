@@ -134,6 +134,20 @@ def _pinned_recently(data: Any) -> bool:
     return pinned_at is not None and abs(dt_util.utcnow() - datetime.fromisoformat(pinned_at)) < timedelta(minutes=5)
 
 
+@pytest.fixture
+def pin_clock() -> Generator[list[datetime]]:
+    """Every pin date issued while a test runs, each an hour after the one before (the flow's waiting time)."""
+    issued: list[datetime] = []
+
+    def _utcnow() -> datetime:
+        issued.append(datetime(2026, 11, 25, tzinfo=UTC) + timedelta(hours=len(issued)))
+        return issued[-1]
+
+    with patch.object(certificate_module, "dt_util") as clock:  # only the module that dates a pin, not HA itself
+        clock.utcnow.side_effect = _utcnow
+        yield issued
+
+
 async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> None:
     entry.add_to_hass(hass)
     await hass.config_entries.async_setup(entry.entry_id)
@@ -207,6 +221,21 @@ async def test_a_new_entry_pins_the_certificate_comexio_serves(
     mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_called_once()
     assert PINNED_SHOWN in notify.call_args.args[1]
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "no_auto_discovery", "mock_comexio_api")
+async def test_a_new_entry_is_pinned_when_created_not_when_the_certificate_was_read(
+    hass: HomeAssistant, certificate_handshake: AsyncMock, pin_clock: list[datetime]
+) -> None:
+    # The ignore lists step can wait for the user: the date is the moment the entry exists.
+    certificate_handshake.side_effect = None
+    certificate_handshake.return_value = PINNED
+
+    result = await _submit_user(hass)
+
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    assert datetime.fromisoformat(result["data"][CONF_CERTIFICATE_PINNED_AT]) > pin_clock[0]
+    assert result["data"][CONF_CERTIFICATE_PINNED_AT] == pin_clock[-1].isoformat()
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "no_auto_discovery")
@@ -368,6 +397,43 @@ async def test_a_pinned_entry_asks_before_it_drops_or_replaces_the_pin(
     mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_called_once()
     assert notify.call_args.kwargs["title"] == title
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_a_replaced_pin_is_dated_when_the_user_confirms_not_when_it_was_read(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, certificate_handshake: AsyncMock, pin_clock: list[datetime]
+) -> None:
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, OTHER)
+    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
+    assert result["step_id"] == "reconfigure_certificate"
+    assert pinned_entry.data[CONF_CERTIFICATE_PINNED_AT] == PINNED_AT_BEFORE  # nothing stored before the confirmation
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["reason"] == "reconfigure_successful"
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert datetime.fromisoformat(pinned_entry.data[CONF_CERTIFICATE_PINNED_AT]) > pin_clock[0]
+    assert pinned_entry.data[CONF_CERTIFICATE_PINNED_AT] == pin_clock[-1].isoformat()
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+@pytest.mark.parametrize("host", [HOST, NEW_HOST], ids=["same host", "other host, same certificate"])
+async def test_a_reconfigure_that_keeps_the_pin_keeps_its_date(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    certificate_handshake: AsyncMock,
+    pin_clock: list[datetime],
+    host: str,
+) -> None:
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+
+    result = await _reconfigure(hass, pinned_entry, host)
+
+    assert result["reason"] == "reconfigure_successful"
+    assert pinned_entry.data[CONF_CERTIFICATE_PINNED_AT] == PINNED_AT_BEFORE
+    assert pin_clock == []  # nothing was pinned, so nothing was dated
 
 
 def _form_default(result: dict[str, Any], field: str) -> Any:

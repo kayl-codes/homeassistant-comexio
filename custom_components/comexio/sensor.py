@@ -897,11 +897,13 @@ class ComexioCertificateExpirySensor(ComexioStableEntityIdMixin, RestoreEntity, 
             return
         valid_from = _stored_utc_date(stored.get("not_valid_before"))
         valid_until = _stored_utc_date(stored.get("not_valid_after"))
-        if valid_from is not None and valid_until is not None:
+        if valid_from is not None and valid_until is not None and valid_from <= valid_until:
             self._valid_from, self._attr_native_value = valid_from, valid_until
         else:
             _LOGGER.debug(
-                "Comexio at %s: stored certificate dates missing or unreadable, waiting for the next read", self._host
+                "Comexio at %s: stored certificate dates missing, unreadable or in reverse order, "
+                "waiting for the next read",
+                self._host,
             )
 
     @callback
@@ -935,7 +937,12 @@ class ComexioCertificateExpirySensor(ComexioStableEntityIdMixin, RestoreEntity, 
                 format_fingerprint(info.fingerprint),
             )
             return
-        self._valid_from, self._attr_native_value = info.not_valid_before, info.not_valid_after
+        valid_from, valid_until = info.not_valid_before, info.not_valid_after
+        if valid_from is not None and valid_until is not None and valid_from > valid_until:
+            # Unknown, like the restore: an expiry before the start would read as an expired certificate.
+            _LOGGER.debug("Comexio at %s: certificate validity dates are in reverse order, not shown", self._host)
+            valid_from = valid_until = None
+        self._valid_from, self._attr_native_value = valid_from, valid_until
         self.async_write_ha_state()
 
 

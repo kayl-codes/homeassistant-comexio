@@ -23,6 +23,7 @@ from .certificate import (
     notify_https_disabled,
     notify_https_enabled,
     pin_data,
+    restamp_pin,
     unpin_data,
 )
 from .const import (
@@ -438,7 +439,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         for the day the import is switched on, instead of importing QI, TL and UL then (#317).
         """
         options = {CONF_IGNORED_IO_TYPES: list(DEFAULT_IGNORED_IO_TYPES), **options}
-        data = self._pending_entry
+        data = {**self._pending_entry}
+        restamp_pin(data)  # the user may have sat at the ignore lists step since the certificate was read
         server_id, host = data[CONF_SERVER_ID], data[CONF_HOST]
         if (fingerprint := data.get(CONF_CERTIFICATE_FINGERPRINT)) is not None:
             # Only now: an abandoned ignore_lists step creates no entry to tell about.
@@ -539,6 +541,9 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = await self._connection_errors(entry, merged)
         if errors:
             return self._show_reconfigure_form(merged, errors)
+        if https_change in (_HTTPS_ENABLED, _HTTPS_REPLACED):
+            # A new pin takes effect now, not when the certificate was read: the user may have confirmed it late.
+            restamp_pin(merged)
         self._notify_https_change(entry, merged, https_change)
         clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
         return self._async_update_and_reload_once(

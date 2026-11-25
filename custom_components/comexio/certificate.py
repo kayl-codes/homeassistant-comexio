@@ -115,6 +115,17 @@ def pin_data(fingerprint: str) -> dict[str, str]:
     return {CONF_CERTIFICATE_FINGERPRINT: fingerprint, CONF_CERTIFICATE_PINNED_AT: dt_util.utcnow().isoformat()}
 
 
+def restamp_pin(data: dict[str, Any]) -> None:
+    """Date the pin in data (if any) from now, for a flow that stores it later than it read the certificate.
+
+    A setup waits at the ignore lists step and a reconfigure at its confirmation (pin_data ran when the
+    handshake read the certificate), so the date would be the moment the certificate was read, not the moment
+    the user's choice took effect.
+    """
+    if (fingerprint := data.get(CONF_CERTIFICATE_FINGERPRINT)) is not None:
+        data |= pin_data(fingerprint)
+
+
 def unpin_data(data: dict[str, Any]) -> bool:
     """Remove the pin and its date from data in place; whether there was a pin."""
     data.pop(CONF_CERTIFICATE_PINNED_AT, None)

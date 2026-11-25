@@ -42,6 +42,26 @@ def test_a_pin_carries_the_time_it_was_written() -> None:
     assert data == {CONF_CERTIFICATE_FINGERPRINT: PINNED, CONF_CERTIFICATE_PINNED_AT: NOW.isoformat()}
 
 
+def test_restamping_dates_a_pin_from_now_and_leaves_an_entry_without_a_pin_alone() -> None:
+    pinned = {
+        CONF_HOST: HOST,
+        CONF_CERTIFICATE_FINGERPRINT: PINNED,
+        CONF_CERTIFICATE_PINNED_AT: "2020-01-01T00:00:00+00:00",
+    }
+    plain = {CONF_HOST: HOST}
+
+    with patch.object(certificate.dt_util, "utcnow", return_value=NOW):
+        certificate.restamp_pin(pinned)
+        certificate.restamp_pin(plain)
+
+    assert pinned == {
+        CONF_HOST: HOST,
+        CONF_CERTIFICATE_FINGERPRINT: PINNED,
+        CONF_CERTIFICATE_PINNED_AT: NOW.isoformat(),
+    }
+    assert plain == {CONF_HOST: HOST}
+
+
 @pytest.mark.parametrize(
     ("data", "had_pin"),
     [
@@ -126,6 +146,31 @@ def test_a_pinned_certificate_without_readable_dates_is_unknown() -> None:
     assert sensor.native_value is None
     assert sensor.extra_state_attributes == {"valid_from": None}
     assert sensor.extra_restore_state_data is None
+
+
+def test_a_read_with_the_end_before_the_start_is_unknown_not_expired() -> None:
+    sensor = _sensor()
+    _read(sensor, CertificateInfo(PINNED, VALID_FROM, VALID_UNTIL))
+
+    _read(sensor, CertificateInfo(PINNED, VALID_UNTIL, VALID_FROM))
+
+    assert sensor.native_value is None
+    assert sensor.extra_state_attributes == {"valid_from": None}
+    assert sensor.extra_restore_state_data is None
+
+
+def test_stored_dates_with_start_equal_to_end_are_restored() -> None:
+    sensor = _sensor()
+
+    sensor._restore(
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": VALID_FROM.isoformat(),
+            "not_valid_after": VALID_FROM.isoformat(),
+        }
+    )
+
+    assert sensor.native_value == VALID_FROM
 
 
 def test_a_failed_read_keeps_the_last_dates_and_logs_once_per_outage(caplog: pytest.LogCaptureFixture) -> None:
@@ -258,6 +303,11 @@ def test_restored_dates_stay_when_the_handshake_presents_another_certificate() -
             "not_valid_before": VALID_FROM.isoformat(),
             "not_valid_after": "9999-12-31T23:59:59-05:00",
         },
+        {
+            "fingerprint": PINNED,
+            "not_valid_before": VALID_UNTIL.isoformat(),
+            "not_valid_after": VALID_FROM.isoformat(),
+        },
         {},
     ],
     ids=[
@@ -270,6 +320,7 @@ def test_restored_dates_stay_when_the_handshake_presents_another_certificate() -
         "no such zone",
         "start before the calendar in UTC",
         "end after the calendar in UTC",
+        "end before the start",
         "nothing",
     ],
 )
