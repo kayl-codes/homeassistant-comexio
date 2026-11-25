@@ -323,7 +323,7 @@ class ComexioPlanBackupSelectEntity(
         fub_id = self.coordinator.get_active_function_plan_fub_id()
         fub_data = self.coordinator.api.fub_data
         plan_name = function_plan_info(fub_data, fub_id).get("Name") if fub_id is not None else None
-        if plan_name is None:
+        if fub_id is None or plan_name is None:
             return []
         entries = self.coordinator.function_plan_backup.plan_backups_for_identity_sync(fub_id, plan_name)
         return [LIVE_BACKUP_OPTION, *(format_backup_label(e) for e in entries)]
@@ -354,7 +354,7 @@ class ComexioPlanBackupSelectEntity(
             function_plan_info(self.coordinator.api.fub_data, fub_id).get("Name") if fub_id is not None else None
         )
         label = self.current_option
-        if plan_name is None or label is None or self.coordinator.orphaned_plans_view_active():
+        if fub_id is None or plan_name is None or label is None or self.coordinator.orphaned_plans_view_active():
             return None
         entry = next(
             (e for e in backups.plan_backups_for_identity_sync(fub_id, plan_name) if format_backup_label(e) == label),

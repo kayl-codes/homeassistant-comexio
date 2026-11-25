@@ -71,7 +71,7 @@ def snapshot_block_settings(snapshot: Mapping[str, Any]) -> BlockSettings | None
     return stored if isinstance(stored, dict) else None
 
 
-def block_settings_changed(previous: Mapping[str, Any], current: BlockSettings | None) -> bool:
+def block_settings_changed(previous: Mapping[str, Any], current: Mapping[str, Mapping[str, str]] | None) -> bool:
     """Whether today's settings differ from the ones the previous snapshot stored.
 
     current None (not read this poll) never counts as a change. A previous snapshot without
