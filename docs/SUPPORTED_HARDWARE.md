@@ -79,6 +79,7 @@ These are offline on the test installation, so **no live value or write has ever
 | **Doorstation** | `PIR1`, `DI1`–`DI3` | digital | `binary_sensor`; `DI1`–`DI3` also as doorbell `event` | ok |
 | | `NameLED1` | digital | `switch` | ok |
 | | `Screenshot1` | 131 | `binary_sensor` | read-only, although Comexio writes it |
+| | camera (not an IO, `/proxy/cam/1/` on the Doorstation's IP) | — | `camera` (still image straight from the Doorstation or over the IO-Server; live stream straight from the Doorstation when opened); `image` Last bell picture and Last motion picture | unit and HA tests only; not yet checked on a real Doorstation (#180) |
 | **Touchpanel**, **Touchpanel-2G** | `DisplayOn1` | digital | `switch` | ok |
 | | `Bright1`, `Volume1` | 28 (%) | `sensor` | read-only |
 | | `Signal1`, `Mute1` | 6 | `binary_sensor` | read-only |
@@ -193,6 +194,7 @@ Diese sind auf der Testinstallation offline, deshalb **wurde noch nie ein Live-W
 | **Doorstation** | `PIR1`, `DI1`–`DI3` | digital | `binary_sensor`; `DI1`–`DI3` zusätzlich als Klingel-`event` | ok |
 | | `NameLED1` | digital | `switch` | ok |
 | | `Screenshot1` | 131 | `binary_sensor` | nur lesbar, obwohl Comexio ihn beschreibt |
+| | Kamera (kein IO, `/proxy/cam/1/` unter der IP der Doorstation) | — | `camera` (Standbild direkt von der Doorstation oder über den IO-Server; Live-Stream direkt von der Doorstation beim Öffnen); `image` Letztes Klingelbild und Letztes Bewegungsbild | nur Unit- und HA-Tests; an einer echten Doorstation noch nicht geprüft (#180) |
 | **Touchpanel**, **Touchpanel-2G** | `DisplayOn1` | digital | `switch` | ok |
 | | `Bright1`, `Volume1` | 28 (%) | `sensor` | nur lesbar |
 | | `Signal1`, `Mute1` | 6 | `binary_sensor` | nur lesbar |
