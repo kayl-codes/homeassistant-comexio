@@ -275,6 +275,12 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   `entry.data`, issue data or the pin that a decision depends on placed after that decision's first `await`, and a
   write that follows the last await without comparing against the capture (#250: `_accept_tap`,
   `async_accept_certificate`).
+- **Config snapshot across an await:** a setup, reconfigure or reauth step that reads `entry.data` (host, pinned
+  certificate, user) and then awaits a handshake, a login or other I/O must not build an API or write the entry from
+  that snapshot unchecked. Compare `entry.data` with the snapshot after the await (`certificate._check_entry_unchanged`
+  is the model); if it changed, abort, or let the setup run again on the fresh data. Only `entry.data` is compared, not
+  the options. Flag a client built with the pin or host of pre-await data, and a write of pre-await data after an
+  await (#337).
 - **Skip guards before the first write:** a list chosen up front (the classes a sync runs, the plans a repair
   fixes) can be stale by the time an item's turn comes — an options save mid-sync can empty a class. The guard
   against writing for nothing (an empty template, no wanted command) runs right before that item's first write and
