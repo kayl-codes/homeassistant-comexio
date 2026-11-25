@@ -229,6 +229,11 @@ class DoorstationPictureFeed:
             # No data and no cause: the session is gone, nothing to report. Empty data is a failure of its own.
             self._report_picture_failure(kind, picture, cause or (None if data is None else "empty picture"))
             return None
+        if not self.available:
+            # It went away while this one was on its way: poll() dropped the kept pictures, and nothing is kept or
+            # served for a Doorstation that cannot be reached (as `_cached_jpeg` does). Nor does the answer end a
+            # failure streak: a picture that was never kept is not "read again".
+            return None
         if self._picture_failures.pop(kind, None) is not None:
             _LOGGER.info(
                 "[%s] Doorstation %d: its %s pictures are read again",
@@ -238,10 +243,6 @@ class DoorstationPictureFeed:
             )
         # No size check of its own: aiocomexio reads at most 4 MiB of a picture (more is a failure, not data), so the
         # memory kept is two pictures per Doorstation at most.
-        if not self.available:
-            # It went away while this one was on its way: poll() dropped the kept pictures, and nothing is kept or
-            # served for a Doorstation that cannot be reached (as `_cached_jpeg` does).
-            return None
         self._jpegs[kind] = (picture.name, data)
         return data
 
@@ -289,6 +290,9 @@ class DoorstationPictureFeed:
             # A removed Doorstation keeps its feed until the entry unloads: the pictures it held (up to 4 MiB each) go,
             # the names stay for the entities. The first image request after it is back reads the JPEG again.
             self._jpegs = {}
+            # A streak of failed picture reads ends with it too: after the return the first failure warns again, and
+            # the pause of a failure from before does not hold a picture back.
+            self._picture_failures = {}
             return
         if self._last_read is None or time.monotonic() - self._last_read >= DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC:
             self._read_soon()
@@ -462,8 +466,20 @@ class DoorstationPictureFeed:
     def _report_picture_failure(
         self, kind: DoorstationPictureKind, picture: DoorstationPicture | None, cause: str | None
     ) -> None:
-        """Note a picture that could not be read and warn once per streak of its kind; no cause means session gone."""
+        """Note a picture that could not be read and warn once per streak of its kind; no cause means session gone.
+
+        A read that failed because the Doorstation went away is no failure of its picture (as for the list, see
+        `async_refresh`): no pause and no streak, or it would hold the picture back for the pause after the return.
+        """
         if cause is None or picture is None:
+            return
+        if not self.available:
+            _LOGGER.debug(
+                "Doorstation %d: %s picture read failure not counted, it went away meanwhile: %s",
+                self.ext_id,
+                kind.value,
+                one_line(cause),
+            )
             return
         streak = kind in self._picture_failures
         self._picture_failures[kind] = (picture.name, time.monotonic())

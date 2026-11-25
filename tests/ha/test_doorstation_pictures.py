@@ -999,6 +999,55 @@ async def test_a_failed_list_that_ends_after_the_doorstation_went_away_starts_no
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_picture_read_that_failed_after_the_doorstation_went_away_sets_no_pause(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="custom_components.comexio.doorstation_pictures")
+    coordinator = await _setup_online(hass, entry)
+    picture_read: AsyncMock = coordinator.api.get_doorstation_picture
+    picture_opened = _gate(picture_read, (None, "timed out"))
+    image = asyncio.create_task(_image_bytes(hass, BELL_ENTITY_ID))  # the read is under way
+    await hass.async_block_till_done()
+
+    coordinator.offline_extensions = {EXTENSION}
+    await _later_no_wait(hass, coordinator, clock, 1)
+    picture_opened.set()
+    assert await image is None
+    # The Doorstation going away is no failure to warn about.
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING and "newest bell picture" in r.getMessage()]
+
+    picture_read.side_effect = None
+    picture_read.return_value = (JPEG, None)
+    coordinator.offline_extensions = set()
+    await _later(hass, coordinator, clock, 1)  # back well within the pause of a real failure
+
+    assert await _image_bytes(hass, BELL_ENTITY_ID) == JPEG  # read at once, no pause held it back
+    assert picture_read.await_count == 2
+    assert not any("pictures are read again" in r.getMessage() for r in caplog.records)  # no streak to end
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_failure_streak_of_pictures_ends_when_the_doorstation_goes_away(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="custom_components.comexio.doorstation_pictures")
+    coordinator = await _setup_online(hass, entry)
+    picture_read: AsyncMock = coordinator.api.get_doorstation_picture
+    picture_read.return_value = (None, "not a JPEG")
+    assert await _image_bytes(hass, BELL_ENTITY_ID) is None  # a real failure: pause and warning
+
+    coordinator.offline_extensions = {EXTENSION}
+    await _later(hass, coordinator, clock, 1)
+    coordinator.offline_extensions = set()
+    await _later(hass, coordinator, clock, 1)  # back, well within the pause of the failure from before
+
+    assert await _image_bytes(hass, BELL_ENTITY_ID) is None  # asked again: the pause of the old streak is gone
+    assert picture_read.await_count == 2
+    warned = [r for r in caplog.records if r.levelno == logging.WARNING and "newest bell picture" in r.getMessage()]
+    assert len(warned) == 2  # and the failure after the return starts a streak of its own
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_push_that_met_an_offline_doorstation_does_not_block_the_pushes_after_it(
     hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
 ) -> None:
