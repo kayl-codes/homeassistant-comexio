@@ -302,6 +302,10 @@ DOORSTATION_MOTION_IDENTIFIER = "PIR1"
 # The gallery in the media browser (media_source.py) lists the newest bell and motion pictures of a Doorstation, this
 # many at most: each thumbnail is one read of the Doorstation, and the reads queue behind the camera's on the IO-Server.
 DOORSTATION_GALLERY_MAX_PICTURES = 20
+# A folder of the gallery waits this long for its list at most, the wait for the Doorstation lock included (the list
+# read itself holds the lock for DOORSTATION_PICTURE_LIST_TIMEOUT_SEC): the browser answers a browse request in time or
+# not at all.
+DOORSTATION_GALLERY_LIST_TIMEOUT_SEC = 20.0
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600

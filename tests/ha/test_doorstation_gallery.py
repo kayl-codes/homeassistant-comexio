@@ -21,6 +21,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_GALLERY_MAX_PICTURES,
+    DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_PATH,
 )
 
@@ -68,12 +69,16 @@ async def _unload_when_done(hass: HomeAssistant, mock_config_entry: MockConfigEn
         await hass.config_entries.async_unload(mock_config_entry.entry_id)
 
 
-async def _setup(hass: HomeAssistant, entry: MockConfigEntry) -> Any:
+async def _setup(hass: HomeAssistant, entry: MockConfigEntry, *, online: bool = True) -> Any:
     assert await async_setup_component(hass, "media_source", {})
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done(wait_background_tasks=True)
-    return hass.data[DOMAIN][entry.entry_id]
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    if online:
+        # The fixture's IO data reports the Doorstation's extension offline; the gallery tests start with it online.
+        coordinator.offline_extensions = set()
+    return coordinator
 
 
 def _folder_id(entry: MockConfigEntry) -> str:
@@ -351,7 +356,9 @@ async def test_the_view_serves_a_picture_to_a_logged_in_client(
 
     assert response.status == HTTPStatus.OK
     assert await response.read() == JPEG
-    coordinator.api.get_doorstation_picture.assert_awaited_with(2, "bell_new.jpg")
+    coordinator.api.get_doorstation_picture.assert_awaited_with(
+        2, "bell_new.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+    )
 
 
 async def test_the_view_refuses_a_client_that_is_not_logged_in(
@@ -400,35 +407,95 @@ async def test_the_view_answers_not_found_for_an_empty_picture(
     assert response.status == HTTPStatus.NOT_FOUND
 
 
-async def test_the_view_answers_gateway_timeout_when_the_read_takes_too_long(
+async def test_the_view_bounds_the_lock_hold_of_its_read_and_answers_what_comes_back(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (None, "not read within 8 s")
+    client = await hass_client()
+
+    response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+
+    coordinator.api.get_doorstation_picture.assert_awaited_once_with(
+        2, "bell_new.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+    )
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+async def test_the_view_has_no_budget_of_its_own_beyond_the_lock_hold(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _slow_read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        await asyncio.sleep(0.1)
+        return JPEG, None
+
+    coordinator.api.get_doorstation_picture.side_effect = _slow_read
+    client = await hass_client()
+
+    # Any outer deadline of the view's own, at the hold budget's length, would cut this read off.
+    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.01):
+        response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+
+    assert response.status == HTTPStatus.OK
+    assert await response.read() == JPEG
+
+
+async def test_an_offline_doorstation_is_neither_listed_nor_browsed(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry, online=False)
+
+    # The fixture's own IO data reports the extension offline: the gallery goes by that, not by a test override.
+    assert EXTENSION in coordinator.offline_extensions
+    root = await media_source.async_browse_media(hass, MEDIA_ROOT)
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+
+    assert root.children == []
+    with pytest.raises(BrowseError, match="offline"):
+        await media_source.async_browse_media(hass, folder_id)
+    coordinator.api.get_doorstation_pictures.assert_not_awaited()
+
+
+async def test_an_extension_whose_offline_state_is_not_known_yet_is_offered(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.offline_extensions = None
+
+    root = await media_source.async_browse_media(hass, MEDIA_ROOT)
+
+    assert [child.identifier for child in root.children] == [_folder_id(mock_config_entry)]
+
+
+async def test_a_timeout_raised_by_the_list_read_itself_is_not_taken_for_the_folders_deadline(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.side_effect = TimeoutError
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+
+    with pytest.raises(TimeoutError):
+        await media_source.async_browse_media(hass, folder_id)
+
+
+async def test_a_folder_whose_list_takes_too_long_is_an_error_in_the_browser(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
 
     async def _never_ends(*_args: Any) -> None:
         await asyncio.sleep(60)
 
-    coordinator.api.get_doorstation_picture.side_effect = _never_ends
-    client = await hass_client()
+    coordinator.api.get_doorstation_pictures.side_effect = _never_ends
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
 
-    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.01):
-        response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
-
-    assert response.status == HTTPStatus.GATEWAY_TIMEOUT
-    coordinator.api.get_doorstation_picture.assert_awaited_with(2, "bell_new.jpg")
-
-
-async def test_a_timeout_from_inside_the_read_is_not_taken_for_a_slow_doorstation(
-    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
-) -> None:
-    coordinator = await _setup(hass, mock_config_entry)
-    coordinator.api.get_doorstation_picture.side_effect = TimeoutError
-    client = await hass_client()
-
-    with patch("custom_components.comexio.media_source._LOGGER") as logger:
-        await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
-
-    logger.debug.assert_not_called()
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.01),
+        pytest.raises(BrowseError, match="not read in"),
+    ):
+        await media_source.async_browse_media(hass, folder_id)
 
 
 @pytest.mark.parametrize("digit", ["²", "٢", "２", TOO_LONG_EXT_ID])

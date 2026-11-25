@@ -394,6 +394,18 @@ def test_a_stalled_list_read_ends_at_its_deadline_and_frees_the_lock(
     assert next_read == ((), None)  # the lock was released: the next read ran
 
 
+def test_a_picture_read_given_a_hold_budget_ends_at_it_with_its_cause(comexio_api: ComexioAPI) -> None:
+    async def _stalled(*_args: Any) -> Any:
+        await asyncio.Event().wait()
+
+    api = _api_with(comexio_api, get_doorstation_picture=AsyncMock(side_effect=_stalled))
+
+    async def _read() -> tuple[Any, Any]:
+        return await api.get_doorstation_picture(1, "a.jpg", held_for_sec=0.05)
+
+    assert asyncio.run(asyncio.wait_for(_read(), 5)) == (None, "not read within 0.05 s")
+
+
 def test_the_wait_for_the_lock_does_not_count_into_the_list_deadline(
     comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:

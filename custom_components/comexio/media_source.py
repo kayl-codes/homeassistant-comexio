@@ -34,6 +34,7 @@ from homeassistant.core import HomeAssistant
 from .const import (
     DOMAIN,
     DOORSTATION_GALLERY_LINK_EXPIRY_SEC,
+    DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
     DOORSTATION_GALLERY_MAX_PICTURES,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_NAME,
@@ -122,10 +123,23 @@ def _picture_title(picture: DoorstationPicture) -> str:
     return f"{label} {picture.taken_at:%Y-%m-%d %H:%M:%S}"
 
 
-def _doorstation_title(entry: ConfigEntry, coordinator: ComexioCoordinator, ext_id: int) -> str:
+def _ext_name(coordinator: ComexioCoordinator, ext_id: int) -> str | None:
+    """The name of a known Doorstation's extension; None if the Doorstation is not known."""
     doorstation = coordinator.doorstations.known.get(ext_id)
-    ios = (coordinator.data or {}).get("io", [])
-    name = doorstation_ext_name(doorstation, ios) if doorstation is not None else None
+    if doorstation is None:
+        return None
+    return doorstation_ext_name(doorstation, (coordinator.data or {}).get("io", []))
+
+
+def _offered(coordinator: ComexioCoordinator, ext_id: int) -> bool:
+    """Whether the gallery offers a Doorstation: known, and its extension not offline (the picture entities' rule)."""
+    if ext_id not in coordinator.doorstations.known:
+        return False
+    return _ext_name(coordinator, ext_id) not in (coordinator.offline_extensions or ())
+
+
+def _doorstation_title(entry: ConfigEntry, coordinator: ComexioCoordinator, ext_id: int) -> str:
+    name = _ext_name(coordinator, ext_id)
     label = one_line(name) if name else f"Doorstation {ext_id}"
     return f"{label} ({entry.title})"
 
@@ -162,7 +176,13 @@ def _picture_item(hass: HomeAssistant, entry_id: str, ext_id: int, picture: Door
 async def _folder_children(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int
 ) -> list[BrowseMediaSource]:
-    pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
+    try:
+        async with asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline:
+            pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
+    except TimeoutError:
+        if not deadline.expired():
+            raise
+        raise BrowseError(f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s") from None
     if pictures is None:
         raise BrowseError(f"Doorstation pictures not read: {cause or _SESSION_GONE_CAUSE}")
     newest = newest_first(pictures)[:DOORSTATION_GALLERY_MAX_PICTURES]
@@ -193,6 +213,7 @@ class DoorstationGallery(MediaSource):
                     _folder_item(entry, coordinator, ext_id)
                     for entry, coordinator in _loaded_entries(self.hass)
                     for ext_id in coordinator.doorstations.known
+                    if _offered(coordinator, ext_id)
                 ],
             )
         parsed = _parse(item.identifier)
@@ -204,6 +225,8 @@ class DoorstationGallery(MediaSource):
         if not _is_known(loaded, parsed.ext_id):
             raise BrowseError("Doorstation not known")
         entry, coordinator = loaded
+        if not _offered(coordinator, parsed.ext_id):
+            raise BrowseError("Doorstation offline")
         return BrowseMediaSource(
             domain=DOMAIN,
             identifier=item.identifier,
@@ -248,19 +271,16 @@ class DoorstationPictureView(HomeAssistantView):
         if not _is_known(loaded, number):
             raise web.HTTPNotFound
         _entry, coordinator = loaded
-        try:
-            async with asyncio.timeout(DOORSTATION_PICTURE_READ_TIMEOUT_SEC) as deadline:
-                data, cause = await coordinator.api.get_doorstation_picture(number, name)
-        except TimeoutError:
-            if not deadline.expired():
-                # A timeout from inside the read, not this view's own deadline: it is no slow Doorstation.
-                raise
-            _LOGGER.debug("Doorstation %s picture not read: timed out", number)
-            raise web.HTTPGatewayTimeout from None
+        # The read holds the Doorstation lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC and then answers with a
+        # cause; the wait for the lock is not bounded here, so a queued thumbnail is not cut off unseen.
+        data, cause = await coordinator.api.get_doorstation_picture(
+            number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+        )
         if data is None:
             # Comexio's answer for a picture rotated out since the listing lands here as well (503, not 404).
             _LOGGER.debug("Doorstation %s picture not read: %s", number, cause or _SESSION_GONE_CAUSE)
             raise web.HTTPServiceUnavailable
         if not data:
+            _LOGGER.debug("Doorstation %s picture is empty: answered as not found", number)
             raise web.HTTPNotFound
         return web.Response(body=data, content_type=_JPEG_MIME)

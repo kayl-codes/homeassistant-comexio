@@ -2034,13 +2034,18 @@ class ComexioAPI:
             held_for_sec=DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
         )
 
-    async def get_doorstation_picture(self, ext_id: int, name: str) -> tuple[bytes | None, str | None]:
+    async def get_doorstation_picture(
+        self, ext_id: int, name: str, *, held_for_sec: float | None = None
+    ) -> tuple[bytes | None, str | None]:
         """One stored picture of a Doorstation as JPEG bytes, or None and the failure cause.
 
-        `name` is a file name from get_doorstation_pictures. Same rules as there.
+        `name` is a file name from get_doorstation_pictures. Same rules as there. `held_for_sec` bounds the time the
+        read holds the Doorstation lock (see _doorstation_read); the wait for the lock is not bounded here.
         """
         return await self._doorstation_read(
-            lambda: self.client.get_doorstation_picture(ext_id, name), "Doorstation picture not fetched"
+            lambda: self.client.get_doorstation_picture(ext_id, name),
+            "Doorstation picture not fetched",
+            held_for_sec=held_for_sec,
         )
 
     async def _doorstation_read[T](
