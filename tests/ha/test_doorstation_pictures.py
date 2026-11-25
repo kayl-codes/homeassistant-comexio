@@ -1035,7 +1035,7 @@ async def test_a_picture_read_that_failed_after_the_doorstation_went_away_sets_n
 
     assert await _image_bytes(hass, BELL_ENTITY_ID) == JPEG  # read at once, no pause held it back
     assert picture_read.await_count == 2
-    assert not any("pictures are read again" in r.getMessage() for r in caplog.records)  # no streak to end
+    assert all("pictures are read again" not in r.getMessage() for r in caplog.records)  # no streak to end
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
@@ -1057,6 +1057,28 @@ async def test_a_failure_streak_of_pictures_ends_when_the_doorstation_goes_away(
     assert picture_read.await_count == 2
     warned = [r for r in caplog.records if r.levelno == logging.WARNING and "newest bell picture" in r.getMessage()]
     assert len(warned) == 2  # and the failure after the return starts a streak of its own
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_failure_streak_of_the_list_ends_when_the_doorstation_goes_away(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.INFO, logger="custom_components.comexio.doorstation_pictures")
+    coordinator = await _setup_online(hass, entry)
+    reads: AsyncMock = coordinator.api.get_doorstation_pictures
+    reads.return_value = (None, "timed out")
+    await _later(hass, coordinator, clock, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC)  # a real failure: the warning
+
+    def warnings() -> list[logging.LogRecord]:
+        return [r for r in caplog.records if r.levelno == logging.WARNING and "list of its pictures" in r.getMessage()]
+
+    assert len(warnings()) == 1
+    coordinator.offline_extensions = {EXTENSION}
+    await _later(hass, coordinator, clock, 1)
+    coordinator.offline_extensions = set()
+    await _later(hass, coordinator, clock, 1)  # back: the first update reads at once, and it fails again
+
+    assert len(warnings()) == 2  # the streak ended with the Doorstation going away, so this one warns afresh
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

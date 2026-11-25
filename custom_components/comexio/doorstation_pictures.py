@@ -290,9 +290,10 @@ class DoorstationPictureFeed:
             # A removed Doorstation keeps its feed until the entry unloads: the pictures it held (up to 4 MiB each) go,
             # the names stay for the entities. The first image request after it is back reads the JPEG again.
             self._jpegs = {}
-            # A streak of failed picture reads ends with it too: after the return the first failure warns again, and
-            # the pause of a failure from before does not hold a picture back.
+            # A streak of failed reads ends with it too, the list's and the pictures': after the return the first
+            # failure warns again, and the pause of a picture failure from before does not hold a picture back.
             self._picture_failures = {}
+            self._list_failed = False
             return
         if self._last_read is None or time.monotonic() - self._last_read >= DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC:
             self._read_soon()
