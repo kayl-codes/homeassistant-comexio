@@ -1184,6 +1184,81 @@ async def test_setup_does_not_pin_what_it_read_for_an_entry_that_changed_meanwhi
     assert NEW_HOST in notify.call_args.args[1]
 
 
+async def test_setup_closes_the_https_session_when_the_login_raises(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    certificate_handshake: AsyncMock,
+) -> None:
+    _serve(certificate_handshake, PINNED)
+    api_returns["login"] = RuntimeError("boom")
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_ERROR
+    assert CONF_CERTIFICATE_FINGERPRINT not in mock_config_entry.data
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED]
+    mock_comexio_api[0].close.assert_called_once()
+
+
+async def test_setup_sends_no_credentials_over_http_to_an_entry_pinned_meanwhile(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+) -> None:
+    # The handshake finds no HTTPS for the host it read, but a reconfigure pinned the entry to another host in
+    # the meantime: an API without a pin would log in to that host unencrypted.
+    async def _entry_is_pinned_during_the_handshake(*_args: Any) -> str:
+        hass.config_entries.async_update_entry(
+            mock_config_entry, data={**mock_config_entry.data, CONF_HOST: NEW_HOST, CONF_CERTIFICATE_FINGERPRINT: OTHER}
+        )
+        raise ComexioConnectionError("no HTTPS")
+
+    certificate_handshake.side_effect = _entry_is_pinned_during_the_handshake
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert not mock_comexio_api  # no API, so no login of any kind
+    notify.assert_not_called()
+
+
+async def test_setup_does_not_fall_back_to_http_for_an_entry_that_changed_meanwhile(
+    hass: HomeAssistant,
+    mock_config_entry: MockConfigEntry,
+    mock_comexio_api: list[ComexioAPI],
+    api_returns: dict,
+    api_attributes: dict,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The HTTPS login failed without a clear cause; the check for a replaced certificate awaits, and the entry is
+    # pinned to another host during it: the fallback must not log in to that host over plain HTTP.
+    _serve(certificate_handshake, PINNED)
+    api_returns["login"] = False
+    api_attributes["last_login_error"] = LOGIN_ERROR_CONNECTION
+
+    async def _entry_is_pinned_during_the_check() -> None:
+        hass.config_entries.async_update_entry(
+            mock_config_entry, data={**mock_config_entry.data, CONF_HOST: NEW_HOST, CONF_CERTIFICATE_FINGERPRINT: OTHER}
+        )
+
+    monkeypatch.setattr(
+        certificate_module, "async_replaced_fingerprint", lambda _api: _entry_is_pinned_during_the_check()
+    )
+
+    await _setup(hass, mock_config_entry)
+
+    assert mock_config_entry.state is ConfigEntryState.SETUP_RETRY
+    assert [api.fingerprint for api in mock_comexio_api] == [PINNED]  # no second, unpinned API
+    mock_comexio_api[0].close.assert_called_once()
+    notify.assert_not_called()
+
+
 @pytest.mark.parametrize(
     ("login_error", "state"),
     [(LOGIN_ERROR_CONNECTION, ConfigEntryState.SETUP_RETRY), ("rejected", ConfigEntryState.SETUP_ERROR)],
