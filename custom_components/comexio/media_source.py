@@ -305,11 +305,21 @@ class DoorstationPictureView(HomeAssistantView):
         if not _is_gallery_picture(name):
             _LOGGER.debug("Doorstation %s picture not served: not a bell or motion picture", number)
             raise web.HTTPNotFound
-        # The read holds the Doorstation lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC and then answers with a
-        # cause; the wait for the lock is not bounded here, so a queued thumbnail is not cut off unseen.
-        data, cause = await coordinator.api.get_doorstation_picture(
-            number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
-        )
+        # The read, its wait for the Doorstation lock included, has DOORSTATION_PICTURE_READ_TIMEOUT_SEC in all, the
+        # same rule as the picture entities: a thumbnail queued behind a stuck read must not keep its request open.
+        # This outer budget ends first: the lock hold (held_for_sec) starts only once the lock is taken, so that bound
+        # is a second safety net that rarely decides.
+        try:
+            async with asyncio.timeout(DOORSTATION_PICTURE_READ_TIMEOUT_SEC) as deadline:
+                data, cause = await coordinator.api.get_doorstation_picture(
+                    number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+                )
+        except TimeoutError:
+            # A timeout from inside the read (socket or connect) is no budget overrun: not ours to answer as 503.
+            if not deadline.expired():
+                raise
+            _LOGGER.debug("Doorstation %s picture not read within %s s", number, DOORSTATION_PICTURE_READ_TIMEOUT_SEC)
+            raise web.HTTPServiceUnavailable from None
         if not _still_offered(hass, entry_id, coordinator, number):
             # Offline or unloaded while the read waited: no picture is handed out, and 503 says a retry may succeed.
             _LOGGER.debug("Doorstation %s went offline or was unloaded during the picture read", number)

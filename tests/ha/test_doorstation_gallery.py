@@ -591,24 +591,57 @@ async def test_the_view_bounds_the_lock_hold_of_its_read_and_answers_what_comes_
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
 
-async def test_the_view_has_no_budget_of_its_own_beyond_the_lock_hold(
+async def test_the_view_serves_a_read_that_finishes_within_its_budget(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
 
     async def _slow_read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.01)
         return JPEG, None
 
     coordinator.api.get_doorstation_picture.side_effect = _slow_read
     client = await hass_client()
 
-    # Any outer deadline of the view's own, at the hold budget's length, would cut this read off.
-    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.01):
+    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.5):
         response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.OK
     assert await response.read() == JPEG
+
+
+async def test_a_thumbnail_queued_past_the_budget_answers_unavailable(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _stuck_read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        # Stands for the wait behind a read that holds the lock: the budget covers that wait too.
+        await asyncio.sleep(60)
+        return JPEG, None
+
+    coordinator.api.get_doorstation_picture.side_effect = _stuck_read
+    client = await hass_client()
+
+    with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.05):
+        response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    coordinator.api.get_doorstation_picture.assert_awaited_once()
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+async def test_a_timeout_from_inside_the_read_is_no_budget_overrun(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    # A socket or connect timeout of the read itself: the view's budget did not run out, so it is not a 503. aiohttp
+    # answers an unhandled TimeoutError with 504 and logs its traceback.
+    coordinator.api.get_doorstation_picture.side_effect = TimeoutError
+    client = await hass_client()
+
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert response.status == HTTPStatus.GATEWAY_TIMEOUT
 
 
 async def test_an_offline_doorstation_is_neither_listed_nor_browsed(
