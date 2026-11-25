@@ -7,6 +7,12 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.50.0-rc1] — 2026-11-25
+
+Covers everything since v0.43.0.
+
 ### ✨ New Features
 - **Web-IO push over HTTPS (#165):** the Web-IO commands now carry the protocol Home Assistant is reached with at the address given to Comexio: HTTPS if Home Assistant answers with TLS there (external URL, custom address or automatic address), otherwise HTTP. Until now every command stayed on HTTP, and Comexio does not pick the protocol from the address. The nightly webhook migration (01:30) moves the commands to the new protocol like it moves them to their own webhook ids: it remembers per command which protocol it was last written with, rewrites the ones that differ and asks for a **restart of the Comexio server**, because Comexio only sends a changed command after one. After the restart it reads every command back and checks its protocol along with its path; a command that still holds the old protocol goes back into the next run. The old webhook id is switched off only after that check. The address sync of a Web-IO device still changes only the IP, never the protocol. `press_action` with `webhook_migration` on the sync button starts the migration right away instead of waiting for the night; the result comes as a notification and in the log. The restart repair now also covers a pending protocol change. Details in [Webhook Security](docs/WEBHOOK_SECURITY.md#the-protocol-of-the-commands).
 - **Doorstation camera: still image straight from the Doorstation (#180):** the Doorstation serves its camera under its own address (`http://<Doorstation IP>/proxy/cam/1/`, no login), so the still image no longer has to go through the IO-Server. The integration reads the IP from the settings of the Doorstation's extension (field "IP-Adresse (optional)") and takes the first frame of the Doorstation's stream as the image (cards, `camera.snapshot`). Without a usable address (the field says `local`, holds a host name or is empty), or while the Doorstation does not answer, the camera works as before: still images over the IO-Server (one warning per failure; the direct way is tried again after 5 minutes, the address is then read afresh). The extension's address is looked up again every 10 minutes, so an address that was set later, or changed, is noticed. Address lookup and read together get 5 seconds, so the IO-Server fallback still answers inside Home Assistant's own image timeout. The picture size and frame rate are the ones set on the Doorstation (IO-Server: devices → Doorstation → camera); the reporter saw no data at all at 1280x720 with 15 frames per second, while 8 frames per second ran fine.
@@ -25,6 +31,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **No "Comexio: restart needed" notice for a new or renamed command:** every command the sync saved moved the stamp the notice and the switch-off of the old webhook id wait for, so a plain rename or a new marker raised the notice again after every sync, although Comexio pushes both within seconds without a restart (measured on a live installation: renamed marker and new marker, each synced, each pushed at once). Now only a change of path, server field or protocol of an existing command asks for a restart; a new command and a plain rename of a command that is already switched over do not. The nightly rewrite, a type fix, a range correction and an uploaded class still do. The ledger remembers that no restart is due, so a Home Assistant restart does not bring the notice back (#335).
 
 ### ⚠️ Requirements & Notes
+- **Restart required** after updating.
 - **In the default catalog:** the integration is now listed in the Marketplace (Home Assistant 2026.11 and newer) and in HACS without adding it as a custom repository. The README has a My Home Assistant button that opens its page directly.
 - **Marketplace category:** the manifest now names the category `hubs_protocols.building_automation`, so the integration is sorted under building automation in the Home Assistant Marketplace. This also silences the HACS check's "manifest has no categories" warning. Nothing changes in how the integration runs.
 - **Dependency:** `aiocomexio==0.16.0` (was 0.14.1), installed automatically by Home Assistant. It also finds a Doorstation on Comexio OS 11.1.5, whose camera tile names no ids (#180).
@@ -553,7 +560,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.43.0...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.50.0-rc1...HEAD
+[0.50.0-rc1]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.43.0...v0.50.0-rc1
 [0.43.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.41.0...v0.42.0
 [0.41.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.40.0...v0.41.0
