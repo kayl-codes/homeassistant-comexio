@@ -265,6 +265,25 @@ DOORSTATION_DIRECT_MAX_BYTES = 4 * 1024 * 1024
 # of their `event` entities.
 DOORSTATION_BELL_IDENTIFIERS = frozenset({"DI1", "DI2", "DI3"})
 DOORBELL_EVENT_RING = "ring"
+# The pictures a Doorstation stores for a bell press or motion (`image` entities, one per kind). The list of stored
+# pictures is read again after this long at the earliest (a poll or a push of the entry's own refreshes it, the
+# Doorstation's list is a request of its own on the IO-Server, which serves one request at a time).
+DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC = 300.0
+# A bell or motion push is followed by a read of the list after this pause: the Doorstation stores the picture a moment
+# after the event (not measured on a real device), and a read right at the push would list the picture before it.
+DOORSTATION_PICTURE_PUSH_DELAY_SEC = 5.0
+# A push whose read lists nothing new (or fails) is read again after this pause, at most this many times in all:
+# the delay above is a guess, and without a repeat the picture would show only at the next poll after the interval.
+DOORSTATION_PICTURE_PUSH_RETRY_SEC = 10.0
+DOORSTATION_PICTURE_PUSH_TRIES = 3
+# One picture read (waiting for the Doorstation reads in front of it included) gets this long: Home Assistant gives
+# an image request about 10 s and cancels it without a trace, so a longer wait would end unseen.
+DOORSTATION_PICTURE_READ_TIMEOUT_SEC = 8.0
+# A picture whose read failed is asked for again after this pause, or at once when a newer one is listed: each failing
+# read holds up the IO-Server's other Doorstation reads (camera stills, live stream starts) for its whole timeout.
+DOORSTATION_PICTURE_RETRY_SEC = 60.0
+# The IOs of a Doorstation whose push says that a picture was taken: the bell buttons and the motion sensor.
+DOORSTATION_PICTURE_PUSH_IDENTIFIERS = DOORSTATION_BELL_IDENTIFIERS | {"PIR1"}
 
 # parse_config() output key of the stored Web-IO commands whose name an earlier command already
 # has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
@@ -1041,6 +1060,11 @@ def io_push_signal(server_id: str, ext_id: str | int, identifier: str) -> str:
     return f"{DOMAIN}_{server_id}_io_push_{ext_id}_{identifier.lower()}"
 
 
+def doorstation_pictures_signal(server_id: str, ext_id: int | str) -> str:
+    """Dispatcher signal fired when the newest bell or motion picture of a Doorstation changed (see image.py)."""
+    return f"{DOMAIN}_{server_id}_doorstation_pictures_{ext_id}"
+
+
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
     return f"{DOMAIN}_{server_id}_bus_load_update"
@@ -1155,6 +1179,11 @@ def doorstation_camera_unique_id(server_id: str, ext_id: int | str) -> str:
 def doorstation_doorbell_unique_id(server_id: str, ext_id: int | str, identifier: str) -> str:
     """unique_id of the doorbell event of a bell button (DI1-DI3) — the extension id and the identifier only."""
     return f"comexio_{server_id}_doorstation{ext_id}_{identifier}_doorbell".lower()
+
+
+def doorstation_picture_unique_id(server_id: str, ext_id: int | str, kind: str) -> str:
+    """unique_id of a Doorstation's picture entity (kind `bell` or `motion`) — the extension id and the kind only."""
+    return f"comexio_{server_id}_doorstation{ext_id}_{kind}_picture".lower()
 
 
 def extension_firmware_update_unique_id(server_id: str, ext_name: str) -> str:

@@ -272,6 +272,12 @@
       }
     },
     "image": {
+      "doorstation_bell_picture": {
+        "name": "Letztes Klingelbild"
+      },
+      "doorstation_motion_picture": {
+        "name": "Letztes Bewegungsbild"
+      },
       "plan_preview": {
         "name": "Vorschaubild"
       }

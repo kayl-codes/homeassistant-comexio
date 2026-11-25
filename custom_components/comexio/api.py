@@ -28,6 +28,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    DoorstationPicture,
     PlacedModuleBlock,
     RawConfig,
     SystemInfo,
@@ -2014,6 +2015,48 @@ class ComexioAPI:
                 cause or "none configured",
             )
         return address, cause
+
+    async def get_doorstation_pictures(self, ext_id: int) -> tuple[tuple[DoorstationPicture, ...] | None, str | None]:
+        """The pictures a Doorstation stored (newest first), or None and the failure cause.
+
+        Read with the admin session, one small request (see aiocomexio's get_doorstation_pictures). The caller logs a
+        failure, so it is only debug-logged here. An empty tuple means the Doorstation stored none. With the session
+        gone (unload, Home Assistant stopping) nothing is asked and the answer is None without a cause.
+        """
+        return await self._doorstation_read(
+            lambda: self.client.get_doorstation_pictures(ext_id), "Doorstation pictures not fetched"
+        )
+
+    async def get_doorstation_picture(self, ext_id: int, name: str) -> tuple[bytes | None, str | None]:
+        """One stored picture of a Doorstation as JPEG bytes, or None and the failure cause.
+
+        `name` is a file name from get_doorstation_pictures. Same rules as there.
+        """
+        return await self._doorstation_read(
+            lambda: self.client.get_doorstation_picture(ext_id, name), "Doorstation picture not fetched"
+        )
+
+    async def _doorstation_read[T](
+        self, fetch: Callable[[], Awaitable[T]], certificate_note: str
+    ) -> tuple[T | None, str | None]:
+        """fetch()'s result or None and the failure cause, one after the other with the other Doorstation reads.
+
+        Comexio serves one request at a time, so these reads share the camera's lock. A lapsed admin session is logged
+        in again once; a certificate mismatch goes to the repair (the cause says so); a session that was closed
+        under the request, or is gone already, is no failure to report.
+        """
+        if self._session_gone_reason() is not None:
+            return None, None
+        try:
+            async with self._doorstation_snapshot_lock:
+                return await self._system_info_part(fetch, [])
+        except ComexioCertificateMismatchError as err:
+            self._note_certificate_mismatch(err, certificate_note)
+            return None, SYSTEM_INFO_CERTIFICATE_CHANGED
+        except RuntimeError as err:
+            if not self.met_the_closed_session(err):
+                raise
+            return None, None
 
     def _load_config_names(self) -> tuple[str, str, str, str, str]:
         """Load configuration names from config_entry."""

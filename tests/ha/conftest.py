@@ -130,6 +130,9 @@ def api_returns() -> dict[str, Any]:
         "get_doorstations": ({}, None),
         # A Doorstation extension with no usable address of its own (`local`), so its camera stays on the IO-Server.
         "get_doorstation_address": (None, None),
+        # No picture stored on the Doorstation (an empty list, no failure) and none to read.
+        "get_doorstation_pictures": ((), None),
+        "get_doorstation_picture": (None, None),
         # An unreadable form, as the real method returns it. The nightly range check (04:20 test time) runs in any
         # test whose loaded entry spans that minute; it counts the command as not checked.
         "get_webio_command_form": None,

@@ -103,9 +103,9 @@ PLATFORMS = [
 ]
 
 
-# The platforms whose entities belong to a Doorstation and are not removed as orphans (camera.py, event.py);
-# the events only while the IO import is on (see DOORBELL_ENTITY_DOMAIN).
-DOORSTATION_ENTITY_DOMAINS = frozenset({"camera", "event"})
+# The platforms whose entities belong to a Doorstation and are not removed as orphans (camera.py, event.py, and the
+# picture entities of image.py); the events only while the IO import is on (see DOORBELL_ENTITY_DOMAIN).
+DOORSTATION_ENTITY_DOMAINS = frozenset({"camera", "event", "image"})
 # The doorbell events are made of IOs: with the IO import off none is created, so their entries are not kept.
 DOORBELL_ENTITY_DOMAIN = "event"
 
@@ -793,7 +793,7 @@ def _doorstation_entity_uids(
     import_ios: bool,
     ignored_types: frozenset[str] = frozenset(),
 ) -> set[str]:
-    """The unique_ids of the Doorstation cameras (camera.py) and doorbell events (event.py) that are registered.
+    """The unique_ids of the Doorstation cameras (camera.py), doorbell events (event.py) and pictures (image.py).
 
     The orphan cleanup keeps them. Such an entity turns unavailable while the IO home page shows no Doorstation (a
     changed page reads like that, and a page that is only partly understood would drop some), so its registry entry
