@@ -80,6 +80,7 @@ from .coordinator import (
     saved_config_store,
 )
 from .entity import track_quickbus_devices
+from .media_source import DoorstationPictureView
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
 from .services import async_setup_services
@@ -150,16 +151,18 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSONAR
-    """Listen for the certificate push's "Accept certificate" button once, for every entry.
+    """Listen for the certificate push's "Accept certificate" button once, for every entry, and serve the gallery.
 
     Not per entry: an entry that met another certificate at setup waits for the repair without being loaded,
-    and its push button must work all the same.
+    and its push button must work all the same. The view that serves the stored Doorstation pictures to the media
+    browser (media_source.py) is registered once for the same reason.
     """
 
     async def _certificate_action(event: Event) -> None:
         await async_handle_certificate_action(hass, event)
 
     hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, _certificate_action)
+    hass.http.register_view(DoorstationPictureView())
     return True
 
 

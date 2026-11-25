@@ -299,6 +299,15 @@ DOORSTATION_PICTURE_LIST_TIMEOUT_SEC = 10.0
 DOORSTATION_PICTURE_RETRY_SEC = 60.0
 # The IO of a Doorstation whose push says that a motion picture was taken (the bell buttons say it for bell pictures).
 DOORSTATION_MOTION_IDENTIFIER = "PIR1"
+# The gallery in the media browser (media_source.py) lists the newest bell and motion pictures of a Doorstation, this
+# many at most: each thumbnail is one read of the Doorstation, and the reads queue behind the camera's on the IO-Server.
+DOORSTATION_GALLERY_MAX_PICTURES = 20
+# How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
+# thumbnails of a folder in that time.
+DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600
+# The view that serves one stored picture to the gallery (its path has the entry, the extension and the file name).
+DOORSTATION_PICTURE_VIEW_PATH = "/api/comexio/doorstation_picture"
+DOORSTATION_PICTURE_VIEW_NAME = "api:comexio:doorstation_picture"
 
 # parse_config() output key of the stored Web-IO commands whose name an earlier command already
 # has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
