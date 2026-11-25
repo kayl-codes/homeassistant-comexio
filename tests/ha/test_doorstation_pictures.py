@@ -306,6 +306,20 @@ async def test_the_pictures_of_an_offline_extension_are_unavailable_and_not_read
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_an_extension_that_is_offline_at_startup_reads_no_list(
+    hass: HomeAssistant, entry: MockConfigEntry, api_returns: dict[str, Any]
+) -> None:
+    api_returns["get_raw_config"]["FubModules"]["1"]["2"]["extension"]["Identifier"] = EXTENSION  # no serial: offline
+    coordinator = await _setup(hass, entry)
+
+    state = hass.states.get(BELL_ENTITY_ID)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
+    coordinator.api.get_doorstation_pictures.assert_not_called()
+    coordinator.api.get_doorstation_picture.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_page_without_doorstation_keeps_the_registered_pictures_unavailable(
     hass: HomeAssistant, entry: MockConfigEntry, api_returns: dict[str, Any]
 ) -> None:
@@ -371,6 +385,8 @@ async def test_a_bell_button_and_the_motion_sensor_each_start_one_delayed_read(
 
     async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, identifier), 1)
     async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, identifier), 1)  # a second push inside the pause
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert reads.await_count == 1  # nothing is read before the pause is over
     async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1))
     await hass.async_block_till_done(wait_background_tasks=True)
 
