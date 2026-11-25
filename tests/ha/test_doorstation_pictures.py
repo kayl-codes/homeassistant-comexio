@@ -1321,9 +1321,9 @@ async def test_the_frontend_gets_the_picture_through_the_image_proxy(
     hass: HomeAssistant, entry: MockConfigEntry, hass_client: Any
 ) -> None:
     assert await async_setup_component(hass, "http", {})
+    coordinator = await _setup_online(hass, entry)  # before the client: its server freezes the router, and the
+    assert coordinator is not None  # webhook component the entry depends on registers a view
     client = await hass_client()
-    coordinator = await _setup_online(hass, entry)
-    assert coordinator is not None
 
     response = await client.get(f"/api/image_proxy/{BELL_ENTITY_ID}")
 
