@@ -647,6 +647,45 @@ async def test_a_read_that_ends_with_the_session_is_no_failure_to_report(
     assert not [r for r in ours if r.levelno >= logging.WARNING and "pictures" in r.getMessage()]
 
 
+# --- the interval is the feed's own ---------------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_list_is_read_every_interval_without_any_coordinator_update(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The coordinator's interval can be longer than the advertised five minutes (Sourcery on #338)."""
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+
+    await _fire_timers(hass, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC + 1)
+
+    assert reads.await_count == 2
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_interval_reads_nothing_while_the_extension_is_offline(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    coordinator.offline_extensions = {EXTENSION}
+
+    await _fire_timers(hass, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC + 1)
+
+    assert coordinator.api.get_doorstation_pictures.await_count == 1
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_interval_ends_with_the_entry(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+
+    assert await hass.config_entries.async_unload(entry.entry_id)
+    await _fire_timers(hass, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC + 1)
+
+    assert reads.await_count == 1
+
+
 # --- a push that comes while a read runs, and a push whose picture is not stored yet ---------------------------------
 
 
@@ -705,9 +744,10 @@ async def test_a_push_whose_read_finds_nothing_new_is_read_again_a_bounded_numbe
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
-async def test_a_press_while_a_retry_waits_renews_the_tries_without_a_second_timer(
+async def test_a_press_while_retries_of_its_kind_wait_does_not_renew_them(
     hass: HomeAssistant, entry: MockConfigEntry
 ) -> None:
+    """A repeated or forged push must not keep the reads going (Sourcery on #338)."""
     coordinator = await _setup_online(hass, entry)
     reads = coordinator.api.get_doorstation_pictures
     async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
@@ -715,11 +755,157 @@ async def test_a_press_while_a_retry_waits_renews_the_tries_without_a_second_tim
     await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
     assert reads.await_count == 3  # the start's read and two tries of three: the last one waits
 
-    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)  # a second press, a retry is waiting
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)  # the bell picture is still awaited
     for _ in range(DOORSTATION_PICTURE_PUSH_TRIES + 1):
         await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
 
-    assert reads.await_count == 1 + 2 + DOORSTATION_PICTURE_PUSH_TRIES  # full tries again, one timer at a time
+    assert reads.await_count == 1 + DOORSTATION_PICTURE_PUSH_TRIES  # the tries were not renewed
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_press_before_the_first_read_of_a_push_is_covered_by_it(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "PIR1"), 1)  # the other kind, same waiting read
+
+    for _ in range(DOORSTATION_PICTURE_PUSH_TRIES + 2):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 1 + DOORSTATION_PICTURE_PUSH_TRIES  # one cycle awaits both kinds
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_press_before_the_first_read_of_a_push_is_awaited_too(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The bell picture shows up at once, the motion picture does not: the retries go on for the second kind."""
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    newer_bell = DoorstationPicture(name="bell_newer.jpg", kind=BELL, taken_at=datetime(2026, 11, 22, 7, 0, 0))
+    reads.return_value = ((newer_bell, MOTION_PICTURE, NEW_BELL), None)
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "PIR1"), 1)
+
+    for _ in range(DOORSTATION_PICTURE_PUSH_TRIES + 2):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 1 + DOORSTATION_PICTURE_PUSH_TRIES  # the motion picture was awaited all along
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_read_of_the_interval_that_lists_the_awaited_picture_ends_the_retries_of_a_push(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+    assert reads.await_count == 2  # nothing new yet, a retry waits
+
+    newer = DoorstationPicture(name="bell_newer.jpg", kind=BELL, taken_at=datetime(2026, 11, 22, 7, 0, 0))
+    reads.return_value = ((newer, MOTION_PICTURE, NEW_BELL), None)
+    await _later(hass, coordinator, clock, DOORSTATION_PICTURE_REFRESH_INTERVAL_SEC)  # no push read: a plain update
+    assert reads.await_count == 3
+
+    for _ in range(DOORSTATION_PICTURE_PUSH_TRIES):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 4  # the waiting retry ran once, found nothing awaited any more and ended the cycle
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_push_that_met_an_offline_doorstation_does_not_block_the_pushes_after_it(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    coordinator.offline_extensions = {EXTENSION}
+    await _later(hass, coordinator, clock, 1)
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+    assert reads.await_count == 1  # nothing was read while it was offline
+
+    coordinator.offline_extensions = set()
+    await _later(hass, coordinator, clock, 1)  # the first update after that reads at once
+    assert reads.await_count == 2
+
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+
+    assert reads.await_count == 3  # the push after it opened a cycle of its own
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_press_of_the_other_kind_during_the_retries_gets_its_own_tries_afterwards(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+    assert reads.await_count == 2  # the bell cycle's first read; the motion picture is not awaited yet
+
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "PIR1"), 1)
+    for _ in range(2 * DOORSTATION_PICTURE_PUSH_TRIES + 1):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 1 + 2 * DOORSTATION_PICTURE_PUSH_TRIES  # the bell's tries, then the motion's
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_burst_of_pushes_starts_no_more_than_one_follow_up_cycle(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The unauthenticated webhook accepts forged pushes while the old id is on: the reads must stay bounded."""
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+
+    for _ in range(50):
+        async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+        async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "PIR1"), 1)
+    for _ in range(3 * DOORSTATION_PICTURE_PUSH_TRIES):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 1 + 2 * DOORSTATION_PICTURE_PUSH_TRIES  # the bell's cycle and one for the motion
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_new_picture_of_the_other_kind_does_not_end_the_retries_of_a_push(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    newer_motion = DoorstationPicture(name="motion_new.jpg", kind=MOTION, taken_at=datetime(2026, 11, 22, 7, 0, 0))
+    reads.return_value = ((newer_motion, MOTION_PICTURE, NEW_BELL, OLD_BELL), None)  # no new bell picture
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "DI1"), 1)
+
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+    for _ in range(DOORSTATION_PICTURE_PUSH_TRIES + 1):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 1 + DOORSTATION_PICTURE_PUSH_TRIES  # the bell picture was still missing: all tries
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_motion_push_stops_retrying_once_the_motion_picture_is_listed(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    reads = coordinator.api.get_doorstation_pictures
+    newer_motion = DoorstationPicture(name="motion_new.jpg", kind=MOTION, taken_at=datetime(2026, 11, 22, 7, 0, 0))
+    reads.return_value = ((newer_motion, MOTION_PICTURE, NEW_BELL, OLD_BELL), None)
+    async_dispatcher_send(hass, io_push_signal(SERVER_ID, 2, "PIR1"), 1)
+
+    await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_DELAY_SEC + 1)
+    for _ in range(DOORSTATION_PICTURE_PUSH_TRIES):
+        await _fire_timers(hass, DOORSTATION_PICTURE_PUSH_RETRY_SEC + 1)
+
+    assert reads.await_count == 2  # the awaited kind showed up at once
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

@@ -69,12 +69,13 @@ def test_no_picture_of_the_kind_is_none() -> None:
     assert newest_of_kind([_picture("m.jpg", MOTION, datetime(2026, 11, 20, 8, 0, 0))], BELL) is None
 
 
-def test_two_pictures_of_the_same_second_pick_the_name_that_sorts_first() -> None:
+def test_two_pictures_of_the_same_moment_pick_the_one_listed_first() -> None:
+    """The library lists the newest first (equal moments by name), so the first listed is the one it ranks highest."""
     moment = datetime(2026, 11, 20, 8, 0, 0)
     b = _picture("bell_b.jpg", BELL, moment)
     a = _picture("bell_a.jpg", BELL, moment)
 
-    assert newest_of_kind([b, a], BELL) is a
+    assert newest_of_kind([b, a], BELL) is b
     assert newest_of_kind([a, b], BELL) is a
 
 
@@ -322,3 +323,62 @@ def test_the_picture_reads_run_one_after_the_other_with_the_other_doorstation_re
     asyncio.run(_together())
 
     assert most == 1
+
+
+def test_a_stalled_list_read_ends_at_its_deadline_and_frees_the_lock(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without it the list would hold the camera's lock for the whole HTTP timeout (Sourcery on #338)."""
+    monkeypatch.setattr("custom_components.comexio.api.DOORSTATION_PICTURE_LIST_TIMEOUT_SEC", 0.05)
+    calls = 0
+
+    async def _stalled_then_fine(*_args: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.Event().wait()  # the first read never answers
+        return ()
+
+    api = _api_with(comexio_api, get_doorstation_pictures=AsyncMock(side_effect=_stalled_then_fine))
+
+    async def _twice() -> tuple[Any, Any]:
+        return await api.get_doorstation_pictures(1), await api.get_doorstation_pictures(1)
+
+    stalled, next_read = asyncio.run(_twice())
+
+    assert stalled == (None, "not read within 0.05 s")
+    assert next_read == ((), None)  # the lock was released: the next read ran
+
+
+def test_the_wait_for_the_lock_does_not_count_into_the_list_deadline(
+    comexio_api: ComexioAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("custom_components.comexio.api.DOORSTATION_PICTURE_LIST_TIMEOUT_SEC", 0.05)
+
+    async def _slow_frame(*_args: Any) -> Any:
+        await asyncio.sleep(0.15)  # longer than the list's deadline: the list only waits behind it
+        return b""
+
+    api = _api_with(
+        comexio_api,
+        get_doorstation_pictures=AsyncMock(return_value=()),
+        get_doorstation_snapshot=AsyncMock(side_effect=_slow_frame),
+    )
+
+    async def _together() -> Any:
+        frame = asyncio.create_task(api.get_doorstation_snapshot(1))
+        await asyncio.sleep(0.01)  # the frame holds the lock now
+        return await api.get_doorstation_pictures(1), await frame
+
+    listed, _ = asyncio.run(_together())
+
+    assert listed == ((), None)
+
+
+def test_a_timeout_of_the_request_itself_is_not_taken_for_the_list_deadline(comexio_api: ComexioAPI) -> None:
+    """Only the deadline of the read is mapped to a cause; any other TimeoutError is not this method's to hide."""
+    api = _api_with(comexio_api, get_doorstation_pictures=AsyncMock(side_effect=TimeoutError("inner")))
+    read = api.get_doorstation_pictures(1)
+
+    with pytest.raises(TimeoutError, match="inner"):
+        asyncio.run(read)

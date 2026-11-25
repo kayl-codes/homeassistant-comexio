@@ -70,6 +70,7 @@ from .const import (
     DEFAULT_SCHEMA_IO,
     DEFAULT_SCHEMA_KNX,
     DEFAULT_SCHEMA_MARKER,
+    DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
     FLANKE_PORT_IN,
     FLANKE_PORT_OUT_RISING,
     FUB_BASE_KEY_FLANKE,
@@ -2024,7 +2025,9 @@ class ComexioAPI:
         gone (unload, Home Assistant stopping) nothing is asked and the answer is None without a cause.
         """
         return await self._doorstation_read(
-            lambda: self.client.get_doorstation_pictures(ext_id), "Doorstation pictures not fetched"
+            lambda: self.client.get_doorstation_pictures(ext_id),
+            "Doorstation pictures not fetched",
+            timeout=DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
         )
 
     async def get_doorstation_picture(self, ext_id: int, name: str) -> tuple[bytes | None, str | None]:
@@ -2037,19 +2040,26 @@ class ComexioAPI:
         )
 
     async def _doorstation_read[T](
-        self, fetch: Callable[[], Awaitable[T]], certificate_note: str
+        self, fetch: Callable[[], Awaitable[T]], certificate_note: str, *, timeout: float | None = None
     ) -> tuple[T | None, str | None]:
         """fetch()'s result or None and the failure cause, one after the other with the other Doorstation reads.
 
         Comexio serves one request at a time, so these reads share the camera's lock. A lapsed admin session is logged
         in again once; a certificate mismatch goes to the repair (the cause says so); a session that was closed
-        under the request, or is gone already, is no failure to report.
+        under the request, or is gone already, is no failure to report. `timeout` bounds the time the lock is held
+        (waiting for it is not counted); a read that runs out of it is a failure with its own cause.
         """
         if self._session_gone_reason() is not None:
             return None, None
         try:
             async with self._doorstation_snapshot_lock:
-                return await self._system_info_part(fetch, [])
+                try:
+                    async with asyncio.timeout(timeout) as deadline:
+                        return await self._system_info_part(fetch, [])
+                except TimeoutError:
+                    if not deadline.expired():
+                        raise
+                    return None, f"not read within {timeout:g} s"
         except ComexioCertificateMismatchError as err:
             self._note_certificate_mismatch(err, certificate_note)
             return None, SYSTEM_INFO_CERTIFICATE_CHANGED
