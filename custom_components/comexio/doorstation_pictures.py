@@ -238,8 +238,11 @@ class DoorstationPictureFeed:
             )
         # No size check of its own: aiocomexio reads at most 4 MiB of a picture (more is a failure, not data), so the
         # memory kept is two pictures per Doorstation at most.
-        if self.available:  # poll() may have dropped the kept pictures while this one was on its way
-            self._jpegs[kind] = (picture.name, data)
+        if not self.available:
+            # It went away while this one was on its way: poll() dropped the kept pictures, and nothing is kept or
+            # served for a Doorstation that cannot be reached (as `_cached_jpeg` does).
+            return None
+        self._jpegs[kind] = (picture.name, data)
         return data
 
     # --- when to read the list ---

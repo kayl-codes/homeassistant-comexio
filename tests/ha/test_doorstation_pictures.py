@@ -901,6 +901,29 @@ async def test_the_kept_pictures_of_a_doorstation_that_went_away_are_dropped(
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_picture_read_that_ends_after_the_doorstation_went_away_serves_and_keeps_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
+) -> None:
+    coordinator = await _setup_online(hass, entry)
+    picture_read: AsyncMock = coordinator.api.get_doorstation_picture
+    picture_opened = _gate(picture_read, (JPEG, None))
+    image = asyncio.create_task(_image_bytes(hass, BELL_ENTITY_ID))  # the read is under way
+    await hass.async_block_till_done()
+
+    coordinator.offline_extensions = {EXTENSION}
+    await _later_no_wait(hass, coordinator, clock, 1)
+    picture_opened.set()
+
+    assert await image is None  # the picture of a Doorstation that is away is not served
+    picture_read.side_effect = None
+    picture_read.return_value = (JPEG, None)
+    coordinator.offline_extensions = set()
+    await _later(hass, coordinator, clock, 1)
+    assert await _image_bytes(hass, BELL_ENTITY_ID) == JPEG
+    assert picture_read.await_count == 2  # nothing of the first read was kept
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_a_push_that_met_an_offline_doorstation_does_not_block_the_pushes_after_it(
     hass: HomeAssistant, entry: MockConfigEntry, clock: _Clock
 ) -> None:
