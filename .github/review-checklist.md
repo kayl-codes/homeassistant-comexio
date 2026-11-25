@@ -279,8 +279,9 @@ command building live in the separate PyPI library `aiocomexio`; this repo wires
   certificate, user) and then awaits a handshake, a login or other I/O must not build an API or write the entry from
   that snapshot unchecked. Compare `entry.data` with the snapshot after the await (`certificate._check_entry_unchanged`
   is the model); if it changed, abort, or let the setup run again on the fresh data. Only `entry.data` is compared, not
-  the options. Flag a client built with the pin or host of pre-await data, and a write of pre-await data after an
-  await (#337).
+  the options. A temporary client built from pre-await data is fine when it is closed and the step aborts after the
+  comparison finds a change (`async_create_api` does this). Flag a client built from pre-await data that is kept or
+  used without that comparison, and a write of pre-await data after an await (#337).
 - **Skip guards before the first write:** a list chosen up front (the classes a sync runs, the plans a repair
   fixes) can be stale by the time an item's turn comes — an options save mid-sync can empty a class. The guard
   against writing for nothing (an empty template, no wanted command) runs right before that item's first write and
