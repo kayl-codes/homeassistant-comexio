@@ -395,15 +395,27 @@ def test_a_stalled_list_read_ends_at_its_deadline_and_frees_the_lock(
 
 
 def test_a_picture_read_given_a_hold_budget_ends_at_it_with_its_cause(comexio_api: ComexioAPI) -> None:
-    async def _stalled(*_args: Any) -> Any:
-        await asyncio.Event().wait()
+    calls = 0
 
-    api = _api_with(comexio_api, get_doorstation_picture=AsyncMock(side_effect=_stalled))
+    async def _stalled_then_fine(*_args: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.Event().wait()  # the first read never answers
+        return b"\xff\xd8"
 
-    async def _read() -> tuple[Any, Any]:
-        return await api.get_doorstation_picture(1, "a.jpg", held_for_sec=0.05)
+    api = _api_with(comexio_api, get_doorstation_picture=AsyncMock(side_effect=_stalled_then_fine))
 
-    assert asyncio.run(asyncio.wait_for(_read(), 5)) == (None, "not read within 0.05 s")
+    async def _twice() -> tuple[Any, Any]:
+        first = await api.get_doorstation_picture(1, "a.jpg", held_for_sec=0.05)
+        second = await api.get_doorstation_picture(1, "a.jpg", held_for_sec=0.05)
+        return first, second
+
+    stalled, next_read = asyncio.run(asyncio.wait_for(_twice(), 5))  # a missing deadline fails, it does not hang
+
+    assert stalled == (None, "not read within 0.05 s")
+    assert next_read == (b"\xff\xd8", None)  # the lock was released: the next read ran
+    assert api.client.get_doorstation_picture.await_count == 2  # both reads reached the client
 
 
 def test_the_wait_for_the_lock_does_not_count_into_the_list_deadline(

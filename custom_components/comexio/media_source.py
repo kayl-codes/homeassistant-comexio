@@ -71,6 +71,12 @@ def _gallery_read_slots(hass: HomeAssistant, entry_id: str) -> asyncio.Semaphore
     )
 
 
+def forget_gallery_read_slots(hass: HomeAssistant, entry_id: str) -> None:
+    """Drops the places of an unloaded entry. A request that still waits keeps its own reference to them; a new one
+    finds the entry unloaded before it reaches for a place (the views and the browser check that first)."""
+    hass.data.pop(f"{_GALLERY_READ_SLOTS_KEY}_{entry_id}", None)
+
+
 class _Item(NamedTuple):
     """A parsed identifier of the source: a Doorstation folder (name None) or one of its pictures."""
 
@@ -208,8 +214,13 @@ def _picture_item(hass: HomeAssistant, entry_id: str, ext_id: int, picture: Door
 async def _folder_children(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int
 ) -> list[BrowseMediaSource]:
+    # The list read takes a gallery place like a thumbnail does: a browse batch must not queue on the Doorstation lock
+    # ahead of the camera and the picture entities either. The wait for the place counts into the list's deadline.
     try:
-        async with asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline:
+        async with (
+            asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline,
+            _gallery_read_slots(hass, entry_id),
+        ):
             pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
     except TimeoutError:
         if not deadline.expired():

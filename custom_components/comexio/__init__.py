@@ -80,7 +80,7 @@ from .coordinator import (
     saved_config_store,
 )
 from .entity import track_quickbus_devices
-from .media_source import DoorstationPictureView
+from .media_source import DoorstationPictureView, forget_gallery_read_slots
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
 from .services import async_setup_services
@@ -1253,6 +1253,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
             finally:
                 coordinator.api.close()
         hass.data[DOMAIN].pop(f"{entry.entry_id}_webhooks", None)
+        forget_gallery_read_slots(hass, entry.entry_id)
 
         # Remove global services when the last entry is unloaded
         if not hass.config_entries.async_entries(DOMAIN):

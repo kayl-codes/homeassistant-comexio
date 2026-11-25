@@ -27,7 +27,7 @@ from custom_components.comexio.const import (
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_PATH,
 )
-from custom_components.comexio.media_source import _gallery_read_slots
+from custom_components.comexio.media_source import _GALLERY_READ_SLOTS_KEY, _gallery_read_slots
 
 pytestmark = pytest.mark.usefixtures("mock_comexio_api")
 
@@ -680,6 +680,47 @@ async def test_a_browser_batch_takes_only_a_couple_of_places_on_the_doorstation_
 
     assert [response.status for response in responses] == [HTTPStatus.OK] * 5
     assert most_at_once == DOORSTATION_GALLERY_CONCURRENT_READS
+
+
+async def test_a_browse_batch_takes_only_a_couple_of_places_on_the_doorstation_lock(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    running = 0
+    most_at_once = 0
+    places_full = asyncio.Event()
+
+    async def _list(*_args: Any, **_kwargs: Any) -> tuple[tuple[DoorstationPicture, ...], None]:
+        nonlocal running, most_at_once
+        running += 1
+        most_at_once = max(most_at_once, running)
+        if running == DOORSTATION_GALLERY_CONCURRENT_READS:
+            places_full.set()
+        # As in the thumbnail batch: the first reads wait until all places run; the overlap does not depend on timing.
+        async with asyncio.timeout(5):
+            await places_full.wait()
+        await asyncio.sleep(0.05)
+        running -= 1
+        return (OTHER_PICTURE, MOTION_PICTURE, NEW_BELL, OLD_BELL), None
+
+    coordinator.api.get_doorstation_pictures.side_effect = _list
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+
+    folders = await asyncio.gather(*(media_source.async_browse_media(hass, folder) for _ in range(5)))
+
+    assert all(len(folder_item.children) == 3 for folder_item in folders)
+    assert most_at_once == DOORSTATION_GALLERY_CONCURRENT_READS
+
+
+async def test_unloading_the_entry_drops_its_gallery_places(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    await _setup(hass, mock_config_entry)
+    _gallery_read_slots(hass, mock_config_entry.entry_id)
+
+    await hass.config_entries.async_unload(mock_config_entry.entry_id)
+
+    assert f"{_GALLERY_READ_SLOTS_KEY}_{mock_config_entry.entry_id}" not in hass.data
 
 
 async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_unavailable(
