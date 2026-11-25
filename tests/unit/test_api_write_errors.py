@@ -329,18 +329,18 @@ def test_the_setup_builds_the_counter_sensor_once() -> None:
     # Reads the source only: a quick check that runs without Home Assistant. That the sensor really is registered
     # and follows a failed write is asserted on a running entry, in
     # tests/ha/test_certificate.py::test_a_restart_meeting_another_certificate_sets_up_read_only_from_the_saved_config.
-    setup = ast.parse(
-        inspect.getsource(sensor_module.async_setup_entry) + inspect.getsource(sensor_module._server_sensors)
-    )
-    added = [
-        node
-        for node in ast.walk(setup)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == ComexioApiWriteErrorsSensor.__name__
-    ]
+    setup = ast.parse(inspect.getsource(sensor_module.async_setup_entry))
+    server_sensors = ast.parse(inspect.getsource(sensor_module._server_sensors))
 
-    assert len(added) == 1
+    def calls(tree: ast.AST, name: str) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
+        ]
+
+    assert len(calls(setup, sensor_module._server_sensors.__name__)) == 1  # the setup takes the sensors from here
+    assert len(calls(server_sensors, ComexioApiWriteErrorsSensor.__name__)) == 1
 
 
 def test_an_io_write_without_extension_names_the_target_in_its_log(

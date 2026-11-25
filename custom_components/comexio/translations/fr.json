@@ -9,6 +9,7 @@
       "unknown": "Une erreur inattendue s'est produite.",
       "certificate_changed": "Comexio présente un autre certificat que celui enregistré. Vérifiez-le sous Paramètres → Réparations.",
       "certificate_unstable": "Comexio a présenté lors du test de connexion un autre certificat qu'un instant auparavant. Quelque chose dans le réseau répond peut-être à sa place — vérifiez-le et réessayez.",
+      "reauth_entry_changed": "Les paramètres de ce serveur ont changé pendant le test de la connexion, par exemple un autre certificat a été accepté. Rien n'a été enregistré. Veuillez saisir à nouveau le mot de passe.",
       "invalid_host": "Ce n’est pas un nom d’hôte ni une adresse IP (éventuellement avec :port) – sans http://, chemins, etc.",
       "invalid_ignored_ids": "Liste d’ID invalide. Saisissez des nombres (p. ex. 3, M12 ou K12), des plages (p. ex. 8-12) ou des listes (p. ex. 1, 3, 5).",
       "invalid_ignored_io_types": "Type d’E/S invalide. Un type se compose uniquement de lettres (p. ex. QI, TL, UL), sans chiffre."

@@ -649,11 +649,27 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
+            base = dict(entry.data)  # like reconfigure: what the test below is based on
             data_updates, errors = await self._reauth_test(entry, user_input)
+            if not errors and dict(entry.data) != base:
+                # The test ran against the old host and pin: stored now, its pin and date would undo the change.
+                # The form stays open (an aborted reauth would not come back by itself) and is built from the new data.
+                _LOGGER.warning(
+                    "Reauth of '%s' not saved: the entry changed while the login was tested", base[CONF_HOST]
+                )
+                errors = {"base": "reauth_entry_changed"}
             if not errors:
                 # Like reconfigure: credentials left in options from older versions would shadow the new ones.
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-                return self._async_update_and_reload_once(entry, data_updates=data_updates, options=clean_options)
+                result = self._async_update_and_reload_once(entry, data_updates=data_updates, options=clean_options)
+                if CONF_CERTIFICATE_FINGERPRINT in data_updates and CONF_CERTIFICATE_FINGERPRINT not in base:
+                    notify_https_enabled(
+                        self.hass,
+                        entry.data[CONF_SERVER_ID],
+                        base[CONF_HOST],
+                        data_updates[CONF_CERTIFICATE_FINGERPRINT],
+                    )
+                return result
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -684,7 +700,6 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             pinned = {**user_input, **pin_data(fingerprint)}
             errors = await self._connection_errors(entry, merged | pinned)
             if not errors:
-                notify_https_enabled(self.hass, entry.data[CONF_SERVER_ID], merged[CONF_HOST], fingerprint)
                 return pinned, errors
             if errors != {"base": "cannot_connect"}:
                 return user_input, errors

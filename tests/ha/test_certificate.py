@@ -548,7 +548,7 @@ async def test_a_reconfigure_that_keeps_the_pin_keeps_its_date(
 
     assert result["reason"] == "reconfigure_successful"
     assert pinned_entry.data[CONF_CERTIFICATE_PINNED_AT] == PINNED_AT_BEFORE
-    assert pin_clock == []  # nothing was pinned, so nothing was dated
+    assert not pin_clock  # nothing was pinned, so nothing was dated
 
 
 def _form_default(result: dict[str, Any], field: str) -> Any:
@@ -771,7 +771,7 @@ async def _reauth(hass: HomeAssistant, entry: MockConfigEntry) -> dict[str, Any]
 
 @pytest.mark.usefixtures("mock_setup_entry")
 async def test_reauth_tests_the_new_credentials_over_the_pinned_https(
-    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI]
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, mock_comexio_api: list[ComexioAPI], notify: MagicMock
 ) -> None:
     # New credentials never go out unencrypted to a Comexio that serves HTTPS.
     pinned_entry.add_to_hass(hass)
@@ -785,6 +785,7 @@ async def test_reauth_tests_the_new_credentials_over_the_pinned_https(
     assert (pinned_entry.data[CONF_USERNAME], pinned_entry.data[CONF_PASSWORD]) == ("admin2", "new-secret")
     assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
     assert pinned_entry.data[CONF_CERTIFICATE_PINNED_AT] == PINNED_AT_BEFORE  # no new pin, no new date
+    notify.assert_not_called()  # nothing was pinned, nobody is told about a new certificate
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
@@ -809,6 +810,61 @@ async def test_reauth_of_an_http_entry_pins_the_certificate_the_login_worked_wit
     assert mock_config_entry.data[CONF_PASSWORD] == "new-secret"
     notify.assert_called_once()
     assert PINNED_SHOWN in notify.call_args.args[1]
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+@pytest.mark.parametrize("entry_fixture", ["pinned_entry", "mock_config_entry"], ids=["pinned", "not yet pinned"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        lambda data: {**data, CONF_CERTIFICATE_FINGERPRINT: "c" * 64},
+        lambda data: {**data, CONF_HOST: NEW_HOST},
+    ],
+    ids=["another pin", "another host"],
+)
+async def test_reauth_does_not_store_what_was_tested_against_an_entry_that_changed_meanwhile(
+    hass: HomeAssistant,
+    request: pytest.FixtureRequest,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+    entry_fixture: str,
+    change: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    # The test ran against the host and pin read when it began: stored after another flow changed them, its pin and
+    # date would undo that change, and nobody is told about a pin that was not stored.
+    entry: MockConfigEntry = request.getfixturevalue(entry_fixture)
+    entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+    host = entry.data[CONF_HOST]
+
+    async def _entry_changes_during_the_login_test(*_args: Any) -> dict:
+        hass.config_entries.async_update_entry(entry, data=change(dict(entry.data)))
+        return {}
+
+    with patch.object(
+        config_flow_module.ComexioConfigFlow, "_connection_errors", side_effect=_entry_changes_during_the_login_test
+    ):
+        result = await _reauth(hass, entry)
+
+    # The form stays open: an aborted reauth would not come back by itself.
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reauth_confirm"
+    assert result["errors"] == {"base": "reauth_entry_changed"}
+    assert entry.data == change(dict(entry.data)) | {CONF_PASSWORD: entry.data[CONF_PASSWORD]}  # the change stays
+    assert entry.data[CONF_PASSWORD] != "new-secret"
+    assert f"Reauth of '{host}' not saved" in caplog.text
+    notify.assert_not_called()
+
+    # Entered again, it is tested against the entry as it is now and stored.
+    result = await hass.config_entries.flow.async_configure(
+        result["flow_id"], {CONF_USERNAME: "admin2", CONF_PASSWORD: "new-secret"}
+    )
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reauth_successful"
+    assert entry.data[CONF_PASSWORD] == "new-secret"
+    assert entry.data[CONF_HOST] == change(dict(entry.data))[CONF_HOST]  # the other host is kept
 
 
 @pytest.mark.usefixtures("mock_setup_entry")
