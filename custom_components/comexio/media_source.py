@@ -5,8 +5,10 @@ motion pictures its Doorstation stored (``DOORSTATION_GALLERY_MAX_PICTURES``), e
 and the pictures come from the Doorstation through ComexioAPI, the reads the picture entities use too. Nothing is kept
 here: a thumbnail is read when the browser asks for it.
 
-The thumbnail links are signed for the connection that browses (``async_sign_path``), and the view that serves a
-picture needs the login as well: the pictures show only to someone who may browse the media.
+The thumbnail links are signed for the connection that browses (``async_sign_path``): a browser's image request cannot
+carry a login, so the signature takes its place. A signed link is a bearer link: whoever holds it can fetch that one
+picture until it expires (``DOORSTATION_GALLERY_LINK_EXPIRY_SEC``, one hour). The view itself requires a login for any
+request without a signature.
 """
 
 import asyncio
@@ -16,7 +18,7 @@ import logging
 from typing import NamedTuple
 
 from aiocomexio import DoorstationPicture, DoorstationPictureKind
-from aiocomexio.doorstation_pictures import is_plain_picture_name
+from aiocomexio.doorstation_pictures import is_plain_picture_name, picture_of
 from aiohttp import web
 from homeassistant.components.http import KEY_HASS, HomeAssistantView
 from homeassistant.components.http.auth import async_sign_path
@@ -138,6 +140,24 @@ def _offered(coordinator: ComexioCoordinator, ext_id: int) -> bool:
     return _ext_name(coordinator, ext_id) not in (coordinator.offline_extensions or ())
 
 
+def _is_gallery_picture(name: str) -> bool:
+    """A plain file name of a bell or motion picture: the kinds the gallery lists. The kind is read off the name, so
+    serving one takes no list read (a thumbnail is one request each)."""
+    return is_plain_picture_name(name) and picture_of(name).kind in PICTURE_KINDS
+
+
+def _may_serve(loaded: tuple[ConfigEntry, ComexioCoordinator] | None, ext_id: int, name: str) -> bool:
+    """Whether the gallery serves this picture now: the Doorstation is offered and the picture is a listed kind."""
+    return loaded is not None and _offered(loaded[1], ext_id) and _is_gallery_picture(name)
+
+
+def _still_offered(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int) -> bool:
+    """Whether the Doorstation is still offered through the coordinator a read started with. An unload removes the
+    entry from hass.data, and a reload brings a new coordinator; the old one keeps its state, so it is not trusted."""
+    loaded = _loaded(hass, entry_id)
+    return loaded is not None and loaded[1] is coordinator and _offered(coordinator, ext_id)
+
+
 def _doorstation_title(entry: ConfigEntry, coordinator: ComexioCoordinator, ext_id: int) -> str:
     name = _ext_name(coordinator, ext_id)
     label = one_line(name) if name else f"Doorstation {ext_id}"
@@ -227,6 +247,10 @@ class DoorstationGallery(MediaSource):
         entry, coordinator = loaded
         if not _offered(coordinator, parsed.ext_id):
             raise BrowseError("Doorstation offline")
+        children = await _folder_children(self.hass, entry.entry_id, coordinator, parsed.ext_id)
+        # The list read may have waited: the entry can have been unloaded or reloaded, or the Doorstation gone offline.
+        if not _still_offered(self.hass, entry.entry_id, coordinator, parsed.ext_id):
+            raise BrowseError("Doorstation offline or no longer known")
         return BrowseMediaSource(
             domain=DOMAIN,
             identifier=item.identifier,
@@ -236,7 +260,7 @@ class DoorstationGallery(MediaSource):
             can_play=False,
             can_expand=True,
             children_media_class=MediaClass.IMAGE,
-            children=await _folder_children(self.hass, entry.entry_id, coordinator, parsed.ext_id),
+            children=children,
         )
 
     async def async_resolve_media(self, item: MediaSourceItem) -> PlayMedia:
@@ -244,8 +268,7 @@ class DoorstationGallery(MediaSource):
         if (
             parsed is None
             or parsed.name is None
-            or not is_plain_picture_name(parsed.name)
-            or not _is_known(_loaded(self.hass, parsed.entry_id), parsed.ext_id)
+            or not _may_serve(_loaded(self.hass, parsed.entry_id), parsed.ext_id, parsed.name)
         ):
             raise Unresolvable("Could not resolve this media item")
         return PlayMedia(_view_path(parsed.entry_id, parsed.ext_id, parsed.name), _JPEG_MIME)
@@ -266,18 +289,31 @@ class DoorstationPictureView(HomeAssistantView):
     requires_auth = True
 
     async def get(self, request: web.Request, entry_id: str, ext_id: str, name: str) -> web.Response:
-        loaded = _loaded(request.app[KEY_HASS], entry_id)
-        if loaded is None or not _is_ext_id(ext_id) or not is_plain_picture_name(name):
+        hass = request.app[KEY_HASS]
+        if not _is_ext_id(ext_id):
             raise web.HTTPNotFound
         number = int(ext_id)
-        if not _is_known(loaded, number):
+        # The name is left out of the logs: it is the picture's, not the Doorstation's.
+        loaded = _loaded(hass, entry_id)
+        if loaded is None:
+            _LOGGER.debug("Doorstation %s picture not served: entry not loaded", number)
             raise web.HTTPNotFound
         _entry, coordinator = loaded
+        if not _offered(coordinator, number):
+            _LOGGER.debug("Doorstation %s picture not served: Doorstation offline", number)
+            raise web.HTTPNotFound
+        if not _is_gallery_picture(name):
+            _LOGGER.debug("Doorstation %s picture not served: not a bell or motion picture", number)
+            raise web.HTTPNotFound
         # The read holds the Doorstation lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC and then answers with a
         # cause; the wait for the lock is not bounded here, so a queued thumbnail is not cut off unseen.
         data, cause = await coordinator.api.get_doorstation_picture(
             number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
         )
+        if not _still_offered(hass, entry_id, coordinator, number):
+            # Offline or unloaded while the read waited: no picture is handed out, and 503 says a retry may succeed.
+            _LOGGER.debug("Doorstation %s went offline or was unloaded during the picture read", number)
+            raise web.HTTPServiceUnavailable
         if data is None:
             # Comexio's answer for a picture rotated out since the listing lands here as well (503, not 404).
             _LOGGER.debug("Doorstation %s picture not read: %s", number, cause or _SESSION_GONE_CAUSE)

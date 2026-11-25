@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Generator
+import copy
 from datetime import datetime, timedelta
 from http import HTTPStatus
 from typing import Any
@@ -32,16 +33,16 @@ JPEG = b"\xff\xd8gallery\xff\xd9"
 MEDIA_ROOT = f"media-source://{DOMAIN}"
 TOO_LONG_EXT_ID = "1" * 5000  # more digits than int() takes (4300)
 OTHER_PICTURE = DoorstationPicture(
-    name="other.jpg", kind=DoorstationPictureKind.OTHER, taken_at=datetime(2026, 11, 22, 7, 0, 0)
+    name="26-11-22-07-00-00_door.jpg", kind=DoorstationPictureKind.OTHER, taken_at=datetime(2026, 11, 22, 7, 0, 0)
 )
 MOTION_PICTURE = DoorstationPicture(
-    name="motion.jpg", kind=DoorstationPictureKind.MOTION, taken_at=datetime(2026, 11, 21, 19, 0, 0)
+    name="26-11-21-19-00-00_pir.jpg", kind=DoorstationPictureKind.MOTION, taken_at=datetime(2026, 11, 21, 19, 0, 0)
 )
 NEW_BELL = DoorstationPicture(
-    name="bell_new.jpg", kind=DoorstationPictureKind.BELL, taken_at=datetime(2026, 11, 21, 18, 30, 0)
+    name="26-11-21-18-30-00_bell.jpg", kind=DoorstationPictureKind.BELL, taken_at=datetime(2026, 11, 21, 18, 30, 0)
 )
 OLD_BELL = DoorstationPicture(
-    name="bell_old.jpg", kind=DoorstationPictureKind.BELL, taken_at=datetime(2026, 11, 20, 8, 0, 0)
+    name="26-11-20-08-00-00_bell.jpg", kind=DoorstationPictureKind.BELL, taken_at=datetime(2026, 11, 20, 8, 0, 0)
 )
 
 
@@ -115,9 +116,9 @@ async def test_a_folder_lists_the_newest_bell_and_motion_pictures_first(
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
     assert [child.identifier for child in folder.children] == [
-        _picture_id(mock_config_entry, "motion.jpg"),
-        _picture_id(mock_config_entry, "bell_new.jpg"),
-        _picture_id(mock_config_entry, "bell_old.jpg"),
+        _picture_id(mock_config_entry, "26-11-21-19-00-00_pir.jpg"),
+        _picture_id(mock_config_entry, "26-11-21-18-30-00_bell.jpg"),
+        _picture_id(mock_config_entry, "26-11-20-08-00-00_bell.jpg"),
     ]
 
 
@@ -142,8 +143,8 @@ async def test_a_folder_keeps_to_the_cap_of_pictures(hass: HomeAssistant, mock_c
         folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
     assert [child.identifier for child in folder.children] == [
-        _picture_id(mock_config_entry, "motion.jpg"),
-        _picture_id(mock_config_entry, "bell_new.jpg"),
+        _picture_id(mock_config_entry, "26-11-21-19-00-00_pir.jpg"),
+        _picture_id(mock_config_entry, "26-11-21-18-30-00_bell.jpg"),
     ]
 
 
@@ -155,18 +156,18 @@ async def test_a_thumbnail_is_a_signed_link_to_the_picture(
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
     thumbnail = folder.children[0].thumbnail
-    assert thumbnail.startswith(f"{_picture_path(mock_config_entry, 'motion.jpg')}?")
+    assert thumbnail.startswith(f"{_picture_path(mock_config_entry, '26-11-21-19-00-00_pir.jpg')}?")
     assert "authSig=" in thumbnail
 
 
 async def test_a_picture_resolves_to_its_view(hass: HomeAssistant, mock_config_entry: MockConfigEntry) -> None:
     await _setup(hass, mock_config_entry)
 
-    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, 'bell_new.jpg')}"
+    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, '26-11-21-18-30-00_bell.jpg')}"
 
     play = await media_source.async_resolve_media(hass, media_id, None)
 
-    assert play.url == _picture_path(mock_config_entry, "bell_new.jpg")
+    assert play.url == _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
     assert play.mime_type == "image/jpeg"
 
 
@@ -260,15 +261,16 @@ async def test_a_root_without_a_known_doorstation_is_empty(
 async def test_a_picture_without_a_moment_comes_last_and_is_titled_by_its_name(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, api_returns: dict[str, Any]
 ) -> None:
-    undated = DoorstationPicture(name="bell_nodate.jpg", kind=DoorstationPictureKind.BELL, taken_at=None)
+    # A name with an impossible moment: still a bell picture by its name, but no moment to sort by.
+    undated = DoorstationPicture(name="26-13-40-25-61-61_bell.jpg", kind=DoorstationPictureKind.BELL, taken_at=None)
     api_returns["get_doorstation_pictures"] = ((undated, MOTION_PICTURE, NEW_BELL, OLD_BELL), None)
     await _setup(hass, mock_config_entry)
 
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
     last = folder.children[-1]
-    assert last.identifier == _picture_id(mock_config_entry, "bell_nodate.jpg")
-    assert last.title == "Doorbell (bell_nodate.jpg)"
+    assert last.identifier == _picture_id(mock_config_entry, "26-13-40-25-61-61_bell.jpg")
+    assert last.title == "Doorbell (26-13-40-25-61-61_bell.jpg)"
 
 
 async def test_a_name_that_is_no_plain_picture_name_is_not_listed(
@@ -285,28 +287,31 @@ async def test_a_name_that_is_no_plain_picture_name_is_not_listed(
 
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
-    assert [child.identifier for child in folder.children] == [_picture_id(mock_config_entry, "bell_new.jpg")]
+    assert [child.identifier for child in folder.children] == [
+        _picture_id(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    ]
 
 
 async def test_a_folder_shows_only_the_cap_of_the_newest_pictures_of_a_longer_list(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, api_returns: dict[str, Any]
 ) -> None:
     count = DOORSTATION_GALLERY_MAX_PICTURES + 5
+    moments = [datetime(2026, 11, 1) + timedelta(hours=hour) for hour in range(count)]
     oldest_first = tuple(
         DoorstationPicture(
-            name=f"bell_{hour:02d}.jpg",
-            kind=DoorstationPictureKind.BELL,
-            taken_at=datetime(2026, 11, 1) + timedelta(hours=hour),
+            name=f"{moment:%y-%m-%d-%H-%M-%S}_bell.jpg", kind=DoorstationPictureKind.BELL, taken_at=moment
         )
-        for hour in range(count)
+        for moment in moments
     )
     api_returns["get_doorstation_pictures"] = (oldest_first, None)
     await _setup(hass, mock_config_entry)
 
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
 
-    assert len(folder.children) == DOORSTATION_GALLERY_MAX_PICTURES
-    assert folder.children[0].identifier == _picture_id(mock_config_entry, f"bell_{count - 1:02d}.jpg")
+    newest_first = [f"{moment:%y-%m-%d-%H-%M-%S}_bell.jpg" for moment in reversed(moments)]
+    assert [child.identifier for child in folder.children] == [
+        _picture_id(mock_config_entry, name) for name in newest_first[:DOORSTATION_GALLERY_MAX_PICTURES]
+    ]
 
 
 async def test_a_signed_thumbnail_is_served_without_a_login(
@@ -327,7 +332,7 @@ async def test_a_resolve_for_an_unloaded_entry_is_unresolvable(
 ) -> None:
     await _setup(hass, mock_config_entry)
     await hass.config_entries.async_unload(mock_config_entry.entry_id)
-    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, 'bell_new.jpg')}"
+    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, '26-11-21-18-30-00_bell.jpg')}"
 
     with pytest.raises(Unresolvable):
         await media_source.async_resolve_media(hass, media_id, None)
@@ -337,7 +342,7 @@ async def test_a_picture_of_a_doorstation_that_is_not_known_does_not_resolve(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     await _setup(hass, mock_config_entry)
-    media_id = f"{MEDIA_ROOT}/{mock_config_entry.entry_id}/9/bell_new.jpg"
+    media_id = f"{MEDIA_ROOT}/{mock_config_entry.entry_id}/9/26-11-21-18-30-00_bell.jpg"
 
     with pytest.raises(Unresolvable):
         await media_source.async_resolve_media(hass, media_id, None)
@@ -352,12 +357,12 @@ async def test_the_view_serves_a_picture_to_a_logged_in_client(
     coordinator = await _setup(hass, mock_config_entry)
     client = await hass_client()
 
-    response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.OK
     assert await response.read() == JPEG
     coordinator.api.get_doorstation_picture.assert_awaited_with(
-        2, "bell_new.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+        2, "26-11-21-18-30-00_bell.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
     )
 
 
@@ -367,9 +372,173 @@ async def test_the_view_refuses_a_client_that_is_not_logged_in(
     await _setup(hass, mock_config_entry)
     client = await hass_client_no_auth()
 
-    response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.UNAUTHORIZED
+
+
+@pytest.mark.parametrize("name", ["26-11-22-07-00-00_door.jpg", "26-11-22-07-00-00_shot.jpg", "bell_new.jpg"])
+async def test_a_picture_of_another_kind_does_not_resolve(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, name: str
+) -> None:
+    await _setup(hass, mock_config_entry)
+
+    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, name)}"
+
+    with pytest.raises(Unresolvable):
+        await media_source.async_resolve_media(hass, media_id, None)
+
+
+@pytest.mark.parametrize("name", ["26-11-22-07-00-00_door.jpg", "26-11-22-07-00-00_shot.jpg", "bell_new.jpg"])
+async def test_the_view_answers_not_found_for_a_picture_of_another_kind(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, name: str
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    client = await hass_client()
+
+    response = await client.get(_picture_path(mock_config_entry, name))
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "name", ["26-11-21-19-00-00_pir.jpg", "26-11-21-19-00-00_PIR.jpg", "26-13-40-25-61-61_bell.jpg"]
+)
+async def test_a_motion_picture_and_an_undated_bell_picture_resolve_and_are_served(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, name: str
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    client = await hass_client()
+    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, name)}"
+
+    play = await media_source.async_resolve_media(hass, media_id, None)
+    response = await client.get(_picture_path(mock_config_entry, name))
+
+    assert play.url == _picture_path(mock_config_entry, name)
+    assert response.status == HTTPStatus.OK
+    assert await response.read() == JPEG
+    coordinator.api.get_doorstation_picture.assert_awaited_with(
+        2, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+    )
+
+
+async def test_every_picture_the_folder_lists_resolves_and_is_served(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    await _setup(hass, mock_config_entry)
+    client = await hass_client()
+    folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
+
+    assert folder.children
+    for child in folder.children:
+        play = await media_source.async_resolve_media(hass, f"{MEDIA_ROOT}/{child.identifier}", None)
+        response = await client.get(play.url)
+        assert response.status == HTTPStatus.OK
+
+
+async def test_an_offline_doorstation_is_neither_resolved_nor_served(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.offline_extensions = {EXTENSION}
+    client = await hass_client()
+    media_id = f"{MEDIA_ROOT}/{_picture_id(mock_config_entry, '26-11-21-18-30-00_bell.jpg')}"
+
+    with pytest.raises(Unresolvable):
+        await media_source.async_resolve_media(hass, media_id, None)
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert response.status == HTTPStatus.NOT_FOUND
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+
+
+async def test_a_folder_whose_extension_goes_offline_during_the_list_read_is_not_listed(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _goes_offline(*_args: Any) -> tuple[tuple[DoorstationPicture, ...], None]:
+        coordinator.offline_extensions = {EXTENSION}
+        return (NEW_BELL,), None
+
+    coordinator.api.get_doorstation_pictures.side_effect = _goes_offline
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+
+    with pytest.raises(BrowseError, match="offline or no longer known"):
+        await media_source.async_browse_media(hass, folder_id)
+    coordinator.api.get_doorstation_pictures.assert_awaited_once()
+
+
+async def test_a_folder_whose_entry_is_unloaded_during_the_list_read_is_not_listed(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _unloaded(*_args: Any) -> tuple[tuple[DoorstationPicture, ...], None]:
+        # What an unload does: the entry leaves hass.data while the list read is under way.
+        hass.data[DOMAIN].pop(mock_config_entry.entry_id)
+        return (NEW_BELL,), None
+
+    coordinator.api.get_doorstation_pictures.side_effect = _unloaded
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+
+    with pytest.raises(BrowseError, match="no longer known"):
+        await media_source.async_browse_media(hass, folder_id)
+    coordinator.api.get_doorstation_pictures.assert_awaited_once()
+
+
+async def test_the_view_answers_unavailable_when_the_doorstation_goes_offline_during_the_read(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _goes_offline(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        coordinator.offline_extensions = {EXTENSION}
+        return b"\xff\xd8", None
+
+    coordinator.api.get_doorstation_picture.side_effect = _goes_offline
+    client = await hass_client()
+
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+async def test_the_view_answers_unavailable_when_the_entry_is_reloaded_during_the_read(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _reloaded(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        # A reload brings a new coordinator under the same entry id; the read's own coordinator no longer counts.
+        hass.data[DOMAIN][mock_config_entry.entry_id] = copy.copy(coordinator)
+        return JPEG, None
+
+    coordinator.api.get_doorstation_picture.side_effect = _reloaded
+    client = await hass_client()
+
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+
+
+async def test_the_view_answers_unavailable_when_the_entry_is_unloaded_during_the_read(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _unloaded(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        # What an unload does: the entry leaves hass.data while the read is under way; the picture read before stays.
+        hass.data[DOMAIN].pop(mock_config_entry.entry_id)
+        return b"\xff\xd8", None
+
+    coordinator.api.get_doorstation_picture.side_effect = _unloaded
+    client = await hass_client()
+
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
 
 async def test_the_view_answers_not_found_for_a_name_that_is_no_picture(
@@ -390,7 +559,7 @@ async def test_the_view_answers_unavailable_when_the_picture_cannot_be_read(
     coordinator.api.get_doorstation_picture.return_value = (None, "timed out")
     client = await hass_client()
 
-    response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
@@ -402,7 +571,7 @@ async def test_the_view_answers_not_found_for_an_empty_picture(
     coordinator.api.get_doorstation_picture.return_value = (b"", None)
     client = await hass_client()
 
-    response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.NOT_FOUND
 
@@ -414,10 +583,10 @@ async def test_the_view_bounds_the_lock_hold_of_its_read_and_answers_what_comes_
     coordinator.api.get_doorstation_picture.return_value = (None, "not read within 8 s")
     client = await hass_client()
 
-    response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+    response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     coordinator.api.get_doorstation_picture.assert_awaited_once_with(
-        2, "bell_new.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+        2, "26-11-21-18-30-00_bell.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
     )
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
@@ -436,7 +605,7 @@ async def test_the_view_has_no_budget_of_its_own_beyond_the_lock_hold(
 
     # Any outer deadline of the view's own, at the hold budget's length, would cut this read off.
     with patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.01):
-        response = await client.get(_picture_path(mock_config_entry, "bell_new.jpg"))
+        response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
     assert response.status == HTTPStatus.OK
     assert await response.read() == JPEG
@@ -505,7 +674,9 @@ async def test_the_view_answers_not_found_for_a_digit_that_is_no_extension(
     await _setup(hass, mock_config_entry)
     client = await hass_client()
 
-    response = await client.get(f"{DOORSTATION_PICTURE_VIEW_PATH}/{mock_config_entry.entry_id}/{digit}/bell_new.jpg")
+    response = await client.get(
+        f"{DOORSTATION_PICTURE_VIEW_PATH}/{mock_config_entry.entry_id}/{digit}/26-11-21-18-30-00_bell.jpg"
+    )
 
     assert response.status == HTTPStatus.NOT_FOUND
 
@@ -516,6 +687,8 @@ async def test_the_view_answers_not_found_for_a_doorstation_that_is_not_known(
     await _setup(hass, mock_config_entry)
     client = await hass_client()
 
-    response = await client.get(f"{DOORSTATION_PICTURE_VIEW_PATH}/{mock_config_entry.entry_id}/9/bell_new.jpg")
+    response = await client.get(
+        f"{DOORSTATION_PICTURE_VIEW_PATH}/{mock_config_entry.entry_id}/9/26-11-21-18-30-00_bell.jpg"
+    )
 
     assert response.status == HTTPStatus.NOT_FOUND
