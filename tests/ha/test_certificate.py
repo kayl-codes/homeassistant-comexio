@@ -1,7 +1,7 @@
 """HTTPS to Comexio with a pinned certificate: config flow, setup upgrade, mismatch repair."""
 
 import asyncio
-from collections.abc import Generator
+from collections.abc import Callable, Generator
 from datetime import UTC, datetime, timedelta
 from functools import partial
 import logging
@@ -397,6 +397,121 @@ async def test_a_pinned_entry_asks_before_it_drops_or_replaces_the_pin(
     mock_comexio_api[0].login.assert_awaited_once()
     notify.assert_called_once()
     assert notify.call_args.kwargs["title"] == title
+
+
+def _without_pin(data: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in data.items() if k not in (CONF_CERTIFICATE_FINGERPRINT, CONF_CERTIFICATE_PINNED_AT)}
+
+
+# What changes the entry behind an open reconfigure: a certificate accepted in the repair (another pin), a pin that
+# is gone, a renewed password (reauth).
+ENTRY_CHANGES = pytest.mark.parametrize(
+    "change",
+    [
+        lambda data: {**data, CONF_CERTIFICATE_FINGERPRINT: "c" * 64},
+        _without_pin,
+        lambda data: {**data, CONF_PASSWORD: "renewed"},
+    ],
+    ids=["another pin", "pin gone", "password renewed"],
+)
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+@ENTRY_CHANGES
+@pytest.mark.parametrize(
+    ("served", "step_id"),
+    [(OTHER, "reconfigure_certificate"), (ComexioConnectionError("no HTTPS"), "reconfigure_http")],
+    ids=["replace the pin", "drop the pin"],
+)
+async def test_a_confirmation_does_not_undo_a_change_made_while_it_was_open(
+    hass: HomeAssistant,
+    pinned_entry: MockConfigEntry,
+    certificate_handshake: AsyncMock,
+    notify: MagicMock,
+    served: str | Exception,
+    step_id: str,
+    change: Callable[[dict[str, Any]], dict[str, Any]],
+) -> None:
+    # The settings were merged from the entry when the question was asked: stored later, they would put the
+    # old values back over e.g. a certificate accepted in the repair meanwhile.
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, served)
+    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
+    assert result["step_id"] == step_id
+    hass.config_entries.async_update_entry(pinned_entry, data=change(dict(pinned_entry.data)))
+    data_changed = dict(pinned_entry.data)
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_entry_changed"
+    assert dict(pinned_entry.data) == data_changed  # nothing of the flow was stored, the host included
+    notify.assert_not_called()  # nothing was stored, so nobody is told the connection changed
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_a_change_made_while_the_login_is_tested_is_not_undone_either(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, certificate_handshake: AsyncMock, notify: MagicMock
+) -> None:
+    # No confirmation here (same host, same certificate): the entry changes during the login test.
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+
+    async def _entry_changes_during_the_login_test(*_args: Any) -> dict:
+        hass.config_entries.async_update_entry(pinned_entry, data={**pinned_entry.data, CONF_PASSWORD: "renewed"})
+        return {}
+
+    with patch.object(
+        config_flow_module.ComexioConfigFlow, "_connection_errors", side_effect=_entry_changes_during_the_login_test
+    ):
+        result = await _reconfigure(hass, pinned_entry, HOST)
+
+    assert result["type"] is FlowResultType.ABORT
+    assert result["reason"] == "reconfigure_entry_changed"
+    assert pinned_entry.data[CONF_PASSWORD] == "renewed"
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_a_failed_login_test_shows_the_form_even_if_the_entry_changed_meanwhile(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, certificate_handshake: AsyncMock, notify: MagicMock
+) -> None:
+    # The check of the entry comes after the login test: a wrong password is the first thing the user has to hear.
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, PINNED)
+
+    async def _entry_changes_and_the_login_fails(*_args: Any) -> dict:
+        hass.config_entries.async_update_entry(pinned_entry, data={**pinned_entry.data, CONF_PASSWORD: "renewed"})
+        return {"base": "invalid_auth"}
+
+    with patch.object(
+        config_flow_module.ComexioConfigFlow, "_connection_errors", side_effect=_entry_changes_and_the_login_fails
+    ):
+        result = await _reconfigure(hass, pinned_entry, HOST)
+
+    assert result["type"] is FlowResultType.FORM
+    assert result["step_id"] == "reconfigure"
+    assert result["errors"] == {"base": "invalid_auth"}
+    assert pinned_entry.data[CONF_PASSWORD] == "renewed"
+    notify.assert_not_called()
+
+
+@pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")
+async def test_a_change_of_the_options_while_a_confirmation_is_open_does_not_stop_it(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, certificate_handshake: AsyncMock
+) -> None:
+    # Only the entry's data is compared: the options are read when the flow stores, so they cannot be undone by it.
+    pinned_entry.add_to_hass(hass)
+    _serve(certificate_handshake, OTHER)
+    result = await _reconfigure(hass, pinned_entry, NEW_HOST)
+    assert result["step_id"] == "reconfigure_certificate"
+    hass.config_entries.async_update_entry(pinned_entry, options={**pinned_entry.options, "scan_interval": 99})
+
+    result = await hass.config_entries.flow.async_configure(result["flow_id"], {})
+
+    assert result["reason"] == "reconfigure_successful"
+    assert pinned_entry.data[CONF_HOST] == NEW_HOST
+    assert pinned_entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
 
 
 @pytest.mark.usefixtures("mock_setup_entry", "mock_comexio_api")

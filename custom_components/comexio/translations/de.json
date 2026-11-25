@@ -81,6 +81,7 @@
     },
     "abort": {
       "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
+      "reconfigure_entry_changed": "Die Einstellungen dieses Servers haben sich geändert, während die Neukonfiguration offen war, zum Beispiel wurde ein Zertifikat akzeptiert oder das Passwort erneuert. Es wurde nichts gespeichert. Starte die Neukonfiguration erneut.",
       "reauth_successful": "Erneute Anmeldung erfolgreich.",
       "already_configured": "Dieser Comexio-Server oder Instanzname wurde inzwischen eingerichtet."
     }

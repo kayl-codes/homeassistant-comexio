@@ -81,6 +81,7 @@
     },
     "abort": {
       "reconfigure_successful": "Configuración de conexión actualizada correctamente.",
+      "reconfigure_entry_changed": "La configuración de este servidor cambió mientras la reconfiguración estaba abierta, por ejemplo se aceptó un certificado o se renovó la contraseña. No se guardó nada. Inicia la reconfiguración de nuevo.",
       "reauth_successful": "Reautenticación correcta.",
       "already_configured": "Este servidor Comexio o nombre de instancia se ha configurado mientras tanto."
     }

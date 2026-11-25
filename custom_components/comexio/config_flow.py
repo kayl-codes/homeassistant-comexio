@@ -247,6 +247,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # The reconfigure settings waiting in a confirmation step (see _HTTPS_CONFIRM_STEPS).
     _pending_reconfigure: dict
+    # The entry data those settings were merged from (see _async_apply_reconfigure).
+    _pending_reconfigure_base: dict
     # The entry data the user step validated, waiting for the ignore_lists step.
     _pending_entry: dict
     # The configured hosts the pending host was already compared with (see _async_pending_entry_still_free).
@@ -460,7 +462,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is None:
             return self._show_reconfigure_form(entry.data, {})
 
-        merged = {**entry.data, **user_input}
+        base = dict(entry.data)
+        merged = {**base, **user_input}
         if not user_input.get(CONF_PASSWORD):
             merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, "")
         if not user_input.get(CONF_API_PASSWORD):
@@ -479,20 +482,20 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if https_change in _HTTPS_CONFIRM_STEPS:
             # No request is sent before the user agreed (only the TLS handshake that read the certificate):
             # neither credentials over plain HTTP nor to that certificate.
-            self._pending_reconfigure = merged
+            self._pending_reconfigure, self._pending_reconfigure_base = merged, base
             return self._show_https_confirm(entry, merged, https_change)
-        return await self._async_apply_reconfigure(entry, merged, https_change)
+        return await self._async_apply_reconfigure(entry, merged, https_change, base)
 
     async def async_step_reconfigure_http(self, user_input=None):
         """Confirmed: the pinned entry goes back to plain HTTP, as its host answered no HTTPS."""
         return await self._async_apply_reconfigure(
-            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_DROPPED
+            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_DROPPED, self._pending_reconfigure_base
         )
 
     async def async_step_reconfigure_certificate(self, user_input=None):
         """Confirmed: the new host's certificate replaces the pinned one."""
         return await self._async_apply_reconfigure(
-            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED
+            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED, self._pending_reconfigure_base
         )
 
     async def _async_host_taken(self, entry, host: str) -> bool:
@@ -536,11 +539,20 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             placeholders["actual"] = format_fingerprint(merged[CONF_CERTIFICATE_FINGERPRINT])
         return self.async_show_form(step_id=_HTTPS_CONFIRM_STEPS[https_change], description_placeholders=placeholders)
 
-    async def _async_apply_reconfigure(self, entry, merged, https_change: str | None):
-        """Test the login with the merged settings and store them; the form again with the errors if it fails."""
+    async def _async_apply_reconfigure(self, entry, merged, https_change: str | None, base: dict):
+        """Test the login with the merged settings and store them; the form again with the errors if it fails.
+
+        base is the entry data the settings were merged from. The entry may change while the flow waits (for a
+        confirmation) or tests the login: a certificate accepted in the repair, a renewed password. Storing the
+        merged settings then would silently put the old values back, so the flow ends and the user starts again
+        from the entry as it is now.
+        """
         errors = await self._connection_errors(entry, merged)
         if errors:
             return self._show_reconfigure_form(merged, errors)
+        if dict(entry.data) != base:
+            _LOGGER.warning("Reconfigure of '%s' not saved: the entry changed while it was open", base[CONF_HOST])
+            return self.async_abort(reason="reconfigure_entry_changed")
         if https_change in (_HTTPS_ENABLED, _HTTPS_REPLACED):
             # A new pin takes effect now, not when the certificate was read: the user may have confirmed it late.
             restamp_pin(merged)

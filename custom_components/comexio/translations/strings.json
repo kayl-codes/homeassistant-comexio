@@ -81,6 +81,7 @@
     },
     "abort": {
       "reconfigure_successful": "Connection settings updated successfully.",
+      "reconfigure_entry_changed": "The settings of this server changed while the reconfiguration was open, for example a certificate was accepted or the password renewed. Nothing was saved. Start the reconfiguration again.",
       "reauth_successful": "Re-authentication successful.",
       "already_configured": "This Comexio server or instance name was set up in the meantime."
     }

@@ -216,6 +216,7 @@ def test_a_read_starts_only_while_no_other_runs(done: bool | None, starts: bool)
     sensor._start_read()
 
     assert sensor.coordinator.config_entry.async_create_background_task.called is starts
+    assert sensor._async_read.called is starts  # the read is only set up when it is going to start
 
 
 def test_removing_the_sensor_cancels_a_running_read() -> None:

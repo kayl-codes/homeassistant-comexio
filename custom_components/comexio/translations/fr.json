@@ -81,6 +81,7 @@
     },
     "abort": {
       "reconfigure_successful": "Paramètres de connexion mis à jour avec succès.",
+      "reconfigure_entry_changed": "Les paramètres de ce serveur ont changé pendant que la reconfiguration était ouverte, par exemple un certificat a été accepté ou le mot de passe renouvelé. Rien n'a été enregistré. Relancez la reconfiguration.",
       "reauth_successful": "Réauthentification réussie.",
       "already_configured": "Ce serveur Comexio ou ce nom d'instance a été configuré entre-temps."
     }
