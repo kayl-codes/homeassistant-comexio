@@ -615,9 +615,10 @@ def count_own_web_devices(raw_config: Mapping[str, Any], webio_name: str) -> int
     if not isinstance(web_devices, Mapping) or not isinstance(webio_name, str):
         return None
     names = [device.get("Name") if isinstance(device, Mapping) else None for device in web_devices.values()]
-    if not all(isinstance(name, str) for name in names):
+    own_names = [name for name in names if isinstance(name, str)]
+    if len(own_names) != len(names):
         return None
-    return sum(_is_own_web_device_name(name, webio_name) for name in names)
+    return sum(_is_own_web_device_name(name, webio_name) for name in own_names)
 
 
 def _count_by_ref(by_ref: dict[int, list[int]]) -> int:
@@ -1064,8 +1065,11 @@ def _source_shared(source_elem_id: str, webio_id: int, plan_data: dict) -> bool:
 
 def _command_class(info: Mapping[str, Any]) -> WebioClass | None:
     """The Web-IO class of a parsed command, None if it names no known class."""
+    name = info.get("webioClass")
+    if not isinstance(name, str):
+        return None
     try:
-        return WebioClass(info.get("webioClass"))
+        return WebioClass(name)
     except ValueError:
         return None
 
@@ -2385,7 +2389,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         issue = ir.async_get(self.hass).async_get_issue(DOMAIN, f"sync_mismatch_{self.server_id}")
         if issue is None or issue.translation_key != "sync_mismatch":
             return {}, None
-        data = issue.data or {}
+        data: Mapping[str, Any] = issue.data or {}
         counts = data.get("counts", {})
         keys = (
             *_PLAN_AUDIT_BUCKETS,
@@ -3057,7 +3061,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "knx_bridge_loopback_missing": len(audit["knx_bridge_loopback_missing"]),
             "all": len(mismatches),
         }
-        missing_detail = self._function_plan_missing_detail(wiring_gaps, ha_map, io_meta_by_key)
+        missing_detail: dict[str, Any] | None = self._function_plan_missing_detail(wiring_gaps, ha_map, io_meta_by_key)
         if open_counts:
             issue_data_counts |= open_counts
             missing_detail = open_detail
@@ -3299,7 +3303,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         as orphaned backups.
         """
         sources = (
-            set(self._renamed_from(fub_id, live_name, plan_hash(plan_data))) if plan_has_elements(plan_data) else set()
+            set(self._renamed_from(fub_id, live_name, plan_hash(plan_data)))
+            if plan_data is not None and plan_has_elements(plan_data)
+            else set()
         )
         # Collected first: dropping an entry changes _rename_move_pending.
         noted = [
@@ -3383,7 +3389,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         pick_name = self._followed_pick_name(fub_id, old_name)
         swapped = pick_name not in (None, new_name)
         with self.plan_edit():
-            if swapped:
+            if swapped and pick_name is not None:
                 try:
                     self._swap_watch_pick(fub_id, pick_name, new_name)
                 except Exception:
@@ -6080,7 +6086,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         counts commands that were read fine, found drifted, but whose corrective write failed —
         kept separate so a run where every fix fails can't misreport as a clean success.
         """
-        device_id = device.get("device_id")
+        device_id = device["device_id"]  # the caller excludes a device without one
         form = await self.api.get_webio_command_form(cmd_id, device_id)
         if form is None or form.min is None or form.max is None:
             result[RANGE_CHECK_FAILED] += 1
@@ -6480,7 +6486,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 _, cmd, device, target = fresh
                 try:
                     ok = await self.api.save_single_command(
-                        device.get("base_id"), device.get("device_id"), target, existing_cmd_id=cmd.get("cmdId")
+                        device.get("base_id"), device["device_id"], target, existing_cmd_id=cmd.get("cmdId")
                     )
                 except Exception:
                     _LOGGER.exception("[%s] Moving Web-IO command '%s' failed", self.server_id, one_line(name))
@@ -8736,9 +8742,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         _LOGGER.info("[%s] Configuration updated, reloading API settings", self.server_id)
 
         data = self.config_entry.data
-        self.api.host = data.get(CONF_HOST)
-        self.api.username = data.get(CONF_USERNAME)
-        self.api.password = data.get(CONF_PASSWORD)
+        self.api.host = data[CONF_HOST]
+        self.api.username = data[CONF_USERNAME]
+        self.api.password = data[CONF_PASSWORD]
         self.api.api_user = data.get(CONF_API_USERNAME)
         self.api.api_pass = data.get(CONF_API_PASSWORD)
         self.api.fingerprint = data.get(CONF_CERTIFICATE_FINGERPRINT)
