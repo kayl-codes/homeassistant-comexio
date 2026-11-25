@@ -139,6 +139,10 @@ _write_met_another_certificate: ContextVar["ComexioAPI | None"] = ContextVar(
 )
 # The same for the API settings text of a failed write (ComexioAPI.last_write_diagnosis): the API and its text.
 _write_diagnosis: ContextVar["tuple[ComexioAPI, str] | None"] = ContextVar("comexio_write_diagnosis", default=None)
+# Whether the Doorstation read of this asyncio task got its turn on the camera's lock (`_doorstation_read` sets it False
+# before it waits and True once it holds the lock). A caller whose own time ran out reads it to tell a Doorstation that
+# did not answer in time from a wait behind other reads; the default (no read made here) is "got it".
+doorstation_read_got_its_turn: ContextVar[bool] = ContextVar("comexio_doorstation_read_got_its_turn", default=True)
 
 
 # Why the main session is gone (_session_gone_reason); the callers add ": not sent", " meanwhile" or
@@ -2051,8 +2055,10 @@ class ComexioAPI:
         """
         if self._session_gone_reason() is not None:
             return None, None
+        doorstation_read_got_its_turn.set(False)
         try:
             async with self._doorstation_snapshot_lock:
+                doorstation_read_got_its_turn.set(True)
                 try:
                     async with asyncio.timeout(held_for_sec) as deadline:
                         return await self._system_info_part(fetch, [])

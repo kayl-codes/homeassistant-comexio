@@ -22,6 +22,7 @@ import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_fire_time_changed
 
 from custom_components.comexio import doorstation_pictures
+from custom_components.comexio.api import doorstation_read_got_its_turn
 from custom_components.comexio.const import (
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
@@ -566,6 +567,33 @@ async def test_a_picture_read_that_takes_too_long_ends_with_a_warning_and_waits_
     picture_read.side_effect = None
     picture_read.return_value = (JPEG, None)
     assert await _image_bytes(hass, BELL_ENTITY_ID) == JPEG
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_picture_request_that_waited_out_its_time_behind_other_reads_leaves_no_pause_or_warning(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(doorstation_pictures, "DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.05)
+    coordinator = await _setup_online(hass, entry)
+    picture_read: AsyncMock = coordinator.api.get_doorstation_picture
+
+    async def _behind_another_read(*_args: Any) -> Any:
+        doorstation_read_got_its_turn.set(False)  # what ComexioAPI does while it waits for the camera's lock
+        await asyncio.Event().wait()
+
+    picture_read.side_effect = _behind_another_read
+    assert await _image_bytes(hass, BELL_ENTITY_ID) is None  # the time ran out before the read had its turn
+
+    assert not [
+        r for r in caplog.records if r.levelno >= logging.WARNING and "could not read its newest" in r.getMessage()
+    ]
+    picture_read.side_effect = None
+    picture_read.return_value = (JPEG, None)
+    assert await _image_bytes(hass, BELL_ENTITY_ID) == JPEG  # asked again at once: no pause of a failure held it back
+    assert picture_read.await_count == 2
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

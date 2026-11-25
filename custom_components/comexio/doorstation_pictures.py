@@ -43,6 +43,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_connect, async_dis
 from homeassistant.helpers.event import async_call_later, async_track_time_interval
 from homeassistant.util import dt as dt_util
 
+from .api import doorstation_read_got_its_turn
 from .const import (
     DOMAIN,
     DOORSTATION_BELL_IDENTIFIERS,
@@ -171,8 +172,9 @@ class DoorstationPictureFeed:
         Read from the Doorstation (through the IO-Server) once per picture and kept until a newer one is listed. The
         read goes one after the other with the list reads of this Doorstation and, in ComexioAPI, with every other
         read of a Doorstation. The wait for those counts into DOORSTATION_PICTURE_READ_TIMEOUT_SEC, but only a read
-        that ran out of time is a failure of the Doorstation: a request that never got its turn returns None and
-        leaves no mark (the reads that held it report their own failures).
+        that ran out of time after it got its turn is a failure of the Doorstation: a request that never got its turn,
+        on the feed's lock or on ComexioAPI's, returns None and leaves no mark (the reads that held it report their own
+        failures).
         """
         if (cached := self._cached_jpeg(kind)) is not None:
             return cached
@@ -180,11 +182,18 @@ class DoorstationPictureFeed:
         if not await self._acquire_by(deadline):
             return None
         budget = asyncio.timeout_at(deadline)
+        doorstation_read_got_its_turn.set(True)  # no value of an earlier read of this task may decide for this one
         try:
             async with budget:
                 return await self._async_read_picture(kind)
         except Exception as err:  # noqa: BLE001 - the image request must end in None and never in an error page
             expired = isinstance(err, TimeoutError) and budget.expired()
+            if expired and not doorstation_read_got_its_turn.get():
+                # The time ran out while the read waited behind other Doorstation reads (another one's list, a frame):
+                # it never reached this Doorstation, so no mark and no pause, as for a request that never got the
+                # feed's lock above.
+                _LOGGER.debug("Doorstation %d: picture request waited out its time for the camera's turn", self.ext_id)
+                return None
             if not expired:
                 _LOGGER.debug("Doorstation %d picture read failed", self.ext_id, exc_info=True)
             cause = f"not read within {DOORSTATION_PICTURE_READ_TIMEOUT_SEC:g} s" if expired else type(err).__name__

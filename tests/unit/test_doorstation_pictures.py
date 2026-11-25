@@ -18,7 +18,7 @@ from homeassistant.util import dt as dt_util
 import pytest
 
 from custom_components.comexio import _doorstation_entity_uids
-from custom_components.comexio.api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI
+from custom_components.comexio.api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, doorstation_read_got_its_turn
 from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_EMPTY_POLLS_BEFORE_DROP,
@@ -323,6 +323,50 @@ def test_the_picture_reads_run_one_after_the_other_with_the_other_doorstation_re
     asyncio.run(_together())
 
     assert most == 1
+
+
+def test_a_doorstation_read_notes_whether_it_got_its_turn_on_the_camera_lock(comexio_api: ComexioAPI) -> None:
+    """A caller whose time ran out tells a wait behind other reads from a Doorstation that did not answer."""
+    api = _api_with(comexio_api, get_doorstation_picture=AsyncMock(return_value=JPEG))
+
+    async def _bounded_read() -> None:
+        async with asyncio.timeout(0.05):
+            await api.get_doorstation_picture(1, "a.jpg")
+
+    async def _scenario() -> tuple[bool, bool]:
+        async with api._doorstation_snapshot_lock:  # another read holds the camera
+            with pytest.raises(TimeoutError):
+                await _bounded_read()
+            waited = doorstation_read_got_its_turn.get()
+        await api.get_doorstation_picture(1, "a.jpg")
+        return waited, doorstation_read_got_its_turn.get()
+
+    waited, then_read = asyncio.run(_scenario())
+
+    assert waited is False  # it never held the lock
+    assert then_read is True  # the next read did
+
+
+def test_a_doorstation_read_that_holds_the_camera_lock_when_its_time_runs_out_has_had_its_turn(
+    comexio_api: ComexioAPI,
+) -> None:
+    """A read that ran out of time with the lock in hand is a failure of the Doorstation, not a wait."""
+
+    async def _never_answers(*_args: object) -> None:
+        await asyncio.Event().wait()
+
+    api = _api_with(comexio_api, get_doorstation_picture=AsyncMock(side_effect=_never_answers))
+
+    async def _bounded_read() -> None:
+        async with asyncio.timeout(0.05):
+            await api.get_doorstation_picture(1, "a.jpg")
+
+    async def _scenario() -> bool:
+        with pytest.raises(TimeoutError):
+            await _bounded_read()
+        return doorstation_read_got_its_turn.get()
+
+    assert asyncio.run(_scenario()) is True
 
 
 def test_a_stalled_list_read_ends_at_its_deadline_and_frees_the_lock(
