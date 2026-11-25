@@ -22,6 +22,9 @@ from .certificate import (
     is_valid_host,
     notify_https_disabled,
     notify_https_enabled,
+    pin_data,
+    restamp_pin,
+    unpin_data,
 )
 from .const import (
     CONF_API_PASSWORD,
@@ -244,6 +247,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     # The reconfigure settings waiting in a confirmation step (see _HTTPS_CONFIRM_STEPS).
     _pending_reconfigure: dict
+    # The entry data those settings were merged from (see _async_apply_reconfigure).
+    _pending_reconfigure_base: dict
     # The entry data the user step validated, waiting for the ignore_lists step.
     _pending_entry: dict
     # The configured hosts the pending host was already compared with (see _async_pending_entry_still_free).
@@ -317,7 +322,7 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                 user_input[CONF_SERVER_ID] = chosen_id
                 user_input["scan_interval"] = int(user_input["scan_interval"])
                 if fingerprint is not None:
-                    user_input[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+                    user_input.update(pin_data(fingerprint))
                 self._pending_entry = user_input
                 self._checked_hosts = set(configured_hosts)
             except (ServerIdExists, ServerIdInvalid, HostAlreadyConfigured):
@@ -436,7 +441,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         for the day the import is switched on, instead of importing QI, TL and UL then (#317).
         """
         options = {CONF_IGNORED_IO_TYPES: list(DEFAULT_IGNORED_IO_TYPES), **options}
-        data = self._pending_entry
+        data = {**self._pending_entry}
+        restamp_pin(data)  # the user may have sat at the ignore lists step since the certificate was read
         server_id, host = data[CONF_SERVER_ID], data[CONF_HOST]
         if (fingerprint := data.get(CONF_CERTIFICATE_FINGERPRINT)) is not None:
             # Only now: an abandoned ignore_lists step creates no entry to tell about.
@@ -456,7 +462,8 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if user_input is None:
             return self._show_reconfigure_form(entry.data, {})
 
-        merged = {**entry.data, **user_input}
+        base = dict(entry.data)
+        merged = {**base, **user_input}
         if not user_input.get(CONF_PASSWORD):
             merged[CONF_PASSWORD] = entry.data.get(CONF_PASSWORD, "")
         if not user_input.get(CONF_API_PASSWORD):
@@ -475,20 +482,20 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if https_change in _HTTPS_CONFIRM_STEPS:
             # No request is sent before the user agreed (only the TLS handshake that read the certificate):
             # neither credentials over plain HTTP nor to that certificate.
-            self._pending_reconfigure = merged
+            self._pending_reconfigure, self._pending_reconfigure_base = merged, base
             return self._show_https_confirm(entry, merged, https_change)
-        return await self._async_apply_reconfigure(entry, merged, https_change)
+        return await self._async_apply_reconfigure(entry, merged, https_change, base)
 
     async def async_step_reconfigure_http(self, user_input=None):
         """Confirmed: the pinned entry goes back to plain HTTP, as its host answered no HTTPS."""
         return await self._async_apply_reconfigure(
-            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_DROPPED
+            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_DROPPED, self._pending_reconfigure_base
         )
 
     async def async_step_reconfigure_certificate(self, user_input=None):
         """Confirmed: the new host's certificate replaces the pinned one."""
         return await self._async_apply_reconfigure(
-            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED
+            self._get_reconfigure_entry(), self._pending_reconfigure, _HTTPS_REPLACED, self._pending_reconfigure_base
         )
 
     async def _async_host_taken(self, entry, host: str) -> bool:
@@ -532,11 +539,23 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             placeholders["actual"] = format_fingerprint(merged[CONF_CERTIFICATE_FINGERPRINT])
         return self.async_show_form(step_id=_HTTPS_CONFIRM_STEPS[https_change], description_placeholders=placeholders)
 
-    async def _async_apply_reconfigure(self, entry, merged, https_change: str | None):
-        """Test the login with the merged settings and store them; the form again with the errors if it fails."""
+    async def _async_apply_reconfigure(self, entry, merged, https_change: str | None, base: dict):
+        """Test the login with the merged settings and store them; the form again with the errors if it fails.
+
+        base is the entry data the settings were merged from. The entry may change while the flow waits (for a
+        confirmation) or tests the login: a certificate accepted in the repair, a renewed password. Storing the
+        merged settings then would silently put the old values back, so the flow ends and the user starts again
+        from the entry as it is now.
+        """
         errors = await self._connection_errors(entry, merged)
         if errors:
             return self._show_reconfigure_form(merged, errors)
+        if dict(entry.data) != base:
+            _LOGGER.warning("Reconfigure of '%s' not saved: the entry changed while it was open", base[CONF_HOST])
+            return self.async_abort(reason="reconfigure_entry_changed")
+        if https_change in (_HTTPS_ENABLED, _HTTPS_REPLACED):
+            # A new pin takes effect now, not when the certificate was read: the user may have confirmed it late.
+            restamp_pin(merged)
         self._notify_https_change(entry, merged, https_change)
         clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
         return self._async_update_and_reload_once(
@@ -584,15 +603,15 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
         fingerprint = await async_read_fingerprint(merged[CONF_HOST])
         if fingerprint is None:
-            return None if merged.pop(CONF_CERTIFICATE_FINGERPRINT, None) is None else _HTTPS_DROPPED
+            return _HTTPS_DROPPED if unpin_data(merged) else None
         if pinned is None:
-            merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+            merged.update(pin_data(fingerprint))
             return _HTTPS_ENABLED
         if fingerprint == pinned:
             return None
         if merged[CONF_HOST] == entry.data.get(CONF_HOST):
             raise CertificateChanged(fingerprint)
-        merged[CONF_CERTIFICATE_FINGERPRINT] = fingerprint
+        merged.update(pin_data(fingerprint))
         return _HTTPS_REPLACED
 
     def _certificate_error(self, entry, merged, actual: str | None) -> str:
@@ -630,11 +649,29 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors = {}
 
         if user_input is not None:
+            base = dict(entry.data)  # like reconfigure: what the test below is based on
             data_updates, errors = await self._reauth_test(entry, user_input)
+            if not errors and dict(entry.data) != base:
+                # The test ran against the old host and pin: stored now, its pin and date would undo the change.
+                # The form stays open (an aborted reauth would not come back by itself) and is built from the new data.
+                _LOGGER.warning(
+                    "Reauth of '%s' not saved: the entry changed while the login was tested", base[CONF_HOST]
+                )
+                errors = {"base": "reauth_entry_changed"}
             if not errors:
+                newly_pinned = CONF_CERTIFICATE_FINGERPRINT in data_updates and CONF_CERTIFICATE_FINGERPRINT not in base
+                restamp_pin(data_updates)  # dated now, not when the certificate was read before the login test
                 # Like reconfigure: credentials left in options from older versions would shadow the new ones.
                 clean_options = {k: v for k, v in entry.options.items() if k not in _CREDENTIAL_KEYS}
-                return self._async_update_and_reload_once(entry, data_updates=data_updates, options=clean_options)
+                result = self._async_update_and_reload_once(entry, data_updates=data_updates, options=clean_options)
+                if newly_pinned:
+                    notify_https_enabled(
+                        self.hass,
+                        entry.data[CONF_SERVER_ID],
+                        base[CONF_HOST],
+                        data_updates[CONF_CERTIFICATE_FINGERPRINT],
+                    )
+                return result
 
         return self.async_show_form(
             step_id="reauth_confirm",
@@ -662,10 +699,9 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             return user_input, await self._connection_errors(entry, merged)
         fingerprint = await async_read_fingerprint(merged[CONF_HOST])
         if fingerprint is not None:
-            pinned = {**user_input, CONF_CERTIFICATE_FINGERPRINT: fingerprint}
+            pinned = {**user_input, **pin_data(fingerprint)}
             errors = await self._connection_errors(entry, merged | pinned)
             if not errors:
-                notify_https_enabled(self.hass, entry.data[CONF_SERVER_ID], merged[CONF_HOST], fingerprint)
                 return pinned, errors
             if errors != {"base": "cannot_connect"}:
                 return user_input, errors

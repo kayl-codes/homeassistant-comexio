@@ -30,6 +30,7 @@ from .certificate import (
     async_report_certificate_changed,
 )
 from .const import (
+    CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
@@ -552,7 +553,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids |= onewire_platforms.keys()
 
     # Server-level buttons and sensors (these are always active)
-    active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
+    active_unique_ids |= _server_level_unique_ids(entry, server_id)
 
     # Function plan run-state sensors (sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
@@ -783,6 +784,18 @@ def _doorbell_type_ignored(unique_id: str, ignored_types: frozenset[str]) -> boo
     """True for the doorbell event of a bell button whose IO type is left out of the import (#317)."""
     match = _DOORBELL_UID_TYPE_RE.search(unique_id)
     return match is not None and match.group(1).upper() in ignored_types
+
+
+def _server_level_unique_ids(entry: ConfigEntry, server_id: str) -> set[str]:
+    """unique_ids of the server-level entities the orphan cleanup keeps.
+
+    The always-present ones (SERVER_LEVEL_UNIQUE_ID_SUFFIXES), plus the certificate expiry sensor on a pinned
+    entry: one that went back to plain HTTP drops it.
+    """
+    suffixes = list(SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
+    if CONF_CERTIFICATE_FINGERPRINT in entry.data:
+        suffixes.append(CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX)
+    return {f"comexio_{server_id}_{suffix}" for suffix in suffixes}
 
 
 def _doorstation_entity_uids(

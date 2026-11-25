@@ -294,6 +294,21 @@ actions:
       message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
 ```
 
+Its attributes name the pinned fingerprint and `pinned_at`, when it was pinned (empty for a certificate pinned before this was recorded); `presented_fingerprint` appears only while the repair is open. HA's own "last changed" cannot tell when the pin was made: it restarts with every restart.
+
+The diagnostic `Certificate valid until` sensor (`sensor.<server>_certificate_expiry`, only on an encrypted entry) shows when the pinned certificate expires; the attribute `valid_from` says when it started. It reads the certificate from a bare TLS handshake — no request, no credentials — at startup and once a day, and takes the dates only from the pinned certificate: another certificate is the repair's business and changes nothing here. A failed read keeps the last date, across restarts as well; `unknown` means not read yet or a certificate without readable dates, never one that does not expire. An automation can warn ahead of time, for example 30 days before:
+
+```yaml
+triggers:
+  - trigger: template
+    value_template: "{{ states('sensor.iosrv1_certificate_expiry') | as_datetime(None) is not none and states('sensor.iosrv1_certificate_expiry') | as_datetime < now() + timedelta(days=30) }}"
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio certificate"
+      message: "Comexio's certificate expires on {{ states('sensor.iosrv1_certificate_expiry') | as_datetime | as_local }}"
+```
+
 ## 🔐 Webhook Security
 
 Comexio pushes live values to Home Assistant through webhooks, and that endpoint takes no login. Every Web-IO command therefore pushes to a **webhook ID of its own**, derived from a secret that stays in Home Assistant, and a request is only accepted if its ID and its content belong together. The commands are rewritten automatically at night; **afterwards the Comexio server has to be restarted once** (a notification tells you when). Nothing is lost in the meantime: the old and the new IDs work side by side until the switch-over is verified.
@@ -615,6 +630,21 @@ actions:
     data:
       title: "Comexio-Verbindung"
       message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
+```
+
+Seine Attribute nennen den gepinnten Fingerabdruck und `pinned_at`, wann er gepinnt wurde (leer bei einem Zertifikat, das gepinnt wurde, bevor das erfasst wurde); `presented_fingerprint` erscheint nur, solange die Reparatur offen ist. HAs eigene „Letzte Änderung“ kann den Zeitpunkt des Pinnings nicht zeigen: Sie beginnt mit jedem Neustart neu.
+
+Der Diagnose-Sensor `Zertifikat gültig bis` (`sensor.<server>_certificate_expiry`, nur bei einem verschlüsselten Eintrag) zeigt, wann das gepinnte Zertifikat abläuft; das Attribut `valid_from` sagt, seit wann es gilt. Er liest das Zertifikat über einen reinen TLS-Handshake — keine Anfrage, keine Zugangsdaten — beim Start und einmal täglich und übernimmt die Daten nur vom gepinnten Zertifikat: Ein anderes Zertifikat ist Sache der Reparatur und ändert hier nichts. Ein fehlgeschlagener Lesevorgang behält das letzte Datum, auch über Neustarts; `unknown` heißt noch nicht gelesen oder ein Zertifikat ohne lesbare Daten, nie eines, das nicht abläuft. Eine Automation kann rechtzeitig warnen, zum Beispiel 30 Tage vorher:
+
+```yaml
+triggers:
+  - trigger: template
+    value_template: "{{ states('sensor.iosrv1_certificate_expiry') | as_datetime(None) is not none and states('sensor.iosrv1_certificate_expiry') | as_datetime < now() + timedelta(days=30) }}"
+actions:
+  - action: notify.persistent_notification
+    data:
+      title: "Comexio-Zertifikat"
+      message: "Das Zertifikat der Comexio läuft am {{ states('sensor.iosrv1_certificate_expiry') | as_datetime | as_local }} ab"
 ```
 
 ## 🔐 Webhook-Absicherung

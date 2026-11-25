@@ -66,6 +66,14 @@ CONF_API_PASSWORD = "api_password"  # nosec B105
 # certificate.py). Present: every request goes over HTTPS with that pin. Absent: plain HTTP, and
 # each setup tries to switch the entry over.
 CONF_CERTIFICATE_FINGERPRINT = "certificate_fingerprint"
+# When that fingerprint was pinned (ISO 8601, UTC), written with it by certificate.pin_data. Absent on
+# entries pinned before it was recorded; the connection sensor then shows no date.
+CONF_CERTIFICATE_PINNED_AT = "certificate_pinned_at"
+# How often the certificate expiry sensor reads the validity period of the certificate Comexio presents
+# (a bare TLS handshake, no request); Comexio renews its certificate on its own schedule, not by the hour.
+CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC = 24 * 3600
+# unique_id suffix (after "comexio_{server_id}_") of that sensor, which exists only on a pinned entry.
+CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX = "certificate_expiry"
 
 CONF_ENABLE_NOTIFICATIONS = "enable_notifications"
 DEFAULT_ENABLE_NOTIFICATIONS = True
