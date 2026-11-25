@@ -30,6 +30,7 @@ from .certificate import (
     async_report_certificate_changed,
 )
 from .const import (
+    CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
@@ -103,9 +104,9 @@ PLATFORMS = [
 ]
 
 
-# The platforms whose entities belong to a Doorstation and are not removed as orphans (camera.py, event.py);
-# the events only while the IO import is on (see DOORBELL_ENTITY_DOMAIN).
-DOORSTATION_ENTITY_DOMAINS = frozenset({"camera", "event"})
+# The platforms whose entities belong to a Doorstation and are not removed as orphans (camera.py, event.py, and the
+# picture entities of image.py); the events only while the IO import is on (see DOORBELL_ENTITY_DOMAIN).
+DOORSTATION_ENTITY_DOMAINS = frozenset({"camera", "event", "image"})
 # The doorbell events are made of IOs: with the IO import off none is created, so their entries are not kept.
 DOORBELL_ENTITY_DOMAIN = "event"
 
@@ -552,7 +553,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     active_unique_ids |= onewire_platforms.keys()
 
     # Server-level buttons and sensors (these are always active)
-    active_unique_ids.update(f"comexio_{server_id}_{suffix}" for suffix in SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
+    active_unique_ids |= _server_level_unique_ids(entry, server_id)
 
     # Function plan run-state sensors (sensor.py), one per plan in $Fubs. Without a
     # scraped $Fubs the existing ones are kept; the platform removes those of plans that disappear
@@ -785,6 +786,18 @@ def _doorbell_type_ignored(unique_id: str, ignored_types: frozenset[str]) -> boo
     return match is not None and match.group(1).upper() in ignored_types
 
 
+def _server_level_unique_ids(entry: ConfigEntry, server_id: str) -> set[str]:
+    """unique_ids of the server-level entities the orphan cleanup keeps.
+
+    The always-present ones (SERVER_LEVEL_UNIQUE_ID_SUFFIXES), plus the certificate expiry sensor on a pinned
+    entry: one that went back to plain HTTP drops it.
+    """
+    suffixes = list(SERVER_LEVEL_UNIQUE_ID_SUFFIXES)
+    if CONF_CERTIFICATE_FINGERPRINT in entry.data:
+        suffixes.append(CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX)
+    return {f"comexio_{server_id}_{suffix}" for suffix in suffixes}
+
+
 def _doorstation_entity_uids(
     ent_reg: er.EntityRegistry,
     entry: ConfigEntry,
@@ -793,7 +806,7 @@ def _doorstation_entity_uids(
     import_ios: bool,
     ignored_types: frozenset[str] = frozenset(),
 ) -> set[str]:
-    """The unique_ids of the Doorstation cameras (camera.py) and doorbell events (event.py) that are registered.
+    """The unique_ids of the Doorstation cameras (camera.py), doorbell events (event.py) and pictures (image.py).
 
     The orphan cleanup keeps them. Such an entity turns unavailable while the IO home page shows no Doorstation (a
     changed page reads like that, and a page that is only partly understood would drop some), so its registry entry

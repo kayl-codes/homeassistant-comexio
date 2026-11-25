@@ -433,7 +433,7 @@ def test_the_setup_without_imported_ios_adds_nothing_and_listens_to_nothing() ->
 def test_the_platform_is_set_up_and_its_registry_entries_survive_the_orphan_cleanup() -> None:
     assert "event" in PLATFORMS
     domains = set(DOORSTATION_ENTITY_DOMAINS)
-    assert domains == {"camera", "event"}
+    assert domains == {"camera", "event", "image"}  # the pictures of a Doorstation (image.py) are kept too
 
 
 def test_the_sync_copes_with_a_coordinator_that_has_no_data_yet() -> None:

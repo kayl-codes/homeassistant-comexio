@@ -9,6 +9,7 @@
       "unknown": "Unerwarteter Fehler aufgetreten.",
       "certificate_changed": "Comexio zeigt ein anderes Zertifikat als das gespeicherte. Bitte unter Einstellungen → Reparaturen prüfen.",
       "certificate_unstable": "Comexio hat beim Login-Test ein anderes Zertifikat gezeigt als einen Moment zuvor. Möglicherweise antwortet etwas anderes im Netzwerk an seiner Stelle — prüfe das Netzwerk und versuche es erneut.",
+      "reauth_entry_changed": "Die Einstellungen dieses Servers haben sich geändert, während die Anmeldung geprüft wurde, zum Beispiel wurde ein anderes Zertifikat akzeptiert. Es wurde nichts gespeichert. Bitte das Passwort noch einmal eingeben.",
       "invalid_host": "Das ist kein Hostname und keine IP-Adresse (optional mit :Port) – ohne http://, Pfade und Ähnliches.",
       "invalid_ignored_ids": "Ungültige ID-Liste. Zahlen (z. B. 3, M12 oder K12), Bereiche (z. B. 8-12) oder Listen (z. B. 1, 3, 5) eingeben.",
       "invalid_ignored_io_types": "Ungültiger IO-Typ. Ein Typ besteht nur aus Buchstaben (z. B. QI, TL, UL), ohne Zahl."
@@ -81,6 +82,7 @@
     },
     "abort": {
       "reconfigure_successful": "Verbindungseinstellungen erfolgreich aktualisiert.",
+      "reconfigure_entry_changed": "Die Einstellungen dieses Servers haben sich geändert, während die Neukonfiguration offen war, zum Beispiel wurde ein Zertifikat akzeptiert oder das Passwort erneuert. Es wurde nichts gespeichert. Starte die Neukonfiguration erneut.",
       "reauth_successful": "Erneute Anmeldung erfolgreich.",
       "already_configured": "Dieser Comexio-Server oder Instanzname wurde inzwischen eingerichtet."
     }
@@ -272,6 +274,12 @@
       }
     },
     "image": {
+      "doorstation_bell_picture": {
+        "name": "Letztes Klingelbild"
+      },
+      "doorstation_motion_picture": {
+        "name": "Letztes Bewegungsbild"
+      },
       "plan_preview": {
         "name": "Vorschaubild"
       }
@@ -339,6 +347,12 @@
           "https": "HTTPS (verschlüsselt)",
           "http": "HTTP (unverschlüsselt)",
           "certificate_changed": "Zertifikat geändert"
+        }
+      },
+      "certificate_expiry": {
+        "name": "Zertifikat gültig bis",
+        "state_attributes": {
+          "valid_from": { "name": "Gültig ab" }
         }
       }
     },

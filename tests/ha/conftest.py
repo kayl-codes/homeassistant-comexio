@@ -130,6 +130,9 @@ def api_returns() -> dict[str, Any]:
         "get_doorstations": ({}, None),
         # A Doorstation extension with no usable address of its own (`local`), so its camera stays on the IO-Server.
         "get_doorstation_address": (None, None),
+        # No picture stored on the Doorstation (an empty list, no failure) and none to read.
+        "get_doorstation_pictures": ((), None),
+        "get_doorstation_picture": (None, None),
         # An unreadable form, as the real method returns it. The nightly range check (04:20 test time) runs in any
         # test whose loaded entry spans that minute; it counts the command as not checked.
         "get_webio_command_form": None,
@@ -157,8 +160,22 @@ def certificate_handshake() -> Generator[AsyncMock]:
 
 
 @pytest.fixture
+def certificate_read() -> Generator[AsyncMock]:
+    """The certificate expiry sensor's TLS handshake (fingerprint and validity); by default it fails.
+
+    A test sets return_value (a CertificateInfo) or side_effect on it before the setup.
+    """
+    read = AsyncMock(name="fetch_certificate", side_effect=ComexioConnectionError("no HTTPS"))
+    with patch("custom_components.comexio.sensor.fetch_certificate", read):
+        yield read
+
+
+@pytest.fixture
 def mock_comexio_api(
-    api_returns: dict[str, Any], api_attributes: dict[str, Any], certificate_handshake: AsyncMock
+    api_returns: dict[str, Any],
+    api_attributes: dict[str, Any],
+    certificate_handshake: AsyncMock,
+    certificate_read: AsyncMock,
 ) -> Generator[list[ComexioAPI]]:
     """The one place the HA tests construct a ComexioAPI; yields every instance created.
 

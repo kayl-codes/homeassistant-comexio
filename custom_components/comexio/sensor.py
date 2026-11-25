@@ -1,9 +1,10 @@
 # Version: 0.7.5
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 import logging
 from typing import Any
 
-from aiocomexio import format_fingerprint
+from aiocomexio import ComexioError, fetch_certificate, format_fingerprint
 from homeassistant.components.sensor import (
     RestoreSensor,
     SensorDeviceClass,
@@ -21,7 +22,8 @@ from homeassistant.helpers import entity_registry as er, issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.restore_state import ExtraStoredData, RestoredExtraData, RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
@@ -35,8 +37,12 @@ from .certificate import (
     presented_fingerprint,
 )
 from .const import (
+    CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC,
+    CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX,
     COMEXIO_UNIT_TO_HA_UNIT,
     CONF_CERTIFICATE_FINGERPRINT,
+    CONF_CERTIFICATE_PINNED_AT,
+    CONF_HOST,
     CONF_INCLUDE_OFFLINE_EXTENSIONS,
     DOMAIN,
     MARKER_TYPE_INTERVAL,
@@ -79,9 +85,17 @@ from .function_plan_backup import summarize_orphaned_backups
 
 _LOGGER = logging.getLogger(__name__)
 
-# Attributes of ComexioConnectionSensor: the pinned certificate and, while the repair is open, the presented one.
+# Attributes of ComexioConnectionSensor: the pinned certificate, when it was pinned and, while the repair is open,
+# the presented one.
 ATTR_PINNED_FINGERPRINT = "pinned_fingerprint"
+ATTR_PINNED_AT = "pinned_at"
 ATTR_PRESENTED_FINGERPRINT = "presented_fingerprint"
+# Attribute of ComexioCertificateExpirySensor: the start of the pinned certificate's validity period.
+ATTR_VALID_FROM = "valid_from"
+# The keys of the dates kept over a restart (extra_restore_state_data and _restore); old data in the restore cache.
+STORED_FINGERPRINT = "fingerprint"
+STORED_VALID_FROM = "not_valid_before"
+STORED_VALID_UNTIL = "not_valid_after"
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -158,33 +172,40 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
             and knx.get("knx_composite") is None
         )
 
-    entities.extend(
-        [
-            ComexioSyncStatusSensor(coordinator, coordinator.server_id),
-            ComexioOfflineExtensionsSensor(coordinator, coordinator.server_id),
-            ComexioFunctionPlanBackupSensor(coordinator, coordinator.server_id),
-            ComexioOrphanedBackupsSensor(coordinator, coordinator.server_id),
-            ComexioVersionSensor(coordinator, coordinator.server_id),
-            ComexioPlanChangedSensor(coordinator, coordinator.server_id),
-            ComexioBusLoadSensor(coordinator, coordinator.server_id),
-            ComexioPlanPreviewSensor(coordinator, coordinator.server_id),
-            ComexioExtensionCountSensor(coordinator, coordinator.server_id),
-            ComexioActiveMarkerCountSensor(coordinator, coordinator.server_id),
-            ComexioFunctionPlanCountSensor(coordinator, coordinator.server_id),
-            ComexioWebioCommandCountSensor(coordinator, coordinator.server_id),
-            ComexioWatchdogEventSensor(coordinator, coordinator.server_id),
-            ComexioFreeStorageSensor(coordinator, coordinator.server_id),
-            ComexioLastBootSensor(coordinator, coordinator.server_id),
-            ComexioConnectionSensor(coordinator, coordinator.server_id),
-            ComexioApiWriteErrorsSensor(coordinator, coordinator.server_id),
-        ]
-    )
+    entities.extend(_server_sensors(coordinator, entry))
 
     async_add_entities(entities)
 
     sync_plan_sensors = _PlanRunStateSensorSync(hass, coordinator, async_add_entities)
     sync_plan_sensors()
     entry.async_on_unload(coordinator.async_add_listener(sync_plan_sensors))
+
+
+def _server_sensors(coordinator: ComexioCoordinator, entry: ConfigEntry) -> list[SensorEntity]:
+    """The server-level sensors: always present, plus the certificate expiry sensor on a pinned entry."""
+    server_id = coordinator.server_id
+    sensors: list[SensorEntity] = [
+        ComexioSyncStatusSensor(coordinator, server_id),
+        ComexioOfflineExtensionsSensor(coordinator, server_id),
+        ComexioFunctionPlanBackupSensor(coordinator, server_id),
+        ComexioOrphanedBackupsSensor(coordinator, server_id),
+        ComexioVersionSensor(coordinator, server_id),
+        ComexioPlanChangedSensor(coordinator, server_id),
+        ComexioBusLoadSensor(coordinator, server_id),
+        ComexioPlanPreviewSensor(coordinator, server_id),
+        ComexioExtensionCountSensor(coordinator, server_id),
+        ComexioActiveMarkerCountSensor(coordinator, server_id),
+        ComexioFunctionPlanCountSensor(coordinator, server_id),
+        ComexioWebioCommandCountSensor(coordinator, server_id),
+        ComexioWatchdogEventSensor(coordinator, server_id),
+        ComexioFreeStorageSensor(coordinator, server_id),
+        ComexioLastBootSensor(coordinator, server_id),
+        ComexioConnectionSensor(coordinator, server_id),
+        ComexioApiWriteErrorsSensor(coordinator, server_id),
+    ]
+    if CONF_CERTIFICATE_FINGERPRINT in entry.data:
+        sensors.append(ComexioCertificateExpirySensor(coordinator, server_id))
+    return sensors
 
 
 def _onewire_sensors(coordinator: ComexioCoordinator) -> list["ComexioOneWireSensor"]:
@@ -730,7 +751,9 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
     Follows the certificate_changed repair through the issue registry; a new pin changes the entry data,
     which reloads the entry and so this sensor.
     The fingerprints are public certificate hashes, kept out of the recorder only because they never
-    change between states.
+    change between states. pinned_at is when the pin was written (None for a pin from before it was
+    recorded); HA's own "last changed" restarts with every restart and so cannot tell. The presented
+    fingerprint is there only while the repair is open.
     """
 
     _attr_has_entity_name = True
@@ -739,7 +762,7 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
     _attr_device_class = SensorDeviceClass.ENUM
     _attr_options = CONNECTION_STATES
     _attr_translation_key = "connection"
-    _unrecorded_attributes = frozenset({ATTR_PINNED_FINGERPRINT, ATTR_PRESENTED_FINGERPRINT})
+    _unrecorded_attributes = frozenset({ATTR_PINNED_FINGERPRINT, ATTR_PINNED_AT, ATTR_PRESENTED_FINGERPRINT})
 
     def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
         self.coordinator = coordinator
@@ -764,11 +787,13 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
     def extra_state_attributes(self) -> dict[str, Any]:
         entry = self.coordinator.config_entry
         pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
-        presented = presented_fingerprint(self.hass, entry.entry_id)
-        return {
+        attributes: dict[str, Any] = {
             ATTR_PINNED_FINGERPRINT: format_fingerprint(pinned) if pinned is not None else None,
-            ATTR_PRESENTED_FINGERPRINT: format_fingerprint(presented) if presented is not None else None,
+            ATTR_PINNED_AT: entry.data.get(CONF_CERTIFICATE_PINNED_AT) if pinned is not None else None,
         }
+        if (presented := presented_fingerprint(self.hass, entry.entry_id)) is not None:
+            attributes[ATTR_PRESENTED_FINGERPRINT] = format_fingerprint(presented)
+        return attributes
 
     async def async_added_to_hass(self) -> None:
         issue_id = certificate_issue_id(self.coordinator.config_entry.entry_id)
@@ -786,6 +811,143 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
                 ir.EVENT_REPAIRS_ISSUE_REGISTRY_UPDATED, _issue_updated, event_filter=_is_this_issue
             )
         )
+
+
+def _stored_utc_date(text: object) -> datetime | None:
+    """A date the expiry sensor stored, in UTC; None when it is missing or cannot be one (stored data edited by hand).
+
+    Every state write of a timestamp converts it to UTC, so a date that cannot be converted would make each
+    write fail: one without a zone, or one with a zone at the edge of the calendar (0001-01-01T00:00:00+05:00).
+    """
+    try:
+        # parse_datetime gives None for text that is no date, but raises for a well-formed impossible one.
+        date = dt_util.parse_datetime(str(text))
+        if date is None or date.utcoffset() is None:
+            return None
+        return dt_util.as_utc(date)
+    except (ValueError, OverflowError):
+        return None
+
+
+class ComexioCertificateExpirySensor(ComexioStableEntityIdMixin, RestoreEntity, SensorEntity):
+    """When the pinned certificate stops being valid (attribute valid_from: when it started); only on a pinned entry.
+
+    Read from a bare TLS handshake (no request, no credentials) at setup and every
+    CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC. The dates are taken only from the pinned certificate itself: a
+    handshake that presents another one (the certificate_changed repair's business, raised by the polls)
+    changes nothing here. A failed read keeps the last value, which survives a restart as long as the pin
+    stays the same; unknown means not read yet or a certificate whose dates cannot be read, never one that
+    does not expire. Not a CoordinatorEntity: it does not depend on the polls, and a new pin reloads the
+    entry and so this sensor.
+    """
+
+    _attr_has_entity_name = True
+    _attr_should_poll = False
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+    _attr_icon = "mdi:certificate-outline"
+    _attr_translation_key = "certificate_expiry"
+    _unrecorded_attributes = frozenset({ATTR_VALID_FROM})
+
+    def __init__(self, coordinator: ComexioCoordinator, server_id: str) -> None:
+        self.coordinator = coordinator
+        self._attr_unique_id = f"comexio_{server_id}_{CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX}"
+        data = coordinator.config_entry.data
+        self._host: str = data[CONF_HOST]
+        self._pin: str = data[CONF_CERTIFICATE_FINGERPRINT]
+        self._attr_native_value: datetime | None = None
+        self._valid_from: datetime | None = None
+        self._read_task: asyncio.Task[None] | None = None
+        self._read_failed = False
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return hub_device_info(self.coordinator)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return {ATTR_VALID_FROM: self._valid_from}
+
+    @property
+    def extra_restore_state_data(self) -> ExtraStoredData | None:
+        if self._attr_native_value is None or self._valid_from is None:
+            return None
+        return RestoredExtraData(
+            {
+                STORED_FINGERPRINT: self._pin,
+                STORED_VALID_FROM: self._valid_from.isoformat(),
+                STORED_VALID_UNTIL: self._attr_native_value.isoformat(),
+            }
+        )
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        if (last := await self.async_get_last_extra_data()) is not None:
+            self._restore(last.as_dict())
+        self.async_on_remove(
+            async_track_time_interval(
+                self.hass, self._start_read, timedelta(seconds=CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC)
+            )
+        )
+        self._start_read()
+
+    async def async_will_remove_from_hass(self) -> None:
+        if self._read_task is not None:
+            self._read_task.cancel()
+
+    def _restore(self, stored: dict[str, Any]) -> None:
+        """Take the dates stored at the last stop, if they belong to the pin of this setup."""
+        if stored.get(STORED_FINGERPRINT) != self._pin:
+            return
+        valid_from = _stored_utc_date(stored.get(STORED_VALID_FROM))
+        valid_until = _stored_utc_date(stored.get(STORED_VALID_UNTIL))
+        if valid_from is not None and valid_until is not None and valid_from <= valid_until:
+            self._valid_from, self._attr_native_value = valid_from, valid_until
+        else:
+            _LOGGER.debug(
+                "Comexio at %s: stored certificate dates missing, unreadable or in reverse order, "
+                "waiting for the next read",
+                self._host,
+            )
+
+    @callback
+    def _start_read(self, _now: datetime | None = None) -> None:
+        if self._read_task is not None and not self._read_task.done():
+            return
+        self._read_task = self.coordinator.config_entry.async_create_background_task(
+            self.hass, self._async_read(), f"comexio certificate expiry {self._host}"
+        )
+
+    async def _async_read(self) -> None:
+        try:
+            info = await fetch_certificate(self._host)
+        except (ComexioError, ValueError) as err:
+            # Once per outage at INFO: the value shown stays right until Comexio replaces the certificate.
+            level = logging.DEBUG if self._read_failed else logging.INFO
+            self._read_failed = True
+            _LOGGER.log(
+                level, "Comexio at %s: certificate validity not read, keeping the last one: %s", self._host, err
+            )
+            return
+        except Exception:
+            # Logged here: the task is held until the next read, so asyncio would report it a day late if at all.
+            _LOGGER.exception("Comexio at %s: certificate validity read failed unexpectedly", self._host)
+            return
+        self._read_failed = False
+        if info.fingerprint != self._pin:
+            _LOGGER.debug(
+                "Comexio at %s presents certificate %s, not the pinned one: its validity is not shown",
+                self._host,
+                format_fingerprint(info.fingerprint),
+            )
+            return
+        valid_from, valid_until = info.not_valid_before, info.not_valid_after
+        if valid_from is not None and valid_until is not None and valid_from > valid_until:
+            # Unknown, like the restore: an expiry before the start would read as an expired certificate.
+            _LOGGER.debug("Comexio at %s: certificate validity dates are in reverse order, not shown", self._host)
+            valid_from = valid_until = None
+        self._valid_from, self._attr_native_value = valid_from, valid_until
+        self.async_write_ha_state()
 
 
 class ComexioApiWriteErrorsSensor(ComexioStableEntityIdMixin, SensorEntity):
