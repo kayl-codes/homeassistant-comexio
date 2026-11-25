@@ -251,7 +251,9 @@ class DoorstationGallery(MediaSource):
         return PlayMedia(_view_path(parsed.entry_id, parsed.ext_id, parsed.name), _JPEG_MIME)
 
 
-async def async_get_media_source(hass: HomeAssistant) -> DoorstationGallery:
+# HA awaits async_get_media_source (media_source/__init__.py) — the async signature is the platform contract,
+# regardless of body (python:S7503 false positive).
+async def async_get_media_source(hass: HomeAssistant) -> DoorstationGallery:  # NOSONAR
     """Set up the Doorstation gallery as a media source (the media_source component asks for it)."""
     return DoorstationGallery(hass)
 
