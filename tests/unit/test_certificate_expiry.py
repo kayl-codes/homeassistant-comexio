@@ -146,6 +146,7 @@ def test_a_pinned_certificate_without_readable_dates_is_unknown() -> None:
     assert sensor.native_value is None
     assert sensor.extra_state_attributes == {"valid_from": None}
     assert sensor.extra_restore_state_data is None
+    assert sensor.async_write_ha_state.call_count == 2  # the unknown reaches HA, not only the property
 
 
 def test_a_read_with_the_end_before_the_start_is_unknown_not_expired() -> None:
@@ -157,6 +158,7 @@ def test_a_read_with_the_end_before_the_start_is_unknown_not_expired() -> None:
     assert sensor.native_value is None
     assert sensor.extra_state_attributes == {"valid_from": None}
     assert sensor.extra_restore_state_data is None
+    assert sensor.async_write_ha_state.call_count == 2  # the unknown reaches HA, not only the property
 
 
 def test_stored_dates_with_start_equal_to_end_are_restored() -> None:

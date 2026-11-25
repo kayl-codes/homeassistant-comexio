@@ -92,6 +92,10 @@ ATTR_PINNED_AT = "pinned_at"
 ATTR_PRESENTED_FINGERPRINT = "presented_fingerprint"
 # Attribute of ComexioCertificateExpirySensor: the start of the pinned certificate's validity period.
 ATTR_VALID_FROM = "valid_from"
+# The keys of the dates kept over a restart (extra_restore_state_data and _restore); old data in the restore cache.
+STORED_FINGERPRINT = "fingerprint"
+STORED_VALID_FROM = "not_valid_before"
+STORED_VALID_UNTIL = "not_valid_after"
 
 # Mapping Comexio units to HA Device Classes
 UNIT_TO_DEVICE_CLASS = {
@@ -870,9 +874,9 @@ class ComexioCertificateExpirySensor(ComexioStableEntityIdMixin, RestoreEntity, 
             return None
         return RestoredExtraData(
             {
-                "fingerprint": self._pin,
-                "not_valid_before": self._valid_from.isoformat(),
-                "not_valid_after": self._attr_native_value.isoformat(),
+                STORED_FINGERPRINT: self._pin,
+                STORED_VALID_FROM: self._valid_from.isoformat(),
+                STORED_VALID_UNTIL: self._attr_native_value.isoformat(),
             }
         )
 
@@ -893,10 +897,10 @@ class ComexioCertificateExpirySensor(ComexioStableEntityIdMixin, RestoreEntity, 
 
     def _restore(self, stored: dict[str, Any]) -> None:
         """Take the dates stored at the last stop, if they belong to the pin of this setup."""
-        if stored.get("fingerprint") != self._pin:
+        if stored.get(STORED_FINGERPRINT) != self._pin:
             return
-        valid_from = _stored_utc_date(stored.get("not_valid_before"))
-        valid_until = _stored_utc_date(stored.get("not_valid_after"))
+        valid_from = _stored_utc_date(stored.get(STORED_VALID_FROM))
+        valid_until = _stored_utc_date(stored.get(STORED_VALID_UNTIL))
         if valid_from is not None and valid_until is not None and valid_from <= valid_until:
             self._valid_from, self._attr_native_value = valid_from, valid_until
         else:

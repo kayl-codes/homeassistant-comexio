@@ -2625,6 +2625,24 @@ async def test_the_certificate_expiry_sensor_reads_again_every_day_until_unloade
 
 
 @pytest.mark.usefixtures("mock_comexio_api")
+async def test_a_registered_certificate_expiry_sensor_survives_the_next_setup_of_a_pinned_entry(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry
+) -> None:
+    # The orphan cleanup of every setup must count the expiry sensor among the entities of a pinned entry.
+    await _setup(hass, pinned_entry)
+    registry = er.async_get(hass)
+    assert registry.async_get(CERTIFICATE_EXPIRY_SENSOR) is not None
+    await hass.config_entries.async_unload(pinned_entry.entry_id)
+    await hass.async_block_till_done()
+
+    await hass.config_entries.async_setup(pinned_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert pinned_entry.state is ConfigEntryState.LOADED
+    assert registry.async_get(CERTIFICATE_EXPIRY_SENSOR) is not None
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
 async def test_dropping_the_pin_removes_the_certificate_expiry_sensor(
     hass: HomeAssistant, pinned_entry: MockConfigEntry
 ) -> None:
