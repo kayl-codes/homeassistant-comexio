@@ -412,9 +412,32 @@ async def test_the_acceptance_of_the_rule_leaves_a_repair_alone_that_came_up_whi
 
     outcome, current = await async_accept_certificate(hass, entry, OTHER, by_rule=True)
 
-    assert (outcome, current) == (ACCEPT_REPAIR_OPEN, None)
+    assert (outcome, current) == (ACCEPT_REPAIR_OPEN, OTHER)  # what the read found: the newest the rule knows
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
     assert _issue(hass, entry).data["actual"] == THIRD  # the user's repair is not cleared or replaced
+
+
+async def test_a_repair_opened_during_the_acceptance_read_shows_what_that_read_found(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock
+) -> None:
+    # The wait settled on OTHER; while the acceptance read again, a repair came up for THIRD and Comexio moved on
+    # to a fourth certificate, which that read found.
+    entry.add_to_hass(hass)
+    reads.return_value = _info(OTHER)
+    fourth = "d" * 64
+
+    async def moved_on(_host: str) -> str:
+        async_report_certificate_changed(hass, entry, THIRD)
+        return fourth
+
+    accept_read.side_effect = moved_on
+
+    await _changed(hass, entry, OTHER)
+
+    accept_read.assert_awaited_once()
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    # Brought up to the acceptance's read: neither OTHER, which Comexio no longer presents, nor the repair's THIRD.
+    assert _issue(hass, entry).data["actual"] == fourth
 
 
 async def test_the_acceptance_of_the_rule_pins_nothing_on_an_entry_disabled_while_it_read(

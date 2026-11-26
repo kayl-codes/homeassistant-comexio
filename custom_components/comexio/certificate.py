@@ -237,7 +237,9 @@ def notify_https_enabled(hass: HomeAssistant, server_id: str, host: str, fingerp
         f"Pinned certificate (SHA-256):\n`{format_fingerprint(fingerprint)}`\n\n"
         "It is the SHA-256 value Comexio's admin page lists under its certificate hashes. Should Comexio "
         "present another certificate later, for example after generating a new one, the integration stops "
-        "and asks in a repair before it trusts that certificate.",
+        "and asks in a repair before it trusts that certificate. Only a certificate of the same issuer and issuer "
+        "key as the pinned one, on a firmware known to replace its certificate on its own, is taken over automatically "
+        "once it stayed the same for a minute; a notification then names it.",
         title="Comexio: connection encrypted",
         notification_id=_https_notification_id(server_id),
     )
@@ -548,7 +550,8 @@ async def async_accept_certificate(
     a repair that is up, once the lock is its own and again after the certificate was read, is ACCEPT_REPAIR_OPEN:
     nothing is pinned, the user decides.
 
-    Returns the outcome (ACCEPT_*) and the certificate Comexio presents now, None if it could not be read.
+    Returns the outcome (ACCEPT_*) and the certificate Comexio presents now; None where it was not read (the read
+    failed, or the acceptance stopped before it) or the entry changed meanwhile.
     """
     # The connection the user decided on: a reconfigure while this waits for the lock or reads counts as a change,
     # as does a pin gone already (HTTPS dropped): nothing left that the user's decision compared against.
@@ -570,7 +573,9 @@ async def async_accept_certificate(
             _LOGGER.warning("Comexio at %s: entry removed while its certificate was read, nothing pinned", host)
             return ACCEPT_ENTRY_GONE, None
         if (stop := _stop_after_read(hass, entry, host, pinned, shown, by_rule)) is not None:
-            return stop, None
+            # A repair that came up meanwhile is brought up to this read, the newest; a changed entry's read was
+            # of the connection it no longer has.
+            return stop, current if stop == ACCEPT_REPAIR_OPEN else None
         if current == pinned:
             # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
             async_clear_certificate_changed(hass, entry.entry_id)

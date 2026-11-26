@@ -29,6 +29,9 @@ AKI = "0a1b2c3d"
         ("1" * 5000, None),  # beyond Python's int conversion limit: unknown, not a ValueError out of the poll
         ("11." + "1" * 5000, None),
         ("999999.1.5", (999999, 1, 5)),
+        (".".join(["1"] * 8), (1,) * 8),
+        (".".join(["1"] * 9), None),  # more parts than a version has: not split into a tuple of any length
+        pytest.param(".".join(["1"] * 100_000), None, id="100000-parts"),
     ],
 )
 def test_the_firmware_version_is_read_as_numbers_or_not_at_all(version: str | None, parsed: Any) -> None:

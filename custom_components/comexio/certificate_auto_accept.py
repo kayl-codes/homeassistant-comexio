@@ -54,8 +54,8 @@ _LOGGER = logging.getLogger(__name__)
 # hass.data: entry_id -> _AutoAccepts. Not bound to the entry: a setup retry or a reload must not end the wait.
 CERTIFICATE_AUTO_ACCEPTS = f"{DOMAIN}_certificate_auto_accepts"
 # ASCII: \d alone also matches other scripts' digits. Bounded: int() of a digit string beyond Python's conversion limit
-# (4300) raises, and no real firmware component has more than a few digits.
-_FIRMWARE_RE = re.compile(r"\d{1,6}(?:\.\d{1,6})*", re.ASCII)
+# (4300) raises, and no real firmware component has more than a few digits, nor a version more than a few parts.
+_FIRMWARE_RE = re.compile(r"\d{1,6}(?:\.\d{1,6}){0,7}", re.ASCII)
 
 AUTO_ACCEPT_TEXTS: dict[str, dict[str, str]] = {
     "en": {
@@ -217,8 +217,8 @@ async def _async_decide(
         return
     if _left_to_open_repair(hass, entry, host, info.fingerprint):
         return
-    outcome, _current = await async_accept_certificate(hass, entry, info.fingerprint, by_rule=True)
-    await _async_after_acceptance(hass, entry, state, host, pinned, info, outcome)
+    outcome, current = await async_accept_certificate(hass, entry, info.fingerprint, by_rule=True)
+    await _async_after_acceptance(hass, entry, state, host, pinned, info, outcome, current)
 
 
 async def _async_after_acceptance(
@@ -229,8 +229,11 @@ async def _async_after_acceptance(
     pinned: str,
     info: CertificateInfo,
     outcome: str,
+    current: str | None,
 ) -> None:
-    """What follows the acceptance by the rule: tell the user, or leave the case to the repair."""
+    """What follows the acceptance by the rule: tell the user, or leave the case to the repair.
+
+    current: the certificate the acceptance read itself, None where it read none."""
     if outcome == ACCEPT_PINNED:
         try:
             await _async_tell_user(hass, entry, pinned, info)
@@ -241,8 +244,9 @@ async def _async_after_acceptance(
         # Not read again: the repair asks, for the newest certificate seen (a report during the read counts).
         _report_if_current(hass, entry, host, pinned, state.seen or info.fingerprint)
     elif outcome == ACCEPT_REPAIR_OPEN:
-        # A repair came up while the acceptance queued or read the certificate: the user decides, on the newest read.
-        _left_to_open_repair(hass, entry, host, info.fingerprint)
+        # A repair came up while the acceptance queued or read the certificate: the user decides, on the newest read
+        # (the acceptance's own if it got that far, else the wait's).
+        _left_to_open_repair(hass, entry, host, current or info.fingerprint)
     else:
         # Another certificate again raised the repair itself; the rest ended the case without one.
         _LOGGER.debug(
