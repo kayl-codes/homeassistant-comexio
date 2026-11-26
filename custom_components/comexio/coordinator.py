@@ -7555,7 +7555,12 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     @property
     def known_firmware(self) -> str | None:
-        """Comexio's firmware version: from this run's polls, else as the last scraped poll saved it, else None."""
+        """Comexio's firmware version: from this run's polls, else as the last scraped poll saved it, else None.
+
+        None once the entry points to another host than the API was built for: what it read belongs to the old one.
+        """
+        if self.api.host != self.config_entry.data.get(CONF_HOST):
+            return None
         return self.api.comexio_version or self._saved_firmware
 
     def _clear_certificate_changed(self) -> None:

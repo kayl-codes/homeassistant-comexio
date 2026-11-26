@@ -88,6 +88,7 @@ class _AutoAccepts:
 
     task: asyncio.Task[None] | None = None
     connection: tuple[str, str] | None = None
+    seen: str | None = None  # the certificate last seen (a report or a read of the wait): what a failure reports
     refused: set[tuple[str, str]] = field(default_factory=set)
     noted: set[tuple[str, str]] = field(default_factory=set)  # pairs whose "left to the user" reason was logged
 
@@ -136,7 +137,8 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
         return False
     # A wait started for the connection before a reconfigure ends on its own (_still_current); this one waits anew.
     if state.task is not None and not state.task.done() and state.connection == (host, pinned):
-        return True  # the wait running reads the certificate again anyway
+        state.seen = actual  # the wait reads the certificate again anyway; a failure of it reports this one
+        return True
     _LOGGER.warning(
         "Comexio at %s presents certificate %s instead of the pinned %s; checking it against the pinned issuer in %d s",
         host,
@@ -147,6 +149,7 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
     if state.task is not None:
         state.task.cancel()  # a no-op for a finished one; a wait for the connection before a reconfigure ends here
     state.connection = (host, pinned)
+    state.seen = actual
     state.task = hass.async_create_background_task(
         _async_run(hass, entry, state, host, pinned, actual), f"{DOMAIN} certificate auto accept {entry.entry_id}"
     )
@@ -178,17 +181,17 @@ async def _async_run(
         await _async_decide(hass, entry, state, host, pinned, seen)
     except Exception:
         _LOGGER.exception("Comexio at %s: the check of the new certificate failed; the repair asks instead", host)
-        _report_if_current(hass, entry, host, pinned, seen)
+        _report_if_current(hass, entry, host, pinned, state.seen or seen)
 
 
 async def _async_decide(
     hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, host: str, pinned: str, seen: str
 ) -> None:
     try:
-        info, last = await _async_settled_certificate(host, seen)
+        info, last = await _async_settled_certificate(host, seen, state)
     except (ComexioError, ValueError) as err:
         _LOGGER.warning("Comexio at %s: the new certificate could not be read again (%s); the repair asks", host, err)
-        _report_if_current(hass, entry, host, pinned, seen)
+        _report_if_current(hass, entry, host, pinned, state.seen or seen)
         return
     if not _still_current(hass, entry, host, pinned):
         # Removed, disabled or reconfigured meanwhile: the new connection decides on its own.
@@ -209,6 +212,13 @@ async def _async_decide(
     if _left_to_open_repair(hass, entry, host, info.fingerprint):
         return
     outcome, _current = await async_accept_certificate(hass, entry, info.fingerprint, by_rule=True)
+    await _async_after_acceptance(hass, entry, host, pinned, info, outcome)
+
+
+async def _async_after_acceptance(
+    hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str, info: CertificateInfo, outcome: str
+) -> None:
+    """What follows the acceptance by the rule: tell the user, or leave the case to the repair."""
     if outcome == ACCEPT_PINNED:
         try:
             await _async_tell_user(hass, entry, pinned, info)
@@ -219,8 +229,8 @@ async def _async_decide(
         # Not read again: the repair asks, for the newest certificate.
         _report_if_current(hass, entry, host, pinned, info.fingerprint)
     elif outcome == ACCEPT_REPAIR_OPEN:
-        # A repair came up while the acceptance queued: it stays as it is, the user decides (it may show a newer read).
-        _LOGGER.info("Comexio at %s: a certificate repair came up while the acceptance queued; the user decides", host)
+        # A repair came up while the acceptance queued or read the certificate: the user decides, on the newest read.
+        _left_to_open_repair(hass, entry, host, info.fingerprint)
     else:
         # Another certificate again raised the repair itself; the rest ended the case without one.
         _LOGGER.debug(
@@ -241,15 +251,16 @@ def _left_to_open_repair(hass: HomeAssistant, entry: ConfigEntry, host: str, act
     return True
 
 
-async def _async_settled_certificate(host: str, seen: str) -> tuple[CertificateInfo | None, str]:
+async def _async_settled_certificate(host: str, seen: str, state: _AutoAccepts) -> tuple[CertificateInfo | None, str]:
     """The certificate once it stayed the same for the settle time (None when it kept changing), and the
     fingerprint read last."""
     for _ in range(CERTIFICATE_AUTO_ACCEPT_MAX_READS):
         await asyncio.sleep(CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC)
         info = await fetch_certificate(host)
-        if info.fingerprint == seen:
+        unchanged = info.fingerprint == seen
+        seen = state.seen = info.fingerprint  # a later failure reports the newest one, not the first
+        if unchanged:
             return info, seen
-        seen = info.fingerprint
     return None, seen
 
 

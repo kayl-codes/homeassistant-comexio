@@ -3661,6 +3661,7 @@ def certificate_repair(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 def _certificate_coordinator(api: ComexioAPI) -> _FakeCoordinator:
     coordinator = _coordinator(api)
     coordinator.config_entry = SimpleNamespace(options={}, entry_id="entry1", data={coordinator_module.CONF_HOST: HOST})
+    api.host = HOST  # the API of this setup was built for the entry's host
     return coordinator
 
 
@@ -4214,6 +4215,19 @@ def test_a_firmware_saved_for_another_host_is_not_known(api: ComexioAPI, saved_h
     api.comexio_version = None
 
     asyncio.run(ComexioCoordinator.async_seed_saved_onewire_sensors(coordinator))
+
+    assert coordinator.known_firmware is None
+
+
+def test_a_firmware_read_for_another_host_is_not_known_after_a_reconfigure(api: ComexioAPI) -> None:
+    # The entry was pointed at another Comexio while this coordinator (and its API) still serve the old one: what
+    # the API read, and what was saved for the old host, say nothing about the new one.
+    coordinator = _certificate_coordinator(api)
+    coordinator._saved_firmware = "11.1.5"
+    api.comexio_version = "11.1.5"
+    assert coordinator.known_firmware == "11.1.5"
+
+    coordinator.config_entry.data[coordinator_module.CONF_HOST] = "192.0.2.99"
 
     assert coordinator.known_firmware is None
 

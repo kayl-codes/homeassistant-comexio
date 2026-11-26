@@ -538,10 +538,11 @@ async def async_accept_certificate(
     is put up for comparison instead (repair and push). One acceptance runs at a time, so a second tap, or the
     repair confirmed alongside, finds the certificate pinned already and leaves it at that.
 
-    by_rule: `shown` is the certificate the rule of certificate_auto_accept.py checked, not one the user saw; only
-    the log line differs, and a certificate pinned already (by someone else meanwhile) is ACCEPT_ENTRY_CHANGED,
-    so the rule does not tell the user it accepted it. A repair that is up once the lock is its own is
-    ACCEPT_REPAIR_OPEN: nothing is pinned, the user decides.
+    by_rule: `shown` is the certificate the rule of certificate_auto_accept.py checked, not one the user saw. The
+    log line differs, and the rule steps back more often: a certificate pinned already (by someone else meanwhile)
+    is ACCEPT_ENTRY_CHANGED, so the rule does not tell the user it accepted it, as is an entry disabled meanwhile;
+    a repair that is up, once the lock is its own and again after the certificate was read, is ACCEPT_REPAIR_OPEN:
+    nothing is pinned, the user decides.
 
     Returns the outcome (ACCEPT_*) and the certificate Comexio presents now, None if it could not be read.
     """
@@ -564,8 +565,8 @@ async def async_accept_certificate(
         if hass.config_entries.async_get_entry(entry.entry_id) is not entry:
             _LOGGER.warning("Comexio at %s: entry removed while its certificate was read, nothing pinned", host)
             return ACCEPT_ENTRY_GONE, None
-        if _connection_changed(entry, host, pinned, shown):
-            return ACCEPT_ENTRY_CHANGED, None
+        if (stop := _stop_after_read(hass, entry, host, pinned, shown, by_rule)) is not None:
+            return stop, None
         if current == pinned:
             # The pinned certificate is back: nothing to accept. A loaded entry's next poll gets through on its own.
             async_clear_certificate_changed(hass, entry.entry_id)
@@ -613,6 +614,16 @@ def _rule_must_stand_back(hass: HomeAssistant, entry: ConfigEntry) -> str | None
     if entry.disabled_by is not None:
         return ACCEPT_ENTRY_CHANGED
     return None
+
+
+def _stop_after_read(
+    hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str | None, shown: str, by_rule: bool
+) -> str | None:
+    """Outcome if the acceptance must not go on once the certificate was read again (the entry was reconfigured; for
+    the rule also a repair that came up or a disable meanwhile), else None."""
+    if _connection_changed(entry, host, pinned, shown):
+        return ACCEPT_ENTRY_CHANGED
+    return _rule_must_stand_back(hass, entry) if by_rule else None
 
 
 def _connection_changed(entry: ConfigEntry, host: str, pinned: str | None, shown: str) -> bool:

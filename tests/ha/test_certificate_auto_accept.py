@@ -304,7 +304,7 @@ async def test_a_repair_opened_while_the_acceptance_waits_for_its_lock_stays_the
 
     accept_read.assert_not_awaited()
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
-    assert _issue(hass, entry).data["actual"] == THIRD  # left as it is: the user decides on that repair
+    assert _issue(hass, entry).data["actual"] == OTHER  # still the user's repair, brought up to the newest read
 
 
 async def test_the_acceptance_of_the_rule_leaves_an_open_repair_alone(
@@ -346,6 +346,69 @@ async def test_the_acceptance_of_the_rule_pins_nothing_on_an_entry_disabled_whil
     assert (outcome, current) == (ACCEPT_ENTRY_CHANGED, None)
     accept_read.assert_not_awaited()
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+
+
+async def test_the_acceptance_of_the_rule_leaves_a_repair_alone_that_came_up_while_it_read(
+    hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+
+    async def repair_opened(_host: str) -> str:
+        async_report_certificate_changed(hass, entry, THIRD)  # e.g. a poll met another certificate meanwhile
+        return OTHER
+
+    accept_read.side_effect = repair_opened
+
+    outcome, current = await async_accept_certificate(hass, entry, OTHER, by_rule=True)
+
+    assert (outcome, current) == (ACCEPT_REPAIR_OPEN, None)
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry).data["actual"] == THIRD  # the user's repair is not cleared or replaced
+
+
+async def test_the_acceptance_of_the_rule_pins_nothing_on_an_entry_disabled_while_it_read(
+    hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+
+    async def disabled(_host: str) -> str:
+        await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+        return OTHER
+
+    accept_read.side_effect = disabled
+
+    outcome, current = await async_accept_certificate(hass, entry, OTHER, by_rule=True)
+
+    assert (outcome, current) == (ACCEPT_ENTRY_CHANGED, None)
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+
+
+async def test_a_failing_read_during_the_wait_reports_the_newest_certificate_seen(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+    reads.side_effect = [_info(THIRD), ComexioConnectionError("down")]  # another certificate, then the read fails
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry).data["actual"] == THIRD  # not the one the first report named
+
+
+async def test_a_report_during_the_wait_is_what_a_failing_read_reports(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+
+    async def poll_meets_another_then_read_fails(_host: str) -> CertificateInfo:
+        async_certificate_changed(hass, entry, THIRD, FIRMWARE)  # a later poll: the running wait is kept
+        raise ComexioConnectionError("down")
+
+    reads.side_effect = poll_meets_another_then_read_fails
+
+    await _changed(hass, entry, OTHER)
+
+    assert _issue(hass, entry).data["actual"] == THIRD
 
 
 async def test_an_entry_disabled_during_the_wait_pins_nothing(
