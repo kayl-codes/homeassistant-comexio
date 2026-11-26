@@ -39,6 +39,7 @@ from .const import (
     DOORSTATION_GALLERY_LINK_EXPIRY_SEC,
     DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
     DOORSTATION_GALLERY_MAX_PICTURES,
+    DOORSTATION_GALLERY_PLACE_WAIT_SEC,
     DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_NAME,
@@ -314,6 +315,52 @@ async def async_get_media_source(hass: HomeAssistant) -> DoorstationGallery:  # 
     return DoorstationGallery(hass)
 
 
+async def _read_in_a_gallery_place(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, name: str
+) -> tuple[bytes | None, str | None]:
+    """One picture read in one of the gallery's places; the wait for the place has its own budget."""
+    slots = _gallery_read_slots(hass, entry_id)
+    try:
+        async with asyncio.timeout(DOORSTATION_GALLERY_PLACE_WAIT_SEC):
+            await slots.acquire()
+    except TimeoutError:
+        _LOGGER.debug(
+            "Doorstation %s picture not answered: no gallery place within %s s",
+            number,
+            DOORSTATION_GALLERY_PLACE_WAIT_SEC,
+        )
+        raise web.HTTPServiceUnavailable from None
+    try:
+        return await _read_within_thumbnail_budget(hass, entry_id, coordinator, number, name)
+    finally:
+        slots.release()
+
+
+async def _read_within_thumbnail_budget(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, name: str
+) -> tuple[bytes | None, str | None]:
+    """The read of a taken place, its wait for the Doorstation lock included, within the thumbnail budget."""
+    # Offline or unloaded while the place was awaited: no read for a picture that is not handed out.
+    if not _still_offered(hass, entry_id, coordinator, number):
+        _LOGGER.debug("Doorstation %s went offline or was unloaded while waiting for a gallery place", number)
+        raise web.HTTPServiceUnavailable
+    try:
+        async with asyncio.timeout(DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC) as deadline:
+            return await coordinator.api.get_doorstation_picture(
+                number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+            )
+    except TimeoutError:
+        # A timeout from inside the read (socket or connect) is no budget overrun: not ours to answer as 503.
+        if not deadline.expired():
+            raise
+        _LOGGER.debug(
+            "Doorstation %s picture not answered within %s s (the read)",
+            number,
+            DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
+        )
+        raise web.HTTPServiceUnavailable from None
+
+
 class DoorstationPictureView(HomeAssistantView):
     """One stored picture of a Doorstation as JPEG: the gallery's thumbnails and its playback."""
 
@@ -338,33 +385,11 @@ class DoorstationPictureView(HomeAssistantView):
         if not _is_gallery_picture(name):
             _LOGGER.debug("Doorstation %s picture not served: not a bell or motion picture", number)
             raise web.HTTPNotFound
-        # The read, its wait for the Doorstation lock included, has DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC in all: a
-        # thumbnail queued behind a stuck read must not keep its request open. The gallery's own places come first, so a
-        # browser batch queues on the lock two reads deep at most. Once the lock is taken, the read holds it for at most
-        # DOORSTATION_PICTURE_READ_TIMEOUT_SEC (held_for_sec); the budget ends the read earlier if the wait used it up.
-        slots = _gallery_read_slots(hass, entry_id)
-        try:
-            async with asyncio.timeout(DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC) as deadline, slots:
-                # Offline or unloaded while the place was awaited: no read for a picture that is not handed out.
-                if not _still_offered(hass, entry_id, coordinator, number):
-                    _LOGGER.debug(
-                        "Doorstation %s went offline or was unloaded while waiting for a gallery place", number
-                    )
-                    raise web.HTTPServiceUnavailable
-                data, cause = await coordinator.api.get_doorstation_picture(
-                    number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
-                )
-        except TimeoutError:
-            # A timeout from inside the read (socket or connect) is no budget overrun: not ours to answer as 503.
-            if not deadline.expired():
-                raise
-            # The wait for a gallery place and the read both count: the line does not tell which one ran out.
-            _LOGGER.debug(
-                "Doorstation %s picture not answered within %s s (a place or the read)",
-                number,
-                DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
-            )
-            raise web.HTTPServiceUnavailable from None
+        # The gallery's places come first, so a browser batch queues two reads deep at most. The wait for a place has
+        # DOORSTATION_GALLERY_PLACE_WAIT_SEC of its own: a thumbnail waiting its turn is not cut short by the read.
+        # Once a place is taken, the read has DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC in all, its wait for the
+        # Doorstation lock included; the read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
+        data, cause = await _read_in_a_gallery_place(hass, entry_id, coordinator, number, name)
         if not _still_offered(hass, entry_id, coordinator, number):
             # Offline or unloaded while the read waited: no picture is handed out, and 503 says a retry may succeed.
             _LOGGER.debug("Doorstation %s went offline or was unloaded during the picture read", number)

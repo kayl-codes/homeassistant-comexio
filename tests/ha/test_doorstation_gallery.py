@@ -810,8 +810,8 @@ async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_u
         await places.acquire()
     client = await hass_client()
     try:
-        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.05):
-            # Every place is taken: the request must still answer within its budget, not wait for a place forever.
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_PLACE_WAIT_SEC", 0.05):
+            # Every place is taken: the request must still answer within its place budget, not wait for a place forever.
             async with asyncio.timeout(5):
                 response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
     finally:
@@ -820,6 +820,27 @@ async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_u
 
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
     coordinator.api.get_doorstation_picture.assert_not_awaited()
+
+
+async def test_a_thumbnail_queued_behind_the_places_is_served_within_its_own_read_budget(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        await asyncio.sleep(0.3)
+        return JPEG, None
+
+    coordinator.api.get_doorstation_picture.side_effect = _read
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+
+    # Three thumbnails, two places: the last one waits about 0.3 s for its place, then reads 0.3 s. Its read fits the
+    # thumbnail budget of 0.5 s; the wait for the place is not part of that budget (it would be 0.6 s together).
+    with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.5):
+        responses = await asyncio.gather(*(client.get(path) for _ in range(3)))
+
+    assert [response.status for response in responses] == [HTTPStatus.OK] * 3
 
 
 async def test_a_thumbnail_whose_doorstation_goes_offline_while_waiting_for_a_gallery_place_is_not_read(
