@@ -1438,22 +1438,29 @@ async def test_a_thumbnail_waiting_past_the_slow_mark_is_warned_before_its_wait_
     queued = None
     loop = asyncio.get_running_loop()
     mark = 0.2
+    fired_at: list[float] = []
+
+    def stamped(*args: Any) -> None:
+        # The timer passes its arguments on unchanged: stamp the moment it fires, then log as before.
+        fired_at.append(loop.time())
+        _warn_slow_place_wait(*args)
+
     try:
-        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", mark):
+        with (
+            patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", mark),
+            patch("custom_components.comexio.media_source._warn_slow_place_wait", stamped),
+        ):
             started = loop.time()
             queued = asyncio.ensure_future(client.get(path))
             async with asyncio.timeout(5):
                 await waiting.wait()
-            # Before the mark there is no warning yet: a warning at once would pass the checks below as well. The
-            # timer is armed after `started`, so it cannot be due while less than the mark has passed. A loop delayed
-            # past the mark (a loaded runner) skips this check instead of failing on a correct warning.
-            await asyncio.sleep(0.05)
-            if loop.time() - started < mark:
-                assert not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records)
-            # The warning comes while the thumbnail still stands in the queue, not when its wait has ended.
+            # The timer must not fire before the mark. asyncio may run a timer up to the clock resolution early, so
+            # half the mark is a safe floor. A loaded runner fires it late, which passes; an immediate warning does not.
             async with asyncio.timeout(5):
-                while not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records):
+                while not fired_at:
                     await asyncio.sleep(0.01)
+            assert fired_at[0] - started >= mark / 2
+            # The warning comes while the thumbnail still stands in the queue, not when its wait has ended.
             assert not queued.done()
     except BaseException:
         if queued is not None:
