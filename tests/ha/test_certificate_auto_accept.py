@@ -3,6 +3,7 @@
 import asyncio
 from collections.abc import Generator
 import logging
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -169,6 +170,9 @@ async def test_the_notification_stays_english_and_the_push_follows_the_system_la
     assert notification.call_args.kwargs["title"] == auto_module.AUTO_ACCEPT_TEXTS["en"]["title"]
     told = [push for push in pushes if push.data["message"] != "clear_notification"]
     assert told[0].data["title"] == auto_module.AUTO_ACCEPT_TEXTS["de"]["title"]
+    # The body is German too, not only the title (a German title over an English body would pass the line above).
+    assert "Aussteller: " + ISSUER in told[0].data["message"]
+    assert "Issuer: " not in told[0].data["message"]
 
 
 @pytest.mark.logged_exception  # the failed notice is logged with its traceback
@@ -457,6 +461,13 @@ async def test_a_certificate_reported_during_the_wait_restarts_the_settle_interv
     entry.add_to_hass(hass)
     accept_read.return_value = shown
     answers = [_info(shown), _info(shown)]
+    settle_sec = 7  # not 0 like the fixture's: the sleeps of exactly this length are what is counted
+    slept: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def recording_sleep(delay: float, *args: Any) -> None:
+        slept.append(delay)
+        await real_sleep(0, *args)  # no real waiting
 
     async def poll_meets_another_during_the_first_read(_host: str) -> CertificateInfo:
         if len(answers) == 2:  # the first read only
@@ -465,9 +476,17 @@ async def test_a_certificate_reported_during_the_wait_restarts_the_settle_interv
 
     reads.side_effect = poll_meets_another_during_the_first_read
 
-    await _changed(hass, entry, OTHER)
+    with (
+        patch.object(auto_module, "CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC", settle_sec),
+        patch.object(
+            auto_module, "asyncio", SimpleNamespace(sleep=recording_sleep, Task=asyncio.Task)
+        ),  # this module only
+    ):
+        await _changed(hass, entry, OTHER)
 
     assert reads.await_count == 2  # whichever one the read shows, it did not stay the same for the interval
+    # The settle interval is waited before every read: the second read after the report is not made at once.
+    assert slept.count(settle_sec) == 2
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == shown
 
 
