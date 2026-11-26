@@ -534,7 +534,7 @@ class ComexioRepairFlow(RepairsFlow):
 
         return self.async_show_form(
             step_id="statistics_cleanup",
-            description_placeholders={"count": count},
+            description_placeholders={"count": str(count)},
             data_schema=vol.Schema(
                 {
                     vol.Required("action", default=ACTION_FIX): SelectSelector(

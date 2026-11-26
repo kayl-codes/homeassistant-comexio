@@ -13,7 +13,7 @@ import math
 import re
 import time
 import traceback
-from typing import Any, NamedTuple, NoReturn
+from typing import Any, NamedTuple, NoReturn, cast
 import weakref
 
 from aiocomexio import (
@@ -29,6 +29,7 @@ from aiocomexio import (
     ComexioResponseError,
     CreatedFunctionPlan,
     DoorstationPicture,
+    IoAddress,
     PlacedModuleBlock,
     RawConfig,
     SystemInfo,
@@ -466,8 +467,9 @@ def _placed_marker_ids(all_plans: dict[int, dict], ref_type: int) -> set[int]:
             ref = elem.get("reference") or {}
             if str(ref.get("type")) != str(ref_type):
                 continue
+            ref_id: Any = ref.get("ref_id")  # a missing id: int(None) raises TypeError, suppressed below
             with suppress(TypeError, ValueError):
-                placed_ids.add(int(ref.get("ref_id")))
+                placed_ids.add(int(ref_id))
     return placed_ids
 
 
@@ -506,9 +508,8 @@ def _plan_marker_refs_strict(plan_data: Any) -> set[int] | None:
         ref = elem.get("reference", "missing") if isinstance(elem, dict) else "malformed"
         if ref is None:
             continue
-        ref_type = _reference_type(ref)
-        if ref_type is None:
-            return None
+        if not isinstance(ref, dict) or (ref_type := _reference_type(ref)) is None:
+            return None  # _reference_type reads no other shape either
         if ref_type != 2:
             continue
         ref_id = ComexioAPI._parse_plausible_marker_id(ref.get("ref_id"))
@@ -1747,7 +1748,7 @@ class ComexioAPI:
         is logged at ERROR with its traceback — once per cause, every further poll at DEBUG.
         """
         try:
-            states = await self.client.get_io_live_states(ios)
+            states = await self.client.get_io_live_states([IoAddress(ext_id, io_id) for ext_id, io_id in ios])
         except ComexioCertificateMismatchError as err:
             self.io_live_fetch_error = f"{type(err).__name__}: {err}"
             self._note_certificate_mismatch(err, "IO live states not fetched")
@@ -1760,8 +1761,8 @@ class ComexioAPI:
             return None
         except ComexioError as err:
             mismatch = await self._replaced_certificate_behind(err)
-            cause = mismatch or err
-            self.io_live_fetch_error = f"{type(cause).__name__}: {cause}"
+            failure: BaseException = mismatch or err
+            self.io_live_fetch_error = f"{type(failure).__name__}: {failure}"
             if mismatch is not None:
                 self._note_certificate_mismatch(mismatch, "IO live states not fetched")
                 return None
@@ -3836,10 +3837,11 @@ class ComexioAPI:
                 k_id,
             )
         else:
-            marker_id = await self.create_marker(binary)
-            if marker_id is None:
+            new_marker_id = await self.create_marker(binary)
+            if new_marker_id is None:
                 _LOGGER.error("create_knx_bridge_marker: create_marker failed for K%s (%s)", k_id, one_line(k_title))
                 return None
+            marker_id = new_marker_id
 
         # A new, free (blank) or unwired marker: its old default/store flag must not carry over.
         if not await self.rename_marker(marker_id, title, binary, default=0, store=False):
@@ -5951,7 +5953,7 @@ class ComexioAPI:
             ref = elem_data.get("reference", "missing") if isinstance(elem_data, dict) else "malformed"
             if ref is None:
                 continue
-            if (ref_type := _reference_type(ref)) is None:
+            if not isinstance(ref, dict) or (ref_type := _reference_type(ref)) is None:
                 _LOGGER.warning("Function plan element %s has no readable reference (%r)", elem_id, ref)
                 unreadable = True
                 continue
@@ -6273,9 +6275,9 @@ class ComexioAPI:
                     not_sent,
                     f". {note.text}" if note.text else "",
                 )
-            self.write_stats.record_failure(
-                f"{target_type} {target_id}", note.cause or attempt.error, failed_at, failed_order
-            )
+            # A failed write always carries its error (None only for a send that went through).
+            failure_error = cast(BaseException, note.cause or attempt.error)
+            self.write_stats.record_failure(f"{target_type} {target_id}", failure_error, failed_at, failed_order)
 
     async def _diagnose_failed_write(
         self,

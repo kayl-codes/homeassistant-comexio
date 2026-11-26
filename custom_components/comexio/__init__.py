@@ -169,7 +169,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
 
 _WEBHOOK_VALUE_KEY = "value"
 _WEBHOOK_MISSING_VALUE_LOG_MSG = "[%s] Webhook %s event without a value refused"
-_WEBHOOK_KIND_LABELS = {WebioClass.QUICKBUS: "Quickbus", WebioClass.KNX: "KNX", WebioClass.ONEWIRE: "1-Wire"}
+_WEBHOOK_KIND_LABELS: dict[str, str] = {
+    WebioClass.QUICKBUS: "Quickbus",
+    WebioClass.KNX: "KNX",
+    WebioClass.ONEWIRE: "1-Wire",
+}
 
 
 def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:
@@ -367,7 +371,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Set custom update interval from config
     conf = {**entry.data, **entry.options}
     interval = conf.get("scan_interval", 15)
-    coordinator.update_interval = timedelta(minutes=interval)
+    # HA has a setter for update_interval; mypy reads the read-only property of its protocol base instead.
+    coordinator.update_interval = timedelta(minutes=interval)  # type: ignore[misc]
 
     # Seed the KNX DPT catalog from disk before the first refresh below — that first poll is
     # exactly the case api.seed_knx_dpt_catalog exists to protect: a freshly created api

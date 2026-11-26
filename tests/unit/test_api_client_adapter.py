@@ -21,6 +21,7 @@ from aiocomexio import (
     ComexioRequestRejectedError,
     ComexioResponseError,
     CreatedFunctionPlan,
+    IoAddress,
     LiveStates,
     RawConfig,
     SystemInfo,
@@ -1199,6 +1200,15 @@ def test_get_io_live_states_passes_the_pairs_through(comexio_api: ComexioAPI, cl
     assert asyncio.run(comexio_api.get_io_live_states([(1, "11")])) == {"11": "74"}
     client.get_io_live_states.assert_awaited_once_with([(1, "11")])
     assert comexio_api.io_live_fetch_error is None
+
+
+def test_get_io_live_states_hands_over_ioaddress_entries(comexio_api: ComexioAPI, client: MagicMock) -> None:
+    """aiocomexio reads .ext_id and .io_id, so a plain tuple would only pass by accident of the mock."""
+    client.get_io_live_states = AsyncMock(return_value={"11": "74"})
+    asyncio.run(comexio_api.get_io_live_states([(1, "11")]))
+    (passed,) = client.get_io_live_states.await_args.args
+    assert all(isinstance(address, IoAddress) for address in passed)
+    assert [(address.ext_id, address.io_id) for address in passed] == [(1, "11")]
 
 
 def test_knx_catalog_failure_keeps_last_known_good(comexio_api: ComexioAPI, client: MagicMock) -> None:
