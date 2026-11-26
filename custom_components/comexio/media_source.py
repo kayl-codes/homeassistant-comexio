@@ -83,9 +83,10 @@ _GALLERY_WAITING_KEY = f"{DOMAIN}_gallery_waiting"
 
 @dataclass
 class _Waiting:
-    """How many thumbnails of one config entry wait for a gallery place right now, and the streaks being logged: a
-    streak of refused thumbnails (one warning, see _refused_for_a_place) and a streak of slow waits (one warning, see
-    _warn_slow_place_wait). A streak belongs to the coordinator it started under: a reloaded entry starts its own."""
+    """How many reads of one config entry (thumbnails and folder lists) wait for a gallery place right now, and the
+    streaks being logged: a streak of refused reads (one warning, see _refused_for_a_place) and a streak of slow waits
+    (one warning, see _warn_slow_place_wait). A streak belongs to the coordinator it started under: a reloaded entry
+    starts its own."""
 
     count: int = 0
     refusing: bool = False
@@ -419,6 +420,10 @@ async def _folder_children(
             "(the Doorstation did not answer in time)"
         ) from None
     if pictures is None:
+        if cause is not None:
+            # Any failure cause of the list read is only debug-logged by the API (a read that ran out its own budget is
+            # one of them), so the browse logs it here, as the deadline path above does.
+            _LOGGER.warning("Doorstation %s picture list not read: %s", ext_id, cause)
         raise BrowseError(f"Doorstation pictures not read: {cause or _SESSION_GONE_CAUSE}")
     newest = newest_first(pictures)[:DOORSTATION_GALLERY_MAX_PICTURES]
     return [_picture_item(hass, entry_id, ext_id, picture) for picture in newest]
