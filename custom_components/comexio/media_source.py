@@ -48,6 +48,7 @@ from .const import (
 from .coordinator import ComexioCoordinator
 from .doorstation import doorstation_ext_name
 from .doorstation_pictures import PICTURE_KINDS
+from .doorstation_stream import LIVE_STREAM_RESPONSE_HEADERS
 
 # The titles of the pictures' kinds in the gallery. They are data, like the picture names: not translated.
 _KIND_TITLES: dict[DoorstationPictureKind, str] = {
@@ -375,4 +376,5 @@ class DoorstationPictureView(HomeAssistantView):
         if not data:
             _LOGGER.debug("Doorstation %s picture is empty: answered as not found", number)
             raise web.HTTPNotFound
-        return web.Response(body=data, content_type=_JPEG_MIME)
+        # The bytes are a device's: nosniff and the sandbox policy keep them from running on Home Assistant's origin.
+        return web.Response(body=data, content_type=_JPEG_MIME, headers=LIVE_STREAM_RESPONSE_HEADERS)

@@ -392,6 +392,8 @@ async def test_the_view_serves_a_picture_to_a_logged_in_client(
 
     assert response.status == HTTPStatus.OK
     assert await response.read() == JPEG
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["Content-Security-Policy"] == "sandbox"
     coordinator.api.get_doorstation_picture.assert_awaited_with(
         2, "26-11-21-18-30-00_bell.jpg", held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
     )
