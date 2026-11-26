@@ -42,6 +42,7 @@ from custom_components.comexio.media_source import (
     _place_granted,
     _refused_for_a_place,
     _warn_slow_place_wait,
+    forget_gallery_read_slots,
 )
 
 pytestmark = pytest.mark.usefixtures("mock_comexio_api")
@@ -1261,9 +1262,12 @@ async def test_a_slow_wait_that_outlives_its_entry_creates_no_state(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
     # The entry was removed while its thumbnail still waited: the timer must not bring the waiting state back.
-    _warn_slow_place_wait(hass, mock_config_entry.entry_id, cast(Any, _Instance()), 2)
+    entry_id = mock_config_entry.entry_id
+    _gallery_waiting(hass, entry_id).count = 1
+    forget_gallery_read_slots(hass, entry_id)
+    _warn_slow_place_wait(hass, entry_id, cast(Any, _Instance()), 2)
 
-    assert _kept_gallery_waiting(hass, mock_config_entry.entry_id) is None
+    assert _kept_gallery_waiting(hass, entry_id) is None
     assert not [r for r in caplog.records if "still waits" in r.getMessage()]
 
 
@@ -1361,13 +1365,15 @@ async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_s
 async def test_a_refusal_and_a_grant_after_the_removal_of_the_entry_create_no_state(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
+    # The entry was removed while a read still held the waiting state: a late refusal and a late grant create none.
+    entry_id = mock_config_entry.entry_id
+    _gallery_waiting(hass, entry_id).count = 1
+    forget_gallery_read_slots(hass, entry_id)
     instance = cast(Any, _Instance())
-    _refused_for_a_place(hass, mock_config_entry.entry_id, instance, 2, "the cap")
-    _place_granted(
-        hass, mock_config_entry.entry_id, instance, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC
-    )
+    _refused_for_a_place(hass, entry_id, instance, 2, "the cap")
+    _place_granted(hass, entry_id, instance, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
 
-    assert _kept_gallery_waiting(hass, mock_config_entry.entry_id) is None
+    assert _kept_gallery_waiting(hass, entry_id) is None
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
