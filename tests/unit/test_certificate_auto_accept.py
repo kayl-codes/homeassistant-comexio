@@ -73,9 +73,21 @@ def test_the_pins_issuer_counts_while_it_was_read_from_the_pin() -> None:
         {"fingerprint": PINNED, "issuer": ISSUER, "authority_key_id": None},
         {"fingerprint": PINNED, "issuer": "", "authority_key_id": AKI},  # damaged: no issuer to compare
         {"fingerprint": PINNED, "issuer": ISSUER, "authority_key_id": "XYZ"},  # damaged: not lowercase hex
+        {"fingerprint": PINNED, "issuer": 5, "authority_key_id": AKI},  # damaged: not text
+        {"fingerprint": PINNED, "issuer": ISSUER, "authority_key_id": 12},  # damaged: not text
         "CN=Comexio LAN CA",  # not the stored layout
     ],
-    ids=["missing", "other pin", "no issuer", "no key id", "empty issuer", "bad key id", "not a mapping"],
+    ids=[
+        "missing",
+        "other pin",
+        "no issuer",
+        "no key id",
+        "empty issuer",
+        "bad key id",
+        "issuer no text",
+        "key id no text",
+        "not a mapping",
+    ],
 )
 def test_without_both_values_of_the_pin_itself_there_is_no_issuer_to_compare(authority: Any) -> None:
     assert pinned_authority(_data(authority)) is None

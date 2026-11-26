@@ -808,8 +808,10 @@ _SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "ex
 _SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
 
 
-# Key of Comexio's firmware version in the saved config (see coordinator.known_firmware).
+# Key of Comexio's firmware version in the saved config (see coordinator.known_firmware), and of the host it was
+# read from: after a reconfigure to another Comexio it says nothing about that one.
 SAVED_FIRMWARE_KEY = "comexio_version"
+SAVED_FIRMWARE_HOST_KEY = "comexio_version_host"
 
 
 def saved_config_store(hass: HomeAssistant, entry_id: str) -> Store:
@@ -5852,6 +5854,7 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # that read none keeps the one saved before.
         if isinstance(firmware := self.known_firmware, str):
             saved[SAVED_FIRMWARE_KEY] = firmware
+            saved[SAVED_FIRMWARE_HOST_KEY] = self.config_entry.data.get(CONF_HOST)
         if saved == self._saved_config:
             return
         await self._saved_config_store.async_save(saved)
@@ -5890,7 +5893,10 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not is_saved_config(stored):
             _LOGGER.warning(ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG, self.server_id, "not a saved config")
             return
-        if isinstance(firmware := stored.get(SAVED_FIRMWARE_KEY), str):
+        # Only the firmware read from this entry's host counts (a reconfigure may have pointed it at another one).
+        if isinstance(firmware := stored.get(SAVED_FIRMWARE_KEY), str) and stored.get(
+            SAVED_FIRMWARE_HOST_KEY
+        ) == self.config_entry.data.get(CONF_HOST):
             self._saved_firmware = firmware
         self.api.seed_onewire_items(stored.get(ONEWIRE_DATA_KEY, []))
 

@@ -3642,6 +3642,7 @@ def test_rename_check_errors_log_one_traceback_then_debug(api: ComexioAPI, caplo
 
 PINNED_CERT = "a" * 64
 OTHER_CERT = "b" * 64
+HOST = "192.0.2.10"
 
 
 @pytest.fixture(autouse=True)
@@ -3659,7 +3660,7 @@ def certificate_repair(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 def _certificate_coordinator(api: ComexioAPI) -> _FakeCoordinator:
     coordinator = _coordinator(api)
-    coordinator.config_entry = SimpleNamespace(options={}, entry_id="entry1")
+    coordinator.config_entry = SimpleNamespace(options={}, entry_id="entry1", data={coordinator_module.CONF_HOST: HOST})
     return coordinator
 
 
@@ -4181,11 +4182,15 @@ def test_the_saved_config_carries_the_firmware_and_a_new_firmware_saves_again(ap
         "11.1.4",
         "11.1.5",
     ]
+    assert {saved.args[0][coordinator_module.SAVED_FIRMWARE_HOST_KEY] for saved in save.await_args_list} == {HOST}
 
 
 def test_the_firmware_comes_from_the_saved_config_until_a_poll_reads_it(api: ComexioAPI) -> None:
     coordinator = _certificate_coordinator(api)
-    stored = coordinator_module.saved_config(_parsed_config()) | {coordinator_module.SAVED_FIRMWARE_KEY: "11.1.5"}
+    stored = coordinator_module.saved_config(_parsed_config()) | {
+        coordinator_module.SAVED_FIRMWARE_KEY: "11.1.5",
+        coordinator_module.SAVED_FIRMWARE_HOST_KEY: HOST,
+    }
     coordinator._saved_config_store.async_load = AsyncMock(return_value=stored)
     api.seed_onewire_items = MagicMock()
 
@@ -4196,9 +4201,29 @@ def test_the_firmware_comes_from_the_saved_config_until_a_poll_reads_it(api: Com
     assert coordinator.known_firmware == "11.2.0"
 
 
+@pytest.mark.parametrize("saved_host", ["192.0.2.99", None], ids=["another host", "no host saved"])
+def test_a_firmware_saved_for_another_host_is_not_known(api: ComexioAPI, saved_host: str | None) -> None:
+    # A reconfigure may have pointed the entry at another Comexio: its firmware says nothing about this one, so the
+    # rule of #294 leaves a certificate change to the user until a poll has read the firmware.
+    coordinator = _certificate_coordinator(api)
+    stored = coordinator_module.saved_config(_parsed_config()) | {coordinator_module.SAVED_FIRMWARE_KEY: "11.1.5"}
+    if saved_host is not None:
+        stored[coordinator_module.SAVED_FIRMWARE_HOST_KEY] = saved_host
+    coordinator._saved_config_store.async_load = AsyncMock(return_value=stored)
+    api.seed_onewire_items = MagicMock()
+    api.comexio_version = None
+
+    asyncio.run(ComexioCoordinator.async_seed_saved_onewire_sensors(coordinator))
+
+    assert coordinator.known_firmware is None
+
+
 def test_a_saved_firmware_that_is_no_text_is_not_known(api: ComexioAPI) -> None:
     coordinator = _certificate_coordinator(api)
-    stored = coordinator_module.saved_config(_parsed_config()) | {coordinator_module.SAVED_FIRMWARE_KEY: 11}
+    stored = coordinator_module.saved_config(_parsed_config()) | {
+        coordinator_module.SAVED_FIRMWARE_KEY: 11,
+        coordinator_module.SAVED_FIRMWARE_HOST_KEY: HOST,
+    }
     coordinator._saved_config_store.async_load = AsyncMock(return_value=stored)
     api.seed_onewire_items = MagicMock()
     api.comexio_version = None

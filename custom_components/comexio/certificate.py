@@ -82,6 +82,8 @@ ACCEPT_ENTRY_CHANGED = "certificate_entry_changed"
 # and for an unexpected error.
 _ACCEPT_OUTDATED = "outdated_push"
 _ACCEPT_FAILED = "failed"
+# Only for by_rule: a repair came up while the acceptance waited for its lock, so the user decides (no abort reason).
+ACCEPT_REPAIR_OPEN = "repair_open"
 
 # Push texts by HA language (English fallback); the certificate_changed placeholders are filled in.
 CERTIFICATE_PUSH_TEXTS: dict[str, dict[str, str]] = {
@@ -538,7 +540,8 @@ async def async_accept_certificate(
 
     by_rule: `shown` is the certificate the rule of certificate_auto_accept.py checked, not one the user saw; only
     the log line differs, and a certificate pinned already (by someone else meanwhile) is ACCEPT_ENTRY_CHANGED,
-    so the rule does not tell the user it accepted it.
+    so the rule does not tell the user it accepted it. A repair that is up once the lock is its own is
+    ACCEPT_REPAIR_OPEN: nothing is pinned, the user decides.
 
     Returns the outcome (ACCEPT_*) and the certificate Comexio presents now, None if it could not be read.
     """
@@ -547,12 +550,10 @@ async def async_accept_certificate(
     host, pinned = entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
     locks: dict[str, asyncio.Lock] = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {})
     async with locks.setdefault(entry.entry_id, asyncio.Lock()):
-        if entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == shown:
-            # Accepted already (a second tap, or the repair alongside). A repair still showing it is left over.
-            if presented_fingerprint(hass, entry.entry_id) == shown:
-                async_clear_certificate_changed(hass, entry.entry_id)
-            # The rule never calls with the pin itself: someone else pinned it meanwhile, not the rule.
-            return (ACCEPT_ENTRY_CHANGED if by_rule else ACCEPT_PINNED), shown
+        if (already := _pinned_already(hass, entry, shown, by_rule)) is not None:
+            return already
+        if by_rule and (stand_back := _rule_must_stand_back(hass, entry)) is not None:
+            return stand_back, None
         if _connection_changed(entry, host, pinned, shown):
             return ACCEPT_ENTRY_CHANGED, None
         try:
@@ -589,6 +590,29 @@ async def async_accept_certificate(
         if reload:
             hass.config_entries.async_schedule_reload(entry.entry_id)
         return ACCEPT_PINNED, current
+
+
+def _pinned_already(hass: HomeAssistant, entry: ConfigEntry, shown: str, by_rule: bool) -> tuple[str, str] | None:
+    """The outcome if `shown` is the pin already (a second tap, or the repair alongside), else None."""
+    if entry.data.get(CONF_CERTIFICATE_FINGERPRINT) != shown:
+        return None
+    # A repair still showing it is left over.
+    if presented_fingerprint(hass, entry.entry_id) == shown:
+        async_clear_certificate_changed(hass, entry.entry_id)
+    # The rule never calls with the pin itself: someone else pinned it meanwhile, not the rule.
+    return (ACCEPT_ENTRY_CHANGED if by_rule else ACCEPT_PINNED), shown
+
+
+def _rule_must_stand_back(hass: HomeAssistant, entry: ConfigEntry) -> str | None:
+    """Outcome if the rule, which looked before it queued for the lock, must not pin any more, else None.
+
+    A repair that came up since is the user's to answer; an entry disabled since is not ours to pin.
+    """
+    if presented_fingerprint(hass, entry.entry_id) is not None:
+        return ACCEPT_REPAIR_OPEN
+    if entry.disabled_by is not None:
+        return ACCEPT_ENTRY_CHANGED
+    return None
 
 
 def _connection_changed(entry: ConfigEntry, host: str, pinned: str | None, shown: str) -> bool:

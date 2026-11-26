@@ -29,6 +29,7 @@ from homeassistant.core import HomeAssistant
 
 from .certificate import (
     ACCEPT_PINNED,
+    ACCEPT_REPAIR_OPEN,
     ACCEPT_UNREACHABLE,
     _async_notify,
     _notify_targets,
@@ -190,7 +191,9 @@ async def _async_decide(
         _report_if_current(hass, entry, host, pinned, seen)
         return
     if not _still_current(hass, entry, host, pinned):
-        return  # removed or reconfigured meanwhile: the new connection decides on its own
+        # Removed, disabled or reconfigured meanwhile: the new connection decides on its own.
+        _LOGGER.info("Comexio at %s: the entry changed during the wait; nothing pinned, no repair raised", host)
+        return
     if info is None:
         _refuse(hass, entry, state, pinned, last, "it kept changing")  # the newest: the one the repair compares
         return
@@ -213,7 +216,11 @@ async def _async_decide(
             # Pinned already: the log line is all that is left to say it was the rule.
             _LOGGER.exception("Comexio at %s: certificate pinned by the rule, but telling the user failed", host)
     elif outcome == ACCEPT_UNREACHABLE:
+        # Not read again: the repair asks, for the newest certificate.
         _report_if_current(hass, entry, host, pinned, info.fingerprint)
+    elif outcome == ACCEPT_REPAIR_OPEN:
+        # A repair came up while the acceptance queued: it stays as it is, the user decides (it may show a newer read).
+        _LOGGER.info("Comexio at %s: a certificate repair came up while the acceptance queued; the user decides", host)
     else:
         # Another certificate again raised the repair itself; the rest ended the case without one.
         _LOGGER.debug(
@@ -247,9 +254,13 @@ async def _async_settled_certificate(host: str, seen: str) -> tuple[CertificateI
 
 
 def _still_current(hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str) -> bool:
-    """Whether the entry is still there with the host and the pin the rule started from."""
+    """Whether the entry is still there, enabled, with the host and the pin the rule started from.
+
+    A reload or setup retry leaves it current (the wait is not bound to the entry); disabling it does not: the user
+    switched the integration off, so nothing is pinned and no repair is raised for it."""
     return (
         hass.config_entries.async_get_entry(entry.entry_id) is entry
+        and entry.disabled_by is None
         and entry.data[CONF_HOST] == host
         and entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == pinned
     )
@@ -263,7 +274,10 @@ def _report_if_current(hass: HomeAssistant, entry: ConfigEntry, host: str, pinne
 def _refuse(
     hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, pinned: str, actual: str, reason: str
 ) -> None:
-    """Leave the certificate to the user: the repair asks, and the rule does not take it up again."""
+    """Leave the certificate to the user: the repair asks, and the rule does not take it up again in this run.
+
+    The pairs are kept in memory: after a restart the rule checks a certificate afresh, and a stable one of the
+    pinned issuer is taken over then, as it would have been at the first report."""
     state.refused.add((pinned, actual))
     _LOGGER.warning(
         "Comexio at %s: certificate %s not accepted automatically, %s; see Repairs",

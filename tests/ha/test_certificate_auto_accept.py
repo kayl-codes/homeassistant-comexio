@@ -1,12 +1,13 @@
 """The certificate rule of #294: a certificate Comexio replaced on its own, taken over where the rule allows it."""
 
+import asyncio
 from collections.abc import Generator
 import logging
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiocomexio import CertificateInfo, ComexioCertificateMismatchError, ComexioConnectionError
-from homeassistant.config_entries import ConfigEntryState
+from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
 import pytest
@@ -16,6 +17,8 @@ from custom_components.comexio import certificate_auto_accept as auto_module
 from custom_components.comexio.certificate import (
     ACCEPT_ENTRY_CHANGED,
     ACCEPT_PINNED,
+    ACCEPT_REPAIR_OPEN,
+    CERTIFICATE_ACCEPT_LOCKS,
     async_accept_certificate,
     async_learn_pin_authority,
     async_report_certificate_changed,
@@ -137,6 +140,10 @@ async def test_a_new_certificate_of_the_pinned_issuer_is_pinned_and_the_user_is_
     assert ISSUER in notification.call_args.args[1]
     told = [push for push in pushes if push.data["message"] != "clear_notification"]
     assert len(told) == 1
+    # The user compares both values with Comexio's admin page: the notification and the push name the old one too.
+    assert "AA:AA" in notification.call_args.args[1]
+    assert "AA:AA" in told[0].data["message"]
+    assert "BB:BB" in told[0].data["message"]
     assert "actions" not in told[0].data["data"]  # nothing left to decide
     assert told[0].data["data"]["push"]["interruption-level"] == "critical"
     assert "pinned by the rule for the pinned issuer, replacing AA:AA" in caplog.text
@@ -277,6 +284,87 @@ async def test_a_repair_opened_during_the_wait_stays_the_users_decision(
     accept_read.assert_not_awaited()
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
     assert _issue(hass, entry).data["actual"] == OTHER
+
+
+async def test_a_repair_opened_while_the_acceptance_waits_for_its_lock_stays_the_users_decision(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock
+) -> None:
+    # The rule looked for a repair before it queued for the acceptance lock (a tap on the repair holds it).
+    entry.add_to_hass(hass)
+    reads.return_value = _info(OTHER)
+    lock = hass.data.setdefault(CERTIFICATE_ACCEPT_LOCKS, {}).setdefault(entry.entry_id, asyncio.Lock())
+
+    async with lock:
+        async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+        for _ in range(10):
+            await asyncio.sleep(0)  # the rule runs up to the lock
+        assert _issue(hass, entry) is None
+        async_report_certificate_changed(hass, entry, THIRD)  # a repair comes up, raised after the rule's read
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    accept_read.assert_not_awaited()
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry).data["actual"] == THIRD  # left as it is: the user decides on that repair
+
+
+async def test_the_acceptance_of_the_rule_leaves_an_open_repair_alone(
+    hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+    async_report_certificate_changed(hass, entry, OTHER)
+
+    outcome, current = await async_accept_certificate(hass, entry, OTHER, by_rule=True)
+
+    assert (outcome, current) == (ACCEPT_REPAIR_OPEN, None)
+    accept_read.assert_not_awaited()
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry) is not None
+
+
+async def test_the_acceptance_by_the_user_is_not_held_back_by_an_open_repair(
+    hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock, reload: MagicMock
+) -> None:
+    # The open repair is what the user accepts: only the rule steps back for it.
+    entry.add_to_hass(hass)
+    async_report_certificate_changed(hass, entry, OTHER)
+    accept_read.return_value = OTHER
+
+    outcome, current = await async_accept_certificate(hass, entry, OTHER)
+
+    assert (outcome, current) == (ACCEPT_PINNED, OTHER)
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+
+
+async def test_the_acceptance_of_the_rule_pins_nothing_on_an_entry_disabled_while_it_queued(
+    hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+    await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+
+    outcome, current = await async_accept_certificate(hass, entry, OTHER, by_rule=True)
+
+    assert (outcome, current) == (ACCEPT_ENTRY_CHANGED, None)
+    accept_read.assert_not_awaited()
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+
+
+async def test_an_entry_disabled_during_the_wait_pins_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+
+    async def disabled(_host: str) -> CertificateInfo:
+        await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+        return _info(OTHER)
+
+    reads.side_effect = disabled
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.disabled_by is ConfigEntryDisabler.USER
+    accept_read.assert_not_awaited()
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry) is None  # switched off: no repair for it either
 
 
 async def test_a_repair_opened_for_an_older_certificate_is_brought_up_to_the_newest(
@@ -457,6 +545,29 @@ async def test_the_state_of_the_rule_is_not_bound_to_the_entry(hass: HomeAssista
         assert state.task is not None
         assert not state.task.done()
         state.task.cancel()
+    await hass.async_block_till_done()
+
+
+async def test_an_unload_of_the_entry_during_the_wait_does_not_end_it(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    # The wait is a background task of Home Assistant, not of the entry: the unload of a reload or a setup retry
+    # cancels the entry's own tasks but not this one.
+    entry.add_to_hass(hass)
+    entry.mock_state(hass, ConfigEntryState.LOADED)
+    with (
+        patch.object(auto_module, "CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC", 3600),
+        patch("custom_components.comexio.async_unload_entry", AsyncMock(return_value=True)),
+    ):
+        async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+        task = hass.data[CERTIFICATE_AUTO_ACCEPTS][entry.entry_id].task
+
+        assert await hass.config_entries.async_unload(entry.entry_id)
+        await asyncio.sleep(0)
+
+        assert entry.state is ConfigEntryState.NOT_LOADED
+        assert not task.done()
+        task.cancel()
     await hass.async_block_till_done()
 
 
