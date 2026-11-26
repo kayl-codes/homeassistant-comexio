@@ -19,6 +19,7 @@ from custom_components.comexio.certificate import (
     ACCEPT_ENTRY_CHANGED,
     ACCEPT_PINNED,
     ACCEPT_REPAIR_OPEN,
+    ACCEPT_RESTORED,
     CERTIFICATE_ACCEPT_LOCKS,
     async_accept_certificate,
     async_learn_pin_authority,
@@ -440,14 +441,36 @@ async def test_a_repair_opened_during_the_acceptance_read_shows_what_that_read_f
     assert _issue(hass, entry).data["actual"] == fourth
 
 
-async def test_the_acceptance_of_the_rule_pins_nothing_on_an_entry_disabled_while_it_read(
+async def test_a_repair_opened_during_the_acceptance_read_is_cleared_when_that_read_finds_the_pin(
     hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock
 ) -> None:
+    # A poll met THIRD while the acceptance read, which found Comexio back on the pin: the repair would ask about a
+    # certificate Comexio no longer presents.
+    entry.add_to_hass(hass)
+
+    async def back_on_the_pin(_host: str) -> str:
+        async_report_certificate_changed(hass, entry, THIRD)
+        return PINNED
+
+    accept_read.side_effect = back_on_the_pin
+
+    outcome, current = await async_accept_certificate(hass, entry, OTHER, by_rule=True)
+
+    assert (outcome, current) == (ACCEPT_RESTORED, PINNED)
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry) is None
+
+
+@pytest.mark.parametrize("read", [OTHER, PINNED], ids=["another-certificate", "the-pin-again"])
+async def test_the_acceptance_of_the_rule_pins_nothing_on_an_entry_disabled_while_it_read(
+    hass: HomeAssistant, entry: MockConfigEntry, accept_read: AsyncMock, read: str
+) -> None:
+    # The pin found again restores nothing either: a disabled entry is not ours to clear or reload.
     entry.add_to_hass(hass)
 
     async def disabled(_host: str) -> str:
         await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
-        return OTHER
+        return read
 
     accept_read.side_effect = disabled
 

@@ -548,7 +548,7 @@ async def async_accept_certificate(
     log line differs, and the rule steps back more often: a certificate pinned already (by someone else meanwhile)
     is ACCEPT_ENTRY_CHANGED, so the rule does not tell the user it accepted it, as is an entry disabled meanwhile;
     a repair that is up, once the lock is its own and again after the certificate was read, is ACCEPT_REPAIR_OPEN:
-    nothing is pinned, the user decides.
+    nothing is pinned, the user decides (unless that read found the pin again: ACCEPT_RESTORED, the repair cleared).
 
     Returns the outcome (ACCEPT_*) and the certificate Comexio presents now; None where it was not read (the read
     failed, or the acceptance stopped before it) or the entry changed meanwhile.
@@ -572,7 +572,7 @@ async def async_accept_certificate(
         if hass.config_entries.async_get_entry(entry.entry_id) is not entry:
             _LOGGER.warning("Comexio at %s: entry removed while its certificate was read, nothing pinned", host)
             return ACCEPT_ENTRY_GONE, None
-        if (stop := _stop_after_read(hass, entry, host, pinned, shown, by_rule)) is not None:
+        if (stop := _stop_after_read(hass, entry, host, pinned, shown, current, by_rule)) is not None:
             # A repair that came up meanwhile is brought up to this read, the newest; a changed entry's read was
             # of the connection it no longer has.
             return stop, current if stop == ACCEPT_REPAIR_OPEN else None
@@ -626,13 +626,20 @@ def _rule_must_stand_back(hass: HomeAssistant, entry: ConfigEntry) -> str | None
 
 
 def _stop_after_read(
-    hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str | None, shown: str, by_rule: bool
+    hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str | None, shown: str, current: str, by_rule: bool
 ) -> str | None:
     """Outcome if the acceptance must not go on once the certificate was read again (the entry was reconfigured; for
-    the rule also a repair that came up or a disable meanwhile), else None."""
+    the rule also a repair that came up or a disable meanwhile), else None.
+
+    A repair does not stop the rule when the read found the pin again: that repair asks about a certificate Comexio
+    no longer presents, and the restore that follows clears it, as it does for the user's acceptance."""
     if _connection_changed(entry, host, pinned, shown):
         return ACCEPT_ENTRY_CHANGED
-    return _rule_must_stand_back(hass, entry) if by_rule else None
+    if not by_rule:
+        return None
+    if current == pinned and entry.disabled_by is None:
+        return None
+    return _rule_must_stand_back(hass, entry)
 
 
 def _connection_changed(entry: ConfigEntry, host: str, pinned: str | None, shown: str) -> bool:
