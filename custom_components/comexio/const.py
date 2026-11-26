@@ -334,6 +334,9 @@ DOORSTATION_GALLERY_PLACE_HOLD_SEC = max(
     DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC, DOORSTATION_GALLERY_LIST_TIMEOUT_SEC
 )
 DOORSTATION_GALLERY_PLACE_WAIT_SEC = (DOORSTATION_GALLERY_MAX_WAITING_READS + 1) * DOORSTATION_GALLERY_PLACE_HOLD_SEC
+# A thumbnail still waiting for its gallery place after this long is logged once, while the wait runs: a stall is then
+# visible before the wait ends, not only at the refusal. The wait itself is DOORSTATION_GALLERY_PLACE_WAIT_SEC. A guess.
+DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC = 60.0
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600
