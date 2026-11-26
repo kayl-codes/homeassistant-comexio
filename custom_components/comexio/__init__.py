@@ -1201,7 +1201,7 @@ async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{server_id}")
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_RESTART}_{server_id}")
         persistent_notification.async_dismiss(hass, webhook_restart_notification_id(server_id))
-    async_remove_auto_accept(hass, entry.entry_id)  # first: a failure of the cleanup after it must not leave a wait
+    async_remove_auto_accept(hass, entry)  # first: a failure of the cleanup after it must not leave a wait
     async_remove_certificate_pushes(hass, entry)
     if server_id is not None:
         # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).

@@ -95,6 +95,14 @@ def notify() -> Generator[MagicMock]:
         yield create
 
 
+@pytest.fixture(autouse=True)
+def no_acceptance_push_clear() -> Generator[None]:
+    """The removal of an entry also clears the push of the rule's acceptance (its own tag, own tests in
+    test_certificate_auto_accept.py); these tests count the calls of the repair's push alone."""
+    with patch("custom_components.comexio.certificate_auto_accept._async_clear_push", autospec=True):
+        yield
+
+
 @pytest.fixture
 def no_auto_discovery() -> Generator[None]:
     """The user form's host suggestion resolves comexio.<domain>; DNS is disabled in tests."""

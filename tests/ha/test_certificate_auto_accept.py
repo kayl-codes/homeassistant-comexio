@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from aiocomexio import CertificateInfo, ComexioCertificateMismatchError, ComexioConnectionError
 from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 import pytest
@@ -948,6 +949,146 @@ async def test_removing_the_entry_ends_its_wait(hass: HomeAssistant, entry: Mock
 
     assert task.cancelled()
     assert entry.entry_id not in hass.data[CERTIFICATE_AUTO_ACCEPTS]
+
+
+def _clears_of_the_acceptance_push(pushes: list[Any], entry: MockConfigEntry) -> list[Any]:
+    tag = auto_module._notification_id(entry.entry_id)
+    return [push for push in pushes if push.data["message"] == "clear_notification" and push.data["data"]["tag"] == tag]
+
+
+async def test_removing_the_entry_takes_the_acceptance_push_off_the_phones(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    entry.add_to_hass(hass)
+    pushes = async_mock_service(hass, "notify", PHONE)
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    # Its own tag: the clear of the repair's push (another tag) does not take this one off the phone.
+    assert len(_clears_of_the_acceptance_push(pushes, entry)) == 1
+
+
+async def test_removing_the_entry_clears_companion_apps_only(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """Any other notify service would deliver the command as the text "clear_notification"."""
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [f"notify.{PHONE}", "notify.family_group"]}
+    )
+    phone = async_mock_service(hass, "notify", PHONE)
+    group = async_mock_service(hass, "notify", "family_group")
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert len(_clears_of_the_acceptance_push(phone, entry)) == 1
+    assert group == []
+
+
+async def test_removing_an_entry_without_a_pin_sends_no_clear(hass: HomeAssistant) -> None:
+    """No pin, no rule, no push: the phones are not bothered."""
+    plain = MockConfigEntry(
+        domain=DOMAIN,
+        minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        data={CONF_HOST: HOST, CONF_USERNAME: "admin", CONF_PASSWORD: "admin", CONF_SERVER_ID: SERVER_ID},
+        options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [f"notify.{PHONE}"]},
+    )
+    plain.add_to_hass(hass)
+    pushes = async_mock_service(hass, "notify", PHONE)
+
+    await hass.config_entries.async_remove(plain.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert pushes == []
+
+
+async def test_removing_an_entry_with_group_targets_only_sends_nothing_and_says_nothing(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=auto_module.__name__)
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: ["notify.family_group"]})
+    group = async_mock_service(hass, "notify", "family_group")
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert group == []
+    assert "acceptance push clear" not in caplog.text
+
+
+async def test_a_phone_not_registered_does_not_keep_the_registered_one_from_the_clear(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=auto_module.__name__)
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [f"notify.{PHONE}", "notify.mobile_app_gone"]}
+    )
+    phone = async_mock_service(hass, "notify", PHONE)
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert len(_clears_of_the_acceptance_push(phone, entry)) == 1
+    messages = [record.getMessage() for record in caplog.records]
+    warned = [message for message in messages if "acceptance push clear skipped" in message]
+    assert len(warned) == 1
+    assert "mobile_app_gone" in warned[0]
+    assert PHONE not in warned[0]
+
+
+async def test_a_failing_phone_does_not_keep_the_next_one_from_the_clear(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: ["notify.mobile_app_broken", f"notify.{PHONE}"]}
+    )
+
+    async def broken(_call: Any) -> None:
+        raise HomeAssistantError("companion app down")
+
+    hass.services.async_register("notify", "mobile_app_broken", broken)
+    phone = async_mock_service(hass, "notify", PHONE)
+
+    await hass.config_entries.async_remove(entry.entry_id)  # does not raise
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert len(_clears_of_the_acceptance_push(phone, entry)) == 1
+    assert "notify.mobile_app_broken failed" in caplog.text
+    assert "acceptance push clear failed for ['notify.mobile_app_broken']" in caplog.text
+
+
+async def test_the_removal_does_not_wait_for_a_slow_notify_service(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    entry.add_to_hass(hass)
+    release = asyncio.Event()
+    arrived: list[Any] = []
+
+    async def slow(call: Any) -> None:
+        await release.wait()
+        arrived.append(call)
+
+    hass.services.async_register("notify", PHONE, slow)
+
+    await asyncio.wait_for(hass.config_entries.async_remove(entry.entry_id), timeout=5)  # done before the push is
+    assert arrived == []
+
+    release.set()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    assert len(_clears_of_the_acceptance_push(arrived, entry)) == 1
+
+
+async def test_a_companion_app_not_registered_at_the_removal_is_named_in_the_log(
+    hass: HomeAssistant, entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    caplog.set_level(logging.DEBUG, logger=auto_module.__name__)
+    entry.add_to_hass(hass)  # no notify service registered: the companion app is gone or not up yet
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert f"acceptance push clear skipped for ['notify.{PHONE}']" in caplog.text
 
 
 # Learning the pin's issuer

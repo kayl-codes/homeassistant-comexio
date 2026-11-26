@@ -34,6 +34,7 @@ from .certificate import (
     ACCEPT_UNREACHABLE,
     _async_notify,
     _notify_targets,
+    _phones,
     async_accept_certificate,
     async_clear_certificate_changed,
     async_report_certificate_changed,
@@ -50,6 +51,7 @@ from .const import (
     DOMAIN,
     certificate_check_signal,
 )
+from .plan_watchdog import NOTIFY_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -187,12 +189,42 @@ def _why_not(entry: ConfigEntry, firmware: str | None) -> str | None:
     return None
 
 
-def async_remove_auto_accept(hass: HomeAssistant, entry_id: str) -> None:
-    """A removed entry's rule state goes with it; a wait still running is cancelled, its notice dismissed."""
-    persistent_notification.async_dismiss(hass, _notification_id(entry_id))
-    state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry_id, None)
+def async_remove_auto_accept(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """A removed entry's rule state goes with it; a wait still running is cancelled, its notice dismissed.
+
+    The push of an acceptance is taken off the companion apps as well. Nothing remembers which of them it reached
+    (the state is in memory, and a push may predate the restart), so every companion app of the notify option gets
+    the clear, as the certificate push's first clear does; a clear for a tag the app does not show does nothing.
+    A push still being sent when the entry goes may land after the clear (the cancelled send is not awaited).
+    """
+    persistent_notification.async_dismiss(hass, _notification_id(entry.entry_id))
+    state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry.entry_id, None)
     if state is not None and state.task is not None:
         state.task.cancel()
+    # No pin, no rule, no push. A background task: the removal does not wait for a slow notify service, and nothing
+    # in it can raise into the removal's cleanup behind it. A task cancelled with Home Assistant leaves the push.
+    if CONF_CERTIFICATE_FINGERPRINT in entry.data:
+        hass.async_create_background_task(_async_clear_push(hass, entry), f"{DOMAIN} acceptance push clear")
+
+
+async def _async_clear_push(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Take the push of an acceptance off the companion apps of the notify option; every failure is logged."""
+    try:
+        phones = sorted(_phones(entry))
+        prefix = f"{NOTIFY_DOMAIN}."
+        registered = [phone for phone in phones if hass.services.has_service(NOTIFY_DOMAIN, phone.removeprefix(prefix))]
+        if unreachable := sorted(set(phones).difference(registered)):
+            # Debug: nothing remembers whether a push was ever sent, and the repair push's removal warns already.
+            _LOGGER.debug("Comexio acceptance push clear skipped for %s: not registered", unreachable)
+        if not registered:
+            return
+        # A companion-app command: any other notify service would deliver it as the text "clear_notification".
+        service_data = {"message": "clear_notification", "data": {"tag": _notification_id(entry.entry_id)}}
+        _, failed = await _async_notify(hass, service_data, registered, set())
+        if failed:
+            _LOGGER.warning("Comexio acceptance push clear failed for %s: a push already sent may stay", sorted(failed))
+    except Exception:
+        _LOGGER.exception("Comexio acceptance push clear for entry %s failed", entry.entry_id)
 
 
 async def _async_run(
