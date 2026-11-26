@@ -6,6 +6,7 @@ import contextlib
 import copy
 from datetime import datetime, timedelta
 from http import HTTPStatus
+from time import get_clock_info
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import PropertyMock, patch
@@ -1458,12 +1459,15 @@ async def test_a_thumbnail_waiting_past_the_slow_mark_is_warned_before_its_wait_
             queued = asyncio.ensure_future(client.get(path))
             async with asyncio.timeout(5):
                 await waiting.wait()
-            # The timer must not fire before the mark. asyncio may run a timer up to the clock resolution early, so
-            # half the mark is a safe floor. A loaded runner fires it late, which passes; an immediate warning does not.
+            # The timer must not fire before the mark. asyncio may run a timer up to the clock resolution early.
+            # `started` is taken before the timer is armed, so it is never later than the arming: a timer can fire
+            # no earlier than `mark - resolution` after `started`. A loaded runner fires it late, which passes;
+            # a warning fired early, or at once, does not.
             async with asyncio.timeout(5):
                 while not fired_at:
                     await asyncio.sleep(0.01)
-            assert fired_at[0] - started >= mark / 2
+            resolution = get_clock_info("monotonic").resolution
+            assert fired_at[0] - started >= mark - resolution
             # The warning comes while the thumbnail still stands in the queue, not when its wait has ended.
             assert not queued.done()
     except BaseException:
