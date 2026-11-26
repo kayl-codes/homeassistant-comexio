@@ -154,8 +154,10 @@ def _ext_name(coordinator: ComexioCoordinator, ext_id: int) -> str | None:
 
 
 def _offered(coordinator: ComexioCoordinator, ext_id: int) -> bool:
-    """Whether the gallery offers a Doorstation: known, and its extension not offline (the picture entities' rule)."""
-    if ext_id not in coordinator.doorstations.known:
+    """Whether the gallery offers a Doorstation: known, its number one the gallery can read back, and its extension not
+    offline (the picture entities' rule)."""
+    # _parse reads a folder's number back up to _MAX_EXT_ID_DIGITS digits: a folder beyond that could never be opened.
+    if ext_id not in coordinator.doorstations.known or not _is_ext_id(str(ext_id)):
         return False
     name = _ext_name(coordinator, ext_id)
     # Without any extension name the offline set cannot be checked, so nothing is offered. The picture feed keeps the

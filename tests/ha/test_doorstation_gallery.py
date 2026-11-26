@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from http import HTTPStatus
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from aiocomexio import DoorstationPicture, DoorstationPictureKind
 from aiocomexio.doorstation import Doorstation
@@ -956,6 +956,24 @@ async def test_an_extension_whose_offline_state_is_not_known_yet_is_offered(
     coordinator.offline_extensions = None
 
     root = await media_source.async_browse_media(hass, MEDIA_ROOT)
+
+    assert [child.identifier for child in root.children] == [_folder_id(mock_config_entry)]
+
+
+async def test_a_doorstation_whose_number_the_gallery_cannot_read_back_is_not_listed(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    doorstation = coordinator.doorstations.known[2]
+    # Ten digits: _parse reads nine at most, so the folder could be listed but never opened.
+    too_long = 1_234_567_890
+    with patch.object(
+        type(coordinator.doorstations),
+        "known",
+        new_callable=PropertyMock,
+        return_value={2: doorstation, too_long: doorstation},
+    ):
+        root = await media_source.async_browse_media(hass, MEDIA_ROOT)
 
     assert [child.identifier for child in root.children] == [_folder_id(mock_config_entry)]
 
