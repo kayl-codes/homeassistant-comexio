@@ -668,10 +668,11 @@ async def test_the_view_serves_a_read_that_finishes_within_its_budget(
     coordinator.api.get_doorstation_picture.side_effect = _slow_read
     client = await hass_client()
 
-    # The read outlasts the picture budget (0.05 s) but not the thumbnail budget (0.5 s): only the latter applies.
+    # The read outlasts the picture budget (0.05 s) but not the thumbnail budget (5 s): only the latter applies.
+    # The thumbnail budget leaves wide room over the 0.2 s read, so a loaded event loop cannot turn it into a 503.
     with (
         patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 0.05),
-        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.5),
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 5),
     ):
         response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
 
