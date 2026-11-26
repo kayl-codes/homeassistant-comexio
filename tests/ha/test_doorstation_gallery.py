@@ -1338,7 +1338,7 @@ async def test_a_grant_ends_the_slow_streak_only_when_the_places_flow_again(
     )
 
     assert waiting.slow is still_slow
-    assert waiting.refusing is False
+    assert not waiting.refusing
 
 
 async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_slow_one(
@@ -1354,8 +1354,8 @@ async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_s
         hass, entry_id, cast(Any, _Instance()), waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC
     )
 
-    assert waiting.refusing is False
-    assert waiting.slow is True
+    assert not waiting.refusing
+    assert waiting.slow
 
 
 async def test_a_refusal_and_a_grant_after_the_removal_of_the_entry_create_no_state(
