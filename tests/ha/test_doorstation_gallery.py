@@ -141,8 +141,10 @@ async def test_the_media_browser_lists_the_doorstation_as_a_folder(
 
 
 async def test_a_folder_lists_the_newest_bell_and_motion_pictures_first(
-    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+    hass: HomeAssistant, api_returns: dict[str, Any], mock_config_entry: MockConfigEntry
 ) -> None:
+    # Not the fixture's newest-first order: the expected order must come from the gallery's own sort.
+    api_returns["get_doorstation_pictures"] = ((OLD_BELL, OTHER_PICTURE, NEW_BELL, MOTION_PICTURE), None)
     await _setup(hass, mock_config_entry)
 
     folder = await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
@@ -853,18 +855,18 @@ async def test_a_thumbnail_queued_behind_the_places_is_served_within_its_own_rea
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
     coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
-    places = _gallery_read_slots(hass, mock_config_entry.entry_id)
     # Both places are held by other reads; the test decides when one of them is free again.
-    for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
-        await places.acquire()
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
     client = await hass_client()
     path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
 
     try:
         with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 1.0):
             request = asyncio.ensure_future(client.get(path))
-            # The thumbnail waits for a place for longer than its read budget. The wait is no part of that budget:
-            # the read itself is immediate, so the budget only starts once the place is taken.
+            # The request must stand in the queue for a place before the wait starts counting: only then does the
+            # sleep past the read budget test that the place wait is no part of that budget.
+            async with asyncio.timeout(5):
+                await waiting.wait()
             await asyncio.sleep(1.5)
             places.release()
             async with asyncio.timeout(10):
