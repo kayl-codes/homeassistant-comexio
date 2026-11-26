@@ -738,23 +738,17 @@ async def test_a_thumbnail_blocked_on_the_doorstation_lock_past_the_budget_answe
     coordinator.api.get_doorstation_picture.assert_awaited_once()
 
 
-async def test_a_browser_batch_takes_only_a_couple_of_places_on_the_doorstation_lock(
+async def test_a_browser_batch_reads_one_picture_at_a_time_on_the_doorstation_lock(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
     running = 0
     most_at_once = 0
-    places_full = asyncio.Event()
 
     async def _read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
         nonlocal running, most_at_once
         running += 1
         most_at_once = max(most_at_once, running)
-        if running == DOORSTATION_GALLERY_CONCURRENT_READS:
-            places_full.set()
-        # The first reads wait until all places run, then hold theirs: the overlap does not depend on timing.
-        async with asyncio.timeout(5):
-            await places_full.wait()
         await asyncio.sleep(0.05)
         running -= 1
         return JPEG, None
@@ -766,26 +760,21 @@ async def test_a_browser_batch_takes_only_a_couple_of_places_on_the_doorstation_
     responses = await asyncio.gather(*(client.get(path) for _ in range(5)))
 
     assert [response.status for response in responses] == [HTTPStatus.OK] * 5
-    assert most_at_once == DOORSTATION_GALLERY_CONCURRENT_READS
+    # One place: the camera waits behind one read at most, so the batch never runs two reads on the lock at once.
+    assert most_at_once == 1
 
 
-async def test_a_browse_batch_takes_only_a_couple_of_places_on_the_doorstation_lock(
+async def test_a_browse_batch_reads_one_list_at_a_time_on_the_doorstation_lock(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
     running = 0
     most_at_once = 0
-    places_full = asyncio.Event()
 
     async def _list(*_args: Any, **_kwargs: Any) -> tuple[tuple[DoorstationPicture, ...], None]:
         nonlocal running, most_at_once
         running += 1
         most_at_once = max(most_at_once, running)
-        if running == DOORSTATION_GALLERY_CONCURRENT_READS:
-            places_full.set()
-        # As in the thumbnail batch: the first reads wait until all places run; the overlap does not depend on timing.
-        async with asyncio.timeout(5):
-            await places_full.wait()
         await asyncio.sleep(0.05)
         running -= 1
         return (OTHER_PICTURE, MOTION_PICTURE, NEW_BELL, OLD_BELL), None
@@ -796,7 +785,7 @@ async def test_a_browse_batch_takes_only_a_couple_of_places_on_the_doorstation_l
     folders = await asyncio.gather(*(media_source.async_browse_media(hass, folder) for _ in range(5)))
 
     assert all(len(folder_item.children) == 3 for folder_item in folders)
-    assert most_at_once == DOORSTATION_GALLERY_CONCURRENT_READS
+    assert most_at_once == 1
 
 
 async def test_the_gallery_places_outlive_a_reload_and_go_with_the_entry_on_removal(
@@ -898,12 +887,43 @@ async def test_a_thumbnail_past_the_waiting_limit_is_answered_at_once(
     assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
 
 
+async def test_a_folder_browse_past_the_waiting_limit_is_refused_at_once(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.return_value = ([], None)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    queued = None
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_MAX_WAITING_READS", 1):
+            queued = asyncio.ensure_future(media_source.async_browse_media(hass, folder))
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            # One browse batch stands in the queue for a place; the next is refused without waiting behind it.
+            async with asyncio.timeout(5):
+                with pytest.raises(BrowseError, match="Too many gallery reads"):
+                    await media_source.async_browse_media(hass, folder)
+            assert not queued.done()
+    except BaseException:
+        if queued is not None:
+            queued.cancel()
+        raise
+    finally:
+        _release_places(places)
+    async with asyncio.timeout(10):
+        await queued
+
+    coordinator.api.get_doorstation_pictures.assert_awaited_once()
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
+
+
 async def test_a_thumbnail_queued_behind_the_places_is_served_within_its_own_read_budget(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
     coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
-    # Both places are held by other reads; the test decides when one of them is free again.
+    # The one place is held by another read; the test decides when it is free again.
     places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
     client = await hass_client()
     path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
@@ -1096,6 +1116,65 @@ async def test_a_folder_waiting_for_a_gallery_place_past_the_budget_is_an_error_
             places.release()
 
     coordinator.api.get_doorstation_pictures.assert_not_awaited()
+    # The timed-out wait gave its count back, or the cap would refuse every later browse of the entry.
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
+
+
+async def test_a_browse_cancelled_while_waiting_for_a_gallery_place_gives_its_count_back(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    await _setup(hass, mock_config_entry)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    browse = asyncio.ensure_future(media_source.async_browse_media(hass, folder_id))
+    try:
+        async with asyncio.timeout(5):
+            await waiting.wait()
+        assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 1
+        browse.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await browse
+    finally:
+        _release_places(places)
+
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
+    # The cancelled browse took no place: all of them are free again.
+    async with asyncio.timeout(1):
+        for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+            await _gallery_read_slots(hass, mock_config_entry.entry_id).acquire()
+
+
+async def test_a_browse_past_the_waiting_limit_is_refused_while_a_thumbnail_queues(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    queued = None
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_MAX_WAITING_READS", 1):
+            queued = asyncio.ensure_future(client.get(path))
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            # The cap counts the queued thumbnail too: the browse is refused rather than queued behind it.
+            async with asyncio.timeout(5):
+                with pytest.raises(BrowseError, match="Too many gallery reads"):
+                    await media_source.async_browse_media(hass, folder_id)
+            assert not queued.done()
+    except BaseException:
+        if queued is not None:
+            queued.cancel()
+        raise
+    finally:
+        _release_places(places)
+    async with asyncio.timeout(10):
+        served = await queued
+
+    assert served.status == HTTPStatus.OK
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
 
 
 async def test_a_folder_that_goes_offline_while_waiting_for_a_gallery_place_is_not_read(

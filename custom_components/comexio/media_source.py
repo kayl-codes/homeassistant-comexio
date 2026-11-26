@@ -90,9 +90,25 @@ def _gallery_waiting(hass: HomeAssistant, entry_id: str) -> _Waiting:
     return hass.data.setdefault(f"{_GALLERY_WAITING_KEY}_{entry_id}", _Waiting())
 
 
+async def _await_gallery_place(hass: HomeAssistant, entry_id: str) -> asyncio.Semaphore | None:
+    """Waits for one of the gallery's places, counted against the waiter cap of the entry (thumbnails and browse
+    batches alike). None at once when the cap is full; otherwise the caller holds a place and releases that very
+    semaphore (an entry removed meanwhile drops its places, a release by key would land on a new set)."""
+    waiting = _gallery_waiting(hass, entry_id)
+    if waiting.count >= DOORSTATION_GALLERY_MAX_WAITING_READS:
+        return None
+    places = _gallery_read_slots(hass, entry_id)
+    waiting.count += 1
+    try:
+        await places.acquire()
+    finally:
+        waiting.count -= 1
+    return places
+
+
 def forget_gallery_read_slots(hass: HomeAssistant, entry_id: str) -> None:
     """Drops the places of a removed entry. They outlive an unload: a read of the old instance still in flight holds
-    one of them, and the reloaded entry must count it against the same two places."""
+    one of them, and the reloaded entry must count it against the same places."""
     hass.data.pop(f"{_GALLERY_READ_SLOTS_KEY}_{entry_id}", None)
     hass.data.pop(f"{_GALLERY_WAITING_KEY}_{entry_id}", None)
 
@@ -237,6 +253,7 @@ def _picture_item(hass: HomeAssistant, entry_id: str, ext_id: int, picture: Door
 
 
 _OFFLINE_OR_UNKNOWN = "Doorstation offline or no longer known"
+_TOO_MANY_WAITING = "Too many gallery reads already wait for a place, try again later"
 
 
 async def _folder_children(
@@ -245,18 +262,24 @@ async def _folder_children(
     # The list read takes a gallery place like a thumbnail does: a browse batch must not queue on the Doorstation lock
     # ahead of the camera and the picture entities either. The wait for the place counts into the list's deadline.
     try:
-        async with (
-            asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline,
-            _gallery_read_slots(hass, entry_id),
-        ):
-            # Offline or unloaded while the place was awaited: no list read takes the Doorstation lock for nothing.
-            if not _still_offered(hass, entry_id, coordinator, ext_id):
-                raise BrowseError(_OFFLINE_OR_UNKNOWN)
-            pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
+        async with asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline:
+            places = await _await_gallery_place(hass, entry_id)
+            if places is None:
+                raise BrowseError(_TOO_MANY_WAITING)
+            try:
+                # Offline or unloaded while the place was awaited: no list read takes the Doorstation lock for nothing.
+                if not _still_offered(hass, entry_id, coordinator, ext_id):
+                    raise BrowseError(_OFFLINE_OR_UNKNOWN)
+                pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
+            finally:
+                places.release()
     except TimeoutError:
         if not deadline.expired():
             raise
-        raise BrowseError(f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s") from None
+        raise BrowseError(
+            f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s "
+            "(the wait for a gallery place included)"
+        ) from None
     if pictures is None:
         raise BrowseError(f"Doorstation pictures not read: {cause or _SESSION_GONE_CAUSE}")
     newest = newest_first(pictures)[:DOORSTATION_GALLERY_MAX_PICTURES]
@@ -339,17 +362,9 @@ async def _read_in_a_gallery_place(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, name: str
 ) -> tuple[bytes | None, str | None]:
     """One picture read in one of the gallery's places; the wait for a place has its own budget and waiter cap."""
-    slots = _gallery_read_slots(hass, entry_id)
-    waiting = _gallery_waiting(hass, entry_id)
-    if waiting.count >= DOORSTATION_GALLERY_MAX_WAITING_READS:
-        _LOGGER.debug(
-            "Doorstation %s picture not answered: %s thumbnails already wait for a place", number, waiting.count
-        )
-        raise web.HTTPServiceUnavailable
-    waiting.count += 1
     try:
         async with asyncio.timeout(DOORSTATION_GALLERY_PLACE_WAIT_SEC):
-            await slots.acquire()
+            places = await _await_gallery_place(hass, entry_id)
     except TimeoutError:
         _LOGGER.debug(
             "Doorstation %s picture not answered: no gallery place within %s s",
@@ -357,12 +372,13 @@ async def _read_in_a_gallery_place(
             DOORSTATION_GALLERY_PLACE_WAIT_SEC,
         )
         raise web.HTTPServiceUnavailable from None
-    finally:
-        waiting.count -= 1
+    if places is None:
+        _LOGGER.debug("Doorstation %s picture not answered: the thumbnails waiting for a place are at the cap", number)
+        raise web.HTTPServiceUnavailable
     try:
         return await _read_within_thumbnail_budget(hass, entry_id, coordinator, number, name)
     finally:
-        slots.release()
+        places.release()
 
 
 async def _read_within_thumbnail_budget(
@@ -414,8 +430,8 @@ class DoorstationPictureView(HomeAssistantView):
         if not _is_gallery_picture(name):
             _LOGGER.debug("Doorstation %s picture not served: not a bell or motion picture", number)
             raise web.HTTPNotFound
-        # The gallery's places come first, so a browser batch queues two reads deep at most. The wait for a place has
-        # DOORSTATION_GALLERY_PLACE_WAIT_SEC of its own: a thumbnail waiting its turn is not cut short by the read.
+        # The gallery's places come first, so a browser batch queues at most one read ahead of the lock. The wait for a
+        # place has DOORSTATION_GALLERY_PLACE_WAIT_SEC of its own: a thumbnail waiting its turn is not cut short.
         # Once a place is taken, the read has DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC in all, its wait for the
         # Doorstation lock included; the read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
         data, cause = await _read_in_a_gallery_place(hass, entry_id, coordinator, number, name)
