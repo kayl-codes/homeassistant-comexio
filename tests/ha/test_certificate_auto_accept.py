@@ -158,6 +158,7 @@ async def test_a_new_certificate_of_the_pinned_issuer_is_pinned_and_the_user_is_
         assert f"New (SHA-256): {OTHER_SHOWN}\n" in text
     assert "actions" not in told[0].data["data"]  # nothing left to decide
     assert told[0].data["data"]["push"]["interruption-level"] == "critical"
+    assert told[0].data["data"]["tag"] == _acceptance_tag(entry)
     assert "pinned by the rule for the pinned issuer, replacing AA:AA" in caplog.text
 
 
@@ -907,7 +908,7 @@ async def test_the_clear_waits_for_a_replaced_wait_still_sending_its_push(
 ) -> None:
     entry.add_to_hass(hass)
     order: list[str] = []
-    tag = auto_module._notification_id(entry.entry_id)
+    tag = _acceptance_tag(entry)
 
     async def phone(call: Any) -> None:
         if call.data["message"] == "clear_notification":
@@ -941,7 +942,7 @@ async def test_the_clear_waits_for_the_current_and_a_replaced_wait_both_sending(
     """The clear comes after the last of them, not after the first that ended."""
     entry.add_to_hass(hass)
     order: list[str] = []
-    tag = auto_module._notification_id(entry.entry_id)
+    tag = _acceptance_tag(entry)
     turns = iter([(50, "replaced ended"), (5, "current ended")])  # the replaced send is the slow one
 
     async def phone(call: Any) -> None:
@@ -1045,8 +1046,13 @@ async def test_removing_the_entry_ends_its_wait(hass: HomeAssistant, entry: Mock
     assert entry.entry_id not in hass.data[CERTIFICATE_AUTO_ACCEPTS]
 
 
+def _acceptance_tag(entry: MockConfigEntry) -> str:
+    """The tag acceptance pushes already on phones carry: written out, not derived, so a changed tag fails here."""
+    return f"comexio_certificate_auto_{entry.entry_id}"
+
+
 def _clears_of_the_acceptance_push(pushes: list[Any], entry: MockConfigEntry) -> list[Any]:
-    tag = auto_module._notification_id(entry.entry_id)
+    tag = _acceptance_tag(entry)
     return [push for push in pushes if push.data["message"] == "clear_notification" and push.data["data"]["tag"] == tag]
 
 
@@ -1233,7 +1239,7 @@ async def test_the_clear_waits_for_the_push_being_sent_when_the_entry_goes(
 ) -> None:
     entry.add_to_hass(hass)
     order: list[str] = []
-    tag = auto_module._notification_id(entry.entry_id)
+    tag = _acceptance_tag(entry)
 
     async def phone(call: Any) -> None:
         if call.data["message"] == "clear_notification":
@@ -1271,7 +1277,7 @@ async def test_a_push_that_never_ends_keeps_the_clear_waiting_only_so_long(
     async def phone(call: Any) -> None:
         if call.data["message"] == "clear_notification":
             cleared.append(call)
-            if call.data["data"]["tag"] == auto_module._notification_id(entry.entry_id):  # not the repair push's clear
+            if call.data["data"]["tag"] == _acceptance_tag(entry):  # not the repair push's clear
                 got_the_clear.set()
             return
         try:
