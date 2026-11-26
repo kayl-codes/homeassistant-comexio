@@ -171,6 +171,45 @@ async def test_the_notification_stays_english_and_the_push_follows_the_system_la
     assert told[0].data["title"] == auto_module.AUTO_ACCEPT_TEXTS["de"]["title"]
 
 
+@pytest.mark.logged_exception  # the failed notice is logged with its traceback
+async def test_the_push_goes_out_although_the_notification_could_not_be_created(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    reads: AsyncMock,
+    accept_read: AsyncMock,
+    reload: MagicMock,
+    notification: MagicMock,
+) -> None:
+    entry.add_to_hass(hass)
+    pushes = async_mock_service(hass, "notify", PHONE)
+    notification.side_effect = RuntimeError("no notification")
+    reads.return_value = _info(OTHER)
+    accept_read.return_value = OTHER
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert [push for push in pushes if push.data["message"] != "clear_notification"]  # the user is still told
+
+
+async def test_a_failed_acceptance_read_asks_for_the_newest_certificate_reported_meanwhile(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock
+) -> None:
+    entry.add_to_hass(hass)
+    reads.return_value = _info(OTHER)
+
+    async def poll_meets_another_then_read_fails(_host: str) -> str:
+        async_certificate_changed(hass, entry, THIRD, FIRMWARE)  # the running wait is kept
+        raise ComexioConnectionError("down")
+
+    accept_read.side_effect = poll_meets_another_then_read_fails
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry).data["actual"] == THIRD  # not the settled one Comexio may no longer present
+
+
 async def test_the_new_pin_has_no_issuer_until_a_setup_reads_it_from_the_new_certificate(
     hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock, reload: MagicMock
 ) -> None:
@@ -500,7 +539,7 @@ async def test_a_failed_notice_leaves_the_new_pin_and_says_so_in_the_log(
 
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
     assert _issue(hass, entry) is None  # pinned: nothing left to ask
-    assert "certificate pinned by the rule, but telling the user failed" in caplog.text
+    assert "the notice of the accepted certificate could not be created" in caplog.text
 
 
 async def test_a_certificate_that_settles_after_one_change_is_taken_over(

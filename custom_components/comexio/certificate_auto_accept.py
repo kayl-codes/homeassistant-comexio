@@ -214,11 +214,17 @@ async def _async_decide(
     if _left_to_open_repair(hass, entry, host, info.fingerprint):
         return
     outcome, _current = await async_accept_certificate(hass, entry, info.fingerprint, by_rule=True)
-    await _async_after_acceptance(hass, entry, host, pinned, info, outcome)
+    await _async_after_acceptance(hass, entry, state, host, pinned, info, outcome)
 
 
 async def _async_after_acceptance(
-    hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str, info: CertificateInfo, outcome: str
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    state: _AutoAccepts,
+    host: str,
+    pinned: str,
+    info: CertificateInfo,
+    outcome: str,
 ) -> None:
     """What follows the acceptance by the rule: tell the user, or leave the case to the repair."""
     if outcome == ACCEPT_PINNED:
@@ -226,10 +232,10 @@ async def _async_after_acceptance(
             await _async_tell_user(hass, entry, pinned, info)
         except Exception:
             # Pinned already: the log line is all that is left to say it was the rule.
-            _LOGGER.exception("Comexio at %s: certificate pinned by the rule, but telling the user failed", host)
+            _LOGGER.exception("Comexio at %s: certificate pinned by the rule, but the push to the user failed", host)
     elif outcome == ACCEPT_UNREACHABLE:
-        # Not read again: the repair asks, for the newest certificate.
-        _report_if_current(hass, entry, host, pinned, info.fingerprint)
+        # Not read again: the repair asks, for the newest certificate seen (a report during the read counts).
+        _report_if_current(hass, entry, host, pinned, state.seen or info.fingerprint)
     elif outcome == ACCEPT_REPAIR_OPEN:
         # A repair came up while the acceptance queued or read the certificate: the user decides, on the newest read.
         _left_to_open_repair(hass, entry, host, info.fingerprint)
@@ -312,7 +318,8 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
     """A persistent notification and a push without a button: the certificate is pinned already.
 
     The notification is English (it has no user, and hass.config.language is the system's language, not the
-    viewer's); the push follows the system language like the certificate push of certificate.py.
+    viewer's); the push is in the system language where it is English or German (like the certificate push of
+    certificate.py), English for any other.
     """
     values = {
         "server_id": entry.data[CONF_SERVER_ID],
@@ -323,9 +330,12 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
     }
     english = AUTO_ACCEPT_TEXTS["en"]
     tag = _notification_id(entry.entry_id)
-    persistent_notification.async_create(
-        hass, english["message"].format(**values), title=english["title"], notification_id=tag
-    )
+    notice = english["message"].format(**values)  # a template bug is the outer handler's, once
+    try:
+        persistent_notification.async_create(hass, notice, title=english["title"], notification_id=tag)
+    except Exception:
+        # Pinned already: the push below must still go out.
+        _LOGGER.exception("Comexio at %s: the notice of the accepted certificate could not be created", values["host"])
     if not (targets := _notify_targets(entry)):
         return
     texts = AUTO_ACCEPT_TEXTS.get(hass.config.language, english)
