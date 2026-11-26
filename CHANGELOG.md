@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### ✨ New Features
+- **Doorstation pictures in the media browser (#180):** **Media** > **Browse media** now offers **Doorstation pictures**: one folder per Doorstation (`<extension> (<instance>)`) with its 20 newest bell and motion pictures, newest first, each with a thumbnail. Nothing is stored in Home Assistant; the list and every picture are read from the Doorstation when you browse, one read at a time per entry together with the camera and the picture entities (the thumbnails of a folder therefore load one after the other). A folder that is not listed within 20 seconds, or a request that finds 40 others already waiting, shows an error instead of hanging. The thumbnail links are signed for the browsing connection and valid for one hour. Not yet verified against a real Doorstation: the time limits are estimates.
+
 ---
 
 ## [0.50.0-rc1] — 2026-11-25
