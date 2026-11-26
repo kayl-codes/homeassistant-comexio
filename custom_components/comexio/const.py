@@ -1140,6 +1140,11 @@ def bus_load_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_bus_load_update"
 
 
+def certificate_check_signal(entry_id: str) -> str:
+    """Dispatcher signal fired when the rule's check of a changed certificate (#294) starts, sees another or ends."""
+    return f"{DOMAIN}_{entry_id}_certificate_check"
+
+
 # Function plan run states (running / stopped), asked for all plans in one dashboard/refresh
 # request (~90 ms for 26 plans, measured live 2026-10-01). A plan started or stopped in Comexio
 # Studio sends no webhook, so the state is polled:

@@ -288,7 +288,7 @@ It is then pinned as the repair would pin it, and you learn it from a notificati
 
 *Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
 
-The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded, also after a restart that met a changed certificate; only when such a restart finds no saved config does the integration not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
+The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded, also after a restart that met a changed certificate, and shows `certificate_changed` too while the integration checks a changed certificate before taking it over on its own (Home Assistant sends nothing to Comexio during that check either); only when such a restart finds no saved config does the integration not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
 
 ```yaml
 triggers:
@@ -302,7 +302,7 @@ actions:
       message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
 ```
 
-Its attributes name the pinned fingerprint and `pinned_at`, when it was pinned (empty for a certificate pinned before this was recorded); `presented_fingerprint` appears only while the repair is open. HA's own "last changed" cannot tell when the pin was made: it restarts with every restart.
+Its attributes name the pinned fingerprint and `pinned_at`, when it was pinned (empty for a certificate pinned before this was recorded); `presented_fingerprint` appears only while the repair is open or such a check runs. HA's own "last changed" cannot tell when the pin was made: it restarts with every restart.
 
 The diagnostic `Certificate valid until` sensor (`sensor.<server>_certificate_expiry`, only on an encrypted entry) shows when the pinned certificate expires; the attribute `valid_from` says when it started. It reads the certificate from a bare TLS handshake — no request, no credentials — at startup and once a day, and takes the dates only from the pinned certificate: another certificate is the repair's business and changes nothing here. A failed read keeps the last date, across restarts as well; `unknown` means not read yet or a certificate without readable dates, never one that does not expire. An automation can warn ahead of time, for example 30 days before:
 
@@ -634,7 +634,7 @@ Es wird dann so gepinnt, wie die Reparatur es pinnen würde, und du erfährst es
 
 *Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Bis auf den TLS-Handshake, der das Zertifikat ausliest, wird vor deiner Bestätigung nichts gesendet — auch nicht der Login-Test.
 
-Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist, auch nach einem Neustart, der auf ein geändertes Zertifikat traf; nur wenn ein solcher Neustart keine gespeicherte Konfiguration findet, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
+Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist, auch nach einem Neustart, der auf ein geändertes Zertifikat traf, und zeigt `certificate_changed` auch, solange die Integration ein geändertes Zertifikat prüft, bevor sie es selbst übernimmt (auch während dieser Prüfung sendet Home Assistant nichts an Comexio); nur wenn ein solcher Neustart keine gespeicherte Konfiguration findet, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
 
 ```yaml
 triggers:
@@ -648,7 +648,7 @@ actions:
       message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
 ```
 
-Seine Attribute nennen den gepinnten Fingerabdruck und `pinned_at`, wann er gepinnt wurde (leer bei einem Zertifikat, das gepinnt wurde, bevor das erfasst wurde); `presented_fingerprint` erscheint nur, solange die Reparatur offen ist. HAs eigene „Letzte Änderung“ kann den Zeitpunkt des Pinnings nicht zeigen: Sie beginnt mit jedem Neustart neu.
+Seine Attribute nennen den gepinnten Fingerabdruck und `pinned_at`, wann er gepinnt wurde (leer bei einem Zertifikat, das gepinnt wurde, bevor das erfasst wurde); `presented_fingerprint` erscheint nur, solange die Reparatur offen ist oder eine solche Prüfung läuft. HAs eigene „Letzte Änderung“ kann den Zeitpunkt des Pinnings nicht zeigen: Sie beginnt mit jedem Neustart neu.
 
 Der Diagnose-Sensor `Zertifikat gültig bis` (`sensor.<server>_certificate_expiry`, nur bei einem verschlüsselten Eintrag) zeigt, wann das gepinnte Zertifikat abläuft; das Attribut `valid_from` sagt, seit wann es gilt. Er liest das Zertifikat über einen reinen TLS-Handshake — keine Anfrage, keine Zugangsdaten — beim Start und einmal täglich und übernimmt die Daten nur vom gepinnten Zertifikat: Ein anderes Zertifikat ist Sache der Reparatur und ändert hier nichts. Ein fehlgeschlagener Lesevorgang behält das letzte Datum, auch über Neustarts; `unknown` heißt noch nicht gelesen oder ein Zertifikat ohne lesbare Daten, nie eines, das nicht abläuft. Eine Automation kann rechtzeitig warnen, zum Beispiel 30 Tage vorher:
 

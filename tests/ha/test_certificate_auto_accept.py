@@ -11,6 +11,7 @@ from aiocomexio import CertificateInfo, ComexioCertificateMismatchError, Comexio
 from homeassistant.config_entries import ConfigEntryDisabler, ConfigEntryState
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry, async_mock_service
 
@@ -26,7 +27,11 @@ from custom_components.comexio.certificate import (
     async_report_certificate_changed,
     certificate_issue_id,
 )
-from custom_components.comexio.certificate_auto_accept import CERTIFICATE_AUTO_ACCEPTS, async_certificate_changed
+from custom_components.comexio.certificate_auto_accept import (
+    CERTIFICATE_AUTO_ACCEPTS,
+    async_certificate_changed,
+    certificate_in_check,
+)
 from custom_components.comexio.const import (
     CERTIFICATE_AUTO_ACCEPT_MAX_READS,
     CONF_CERTIFICATE_AUTHORITY,
@@ -40,6 +45,7 @@ from custom_components.comexio.const import (
     CONFIG_ENTRY_MINOR_VERSION,
     DOMAIN,
     LOGIN_ERROR_CERTIFICATE,
+    certificate_check_signal,
 )
 
 from .conftest import HOST, SERVER_ID
@@ -807,6 +813,87 @@ async def test_a_wait_for_the_connection_before_a_reconfigure_does_not_swallow_t
         assert state.connection == ("192.0.2.99", PINNED)
         for task in (first, state.task):
             task.cancel()
+    await hass.async_block_till_done()
+
+
+async def test_the_end_of_a_replaced_wait_does_not_end_the_check_of_the_new_one(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    # The connection sensor shows certificate_changed while a wait runs (certificate_in_check); the cancelled wait of
+    # the connection before a reconfigure ends after the new one started and must not clear it.
+    entry.add_to_hass(hass)
+    with patch.object(auto_module, "CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC", 3600):
+        async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+        await asyncio.sleep(0)  # the first wait runs (its cleanup only runs once it started)
+        state = hass.data[CERTIFICATE_AUTO_ACCEPTS][entry.entry_id]
+        first = state.task
+        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_HOST: "192.0.2.99"})
+        async_certificate_changed(hass, entry, THIRD, FIRMWARE)
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+        assert first.cancelled()
+        assert certificate_in_check(hass, entry) == THIRD
+        state.task.cancel()
+        await hass.async_block_till_done()
+
+    assert certificate_in_check(hass, entry) is None  # its own end does
+
+
+async def test_a_read_of_the_wait_that_shows_another_certificate_is_signalled(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock
+) -> None:
+    # The sensor shows what certificate_in_check returns, so a change of it by the wait's own read needs a signal.
+    entry.add_to_hass(hass)
+    shown: list[str | None] = []
+    unsub = async_dispatcher_connect(
+        hass, certificate_check_signal(entry.entry_id), lambda: shown.append(certificate_in_check(hass, entry))
+    )
+    second_read = asyncio.Event()
+
+    async def _read(_host: str) -> CertificateInfo:
+        if reads.await_count == 1:
+            return _info(THIRD)  # Comexio changed its certificate again during the wait
+        await second_read.wait()
+        return _info(THIRD)
+
+    reads.side_effect = _read
+    async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert shown == [OTHER, THIRD]  # the start, then the read that saw another one
+    hass.data[CERTIFICATE_AUTO_ACCEPTS][entry.entry_id].task.cancel()
+    await hass.async_block_till_done()
+    unsub()
+    assert shown == [OTHER, THIRD, None]  # the end
+
+
+async def test_a_wait_for_another_connection_is_no_check_of_the_current_one(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock
+) -> None:
+    # A reconfigure to another host or a new pin leaves the old wait running until it ends (_still_current).
+    entry.add_to_hass(hass)
+    never = asyncio.Event()
+
+    async def _read(_host: str) -> CertificateInfo:
+        await never.wait()
+        return _info(OTHER)
+
+    reads.side_effect = _read
+    async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+    await asyncio.sleep(0)
+    assert certificate_in_check(hass, entry) == OTHER
+
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_HOST: "192.0.2.99"})
+    assert certificate_in_check(hass, entry) is None
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_HOST: HOST})
+    assert certificate_in_check(hass, entry) == OTHER
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: OTHER})
+    assert certificate_in_check(hass, entry) is None
+
+    hass.data[CERTIFICATE_AUTO_ACCEPTS][entry.entry_id].task.cancel()
     await hass.async_block_till_done()
 
 

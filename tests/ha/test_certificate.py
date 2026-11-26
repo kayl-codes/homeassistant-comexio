@@ -43,9 +43,11 @@ from custom_components.comexio.certificate import (
     async_report_certificate_changed,
     certificate_issue_id,
 )
+from custom_components.comexio.certificate_auto_accept import async_certificate_changed
 from custom_components.comexio.const import (
     CERTIFICATE_CHANGED_MSG,
     CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC,
+    CONF_CERTIFICATE_AUTHORITY,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_CERTIFICATE_PINNED_AT,
     CONF_HOST,
@@ -1848,6 +1850,50 @@ async def test_the_connection_sensor_follows_the_certificate_repair(
     async_clear_certificate_changed(hass, pinned_entry.entry_id)
     await hass.async_block_till_done()
     assert hass.states.get(CONNECTION_SENSOR).state == "https"
+
+
+@pytest.mark.usefixtures("mock_comexio_api")
+async def test_the_connection_sensor_shows_the_rules_check_of_a_changed_certificate(
+    hass: HomeAssistant, pinned_entry: MockConfigEntry, authority_read: AsyncMock
+) -> None:
+    # While the rule of #294 waits, Home Assistant sends nothing to Comexio either: the sensor must not say https.
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=pinned_entry.title,
+        minor_version=CONFIG_ENTRY_MINOR_VERSION,
+        data={
+            **pinned_entry.data,
+            CONF_CERTIFICATE_AUTHORITY: {
+                "fingerprint": PINNED,
+                "issuer": "CN=Comexio LAN CA",
+                "authority_key_id": "0a",
+            },
+        },
+    )
+    await _setup(hass, entry)
+    assert hass.states.get(CONNECTION_SENSOR).state == "https"
+    read_again = asyncio.Event()
+
+    async def _read(_host: str) -> CertificateInfo:
+        await read_again.wait()
+        return CertificateInfo(PINNED, None, None, "CN=Comexio LAN CA", "0a")  # the pin is back: nothing to accept
+
+    authority_read.side_effect = _read
+    with patch("custom_components.comexio.certificate_auto_accept.CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC", 0):
+        async_certificate_changed(hass, entry, OTHER, "11.1.5")
+        await hass.async_block_till_done()
+
+        state = hass.states.get(CONNECTION_SENSOR)
+        assert state.state == "certificate_changed"
+        assert state.attributes["presented_fingerprint"] == ":".join(["BB"] * 32)
+        assert _issue(hass, entry) is None  # no repair: the rule's wait alone
+
+        read_again.set()
+        await hass.async_block_till_done(wait_background_tasks=True)
+
+    state = hass.states.get(CONNECTION_SENSOR)
+    assert state.state == "https"  # the wait is over
+    assert "presented_fingerprint" not in state.attributes
 
 
 @pytest.mark.usefixtures("mock_comexio_api")

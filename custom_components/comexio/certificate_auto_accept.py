@@ -26,6 +26,7 @@ from aiocomexio import CertificateInfo, ComexioError, fetch_certificate, format_
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 
 from .certificate import (
     ACCEPT_PINNED,
@@ -47,6 +48,7 @@ from .const import (
     CONF_HOST,
     CONF_SERVER_ID,
     DOMAIN,
+    certificate_check_signal,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -140,7 +142,9 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
         return False
     # A wait started for the connection before a reconfigure ends on its own (_still_current); this one waits anew.
     if state.task is not None and not state.task.done() and state.connection == (host, pinned):
-        state.seen = actual  # the wait reads the certificate again anyway; a failure of it reports this one
+        if state.seen != actual:
+            state.seen = actual  # the wait reads the certificate again anyway; a failure of it reports this one
+            async_dispatcher_send(hass, certificate_check_signal(entry.entry_id))
         return True
     _LOGGER.warning(
         "Comexio at %s presents certificate %s instead of the pinned %s; checking it against the pinned issuer in %d s",
@@ -156,7 +160,22 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
     state.task = hass.async_create_background_task(
         _async_run(hass, entry, state, host, pinned, actual), f"{DOMAIN} certificate auto accept {entry.entry_id}"
     )
+    async_dispatcher_send(hass, certificate_check_signal(entry.entry_id))  # the connection sensor shows the check
     return True
+
+
+def certificate_in_check(hass: HomeAssistant, entry: ConfigEntry) -> str | None:
+    """The certificate the rule's wait checks for the entry (the one seen last), None when no wait runs.
+
+    Home Assistant sends nothing to Comexio during the wait either, so the connection sensor shows it like the repair.
+    A wait for the connection before a reconfigure or a new pin is no check of this one: it ends on its own.
+    """
+    state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).get(entry.entry_id)
+    if state is None or state.task is None or state.task.done():
+        return None
+    if state.connection != (entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)):
+        return None
+    return state.seen
 
 
 def _why_not(entry: ConfigEntry, firmware: str | None) -> str | None:
@@ -185,13 +204,18 @@ async def _async_run(
     except Exception:
         _LOGGER.exception("Comexio at %s: the check of the new certificate failed; the repair asks instead", host)
         _report_if_current(hass, entry, host, pinned, state.seen or seen)
+    finally:
+        # Also when cancelled. Only this run's own task: a wait started anew meanwhile is still checking.
+        if state.task is asyncio.current_task():
+            state.task = None
+            async_dispatcher_send(hass, certificate_check_signal(entry.entry_id))
 
 
 async def _async_decide(
     hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, host: str, pinned: str, seen: str
 ) -> None:
     try:
-        info, last = await _async_settled_certificate(host, seen, state)
+        info, last = await _async_settled_certificate(hass, entry.entry_id, host, seen, state)
     except (ComexioError, ValueError) as err:
         _LOGGER.warning("Comexio at %s: the new certificate could not be read again (%s); the repair asks", host, err)
         _report_if_current(hass, entry, host, pinned, state.seen or seen)
@@ -267,7 +291,9 @@ def _left_to_open_repair(hass: HomeAssistant, entry: ConfigEntry, host: str, act
     return True
 
 
-async def _async_settled_certificate(host: str, seen: str, state: _AutoAccepts) -> tuple[CertificateInfo | None, str]:
+async def _async_settled_certificate(
+    hass: HomeAssistant, entry_id: str, host: str, seen: str, state: _AutoAccepts
+) -> tuple[CertificateInfo | None, str]:
     """The certificate once it stayed the same for the settle time (None when it kept changing), and the
     fingerprint read last."""
     for _ in range(CERTIFICATE_AUTO_ACCEPT_MAX_READS):
@@ -276,7 +302,10 @@ async def _async_settled_certificate(host: str, seen: str, state: _AutoAccepts) 
         # The read must match the last read and the newest seen (a report of the wait included): another certificate
         # reported meanwhile restarts the interval, whichever one the read then shows.
         unchanged = info.fingerprint == seen == state.seen
+        changed = info.fingerprint != state.seen
         seen = state.seen = info.fingerprint  # a later failure reports the newest one, not the first
+        if changed:
+            async_dispatcher_send(hass, certificate_check_signal(entry_id))  # the connection sensor shows it
         if unchanged:
             return info, seen
     return None, seen
