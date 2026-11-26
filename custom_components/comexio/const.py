@@ -320,6 +320,10 @@ DOORSTATION_GALLERY_PLACE_WAIT_SEC = DOORSTATION_GALLERY_MAX_PICTURES * DOORSTAT
 # A browser batch then holds two places in the lock's queue, not twenty, so the camera and the picture entities
 # wait behind two reads only.
 DOORSTATION_GALLERY_CONCURRENT_READS = 2
+# A thumbnail that finds this many others already waiting for one of those places is answered at once. Each wait is
+# bounded in time (DOORSTATION_GALLERY_PLACE_WAIT_SEC), but without this cap a flood of requests from an authenticated
+# client parks an unbounded number of them. Two browser batches; a guess, not measured.
+DOORSTATION_GALLERY_MAX_WAITING_READS = 2 * DOORSTATION_GALLERY_MAX_PICTURES
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600

@@ -28,7 +28,7 @@ from custom_components.comexio.const import (
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_PATH,
 )
-from custom_components.comexio.media_source import _GALLERY_READ_SLOTS_KEY, _gallery_read_slots
+from custom_components.comexio.media_source import _GALLERY_READ_SLOTS_KEY, _gallery_read_slots, _gallery_waiting
 
 pytestmark = pytest.mark.usefixtures("mock_comexio_api")
 
@@ -707,9 +707,12 @@ async def test_a_thumbnail_blocked_on_the_doorstation_lock_past_the_budget_answe
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
     doorstation_lock = asyncio.Lock()
+    # Set as the read reaches the lock: a 503 that came earlier than the lock wait never gets here.
+    at_the_lock = asyncio.Event()
 
     async def _read_behind_the_lock(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
         # The Doorstation lock is what the real read waits for; another read holds it for as long as the test says.
+        at_the_lock.set()
         async with doorstation_lock:
             return JPEG, None
 
@@ -720,12 +723,19 @@ async def test_a_thumbnail_blocked_on_the_doorstation_lock_past_the_budget_answe
     await doorstation_lock.acquire()
     try:
         with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.05):
-            async with asyncio.timeout(10):
-                response = await client.get(path)
+            request = asyncio.ensure_future(client.get(path))
+            try:
+                async with asyncio.timeout(5):
+                    await at_the_lock.wait()
+                async with asyncio.timeout(10):
+                    response = await request
+            finally:
+                request.cancel()
     finally:
         doorstation_lock.release()
 
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+    coordinator.api.get_doorstation_picture.assert_awaited_once()
 
 
 async def test_a_browser_batch_takes_only_a_couple_of_places_on_the_doorstation_lock(
@@ -833,21 +843,59 @@ async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_u
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
     coordinator = await _setup(hass, mock_config_entry)
-    places = _gallery_read_slots(hass, mock_config_entry.entry_id)
-    for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
-        await places.acquire()
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
     client = await hass_client()
+    request = None
     try:
         with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_PLACE_WAIT_SEC", 0.05):
-            # Every place is taken: the request must still answer within its place budget, not wait for a place forever.
+            request = asyncio.ensure_future(client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")))
+            # Every place is taken: the request must stand in the queue and still answer within its place budget.
             async with asyncio.timeout(5):
-                response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+                await waiting.wait()
+            async with asyncio.timeout(5):
+                response = await request
     finally:
-        for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
-            places.release()
+        _release_places(places)
+        if request is not None:
+            request.cancel()
 
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
     coordinator.api.get_doorstation_picture.assert_not_awaited()
+    # The timed-out wait gave its count back, or the cap would refuse every later thumbnail of the entry.
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
+
+
+async def test_a_thumbnail_past_the_waiting_limit_is_answered_at_once(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    queued = None
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_MAX_WAITING_READS", 1):
+            queued = asyncio.ensure_future(client.get(path))
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            # One thumbnail stands in the queue for a place; the next is refused without waiting behind it.
+            async with asyncio.timeout(5):
+                refused = await client.get(path)
+            assert not queued.done()
+    except BaseException:
+        if queued is not None:
+            queued.cancel()
+        raise
+    finally:
+        _release_places(places)
+    async with asyncio.timeout(10):
+        served = await queued
+
+    assert refused.status == HTTPStatus.SERVICE_UNAVAILABLE
+    assert served.status == HTTPStatus.OK
+    coordinator.api.get_doorstation_picture.assert_awaited_once()
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
 
 
 async def test_a_thumbnail_queued_behind_the_places_is_served_within_its_own_read_budget(

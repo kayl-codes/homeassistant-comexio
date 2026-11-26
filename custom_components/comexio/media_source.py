@@ -13,6 +13,7 @@ request without a signature.
 
 import asyncio
 from collections.abc import Iterable
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 from typing import NamedTuple
@@ -39,6 +40,7 @@ from .const import (
     DOORSTATION_GALLERY_LINK_EXPIRY_SEC,
     DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
     DOORSTATION_GALLERY_MAX_PICTURES,
+    DOORSTATION_GALLERY_MAX_WAITING_READS,
     DOORSTATION_GALLERY_PLACE_WAIT_SEC,
     DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
@@ -73,10 +75,26 @@ def _gallery_read_slots(hass: HomeAssistant, entry_id: str) -> asyncio.Semaphore
     )
 
 
+_GALLERY_WAITING_KEY = f"{DOMAIN}_gallery_waiting"
+
+
+@dataclass
+class _Waiting:
+    """How many thumbnails of one config entry wait for a gallery place right now."""
+
+    count: int = 0
+
+
+def _gallery_waiting(hass: HomeAssistant, entry_id: str) -> _Waiting:
+    """The waiting count next to the places of one config entry: it outlives an unload like they do."""
+    return hass.data.setdefault(f"{_GALLERY_WAITING_KEY}_{entry_id}", _Waiting())
+
+
 def forget_gallery_read_slots(hass: HomeAssistant, entry_id: str) -> None:
     """Drops the places of a removed entry. They outlive an unload: a read of the old instance still in flight holds
     one of them, and the reloaded entry must count it against the same two places."""
     hass.data.pop(f"{_GALLERY_READ_SLOTS_KEY}_{entry_id}", None)
+    hass.data.pop(f"{_GALLERY_WAITING_KEY}_{entry_id}", None)
 
 
 class _Item(NamedTuple):
@@ -320,8 +338,15 @@ async def async_get_media_source(hass: HomeAssistant) -> DoorstationGallery:  # 
 async def _read_in_a_gallery_place(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, name: str
 ) -> tuple[bytes | None, str | None]:
-    """One picture read in one of the gallery's places; the wait for the place has its own budget."""
+    """One picture read in one of the gallery's places; the wait for a place has its own budget and waiter cap."""
     slots = _gallery_read_slots(hass, entry_id)
+    waiting = _gallery_waiting(hass, entry_id)
+    if waiting.count >= DOORSTATION_GALLERY_MAX_WAITING_READS:
+        _LOGGER.debug(
+            "Doorstation %s picture not answered: %s thumbnails already wait for a place", number, waiting.count
+        )
+        raise web.HTTPServiceUnavailable
+    waiting.count += 1
     try:
         async with asyncio.timeout(DOORSTATION_GALLERY_PLACE_WAIT_SEC):
             await slots.acquire()
@@ -332,6 +357,8 @@ async def _read_in_a_gallery_place(
             DOORSTATION_GALLERY_PLACE_WAIT_SEC,
         )
         raise web.HTTPServiceUnavailable from None
+    finally:
+        waiting.count -= 1
     try:
         return await _read_within_thumbnail_budget(hass, entry_id, coordinator, number, name)
     finally:
