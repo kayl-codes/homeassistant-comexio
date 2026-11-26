@@ -21,7 +21,11 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.comexio.api import doorstation_read_lock, forget_doorstation_read_lock
+from custom_components.comexio.api import (
+    doorstation_read_got_its_turn,
+    doorstation_read_lock,
+    forget_doorstation_read_lock,
+)
 from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_GALLERY_CONCURRENT_READS,
@@ -906,6 +910,52 @@ async def test_a_folder_list_that_stalls_with_its_place_is_logged_and_told_apart
     coordinator.api.get_doorstation_pictures.assert_awaited()
     assert any(r.levelname == "WARNING" and "timed out after" in r.getMessage() for r in caplog.records)
     assert all("no place within" not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_folder_list_that_waits_for_the_doorstation_lock_is_not_blamed_on_the_doorstation(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The place was held, but other reads held the Doorstation's lock, so the read never reached the Doorstation.
+    # The browse must not say it did not answer, nor log a stalled read.
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _wait_for_the_lock(_ext_id: int) -> None:
+        doorstation_read_got_its_turn.set(False)  # what ComexioAPI does while it waits for the Doorstation's lock
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _wait_for_the_lock
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation was busy with other reads\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    coordinator.api.get_doorstation_pictures.assert_awaited()
+    assert any(r.levelname == "WARNING" and "waited out its" in r.getMessage() for r in caplog.records)
+    assert all("did not answer" not in r.getMessage() for r in caplog.records)
+    assert all("timed out after" not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_stale_lock_wait_of_an_earlier_read_does_not_decide_for_a_folder_list_stall(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An earlier read of this task left the flag at False. This list read reaches the Doorstation and stalls there, so
+    # the flag must not blame the lock: the old "did not answer" text and log line stay.
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _stall(_ext_id: int) -> None:
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _stall
+    doorstation_read_got_its_turn.set(False)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    assert any(r.levelname == "WARNING" and "timed out after" in r.getMessage() for r in caplog.records)
+    assert all("busy with other reads" not in r.getMessage() for r in caplog.records)
 
 
 async def test_a_folder_list_grant_is_judged_by_the_list_mark(

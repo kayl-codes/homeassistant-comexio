@@ -35,6 +35,7 @@ from homeassistant.components.media_source import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .api import doorstation_read_got_its_turn
 from .const import (
     DOMAIN,
     DOORSTATION_GALLERY_CONCURRENT_READS,
@@ -373,6 +374,34 @@ def _list_not_read(detail: str) -> BrowseError:
     return BrowseError(f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s {detail}")
 
 
+def _list_timed_out(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int, *, placed: bool
+) -> BrowseError:
+    """The browse error of a picture list read that ran out its budget, with the log line its cause needs."""
+    if not placed:
+        # The wait for the place ate the budget: a refusal like a thumbnail's, so a stall shows in the log.
+        _refused_for_a_place(
+            hass, entry_id, coordinator, ext_id, f"no place within {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s"
+        )
+        return _list_not_read("(the wait for a gallery place included)")
+    if not doorstation_read_got_its_turn.get():
+        # The place was held, but the read waited for the Doorstation's lock behind other reads: it never reached the
+        # Doorstation, so it does not say that the Doorstation did not answer.
+        _LOGGER.warning(
+            "Doorstation %s picture list read waited out its %g s behind other reads, with its gallery place",
+            ext_id,
+            DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
+        )
+        return _list_not_read("(the Doorstation was busy with other reads)")
+    # The place was held and the read did not finish: nothing else logs that, so it is logged here.
+    _LOGGER.warning(
+        "Doorstation %s picture list read timed out after %g s, with its gallery place",
+        ext_id,
+        DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
+    )
+    return _list_not_read("(the Doorstation did not answer in time)")
+
+
 async def _folder_children(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int
 ) -> list[BrowseMediaSource]:
@@ -402,25 +431,15 @@ async def _folder_children(
                 # Offline or unloaded while the place was awaited: no list read takes the Doorstation lock for nothing.
                 if not _still_offered(hass, entry_id, coordinator, ext_id):
                     raise BrowseError(_OFFLINE_OR_UNKNOWN)
+                # An earlier read of this task must not decide for this one (see the timeout branch below).
+                doorstation_read_got_its_turn.set(True)
                 pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
             finally:
                 places.release()
     except TimeoutError:
         if not deadline.expired():
             raise
-        if not placed:
-            # The wait for the place ate the budget: a refusal like a thumbnail's, so a stall shows in the log.
-            _refused_for_a_place(
-                hass, entry_id, coordinator, ext_id, f"no place within {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s"
-            )
-            raise _list_not_read("(the wait for a gallery place included)") from None
-        # The place was held and the read did not finish: nothing else logs that, so it is logged here.
-        _LOGGER.warning(
-            "Doorstation %s picture list read timed out after %g s, with its gallery place",
-            ext_id,
-            DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
-        )
-        raise _list_not_read("(the Doorstation did not answer in time)") from None
+        raise _list_timed_out(hass, entry_id, coordinator, ext_id, placed=placed) from None
     if pictures is None:
         if cause is not None:
             # Any failure cause of the list read is only debug-logged by the API (a read that ran out its own budget is
