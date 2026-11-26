@@ -47,7 +47,6 @@ from custom_components.comexio.media_source import (
     _place_granted,
     _refused_for_a_place,
     _warn_slow_place_wait,
-    forget_gallery_read_slots,
 )
 
 pytestmark = pytest.mark.usefixtures("mock_comexio_api")
@@ -144,6 +143,24 @@ async def _take_all_places(hass: HomeAssistant, entry_id: str) -> tuple[_Signall
 def _release_places(places: asyncio.Semaphore) -> None:
     for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
         places.release()
+
+
+@contextlib.contextmanager
+def _recording_slow_timers() -> Generator[list[asyncio.TimerHandle], None, None]:
+    """Records the slow-wait timers the reads arm while the block runs, cancelled or not. A timer that is still armed
+    would fire into the test, so the tests check the handle instead of racing the clock against the mark."""
+    loop = asyncio.get_running_loop()
+    real_call_later = loop.call_later
+    timers: list[asyncio.TimerHandle] = []
+
+    def _record(delay: float, callback: Any, *args: Any, **kwargs: Any) -> asyncio.TimerHandle:
+        handle = real_call_later(delay, callback, *args, **kwargs)
+        if callback is _warn_slow_place_wait:
+            timers.append(handle)
+        return handle
+
+    with patch.object(loop, "call_later", new=_record):
+        yield timers
 
 
 # --- the browser ----------------------------------------------------------------------------------------------------
@@ -870,23 +887,28 @@ async def test_a_browse_cancelled_while_it_waits_leaves_no_slow_timer_behind(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
     # A browser that leaves while its folder list waits must take the slow-wait timer with it: a leaked timer would warn
-    # about a wait that no longer exists. The mark is short here, so a leaked timer fires inside the test.
+    # about a wait that no longer exists. The mark is far away, so no timer fires during the test; the check is that the
+    # timer the wait armed is cancelled by the browser's leaving.
     await _setup(hass, mock_config_entry)
     places, _waiting = await _take_all_places(hass, mock_config_entry.entry_id)
     waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
     folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
-    browse = asyncio.ensure_future(media_source.async_browse_media(hass, folder))
     try:
-        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC", 0.2):
+        with (
+            patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC", 30.0),
+            _recording_slow_timers() as timers,
+        ):
+            browse = asyncio.ensure_future(media_source.async_browse_media(hass, folder))
             async with asyncio.timeout(5):
                 while waiting.count < 1:
                     await asyncio.sleep(0.01)
             browse.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await browse
-            await asyncio.sleep(0.3)
     finally:
         _release_places(places)
+    assert timers
+    assert all(timer.cancelled() for timer in timers)
     assert waiting.count == 0
     assert not waiting.slow
     assert not [r for r in caplog.records if "still waits" in r.getMessage()]
@@ -1316,10 +1338,12 @@ async def test_a_cancelled_wait_while_another_still_waits_keeps_the_slow_flag(
 async def test_a_slow_wait_that_outlives_its_entry_creates_no_state(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The entry was removed while its thumbnail still waited: the timer must not bring the waiting state back.
+    # The entry was removed while its thumbnail still waited: the removal drops the waiting state, and the timer that
+    # fires after it must not bring the state back.
+    await _setup(hass, mock_config_entry)
     entry_id = mock_config_entry.entry_id
     _gallery_waiting(hass, entry_id).count = 1
-    forget_gallery_read_slots(hass, entry_id)
+    await hass.config_entries.async_remove(entry_id)
     _warn_slow_place_wait(hass, entry_id, cast(Any, _Instance()), 2)
 
     assert _kept_gallery_waiting(hass, entry_id) is None
@@ -1352,8 +1376,12 @@ async def test_a_thumbnail_whose_browser_left_while_it_waited_takes_no_place_and
     client = await hass_client()
     path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
     queued = asyncio.ensure_future(client.get(path))
-    # The mark is well above the time the cancel takes under load, so the wait is always cancelled before it.
-    with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 1.0):
+    # The mark is far away, so no timer fires during the test: the check is that the timer the wait armed is cancelled
+    # with the wait. A timer the cancel had not taken would be left armed and fire into the next test.
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 30.0),
+        _recording_slow_timers() as timers,
+    ):
         try:
             async with asyncio.timeout(5):
                 await waiting.wait()
@@ -1363,9 +1391,9 @@ async def test_a_thumbnail_whose_browser_left_while_it_waited_takes_no_place_and
                     await asyncio.sleep(0.01)
         finally:
             _release_places(places)
-        # Past the slow mark: a timer that the cancelled wait had not cleared would warn now.
-        await asyncio.sleep(1.2)
 
+    assert timers
+    assert all(timer.cancelled() for timer in timers)
     coordinator.api.get_doorstation_picture.assert_not_awaited()
     assert not _gallery_read_slots(hass, mock_config_entry.entry_id).locked()
     assert not [r for r in caplog.records if "still waits" in r.getMessage()]
@@ -1420,16 +1448,19 @@ async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_s
 async def test_a_refusal_and_a_grant_after_the_removal_of_the_entry_create_no_state(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # The entry was removed while a read still held the waiting state: a late refusal and a late grant create none.
+    # The entry was removed while a read still held the waiting state: the removal drops that state, and a late refusal
+    # and a late grant create none.
+    await _setup(hass, mock_config_entry)
     entry_id = mock_config_entry.entry_id
     _gallery_waiting(hass, entry_id).count = 1
-    forget_gallery_read_slots(hass, entry_id)
+    await hass.config_entries.async_remove(entry_id)
+    logged_before = len(caplog.records)
     instance = cast(Any, _Instance())
     _refused_for_a_place(hass, entry_id, instance, 2, "the cap")
     _place_granted(hass, entry_id, instance, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
 
     assert _kept_gallery_waiting(hass, entry_id) is None
-    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+    assert not [r for r in caplog.records[logged_before:] if r.levelname == "WARNING"]
 
 
 async def test_a_thumbnail_waiting_past_the_slow_mark_is_warned_before_its_wait_ends(
