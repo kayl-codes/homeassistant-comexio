@@ -311,10 +311,11 @@ DOORSTATION_GALLERY_LIST_TIMEOUT_SEC = 20.0
 # shorter picture-entity budget let the last ones of a browser batch fail. 30 s is a guess, not measured against a real
 # Doorstation. The read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
 DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC = 30.0
-# A thumbnail waits this long for one of the gallery's places at most (media_source.py). A full browser batch of
-# DOORSTATION_GALLERY_MAX_PICTURES reads, two at a time, each up to DOORSTATION_PICTURE_READ_TIMEOUT_SEC, needs 80 s for
-# its last thumbnail; 90 s covers it. Derived from those numbers, not measured against a real Doorstation.
-DOORSTATION_GALLERY_PLACE_WAIT_SEC = 90.0
+# A thumbnail waits this long for one of the gallery's places at most (media_source.py). The entry's Doorstation lock
+# runs the reads one after the other, however many places there are: the last thumbnail of a full browser batch waits
+# for the reads before it, up to DOORSTATION_PICTURE_READ_TIMEOUT_SEC each. The whole batch in that worst case is the
+# value, which leaves room for the camera's reads in between. Derived from those numbers, not measured on a Doorstation.
+DOORSTATION_GALLERY_PLACE_WAIT_SEC = DOORSTATION_GALLERY_MAX_PICTURES * DOORSTATION_PICTURE_READ_TIMEOUT_SEC
 # The gallery puts at most this many reads on a Doorstation lock at a time, per config entry (media_source.py).
 # A browser batch then holds two places in the lock's queue, not twenty, so the camera and the picture entities
 # wait behind two reads only.
