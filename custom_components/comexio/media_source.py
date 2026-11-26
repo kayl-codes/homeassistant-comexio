@@ -191,9 +191,10 @@ def _warn_slow_place_wait(hass: HomeAssistant, entry_id: str, coordinator: Comex
 
 
 def _place_granted(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, waited: float) -> None:
-    """A thumbnail got its place: the refusal streak ends. The slow streak ends when the places flow again: a place that
-    came within the slow mark, or a queue that is now empty. A grant after a long wait while others still queue belongs
-    to the same stall, and the next one must not warn again. A grant under a replaced instance changes nothing."""
+    """A thumbnail or a list read got its place: the refusal streak ends. The slow streak ends when the places flow
+    again: a place that came within the slow mark, or a queue that is now empty. A grant after a long wait while others
+    still queue belongs to the same stall, and the next one must not warn again. A grant under a replaced instance
+    changes nothing."""
     waiting = _kept_gallery_waiting(hass, entry_id)
     # A grant of a replaced instance leaves the new instance's refusal streak as it is: a repeat warning may then be
     # lost, but never the first one of a streak.
@@ -359,12 +360,16 @@ async def _folder_children(
 ) -> list[BrowseMediaSource]:
     # The list read takes a gallery place like a thumbnail does: a browse batch must not queue on the Doorstation lock
     # ahead of the camera and the picture entities either. The wait for the place counts into the list's deadline.
+    loop = asyncio.get_running_loop()
     try:
+        started = loop.time()
         async with asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline:
             places = await _await_gallery_place(hass, entry_id)
             if places is None:
                 raise BrowseError(_TOO_MANY_WAITING)
             try:
+                # A list read that gets its place is a place flowing again, as a thumbnail's is (_place_granted).
+                _place_granted(hass, entry_id, coordinator, waited=loop.time() - started)
                 # Offline or unloaded while the place was awaited: no list read takes the Doorstation lock for nothing.
                 if not _still_offered(hass, entry_id, coordinator, ext_id):
                     raise BrowseError(_OFFLINE_OR_UNKNOWN)

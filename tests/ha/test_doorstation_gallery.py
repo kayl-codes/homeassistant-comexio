@@ -799,6 +799,24 @@ async def test_a_browse_batch_reads_one_list_at_a_time_on_the_doorstation_lock(
     assert most_at_once == 1
 
 
+async def test_a_list_read_that_gets_its_place_at_once_ends_the_slow_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    # A place that comes within the slow mark is the places flowing again, for a list read as for a thumbnail. The
+    # other thumbnail is only counted here: it stays queued, so the empty-queue rule cannot end the streak instead.
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.return_value = ((OTHER_PICTURE,), None)
+    waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
+    waiting.slow = True
+    waiting.refusing = True
+    waiting.count = 1
+
+    await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
+
+    assert not waiting.slow
+    assert not waiting.refusing
+
+
 async def test_the_gallery_places_outlive_a_reload_and_go_with_the_entry_on_removal(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -1154,7 +1172,7 @@ async def test_a_thumbnail_waiting_past_the_slow_mark_is_warned_before_its_wait_
                 await waiting.wait()
             # The warning comes while the thumbnail still stands in the queue, not when its wait has ended.
             async with asyncio.timeout(5):
-                while not any("still waits" in r.getMessage() for r in caplog.records):
+                while not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records):
                     await asyncio.sleep(0.01)
             assert not queued.done()
     except BaseException:
