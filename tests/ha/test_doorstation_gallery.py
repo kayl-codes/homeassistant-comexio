@@ -1361,12 +1361,15 @@ async def test_a_request_after_the_entry_was_unloaded_changes_no_streak_and_warn
     # instance neither warns nor clears what is kept for the entry.
     entry_id = mock_config_entry.entry_id
     waiting = _gallery_waiting(hass, entry_id)
+    # Both streaks are running when the late request arrives: it must leave them running, not only find them off.
+    waiting.refusing = True
+    waiting.slow = True
     old = cast(Any, _Instance())
     _refused_for_a_place(hass, entry_id, old, 2, "late")
     _warn_slow_place_wait(hass, entry_id, old, 2)
 
-    assert waiting.refusing is False
-    assert waiting.slow is False
+    assert waiting.refusing
+    assert waiting.slow
     assert not [r for r in caplog.records if r.levelname == "WARNING"]
 
 
