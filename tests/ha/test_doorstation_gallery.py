@@ -5,7 +5,8 @@ from collections.abc import AsyncGenerator, Generator
 import copy
 from datetime import datetime, timedelta
 from http import HTTPStatus
-from typing import Any
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import patch
 
 from aiocomexio import DoorstationPicture, DoorstationPictureKind
@@ -19,6 +20,7 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.comexio.api import doorstation_read_lock, forget_doorstation_read_lock
 from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_GALLERY_CONCURRENT_READS,
@@ -751,6 +753,29 @@ async def test_unloading_the_entry_drops_its_gallery_places(
     await hass.config_entries.async_unload(mock_config_entry.entry_id)
 
     assert f"{_GALLERY_READ_SLOTS_KEY}_{mock_config_entry.entry_id}" not in hass.data
+
+
+async def test_a_reloaded_entry_keeps_the_doorstation_lock_of_its_predecessor(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    lock = coordinator.api._doorstation_snapshot_lock
+
+    assert await hass.config_entries.async_reload(mock_config_entry.entry_id)
+
+    reloaded = hass.data[DOMAIN][mock_config_entry.entry_id]
+    assert reloaded.api is not coordinator.api
+    assert reloaded.api._doorstation_snapshot_lock is lock
+
+
+def test_each_entry_has_its_own_doorstation_read_lock_until_it_is_forgotten() -> None:
+    hass = cast(HomeAssistant, SimpleNamespace(data={}))
+    lock = doorstation_read_lock(hass, "entry_a")
+    assert doorstation_read_lock(hass, "entry_a") is lock
+    assert doorstation_read_lock(hass, "entry_b") is not lock
+    forget_doorstation_read_lock(hass, "entry_a")
+    assert doorstation_read_lock(hass, "entry_a") is not lock
+    forget_doorstation_read_lock(hass, "never_seen")
 
 
 async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_unavailable(

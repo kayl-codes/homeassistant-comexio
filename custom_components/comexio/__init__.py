@@ -20,7 +20,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import slugify
 
-from .api import ComexioAPI
+from .api import ComexioAPI, forget_doorstation_read_lock
 from .certificate import (
     async_clear_certificate_changed,
     async_create_api,
@@ -1206,6 +1206,9 @@ async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Drop the entry's repairs with nothing left to fix, the certificate push on the phones, its saved config and
     its last plan preview."""
+    # Removal normally follows the unload (Home Assistant may also remove after a failed one); an entry id is
+    # never reused, so the lock of a removed entry has no reader left.
+    forget_doorstation_read_lock(hass, entry.entry_id)
     # Nothing else reads the stores once the entry is gone: a new entry gets a new entry id (#250).
     # finally: a failed delete of one must not keep the others, the webhook secret and the preview name the user's
     # wiring, and a failing cleanup above them must not keep any store either.
