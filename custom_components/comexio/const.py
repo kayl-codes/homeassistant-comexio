@@ -322,15 +322,18 @@ DOORSTATION_GALLERY_CONCURRENT_READS = 1
 # bounded in time (DOORSTATION_GALLERY_PLACE_WAIT_SEC), but without this cap a flood of requests from an authenticated
 # client parks an unbounded number of them. Two browser batches; a guess, not measured.
 DOORSTATION_GALLERY_MAX_WAITING_READS = 2 * DOORSTATION_GALLERY_MAX_PICTURES
-# A thumbnail waits this long for one of the gallery's places at most (media_source.py). The entry's Doorstation lock
-# runs the reads one after the other, however many places there are. A place is held for one read: a picture for
-# DOORSTATION_PICTURE_READ_TIMEOUT_SEC, a folder list for DOORSTATION_PICTURE_LIST_TIMEOUT_SEC, each with the wait for
-# the lock included. The value covers the holder and the cap's worth of reads ahead of a thumbnail at the longer of
-# those holds, so an admitted thumbnail is not answered 503 while the lock is free. A read that waits behind the camera
-# takes longer, and camera and picture-entity reads that take the lock in between are not in the value either: a
-# thumbnail still waiting when it runs out is answered 503. Derived from those numbers, not measured.
-DOORSTATION_GALLERY_READ_HOLD_SEC = max(DOORSTATION_PICTURE_READ_TIMEOUT_SEC, DOORSTATION_PICTURE_LIST_TIMEOUT_SEC)
-DOORSTATION_GALLERY_PLACE_WAIT_SEC = (DOORSTATION_GALLERY_MAX_WAITING_READS + 1) * DOORSTATION_GALLERY_READ_HOLD_SEC
+# A thumbnail waits this long for one of the gallery's places at most (media_source.py). A place is held for one read
+# and its wait for the entry's Doorstation lock, which the camera and the picture entities take too: a thumbnail for
+# DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC at most, a folder list for DOORSTATION_GALLERY_LIST_TIMEOUT_SEC (the lock
+# itself is held for DOORSTATION_PICTURE_READ_TIMEOUT_SEC / DOORSTATION_PICTURE_LIST_TIMEOUT_SEC of that). The value
+# covers the holder and the cap's worth of reads ahead of a thumbnail at the longer of those holds, so an admitted
+# thumbnail gets its place however long the reads ahead wait for the lock; its own read can still run out of its
+# budget. About 20 minutes in the worst case: the value bounds how long a request is parked, not what a viewer sees (a
+# browser or a proxy in between may give up sooner; no such limit was measured). Derived, not measured.
+DOORSTATION_GALLERY_PLACE_HOLD_SEC = max(
+    DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC, DOORSTATION_GALLERY_LIST_TIMEOUT_SEC
+)
+DOORSTATION_GALLERY_PLACE_WAIT_SEC = (DOORSTATION_GALLERY_MAX_WAITING_READS + 1) * DOORSTATION_GALLERY_PLACE_HOLD_SEC
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600

@@ -700,6 +700,8 @@ async def test_a_thumbnail_queued_past_the_budget_answers_unavailable(
 
     coordinator.api.get_doorstation_picture.assert_awaited_once()
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+    # The place is free again once the budget ran out: DOORSTATION_GALLERY_PLACE_WAIT_SEC counts on that.
+    assert not _gallery_read_slots(hass, mock_config_entry.entry_id).locked()
 
 
 async def test_a_thumbnail_blocked_on_the_doorstation_lock_past_the_budget_answers_unavailable(
@@ -1129,6 +1131,8 @@ async def test_a_folder_whose_list_takes_too_long_is_an_error_in_the_browser(
         pytest.raises(BrowseError, match="not read in"),
     ):
         await media_source.async_browse_media(hass, folder_id)
+    # The list gave its place back when its deadline ran out: DOORSTATION_GALLERY_PLACE_WAIT_SEC counts on that.
+    assert not _gallery_read_slots(hass, mock_config_entry.entry_id).locked()
 
 
 async def test_a_folder_waiting_for_a_gallery_place_past_the_budget_is_an_error_in_the_browser(
