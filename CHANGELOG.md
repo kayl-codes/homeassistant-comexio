@@ -7,6 +7,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+### ✨ New Features
+- **A certificate Comexio replaced on its own is taken over when the issuer matches (#294):** Comexio firmware up to 11.1.5 replaces its TLS certificate on its own, and each time the integration stopped and waited for the user. It now takes the new certificate over without asking when it names the same issuer and authority key identifier as the pinned one, the firmware Comexio last reported is at most 11.1.5, the certificate is still the same when read again a minute later, and no certificate repair is open. Issuer and key identifier are read from the pinned certificate by the integration itself, at the first start that reaches Comexio with it. You learn of every automatic take-over from a notification and an urgent push without a button, with both fingerprints and the issuer. Anything else (another issuer, newer or unknown firmware, a certificate that keeps changing) goes to the repair and push as before. Issuer and key identifier are copied from the certificate, so the rule narrows the trust on first use the pin rests on, it does not replace it. The firmware version is now kept in the saved config, so the rule also works at a start right after a restart.
+
 ---
 
 ## [0.50.0-rc1] — 2026-11-25

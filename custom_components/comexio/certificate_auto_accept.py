@@ -1,0 +1,318 @@
+"""A certificate Comexio replaced on its own, taken over without asking where a rule allows it (#294).
+
+Comexio firmware up to CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE replaces its TLS certificate on its own. Each time
+the pin stops matching and the integration would wait for the user. The rule takes a new certificate over when:
+
+- the pin's issuer and authority key identifier are known (certificate.pinned_authority) and the new certificate
+  has the same pair (aiocomexio.same_authority),
+- the firmware Comexio last reported is at most CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE (unknown: no),
+- no certificate_changed repair is open for the entry, and the rule has not turned this certificate down before,
+- the new certificate stays the same for CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC (read again then).
+
+It is then pinned as the repair would (certificate.async_accept_certificate), and the user learns it from a
+persistent notification and a push to the notify targets, without a button. Anything else goes to the repair as
+before. Issuer and key identifier are copied from the certificate itself, so the rule tells Comexio's own
+certificates apart from a stranger's only as far as nobody copies them: it narrows the trust on first use the pin
+already rests on, it does not replace it.
+"""
+
+import asyncio
+from dataclasses import dataclass, field
+import logging
+import re
+from typing import Any
+
+from aiocomexio import CertificateInfo, ComexioError, fetch_certificate, format_fingerprint, same_authority
+from homeassistant.components import persistent_notification
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.core import HomeAssistant
+
+from .certificate import (
+    ACCEPT_PINNED,
+    ACCEPT_UNREACHABLE,
+    _async_notify,
+    _notify_targets,
+    async_accept_certificate,
+    async_report_certificate_changed,
+    pinned_authority,
+    presented_fingerprint,
+)
+from .const import (
+    CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE,
+    CERTIFICATE_AUTO_ACCEPT_MAX_READS,
+    CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC,
+    CONF_CERTIFICATE_FINGERPRINT,
+    CONF_HOST,
+    CONF_SERVER_ID,
+    DOMAIN,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+# hass.data: entry_id -> _AutoAccepts. Not bound to the entry: a setup retry or a reload must not end the wait.
+CERTIFICATE_AUTO_ACCEPTS = f"{DOMAIN}_certificate_auto_accepts"
+_FIRMWARE_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
+
+AUTO_ACCEPT_TEXTS: dict[str, dict[str, str]] = {
+    "en": {
+        "title": "Comexio: new certificate accepted",
+        "message": (
+            "Comexio {server_id} ({host}) presented a new TLS certificate of the same issuer as the pinned one. "
+            "Its firmware replaces the certificate on its own, so Home Assistant accepted it automatically. "
+            "Compare it with the SHA-256 value on Comexio's admin page; if it differs, reconfigure the entry.\n"
+            "Previous (SHA-256): {pinned}\n"
+            "New (SHA-256): {actual}\n"
+            "Issuer: {issuer}"
+        ),
+    },
+    "de": {
+        "title": "Comexio: neues Zertifikat übernommen",
+        "message": (
+            "Comexio {server_id} ({host}) zeigte ein neues TLS-Zertifikat desselben Ausstellers wie das gepinnte. "
+            "Ihre Firmware tauscht das Zertifikat selbst aus, daher hat Home Assistant es automatisch übernommen. "
+            "Vergleiche es mit dem SHA-256-Wert auf der Admin-Seite der Comexio; weicht er ab, konfiguriere den "
+            "Eintrag neu.\n"
+            "Bisher (SHA-256): {pinned}\n"
+            "Neu (SHA-256): {actual}\n"
+            "Aussteller: {issuer}"
+        ),
+    },
+}
+
+
+@dataclass
+class _AutoAccepts:
+    """One entry's rule state: the wait running (and the host and pin it started from), and the (pin,
+    certificate) pairs the rule turned down."""
+
+    task: asyncio.Task[None] | None = None
+    connection: tuple[str, str] | None = None
+    refused: set[tuple[str, str]] = field(default_factory=set)
+    noted: set[tuple[str, str]] = field(default_factory=set)  # pairs whose "left to the user" reason was logged
+
+
+def parse_firmware(version: str | None) -> tuple[int, ...] | None:
+    """Comexio's firmware version ("11.1.5") as numbers, None when unknown or not in that form."""
+    if version is None or _FIRMWARE_RE.fullmatch(version.strip()) is None:
+        return None
+    return tuple(int(part) for part in version.strip().split("."))
+
+
+def firmware_replaces_certificate(version: str | None) -> bool:
+    """Whether the firmware is one that replaces its certificate on its own (at most the known last one)."""
+    parsed = parse_firmware(version)
+    return parsed is not None and parsed <= CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE
+
+
+def async_certificate_changed(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware: str | None) -> None:
+    """Comexio presents `actual` instead of the pin: the rule takes it over where it applies, else the repair asks.
+
+    firmware: the version Comexio last reported (live or from the saved config), None when unknown.
+    """
+    if not _async_start(hass, entry, actual, firmware):
+        async_report_certificate_changed(hass, entry, actual)
+
+
+def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware: str | None) -> bool:
+    """Start (or keep) the rule's wait for `actual`; False when the rule does not apply and the user decides."""
+    host, pinned = entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+    if pinned is None or actual == pinned:
+        return False
+    state: _AutoAccepts = hass.data.setdefault(CERTIFICATE_AUTO_ACCEPTS, {}).setdefault(entry.entry_id, _AutoAccepts())
+    if (why_not := _why_not(entry, firmware)) is not None:
+        if (pinned, actual) not in state.noted:  # every poll reports it again: once is enough
+            state.noted.add((pinned, actual))
+            _LOGGER.info(
+                "Comexio at %s: certificate %s is left to the user (#294): %s",
+                host,
+                format_fingerprint(actual),
+                why_not,
+            )
+        return False
+    if presented_fingerprint(hass, entry.entry_id) is not None:
+        return False  # the repair is up already: the user decides
+    if (pinned, actual) in state.refused:
+        return False
+    # A wait started for the connection before a reconfigure ends on its own (_still_current); this one waits anew.
+    if state.task is not None and not state.task.done() and state.connection == (host, pinned):
+        return True  # the wait running reads the certificate again anyway
+    _LOGGER.warning(
+        "Comexio at %s presents certificate %s instead of the pinned %s; checking it against the pinned issuer in %d s",
+        host,
+        format_fingerprint(actual),
+        format_fingerprint(pinned),
+        CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC,
+    )
+    if state.task is not None:
+        state.task.cancel()  # a no-op for a finished one; a wait for the connection before a reconfigure ends here
+    state.connection = (host, pinned)
+    state.task = hass.async_create_background_task(
+        _async_run(hass, entry, state, host, pinned, actual), f"{DOMAIN} certificate auto accept {entry.entry_id}"
+    )
+    return True
+
+
+def _why_not(entry: ConfigEntry, firmware: str | None) -> str | None:
+    """Why the rule does not apply to the entry, None when it does."""
+    if pinned_authority(entry.data) is None:
+        return "the pinned certificate's issuer is not known"
+    if not firmware_replaces_certificate(firmware):
+        return f"firmware {firmware or 'unknown'} is not one known to replace its certificate"
+    return None
+
+
+def async_remove_auto_accept(hass: HomeAssistant, entry_id: str) -> None:
+    """A removed entry's rule state goes with it; a wait still running is cancelled, its notice dismissed."""
+    persistent_notification.async_dismiss(hass, _notification_id(entry_id))
+    state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry_id, None)
+    if state is not None and state.task is not None:
+        state.task.cancel()
+
+
+async def _async_run(
+    hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, host: str, pinned: str, seen: str
+) -> None:
+    """The wait and the decision; whatever goes wrong ends at the repair, never in silence."""
+    try:
+        await _async_decide(hass, entry, state, host, pinned, seen)
+    except Exception:
+        _LOGGER.exception("Comexio at %s: the check of the new certificate failed; the repair asks instead", host)
+        _report_if_current(hass, entry, host, pinned, seen)
+
+
+async def _async_decide(
+    hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, host: str, pinned: str, seen: str
+) -> None:
+    try:
+        info, last = await _async_settled_certificate(host, seen)
+    except (ComexioError, ValueError) as err:
+        _LOGGER.warning("Comexio at %s: the new certificate could not be read again (%s); the repair asks", host, err)
+        _report_if_current(hass, entry, host, pinned, seen)
+        return
+    if not _still_current(hass, entry, host, pinned):
+        return  # removed or reconfigured meanwhile: the new connection decides on its own
+    if info is None:
+        _refuse(hass, entry, state, pinned, last, "it kept changing")  # the newest: the one the repair compares
+        return
+    if info.fingerprint == pinned:
+        _LOGGER.info("Comexio at %s presents the pinned certificate again; nothing to accept", host)
+        if entry.state is not ConfigEntryState.LOADED:
+            hass.config_entries.async_schedule_reload(entry.entry_id)
+        return
+    authority = pinned_authority(entry.data)
+    if authority is None or not same_authority(authority, info):
+        _refuse(hass, entry, state, pinned, info.fingerprint, f"its issuer differs ({info.issuer})")
+        return
+    if _left_to_open_repair(hass, entry, host, info.fingerprint):
+        return
+    outcome, _current = await async_accept_certificate(hass, entry, info.fingerprint, by_rule=True)
+    if outcome == ACCEPT_PINNED:
+        try:
+            await _async_tell_user(hass, entry, pinned, info)
+        except Exception:
+            # Pinned already: the log line is all that is left to say it was the rule.
+            _LOGGER.exception("Comexio at %s: certificate pinned by the rule, but telling the user failed", host)
+    elif outcome == ACCEPT_UNREACHABLE:
+        _report_if_current(hass, entry, host, pinned, info.fingerprint)
+    else:
+        # Another certificate again raised the repair itself; the rest ended the case without one.
+        _LOGGER.debug(
+            "Comexio at %s: acceptance of %s ended with %s", host, format_fingerprint(info.fingerprint), outcome
+        )
+
+
+def _left_to_open_repair(hass: HomeAssistant, entry: ConfigEntry, host: str, actual: str) -> bool:
+    """Whether a repair came up during the wait (a reconfigure's test, a tap on an older push): the user decides.
+
+    The repair is brought up to the certificate read last, so the user compares the one Comexio presents now."""
+    shown = presented_fingerprint(hass, entry.entry_id)
+    if shown is None:
+        return False
+    _LOGGER.info("Comexio at %s: a certificate repair is open, the new certificate is left to it", host)
+    if shown != actual:
+        async_report_certificate_changed(hass, entry, actual)
+    return True
+
+
+async def _async_settled_certificate(host: str, seen: str) -> tuple[CertificateInfo | None, str]:
+    """The certificate once it stayed the same for the settle time (None when it kept changing), and the
+    fingerprint read last."""
+    for _ in range(CERTIFICATE_AUTO_ACCEPT_MAX_READS):
+        await asyncio.sleep(CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC)
+        info = await fetch_certificate(host)
+        if info.fingerprint == seen:
+            return info, seen
+        seen = info.fingerprint
+    return None, seen
+
+
+def _still_current(hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str) -> bool:
+    """Whether the entry is still there with the host and the pin the rule started from."""
+    return (
+        hass.config_entries.async_get_entry(entry.entry_id) is entry
+        and entry.data[CONF_HOST] == host
+        and entry.data.get(CONF_CERTIFICATE_FINGERPRINT) == pinned
+    )
+
+
+def _report_if_current(hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str, actual: str) -> None:
+    if _still_current(hass, entry, host, pinned):
+        async_report_certificate_changed(hass, entry, actual)
+
+
+def _refuse(
+    hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, pinned: str, actual: str, reason: str
+) -> None:
+    """Leave the certificate to the user: the repair asks, and the rule does not take it up again."""
+    state.refused.add((pinned, actual))
+    _LOGGER.warning(
+        "Comexio at %s: certificate %s not accepted automatically, %s; see Repairs",
+        entry.data[CONF_HOST],
+        format_fingerprint(actual),
+        reason,
+    )
+    async_report_certificate_changed(hass, entry, actual)
+
+
+def _notification_id(entry_id: str) -> str:
+    """The id of the persistent notification and the tag of the push: one notice per entry."""
+    return f"{DOMAIN}_certificate_auto_{entry_id}"
+
+
+async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str, info: CertificateInfo) -> None:
+    """A persistent notification and a push without a button: the certificate is pinned already.
+
+    The notification is English (it has no user, and hass.config.language is the system's language, not the
+    viewer's); the push follows the system language like the certificate push of certificate.py.
+    """
+    values = {
+        "server_id": entry.data[CONF_SERVER_ID],
+        "host": entry.data[CONF_HOST],
+        "pinned": format_fingerprint(pinned),
+        "actual": format_fingerprint(info.fingerprint),
+        "issuer": info.issuer,
+    }
+    english = AUTO_ACCEPT_TEXTS["en"]
+    tag = _notification_id(entry.entry_id)
+    persistent_notification.async_create(
+        hass, english["message"].format(**values), title=english["title"], notification_id=tag
+    )
+    if not (targets := _notify_targets(entry)):
+        return
+    texts = AUTO_ACCEPT_TEXTS.get(hass.config.language, english)
+    message = texts["message"].format(**values)
+    # As urgent as the push asking for the decision: a certificate the user did not see is trusted now. Its own
+    # tag, so the clear of that push does not take this one off the phones.
+    service_data: dict[str, Any] = {
+        "title": texts["title"],
+        "message": message,
+        "data": {
+            "tag": tag,
+            "group": f"{DOMAIN}_{entry.data[CONF_SERVER_ID]}",
+            "ttl": 0,
+            "priority": "high",
+            "channel": "alarm_stream",
+            "push": {"interruption-level": "critical", "sound": {"name": "default", "critical": 1, "volume": 1.0}},
+        },
+    }
+    await _async_notify(hass, service_data, targets, set())

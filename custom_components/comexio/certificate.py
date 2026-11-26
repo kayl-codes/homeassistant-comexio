@@ -4,18 +4,27 @@ Comexio signs its certificate itself, so instead of a CA the integration pins th
 fingerprint, read from a bare TLS handshake at setup (trust on first use, see aiocomexio.tls). A Comexio
 that serves no HTTPS keeps plain HTTP, and every setup of such an entry tries the switch again.
 
-A certificate other than the pinned one is never accepted on its own: the certificate_changed repair
-and the urgent push show the pinned and the new fingerprint and pin the new one only when the user confirms
-it (the repair's button, or the push's).
+A certificate other than the pinned one is accepted only by the user, with one exception: the certificate_changed
+repair and the urgent push show the pinned and the new fingerprint and pin the new one when the user confirms it
+(the repair's button, or the push's). The exception is the rule of certificate_auto_accept.py (#294): on a Comexio
+firmware that replaces its certificate on its own, a new certificate of the pinned one's issuer and authority key
+identifier is taken over without asking, and the user is told.
 """
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 import logging
 import re
 from typing import Any
 
-from aiocomexio import ComexioError, fetch_certificate_fingerprint, format_fingerprint
+from aiocomexio import (
+    CertificateInfo,
+    ComexioError,
+    fetch_certificate,
+    fetch_certificate_fingerprint,
+    format_fingerprint,
+)
 from aiocomexio.tls import https_address
 from homeassistant.components import persistent_notification
 from homeassistant.config_entries import ConfigEntry, ConfigEntryState
@@ -29,6 +38,7 @@ from .api import ComexioAPI
 from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
+    CONF_CERTIFICATE_AUTHORITY,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_CERTIFICATE_PINNED_AT,
     CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY,
@@ -127,9 +137,67 @@ def restamp_pin(data: dict[str, Any]) -> None:
 
 
 def unpin_data(data: dict[str, Any]) -> bool:
-    """Remove the pin and its date from data in place; whether there was a pin."""
+    """Remove the pin, its date and its issuer from data in place; whether there was a pin."""
     data.pop(CONF_CERTIFICATE_PINNED_AT, None)
+    data.pop(CONF_CERTIFICATE_AUTHORITY, None)
     return data.pop(CONF_CERTIFICATE_FINGERPRINT, None) is not None
+
+
+def pinned_authority(data: Mapping[str, Any]) -> CertificateInfo | None:
+    """Issuer and authority key identifier of the pinned certificate (no dates), None while not both are known.
+
+    They count only while the fingerprint they were read from is still the pin: a pin replaced since (accepted,
+    reconfigured) has none until a setup learns its own (async_learn_pin_authority).
+    """
+    pinned = data.get(CONF_CERTIFICATE_FINGERPRINT)
+    stored = data.get(CONF_CERTIFICATE_AUTHORITY)
+    if pinned is None or not isinstance(stored, Mapping) or stored.get("fingerprint") != pinned:
+        return None
+    try:
+        info = CertificateInfo(pinned, None, None, stored.get("issuer"), stored.get("authority_key_id"))
+    except ValueError:
+        return None  # a damaged entry: no rule to apply, the user decides
+    return info if info.issuer is not None and info.authority_key_id is not None else None
+
+
+async def async_learn_pin_authority(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Record the pinned certificate's issuer and authority key identifier, once, from a handshake that presents it.
+
+    Called after a login over the pin worked, before the update listener is registered (no reload). Read from a
+    handshake whose fingerprint is the pin, so they belong to the certificate the user (or the first setup)
+    trusted. Best effort: a failed read or a certificate without both leaves them unknown for the next setup, and
+    a certificate change then goes to the user as before.
+    """
+    pinned = entry.data.get(CONF_CERTIFICATE_FINGERPRINT)
+    if pinned is None or pinned_authority(entry.data) is not None:
+        return
+    host = entry.data[CONF_HOST]
+    try:
+        info = await fetch_certificate(host)
+    except (ComexioError, ValueError) as err:
+        _LOGGER.debug("Comexio at %s: issuer of the pinned certificate not read: %s", host, err)
+        return
+    if (entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)) != (host, pinned):
+        return  # reconfigured meanwhile: the certificate read belongs to the old connection
+    if info.fingerprint != pinned:
+        _LOGGER.debug(
+            "Comexio at %s: issuer of the pinned certificate not recorded (handshake presented %s)",
+            host,
+            format_fingerprint(info.fingerprint),
+        )
+        return
+    if info.issuer is None or info.authority_key_id is None:
+        # Visible: without both, every certificate change goes to the user, and nothing else would say why.
+        _LOGGER.info(
+            "Comexio at %s: the pinned certificate names no %s, so a new certificate is never accepted "
+            "automatically (#294); each change goes to the repair",
+            host,
+            "issuer" if info.issuer is None else "authority key identifier",
+        )
+        return
+    authority = {"fingerprint": pinned, "issuer": info.issuer, "authority_key_id": info.authority_key_id}
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_AUTHORITY: authority})
+    _LOGGER.info("Comexio at %s: issuer of the pinned certificate recorded: %s", host, info.issuer)
 
 
 def certificate_issue_id(entry_id: str) -> str:
@@ -459,12 +527,18 @@ def parse_accept_action(action: Any) -> tuple[str, str, str] | None:
     return match["entry_id"], match["pinned"], match["actual"]
 
 
-async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, shown: str) -> tuple[str, str | None]:
+async def async_accept_certificate(
+    hass: HomeAssistant, entry: ConfigEntry, shown: str, *, by_rule: bool = False
+) -> tuple[str, str | None]:
     """Pin `shown`, the certificate the user has seen, if Comexio still presents it.
 
     Never pins anything the user has not seen: the certificate is read again, and a different one than shown
     is put up for comparison instead (repair and push). One acceptance runs at a time, so a second tap, or the
     repair confirmed alongside, finds the certificate pinned already and leaves it at that.
+
+    by_rule: `shown` is the certificate the rule of certificate_auto_accept.py checked, not one the user saw; only
+    the log line differs, and a certificate pinned already (by someone else meanwhile) is ACCEPT_ENTRY_CHANGED,
+    so the rule does not tell the user it accepted it.
 
     Returns the outcome (ACCEPT_*) and the certificate Comexio presents now, None if it could not be read.
     """
@@ -477,7 +551,8 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
             # Accepted already (a second tap, or the repair alongside). A repair still showing it is left over.
             if presented_fingerprint(hass, entry.entry_id) == shown:
                 async_clear_certificate_changed(hass, entry.entry_id)
-            return ACCEPT_PINNED, shown
+            # The rule never calls with the pin itself: someone else pinned it meanwhile, not the rule.
+            return (ACCEPT_ENTRY_CHANGED if by_rule else ACCEPT_PINNED), shown
         if _connection_changed(entry, host, pinned, shown):
             return ACCEPT_ENTRY_CHANGED, None
         try:
@@ -501,9 +576,10 @@ async def async_accept_certificate(hass: HomeAssistant, entry: ConfigEntry, show
             async_report_certificate_changed(hass, entry, current)
             return ACCEPT_CHANGED_AGAIN, current
         _LOGGER.warning(
-            "Comexio at %s: certificate %s pinned by the user, replacing %s",
+            "Comexio at %s: certificate %s pinned %s, replacing %s",
             entry.data[CONF_HOST],
             format_fingerprint(current),
+            "by the rule for the pinned issuer" if by_rule else "by the user",
             format_fingerprint(entry.data[CONF_CERTIFICATE_FINGERPRINT]),  # still the pin: unchanged, checked above
         )
         # A loaded entry reloads through its update listener on the data change below.

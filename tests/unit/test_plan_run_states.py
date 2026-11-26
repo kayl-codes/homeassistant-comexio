@@ -301,6 +301,7 @@ class _FakeCoordinator(SimpleNamespace):
     comexio_unreachable = ComexioCoordinator.comexio_unreachable
     _async_bus_load_emergency_reboot = ComexioCoordinator._async_bus_load_emergency_reboot
     _report_certificate_changed = ComexioCoordinator._report_certificate_changed
+    known_firmware = ComexioCoordinator.known_firmware
     _fail_poll_on_certificate_mismatch = ComexioCoordinator._fail_poll_on_certificate_mismatch
     _clear_certificate_changed = ComexioCoordinator._clear_certificate_changed
     _schedule_full_setup = ComexioCoordinator._schedule_full_setup
@@ -387,6 +388,7 @@ def _coordinator(api: ComexioAPI, **overrides) -> _FakeCoordinator:
         # No poll scraped a config yet, none was saved, and the setup did not start from one (#250).
         _scraped_config=None,
         _saved_config=None,
+        _saved_firmware=None,
         _saved_config_store=SimpleNamespace(async_load=AsyncMock(return_value=None), async_save=AsyncMock()),
         started_from_saved_config=False,
         _full_setup_due=False,
@@ -3644,9 +3646,13 @@ OTHER_CERT = "b" * 64
 
 @pytest.fixture(autouse=True)
 def certificate_repair(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
-    """The repair's issue-registry calls, recorded instead of run (every scraped poll drops the repair)."""
+    """The repair's issue-registry calls, recorded instead of run (every scraped poll drops the repair).
+
+    report is the hand-over to the rule of #294 (certificate_auto_accept), which raises the repair where it does
+    not apply; its last argument is the firmware Comexio last reported (None: no poll read one).
+    """
     report, clear = MagicMock(), MagicMock()
-    monkeypatch.setattr(coordinator_module, "async_report_certificate_changed", report)
+    monkeypatch.setattr(coordinator_module, "async_certificate_changed", report)
     monkeypatch.setattr(coordinator_module, "async_clear_certificate_changed", clear)
     return SimpleNamespace(report=report, clear=clear)
 
@@ -3667,7 +3673,7 @@ def test_a_config_fetch_meeting_another_certificate_fails_the_poll(
     fetch = ComexioCoordinator._async_fetch_parsed_config(coordinator, {})
     with pytest.raises(UpdateFailed):
         asyncio.run(fetch)
-    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT, None)
     api.get_live_states.assert_not_awaited()  # nothing more goes to a server that is not the pinned one
 
 
@@ -3679,7 +3685,7 @@ def test_a_run_state_fetch_meeting_another_certificate_raises_the_repair(
         side_effect=ComexioCertificateMismatchError("foreign", expected=PINNED_CERT, actual=OTHER_CERT)
     )
     asyncio.run(coordinator._async_refresh_plan_run_states())
-    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT, None)
 
 
 @pytest.mark.parametrize(
@@ -3697,7 +3703,7 @@ def test_an_unreachable_poll_checks_for_a_replaced_certificate(
     with pytest.raises(error):
         asyncio.run(update)
     if reported:
-        certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+        certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT, None)
     else:
         certificate_repair.report.assert_not_called()
     certificate_repair.clear.assert_not_called()
@@ -3752,7 +3758,7 @@ def test_the_first_poll_meeting_another_certificate_still_fails(
     update = ComexioCoordinator._async_update_data(coordinator)
     with pytest.raises(UpdateFailed, match="another certificate than the pinned one") as raised:
         asyncio.run(update)
-    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT, None)
     # Its setup starts from the saved config instead (__init__._async_connect).
     coordinator.last_exception = raised.value
     assert ComexioCoordinator.last_poll_met_another_certificate.fget(coordinator) is True
@@ -3774,7 +3780,7 @@ def test_an_unreachable_first_poll_with_a_replaced_certificate_fails_on_the_cert
 
     assert isinstance(raised.value.__cause__, ComexioConnectionError)
     assert ComexioCoordinator.last_poll_met_another_certificate.fget(coordinator) is True
-    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT, None)
     assert coordinator._last_poll_scraped is False
 
 
@@ -3794,7 +3800,7 @@ def test_an_unreachable_poll_with_a_replaced_certificate_keeps_the_last_data(
     api.fetch_replaced_fingerprint = AsyncMock(return_value=OTHER_CERT)
 
     assert asyncio.run(ComexioCoordinator._async_update_data(coordinator)) is last_data
-    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT)
+    certificate_repair.report.assert_called_once_with(coordinator.hass, coordinator.config_entry, OTHER_CERT, None)
     assert coordinator.comexio_unreachable is True
 
 
@@ -4159,6 +4165,70 @@ def test_a_scraped_poll_saves_its_config_only_when_it_changed(api: ComexioAPI) -
     assert [saved.args[0]["markers"][0]["ha_name"] for saved in save.await_args_list] == ["M7 Licht", "M7 Licht Flur"]
     assert save.await_args_list[0].args[0] == coordinator_module.saved_config(_parsed_config())
     assert coordinator._scraped_config is None
+
+
+def test_the_saved_config_carries_the_firmware_and_a_new_firmware_saves_again(api: ComexioAPI) -> None:
+    # The rule of #294 reads it at a setup that meets another certificate before any poll (known_firmware).
+    coordinator = _certificate_coordinator(api)
+    save = coordinator._saved_config_store.async_save
+
+    for firmware in ("11.1.4", "11.1.4", "11.1.5"):
+        api.comexio_version = firmware
+        coordinator._async_fetch_and_audit = _scraping_poll(coordinator, _parsed_config())
+        asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    assert [saved.args[0][coordinator_module.SAVED_FIRMWARE_KEY] for saved in save.await_args_list] == [
+        "11.1.4",
+        "11.1.5",
+    ]
+
+
+def test_the_firmware_comes_from_the_saved_config_until_a_poll_reads_it(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+    stored = coordinator_module.saved_config(_parsed_config()) | {coordinator_module.SAVED_FIRMWARE_KEY: "11.1.5"}
+    coordinator._saved_config_store.async_load = AsyncMock(return_value=stored)
+    api.seed_onewire_items = MagicMock()
+
+    asyncio.run(ComexioCoordinator.async_seed_saved_onewire_sensors(coordinator))
+
+    assert coordinator.known_firmware == "11.1.5"
+    api.comexio_version = "11.2.0"
+    assert coordinator.known_firmware == "11.2.0"
+
+
+def test_a_saved_firmware_that_is_no_text_is_not_known(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+    stored = coordinator_module.saved_config(_parsed_config()) | {coordinator_module.SAVED_FIRMWARE_KEY: 11}
+    coordinator._saved_config_store.async_load = AsyncMock(return_value=stored)
+    api.seed_onewire_items = MagicMock()
+    api.comexio_version = None
+
+    asyncio.run(ComexioCoordinator.async_seed_saved_onewire_sensors(coordinator))
+
+    assert coordinator.known_firmware is None  # unknown firmware: the rule leaves the certificate to the user
+
+
+def test_a_poll_that_read_no_firmware_keeps_the_saved_one(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+    coordinator._saved_firmware = "11.1.5"
+    api.comexio_version = None
+    save = coordinator._saved_config_store.async_save
+    coordinator._async_fetch_and_audit = _scraping_poll(coordinator, _parsed_config())
+
+    asyncio.run(ComexioCoordinator._async_update_data(coordinator))
+
+    assert save.await_args.args[0][coordinator_module.SAVED_FIRMWARE_KEY] == "11.1.5"
+
+
+def test_another_certificate_goes_to_the_rule_with_the_firmware_the_poll_read(api: ComexioAPI) -> None:
+    coordinator = _certificate_coordinator(api)
+    coordinator._saved_firmware = "11.1.4"
+    api.comexio_version = "11.1.5"
+
+    with patch.object(coordinator_module, "async_certificate_changed") as changed:
+        ComexioCoordinator._report_certificate_changed(coordinator, "b" * 64)
+
+    changed.assert_called_once_with(coordinator.hass, coordinator.config_entry, "b" * 64, "11.1.5")
 
 
 def test_a_poll_met_by_another_certificate_saves_nothing(api: ComexioAPI) -> None:
