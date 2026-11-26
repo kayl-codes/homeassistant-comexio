@@ -411,6 +411,27 @@ async def test_a_report_during_the_wait_is_what_a_failing_read_reports(
     assert _issue(hass, entry).data["actual"] == THIRD
 
 
+@pytest.mark.parametrize("shown", [OTHER, THIRD], ids=["the_first_again", "the_one_reported_meanwhile"])
+async def test_a_certificate_reported_during_the_wait_restarts_the_settle_interval(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock, reload: MagicMock, shown: str
+) -> None:
+    entry.add_to_hass(hass)
+    accept_read.return_value = shown
+    answers = [_info(shown), _info(shown)]
+
+    async def poll_meets_another_during_the_first_read(_host: str) -> CertificateInfo:
+        if len(answers) == 2:  # the first read only
+            async_certificate_changed(hass, entry, THIRD, FIRMWARE)
+        return answers.pop()
+
+    reads.side_effect = poll_meets_another_during_the_first_read
+
+    await _changed(hass, entry, OTHER)
+
+    assert reads.await_count == 2  # whichever one the read shows, it did not stay the same for the interval
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == shown
+
+
 async def test_an_entry_disabled_during_the_wait_pins_nothing(
     hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock
 ) -> None:

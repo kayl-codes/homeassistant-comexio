@@ -52,7 +52,9 @@ _LOGGER = logging.getLogger(__name__)
 
 # hass.data: entry_id -> _AutoAccepts. Not bound to the entry: a setup retry or a reload must not end the wait.
 CERTIFICATE_AUTO_ACCEPTS = f"{DOMAIN}_certificate_auto_accepts"
-_FIRMWARE_RE = re.compile(r"\d+(?:\.\d+)*", re.ASCII)  # ASCII: \d alone also matches other scripts' digits
+# ASCII: \d alone also matches other scripts' digits. Bounded: int() of a digit string beyond Python's conversion limit
+# (4300) raises, and no real firmware component has more than a few digits.
+_FIRMWARE_RE = re.compile(r"\d{1,6}(?:\.\d{1,6})*", re.ASCII)
 
 AUTO_ACCEPT_TEXTS: dict[str, dict[str, str]] = {
     "en": {
@@ -257,7 +259,9 @@ async def _async_settled_certificate(host: str, seen: str, state: _AutoAccepts) 
     for _ in range(CERTIFICATE_AUTO_ACCEPT_MAX_READS):
         await asyncio.sleep(CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC)
         info = await fetch_certificate(host)
-        unchanged = info.fingerprint == seen
+        # The read must match the last read and the newest seen (a report of the wait included): another certificate
+        # reported meanwhile restarts the interval, whichever one the read then shows.
+        unchanged = info.fingerprint == seen == state.seen
         seen = state.seen = info.fingerprint  # a later failure reports the newest one, not the first
         if unchanged:
             return info, seen

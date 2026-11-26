@@ -26,6 +26,9 @@ AKI = "0a1b2c3d"
         ("11..5", None),
         ("v11.1.5", None),
         ("١١.1.5", None),  # Arabic-Indic digits: not Comexio's spelling, not taken for numbers
+        ("1" * 5000, None),  # beyond Python's int conversion limit: unknown, not a ValueError out of the poll
+        ("11." + "1" * 5000, None),
+        ("999999.1.5", (999999, 1, 5)),
     ],
 )
 def test_the_firmware_version_is_read_as_numbers_or_not_at_all(version: str | None, parsed: Any) -> None:
