@@ -25,7 +25,7 @@ from homeassistant.helpers import issue_registry as ir
 from homeassistant.util import dt as dt_util
 import voluptuous as vol
 
-from .api import ComexioAPI
+from .api import ComexioAPI, doorstation_read_lock
 from .const import (
     CONF_API_PASSWORD,
     CONF_API_USERNAME,
@@ -646,7 +646,7 @@ def connection_state(hass: HomeAssistant, entry: ConfigEntry) -> str:
     return CONNECTION_HTTPS
 
 
-def _new_api(hass: HomeAssistant, data: Any, fingerprint: str | None) -> ComexioAPI:
+def _new_api(hass: HomeAssistant, entry_id: str, data: Any, fingerprint: str | None) -> ComexioAPI:
     return ComexioAPI(
         hass,
         data[CONF_HOST],
@@ -655,6 +655,7 @@ def _new_api(hass: HomeAssistant, data: Any, fingerprint: str | None) -> Comexio
         api_user=data.get(CONF_API_USERNAME),
         api_pass=data.get(CONF_API_PASSWORD),
         fingerprint=fingerprint,
+        doorstation_lock=doorstation_read_lock(hass, entry_id),
     )
 
 
@@ -686,14 +687,14 @@ async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAP
     but not the login would otherwise never set up again, and the entry encrypted nothing before.
     """
     if CONF_CERTIFICATE_FINGERPRINT in entry.data:
-        return _new_api(hass, entry.data, entry.data[CONF_CERTIFICATE_FINGERPRINT])
+        return _new_api(hass, entry.entry_id, entry.data, entry.data[CONF_CERTIFICATE_FINGERPRINT])
     host = entry.data[CONF_HOST]
     read_from = dict(entry.data)  # what the handshake and the login below are based on
     fingerprint = await async_read_fingerprint(host)
     if fingerprint is None:
         _check_entry_unchanged(entry, read_from)  # an entry pinned meanwhile is not logged in to over plain HTTP
-        return _new_api(hass, entry.data, None)
-    api = _new_api(hass, read_from, fingerprint)
+        return _new_api(hass, entry.entry_id, entry.data, None)
+    api = _new_api(hass, entry.entry_id, read_from, fingerprint)
     try:
         logged_in = await api.login()
     except BaseException:  # an error or the cancellation of an unload must not leave the session open
@@ -721,7 +722,7 @@ async def async_create_api(hass: HomeAssistant, entry: ConfigEntry) -> ComexioAP
         api.last_login_error,
     )
     api.close()
-    return _new_api(hass, entry.data, None)
+    return _new_api(hass, entry.entry_id, entry.data, None)
 
 
 async def async_replaced_fingerprint(api: ComexioAPI) -> str | None:

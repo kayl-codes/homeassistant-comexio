@@ -830,6 +830,23 @@ def _verified_plan_ids(fubs: dict[str, Any], source: str) -> set[int] | None:
     return function_plan_ids(fubs)
 
 
+_DOORSTATION_READ_LOCK_KEY = "comexio_doorstation_read_lock"
+
+
+def doorstation_read_lock(hass: HomeAssistant, entry_id: str) -> asyncio.Lock:
+    """The Doorstation read lock of one config entry, shared by the instances the entry creates on each reload.
+
+    Comexio serves one request at a time. A read the previous instance still has in flight at a reload (its session
+    is only detached) must keep the next instance's reads waiting, so the lock lives on the entry, not on the instance.
+    """
+    return hass.data.setdefault(f"{_DOORSTATION_READ_LOCK_KEY}_{entry_id}", asyncio.Lock())
+
+
+def forget_doorstation_read_lock(hass: HomeAssistant, entry_id: str) -> None:
+    """Drops the lock of a removed entry (after its unload, so no instance of it is left to read)."""
+    hass.data.pop(f"{_DOORSTATION_READ_LOCK_KEY}_{entry_id}", None)
+
+
 class ComexioAPI:
     """
     Detailed interface to communicate with the Comexio API.
@@ -850,8 +867,11 @@ class ComexioAPI:
         api_user: str | None = None,
         api_pass: str | None = None,
         fingerprint: str | None = None,
+        doorstation_lock: asyncio.Lock | None = None,
     ) -> None:
         """Initialize the API class with all required credentials.
+
+        doorstation_lock is the entry's lock from doorstation_read_lock; without it the instance gets a lock of its own.
 
         With fingerprint (CONF_CERTIFICATE_FINGERPRINT) every request goes over HTTPS and checks that
         Comexio presents that certificate; without it plain HTTP.
@@ -951,8 +971,9 @@ class ComexioAPI:
         # the first login() completes — each would otherwise start its own redundant login.
         self._preview_session_lock = asyncio.Lock()
         # One camera image at a time: aiocomexio's deadline for a read also counts a wait behind another request,
-        # so the reads of several cameras that start together would each use up the time of the others.
-        self._doorstation_snapshot_lock = asyncio.Lock()
+        # so the reads of several cameras that start together would each use up the time of the others. The lock
+        # is the entry's (doorstation_read_lock), so a reloaded instance waits for a read the old one still runs.
+        self._doorstation_snapshot_lock = doorstation_lock if doorstation_lock is not None else asyncio.Lock()
         # Set by close(); lets a login() already in flight inside the lock above notice
         # the instance was torn down while it was waiting and give up instead of leaking
         # a freshly-authenticated session past unload (see close() for the full race).
@@ -2034,13 +2055,18 @@ class ComexioAPI:
             held_for_sec=DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
         )
 
-    async def get_doorstation_picture(self, ext_id: int, name: str) -> tuple[bytes | None, str | None]:
+    async def get_doorstation_picture(
+        self, ext_id: int, name: str, *, held_for_sec: float | None = None
+    ) -> tuple[bytes | None, str | None]:
         """One stored picture of a Doorstation as JPEG bytes, or None and the failure cause.
 
-        `name` is a file name from get_doorstation_pictures. Same rules as there.
+        `name` is a file name from get_doorstation_pictures. Same rules as there. `held_for_sec` bounds the time the
+        read holds the Doorstation lock (see _doorstation_read); the wait for the lock is not bounded here.
         """
         return await self._doorstation_read(
-            lambda: self.client.get_doorstation_picture(ext_id, name), "Doorstation picture not fetched"
+            lambda: self.client.get_doorstation_picture(ext_id, name),
+            "Doorstation picture not fetched",
+            held_for_sec=held_for_sec,
         )
 
     async def _doorstation_read[T](

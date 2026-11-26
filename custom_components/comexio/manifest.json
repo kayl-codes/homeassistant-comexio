@@ -5,7 +5,7 @@
   "categories": ["hubs_protocols.building_automation"],
   "codeowners": ["@kayl-codes"],
   "config_flow": true,
-  "dependencies": ["network", "webhook"],
+  "dependencies": ["http", "media_source", "network", "webhook"],
   "documentation": "https://github.com/kayl-codes/homeassistant-comexio",
   "integration_type": "hub",
   "iot_class": "local_push",

@@ -20,7 +20,7 @@ from homeassistant.helpers import (
 from homeassistant.helpers.typing import ConfigType
 from homeassistant.util import slugify
 
-from .api import ComexioAPI
+from .api import ComexioAPI, forget_doorstation_read_lock
 from .certificate import (
     async_clear_certificate_changed,
     async_create_api,
@@ -80,6 +80,7 @@ from .coordinator import (
     saved_config_store,
 )
 from .entity import track_quickbus_devices
+from .media_source import DoorstationPictureView, forget_gallery_read_slots
 from .orphaned_statistics import find_unit_mismatches, legacy_statistic_prefixes
 from .reference_monitor import async_integration_version
 from .services import async_setup_services
@@ -150,16 +151,18 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSONAR
-    """Listen for the certificate push's "Accept certificate" button once, for every entry.
+    """Listen for the certificate push's "Accept certificate" button once, for every entry, and serve the gallery.
 
     Not per entry: an entry that met another certificate at setup waits for the repair without being loaded,
-    and its push button must work all the same.
+    and its push button must work all the same. The view that serves the stored Doorstation pictures to the media
+    browser (media_source.py) is registered once for the same reason.
     """
 
     async def _certificate_action(event: Event) -> None:
         await async_handle_certificate_action(hass, event)
 
     hass.bus.async_listen(MOBILE_APP_NOTIFICATION_ACTION_EVENT, _certificate_action)
+    hass.http.register_view(DoorstationPictureView())
     return True
 
 
@@ -1203,6 +1206,11 @@ async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Drop the entry's repairs with nothing left to fix, the certificate push on the phones, its saved config and
     its last plan preview."""
+    # Removal normally follows the unload (Home Assistant may also remove after a failed one); an entry id is
+    # never reused, so the pools of a removed entry have no reader left. Both are kept across a reload: a read
+    # of the old instance still in flight shares them with the new one.
+    forget_doorstation_read_lock(hass, entry.entry_id)
+    forget_gallery_read_slots(hass, entry.entry_id)
     # Nothing else reads the stores once the entry is gone: a new entry gets a new entry id (#250).
     # finally: a failed delete of one must not keep the others, the webhook secret and the preview name the user's
     # wiring, and a failing cleanup above them must not keep any store either.
