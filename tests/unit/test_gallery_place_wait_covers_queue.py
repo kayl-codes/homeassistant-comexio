@@ -1,13 +1,16 @@
-"""The gallery's place wait covers every thumbnail the waiter cap admits (the queue behind one lock, SH-387)."""
+"""Guard on the gallery's place wait: it covers the queue the waiter cap admits (SH-387, a formula check only)."""
 
 from custom_components.comexio.const import (
     DOORSTATION_GALLERY_MAX_WAITING_READS,
     DOORSTATION_GALLERY_PLACE_WAIT_SEC,
+    DOORSTATION_PICTURE_LIST_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
 )
 
 
-def test_the_place_wait_covers_the_holder_and_every_admitted_waiter() -> None:
-    """A thumbnail admitted at the cap waits for the holder and up to the cap's worth of reads, one after another."""
+def test_the_place_wait_is_at_least_the_queue_the_waiter_cap_admits() -> None:
+    """The holder plus the cap's reads, one after another, fit in the place wait. Timing is not measured here."""
+    # The longest hold of a place: a folder list (10 s) holds it longer than a picture (8 s).
+    longest_hold = max(DOORSTATION_PICTURE_READ_TIMEOUT_SEC, DOORSTATION_PICTURE_LIST_TIMEOUT_SEC)
     reads_ahead = DOORSTATION_GALLERY_MAX_WAITING_READS + 1
-    assert reads_ahead * DOORSTATION_PICTURE_READ_TIMEOUT_SEC <= DOORSTATION_GALLERY_PLACE_WAIT_SEC
+    assert reads_ahead * longest_hold <= DOORSTATION_GALLERY_PLACE_WAIT_SEC

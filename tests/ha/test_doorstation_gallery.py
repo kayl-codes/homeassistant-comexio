@@ -887,6 +887,40 @@ async def test_a_thumbnail_past_the_waiting_limit_is_answered_at_once(
     assert _gallery_waiting(hass, mock_config_entry.entry_id).count == 0
 
 
+async def test_a_stall_at_the_places_is_warned_once_per_streak(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    queued = None
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_MAX_WAITING_READS", 1):
+            queued = asyncio.ensure_future(client.get(path))
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            # Two refusals in a row make one streak: one warning, the second is only logged at debug level.
+            async with asyncio.timeout(5):
+                first = await client.get(path)
+                second = await client.get(path)
+    except BaseException:
+        if queued is not None:
+            queued.cancel()
+        raise
+    finally:
+        _release_places(places)
+    async with asyncio.timeout(10):
+        served = await queued
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "not answered" in r.getMessage()]
+    assert (first.status, second.status, served.status) == (HTTPStatus.SERVICE_UNAVAILABLE, 503, HTTPStatus.OK)
+    assert len(warnings) == 1
+    # The thumbnail that got its place ended the streak.
+    assert _gallery_waiting(hass, mock_config_entry.entry_id).refusing is False
+
+
 async def test_a_folder_browse_past_the_waiting_limit_is_refused_at_once(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:

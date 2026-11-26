@@ -80,9 +80,11 @@ _GALLERY_WAITING_KEY = f"{DOMAIN}_gallery_waiting"
 
 @dataclass
 class _Waiting:
-    """How many thumbnails of one config entry wait for a gallery place right now."""
+    """How many thumbnails of one config entry wait for a gallery place right now, and whether a streak of refused
+    thumbnails is being logged (one warning per streak, see _refused_for_a_place)."""
 
     count: int = 0
+    refusing: bool = False
 
 
 def _gallery_waiting(hass: HomeAssistant, entry_id: str) -> _Waiting:
@@ -104,6 +106,22 @@ async def _await_gallery_place(hass: HomeAssistant, entry_id: str) -> asyncio.Se
     finally:
         waiting.count -= 1
     return places
+
+
+def _refused_for_a_place(hass: HomeAssistant, entry_id: str, number: int, why: str) -> None:
+    """Logs a thumbnail refused for lack of a gallery place: the first of a streak as a warning, the others at debug
+    level until a thumbnail gets its place again (a stall is then visible once, not once per refused request)."""
+    waiting = _gallery_waiting(hass, entry_id)
+    if waiting.refusing:
+        _LOGGER.debug("Doorstation %s picture not answered: %s", number, why)
+        return
+    waiting.refusing = True
+    _LOGGER.warning(
+        "Doorstation %s gallery pictures are not answered (%s); further refusals are logged at debug level until one "
+        "gets its place",
+        number,
+        why,
+    )
 
 
 def forget_gallery_read_slots(hass: HomeAssistant, entry_id: str) -> None:
@@ -366,15 +384,12 @@ async def _read_in_a_gallery_place(
         async with asyncio.timeout(DOORSTATION_GALLERY_PLACE_WAIT_SEC):
             places = await _await_gallery_place(hass, entry_id)
     except TimeoutError:
-        _LOGGER.debug(
-            "Doorstation %s picture not answered: no gallery place within %s s",
-            number,
-            DOORSTATION_GALLERY_PLACE_WAIT_SEC,
-        )
+        _refused_for_a_place(hass, entry_id, number, f"no place within {DOORSTATION_GALLERY_PLACE_WAIT_SEC:g} s")
         raise web.HTTPServiceUnavailable from None
     if places is None:
-        _LOGGER.debug("Doorstation %s picture not answered: the thumbnails waiting for a place are at the cap", number)
+        _refused_for_a_place(hass, entry_id, number, "the waiting thumbnails are at the cap")
         raise web.HTTPServiceUnavailable
+    _gallery_waiting(hass, entry_id).refusing = False
     try:
         return await _read_within_thumbnail_budget(hass, entry_id, coordinator, number, name)
     finally:
