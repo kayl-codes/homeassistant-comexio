@@ -275,7 +275,7 @@ Comexio firmware up to 11.1.5 replaces its certificate on its own, again and aga
 - **Settled:** the new certificate is read again after a minute and has to be the same; one that keeps changing goes to you.
 - **Not yet in your hands:** no certificate repair is open, and the rule has not turned this certificate down before.
 
-It is then pinned as the repair would pin it, and you learn it from a notification and an urgent push (no button: nothing left to decide), both with the old and new fingerprint and the issuer. Compare the new fingerprint with Comexio's admin page anyway; if it differs, reconfigure the entry. If any condition fails, everything runs as described above.
+It is then pinned as the repair would pin it, and you learn it from a notification and, on the notify services set under **Function plan watchdog: push to**, an urgent push (no button: nothing left to decide), both with the old and new fingerprint and the issuer. Compare the new fingerprint with Comexio's admin page anyway; if it differs, reconfigure the entry. If any condition fails, everything runs as described above.
 
 ### Why it works this way
 
@@ -621,7 +621,7 @@ Comexio-Firmware bis 11.1.5 tauscht ihr Zertifikat von selbst aus, immer wieder 
 - **Stabil:** Das neue Zertifikat wird nach einer Minute erneut gelesen und muss dasselbe sein; eines, das sich weiter ändert, geht an dich.
 - **Noch nicht bei dir:** Keine Zertifikats-Reparatur ist offen, und die Regel hat dieses Zertifikat nicht schon einmal abgelehnt.
 
-Es wird dann so gepinnt, wie die Reparatur es pinnen würde, und du erfährst es aus einer Benachrichtigung und einem dringenden Push (ohne Knopf: Es ist nichts mehr zu entscheiden), beide mit altem und neuem Fingerabdruck und dem Aussteller. Vergleiche den neuen Fingerabdruck trotzdem mit der Admin-Seite des Comexio; weicht er ab, konfiguriere den Eintrag neu. Trifft eine Bedingung nicht zu, läuft alles wie oben beschrieben.
+Es wird dann so gepinnt, wie die Reparatur es pinnen würde, und du erfährst es aus einer Benachrichtigung und, auf den unter **Logikplan-Watchdog: Push an** eingestellten Benachrichtigungsdiensten, einem dringenden Push (ohne Knopf: Es ist nichts mehr zu entscheiden), beide mit altem und neuem Fingerabdruck und dem Aussteller. Vergleiche den neuen Fingerabdruck trotzdem mit der Admin-Seite des Comexio; weicht er ab, konfiguriere den Eintrag neu. Trifft eine Bedingung nicht zu, läuft alles wie oben beschrieben.
 
 ### Warum es so läuft
 

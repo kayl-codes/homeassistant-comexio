@@ -34,6 +34,7 @@ from .certificate import (
     _async_notify,
     _notify_targets,
     async_accept_certificate,
+    async_clear_certificate_changed,
     async_report_certificate_changed,
     pinned_authority,
     presented_fingerprint,
@@ -204,6 +205,9 @@ async def _async_decide(
         return
     if info.fingerprint == pinned:
         _LOGGER.info("Comexio at %s presents the pinned certificate again; nothing to accept", host)
+        # A repair raised during the wait (a reconfigure's test) asks about a certificate Comexio no longer presents,
+        # as the acceptance does when the pin is back.
+        async_clear_certificate_changed(hass, entry.entry_id)
         if entry.state is not ConfigEntryState.LOADED:
             hass.config_entries.async_schedule_reload(entry.entry_id)
         return

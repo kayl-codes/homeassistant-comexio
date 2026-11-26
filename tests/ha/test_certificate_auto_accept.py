@@ -50,6 +50,9 @@ ISSUER = "CN=Comexio LAN CA"
 AKI = "0a1b2c3d"
 FIRMWARE = "11.1.5"
 PHONE = "mobile_app_phone"
+# As the user sees them: all 32 bytes, upper case, colon-separated (written out, not built by the code under test).
+PINNED_SHOWN = ":".join(["AA"] * 32)
+OTHER_SHOWN = ":".join(["BB"] * 32)
 
 
 def _info(fingerprint: str, issuer: str | None = ISSUER, aki: str | None = AKI) -> CertificateInfo:
@@ -137,14 +140,14 @@ async def test_a_new_certificate_of_the_pinned_issuer_is_pinned_and_the_user_is_
     assert _issue(hass, entry) is None  # never asked
     reload.assert_called_once_with(entry.entry_id)  # not loaded: the new pin takes effect with a setup
     notification.assert_called_once()
-    assert "BB:BB" in notification.call_args.args[1]
-    assert ISSUER in notification.call_args.args[1]
+    notice = notification.call_args.args[1]
+    assert f"Issuer: {ISSUER}" in notice
     told = [push for push in pushes if push.data["message"] != "clear_notification"]
     assert len(told) == 1
-    # The user compares both values with Comexio's admin page: the notification and the push name the old one too.
-    assert "AA:AA" in notification.call_args.args[1]
-    assert "AA:AA" in told[0].data["message"]
-    assert "BB:BB" in told[0].data["message"]
+    # The user compares both values with Comexio's admin page: the notification and the push name both, complete.
+    for text in (notice, told[0].data["message"]):
+        assert f"Previous (SHA-256): {PINNED_SHOWN}\n" in text
+        assert f"New (SHA-256): {OTHER_SHOWN}\n" in text
     assert "actions" not in told[0].data["data"]  # nothing left to decide
     assert told[0].data["data"]["push"]["interruption-level"] == "critical"
     assert "pinned by the rule for the pinned issuer, replacing AA:AA" in caplog.text
@@ -167,11 +170,16 @@ async def test_the_notification_stays_english_and_the_push_follows_the_system_la
 
     await _changed(hass, entry, OTHER)
 
-    assert notification.call_args.kwargs["title"] == auto_module.AUTO_ACCEPT_TEXTS["en"]["title"]
+    # Written out, not taken from the module: a title translated into the wrong language must fail here.
+    assert notification.call_args.kwargs["title"] == "Comexio: new certificate accepted"
+    assert f"Issuer: {ISSUER}" in notification.call_args.args[1]
+    assert "Aussteller: " not in notification.call_args.args[1]
     told = [push for push in pushes if push.data["message"] != "clear_notification"]
-    assert told[0].data["title"] == auto_module.AUTO_ACCEPT_TEXTS["de"]["title"]
+    assert told[0].data["title"] == "Comexio: neues Zertifikat übernommen"
     # The body is German too, not only the title (a German title over an English body would pass the line above).
-    assert "Aussteller: " + ISSUER in told[0].data["message"]
+    assert f"Aussteller: {ISSUER}" in told[0].data["message"]
+    assert f"Bisher (SHA-256): {PINNED_SHOWN}\n" in told[0].data["message"]
+    assert f"Neu (SHA-256): {OTHER_SHOWN}\n" in told[0].data["message"]
     assert "Issuer: " not in told[0].data["message"]
 
 
@@ -529,6 +537,7 @@ async def test_a_repair_opened_for_an_older_certificate_is_brought_up_to_the_new
 async def test_why_the_rule_does_not_apply_is_logged_once_per_certificate(
     hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)  # the line is INFO: not left to the harness's default level
     entry.add_to_hass(hass)
 
     for _ in range(3):  # every poll reports it again
@@ -643,6 +652,29 @@ async def test_the_pinned_certificate_back_needs_nothing(
 
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
     assert _issue(hass, entry) is None
+    reload.assert_called_once_with(entry.entry_id)  # not loaded: a setup gets through with the pin now
+
+
+async def test_the_pinned_certificate_back_takes_down_a_repair_raised_during_the_wait(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, reload: MagicMock
+) -> None:
+    entry.add_to_hass(hass)
+    pushes = async_mock_service(hass, "notify", PHONE)
+
+    async def repair_raised_then_pin_back(_host: str) -> CertificateInfo:
+        # A reconfigure's connection test met another certificate while the rule waited.
+        async_report_certificate_changed(hass, entry, THIRD)
+        assert _issue(hass, entry) is not None  # the repair is up before the pin comes back
+        return _info(PINNED)
+
+    reads.side_effect = repair_raised_then_pin_back
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == PINNED
+    assert _issue(hass, entry) is None  # it asked about a certificate Comexio no longer presents
+    # Its push goes off the phones too.
+    assert [push.data["message"] for push in pushes][-1] == "clear_notification"
     reload.assert_called_once_with(entry.entry_id)  # not loaded: a setup gets through with the pin now
 
 
