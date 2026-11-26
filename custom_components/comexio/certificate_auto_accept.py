@@ -51,7 +51,7 @@ _LOGGER = logging.getLogger(__name__)
 
 # hass.data: entry_id -> _AutoAccepts. Not bound to the entry: a setup retry or a reload must not end the wait.
 CERTIFICATE_AUTO_ACCEPTS = f"{DOMAIN}_certificate_auto_accepts"
-_FIRMWARE_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
+_FIRMWARE_RE = re.compile(r"\d+(?:\.\d+)*", re.ASCII)  # ASCII: \d alone also matches other scripts' digits
 
 AUTO_ACCEPT_TEXTS: dict[str, dict[str, str]] = {
     "en": {
