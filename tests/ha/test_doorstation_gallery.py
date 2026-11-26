@@ -1436,14 +1436,20 @@ async def test_a_thumbnail_waiting_past_the_slow_mark_is_warned_before_its_wait_
     client = await hass_client()
     path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
     queued = None
+    loop = asyncio.get_running_loop()
+    mark = 0.2
     try:
-        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 0.2):
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", mark):
+            started = loop.time()
             queued = asyncio.ensure_future(client.get(path))
             async with asyncio.timeout(5):
                 await waiting.wait()
-            # Well before the mark there is no warning yet: a warning at once would pass the checks below as well.
+            # Before the mark there is no warning yet: a warning at once would pass the checks below as well. The
+            # timer is armed after `started`, so it cannot be due while less than the mark has passed. A loop delayed
+            # past the mark (a loaded runner) skips this check instead of failing on a correct warning.
             await asyncio.sleep(0.05)
-            assert not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records)
+            if loop.time() - started < mark:
+                assert not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records)
             # The warning comes while the thumbnail still stands in the queue, not when its wait has ended.
             async with asyncio.timeout(5):
                 while not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records):
