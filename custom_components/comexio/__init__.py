@@ -25,10 +25,11 @@ from .certificate import (
     async_clear_certificate_changed,
     async_create_api,
     async_handle_certificate_action,
+    async_learn_pin_authority,
     async_remove_certificate_pushes,
     async_replaced_fingerprint,
-    async_report_certificate_changed,
 )
+from .certificate_auto_accept import async_certificate_changed, async_remove_auto_accept
 from .const import (
     CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX,
     CONF_CERTIFICATE_FINGERPRINT,
@@ -714,8 +715,9 @@ async def _async_connect(
     coordinator.sync_webhooks()
     if not await api.login():
         if (actual := await async_replaced_fingerprint(api)) is not None:
-            # Never accepted on its own: the repair shows both fingerprints and asks.
-            async_report_certificate_changed(hass, entry, actual)
+            # The rule of #294 takes it over where it applies (after its wait); otherwise the repair shows both
+            # fingerprints and asks.
+            async_certificate_changed(hass, entry, actual, coordinator.known_firmware)
             if await coordinator.async_start_from_saved_config():
                 return True
             raise ConfigEntryNotReady(
@@ -732,6 +734,8 @@ async def _async_connect(
         _LOGGER.error("Comexio login rejected for %s — check credentials", entry.data[CONF_HOST])
         raise ConfigEntryAuthFailed
     async_clear_certificate_changed(hass, entry.entry_id)
+    # Before the update listener is registered: recording the pin's issuer reloads nothing.
+    await async_learn_pin_authority(hass, entry)
     return await _async_first_refresh(entry, coordinator)
 
 
@@ -1197,6 +1201,7 @@ async def _async_drop_entry_leftovers(hass: HomeAssistant, entry: ConfigEntry) -
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_COMMANDS_STUCK}_{server_id}")
         ir.async_delete_issue(hass, DOMAIN, f"{ISSUE_WEBHOOK_RESTART}_{server_id}")
         persistent_notification.async_dismiss(hass, webhook_restart_notification_id(server_id))
+    async_remove_auto_accept(hass, entry.entry_id)  # first: a failure of the cleanup after it must not leave a wait
     async_remove_certificate_pushes(hass, entry)
     if server_id is not None:
         # An entry removed while disabled never ran the new setup, which deletes the public copy (dh).

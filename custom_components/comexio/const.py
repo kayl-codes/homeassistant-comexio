@@ -69,6 +69,20 @@ CONF_CERTIFICATE_FINGERPRINT = "certificate_fingerprint"
 # When that fingerprint was pinned (ISO 8601, UTC), written with it by certificate.pin_data. Absent on
 # entries pinned before it was recorded; the connection sensor then shows no date.
 CONF_CERTIFICATE_PINNED_AT = "certificate_pinned_at"
+# Issuer (RFC 4514) and authority key identifier (lowercase hex) of a pinned certificate, with the fingerprint they
+# were read from: {"fingerprint", "issuer", "authority_key_id"}. Learned at a setup whose handshake presents the pin
+# (certificate.async_learn_pin_authority). They count only while that fingerprint is still the pin, so a new pin
+# never inherits the old one's. A certificate change with the same pair may be taken over by the rule of
+# certificate_auto_accept.py; otherwise the user decides.
+CONF_CERTIFICATE_AUTHORITY = "certificate_authority"
+# Comexio firmware up to this version replaces its certificate on its own (#294); only there is a new certificate
+# of the pinned one's issuer and authority key identifier taken over without asking. A newer or unknown firmware
+# keeps the repair.
+CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE = (11, 1, 5)
+# How long a new certificate must stay the same before the rule takes it over: a certificate that changes again
+# meanwhile starts the wait afresh, at most CERTIFICATE_AUTO_ACCEPT_MAX_READS reads, then the user decides.
+CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC = 60
+CERTIFICATE_AUTO_ACCEPT_MAX_READS = 3
 # How often the certificate expiry sensor reads the validity period of the certificate Comexio presents
 # (a bare TLS handshake, no request); Comexio renews its certificate on its own schedule, not by the hour.
 CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC = 24 * 3600
@@ -1124,6 +1138,11 @@ def doorstation_pictures_signal(server_id: str, ext_id: int | str) -> str:
 def bus_load_signal(server_id: str) -> str:
     """Dispatcher signal fired when a fresh Comexio bus workload reading arrives."""
     return f"{DOMAIN}_{server_id}_bus_load_update"
+
+
+def certificate_check_signal(entry_id: str) -> str:
+    """Dispatcher signal fired when the rule's check of a changed certificate (#294) starts, sees another or ends."""
+    return f"{DOMAIN}_{entry_id}_certificate_check"
 
 
 # Function plan run states (running / stopped), asked for all plans in one dashboard/refresh

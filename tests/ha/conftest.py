@@ -171,11 +171,26 @@ def certificate_read() -> Generator[AsyncMock]:
 
 
 @pytest.fixture
+def authority_read() -> Generator[AsyncMock]:
+    """The handshake that reads the certificate with its issuer: learning the pin's, and the rule of #294.
+
+    By default it fails. A test sets return_value (a CertificateInfo) or side_effect on it before the setup.
+    """
+    read = AsyncMock(name="fetch_certificate (issuer)", side_effect=ComexioConnectionError("no HTTPS"))
+    with (
+        patch("custom_components.comexio.certificate.fetch_certificate", read),
+        patch("custom_components.comexio.certificate_auto_accept.fetch_certificate", read),
+    ):
+        yield read
+
+
+@pytest.fixture
 def mock_comexio_api(
     api_returns: dict[str, Any],
     api_attributes: dict[str, Any],
     certificate_handshake: AsyncMock,
     certificate_read: AsyncMock,
+    authority_read: AsyncMock,
 ) -> Generator[list[ComexioAPI]]:
     """The one place the HA tests construct a ComexioAPI; yields every instance created.
 
