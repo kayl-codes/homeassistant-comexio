@@ -857,6 +857,23 @@ async def test_a_failed_read_leaves_the_issuer_unknown(
     assert entry.data[CONF_CERTIFICATE_AUTHORITY] is None
 
 
+@pytest.mark.logged_exception  # the traceback of the unexpected error is the point: it is a bug to be seen
+async def test_an_unexpected_read_error_leaves_the_issuer_unknown_and_is_logged(
+    hass: HomeAssistant, entry: MockConfigEntry, authority_read: AsyncMock, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_AUTHORITY: None})
+    authority_read.side_effect = RuntimeError("bug in the read")
+
+    await async_learn_pin_authority(hass, entry)  # a best-effort step: it must not fail the setup
+
+    assert entry.data[CONF_CERTIFICATE_AUTHORITY] is None
+    [record] = [r for r in caplog.records if "failed unexpectedly" in r.getMessage()]
+    assert record.levelno == logging.ERROR
+    assert record.exc_info is not None
+    assert record.exc_info[0] is RuntimeError
+
+
 async def test_a_start_after_the_certificate_changed_takes_it_over_with_the_saved_firmware(
     hass: HomeAssistant,
     entry: MockConfigEntry,

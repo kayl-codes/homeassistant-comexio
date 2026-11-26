@@ -179,6 +179,10 @@ async def async_learn_pin_authority(hass: HomeAssistant, entry: ConfigEntry) -> 
     except (ComexioError, ValueError) as err:
         _LOGGER.debug("Comexio at %s: issuer of the pinned certificate not read: %s", host, err)
         return
+    except Exception:
+        # Best effort: a bug in the read must not fail a setup whose login worked; the issuer stays unknown.
+        _LOGGER.exception("Comexio at %s: reading the issuer of the pinned certificate failed unexpectedly", host)
+        return
     if (entry.data[CONF_HOST], entry.data.get(CONF_CERTIFICATE_FINGERPRINT)) != (host, pinned):
         return  # reconfigured meanwhile: the certificate read belongs to the old connection
     if info.fingerprint != pinned:
