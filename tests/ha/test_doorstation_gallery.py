@@ -97,6 +97,34 @@ def _picture_path(entry: MockConfigEntry, name: str) -> str:
     return f"{DOORSTATION_PICTURE_VIEW_PATH}/{entry.entry_id}/2/{name}"
 
 
+class _SignallingPlaces(asyncio.Semaphore):
+    """The gallery's places; `waiting` is set once a read has to wait for one, so a test knows the read stands there."""
+
+    def __init__(self, waiting: asyncio.Event) -> None:
+        super().__init__(DOORSTATION_GALLERY_CONCURRENT_READS)
+        self.waiting = waiting
+
+    async def acquire(self) -> bool:
+        if self.locked():
+            self.waiting.set()
+        return await super().acquire()
+
+
+async def _take_all_places(hass: HomeAssistant, entry_id: str) -> tuple[_SignallingPlaces, asyncio.Event]:
+    """Puts the entry's gallery places under the test's control: all taken, so the next read waits for one."""
+    waiting = asyncio.Event()
+    places = _SignallingPlaces(waiting)
+    hass.data[f"{_GALLERY_READ_SLOTS_KEY}_{entry_id}"] = places
+    for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+        await places.acquire()
+    return places, waiting
+
+
+def _release_places(places: asyncio.Semaphore) -> None:
+    for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+        places.release()
+
+
 # --- the browser ----------------------------------------------------------------------------------------------------
 
 
@@ -744,6 +772,49 @@ async def test_a_thumbnail_waiting_for_a_gallery_place_past_the_budget_answers_u
     coordinator.api.get_doorstation_picture.assert_not_awaited()
 
 
+async def test_a_thumbnail_whose_doorstation_goes_offline_while_waiting_for_a_gallery_place_is_not_read(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    request = asyncio.ensure_future(client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")))
+    try:
+        async with asyncio.timeout(5):
+            await waiting.wait()
+        coordinator.offline_extensions = {EXTENSION}
+        _release_places(places)
+        async with asyncio.timeout(5):
+            response = await request
+    finally:
+        request.cancel()
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+
+
+async def test_a_thumbnail_whose_entry_is_reloaded_while_waiting_for_a_gallery_place_is_not_read(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    request = asyncio.ensure_future(client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")))
+    try:
+        async with asyncio.timeout(5):
+            await waiting.wait()
+        # A reload brings a new coordinator under the same entry id; the waiting read's own one no longer counts.
+        hass.data[DOMAIN][mock_config_entry.entry_id] = copy.copy(coordinator)
+        _release_places(places)
+        async with asyncio.timeout(5):
+            response = await request
+    finally:
+        request.cancel()
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+
+
 async def test_a_timeout_from_inside_the_read_is_no_budget_overrun(
     hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -785,6 +856,26 @@ async def test_an_extension_whose_offline_state_is_not_known_yet_is_offered(
     assert [child.identifier for child in root.children] == [_folder_id(mock_config_entry)]
 
 
+async def test_a_doorstation_without_a_known_extension_name_is_neither_listed_nor_browsed_nor_served(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    client = await hass_client()
+
+    # No name from the IO data or the Doorstation: the offline set cannot be checked, so the gallery offers nothing.
+    with patch("custom_components.comexio.media_source.doorstation_ext_name", return_value=None):
+        root = await media_source.async_browse_media(hass, MEDIA_ROOT)
+        with pytest.raises(BrowseError, match="offline"):
+            await media_source.async_browse_media(hass, folder_id)
+        response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert root.children == []
+    assert response.status == HTTPStatus.NOT_FOUND
+    coordinator.api.get_doorstation_pictures.assert_not_awaited()
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+
+
 async def test_a_timeout_raised_by_the_list_read_itself_is_not_taken_for_the_folders_deadline(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -812,6 +903,70 @@ async def test_a_folder_whose_list_takes_too_long_is_an_error_in_the_browser(
         pytest.raises(BrowseError, match="not read in"),
     ):
         await media_source.async_browse_media(hass, folder_id)
+
+
+async def test_a_folder_waiting_for_a_gallery_place_past_the_budget_is_an_error_in_the_browser(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    places = _gallery_read_slots(hass, mock_config_entry.entry_id)
+    for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+        await places.acquire()
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.05):
+            # Every place is taken: the folder must answer within its deadline, not wait for a place forever.
+            async with asyncio.timeout(5):
+                with pytest.raises(BrowseError, match="not read in"):
+                    await media_source.async_browse_media(hass, folder_id)
+    finally:
+        for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
+            places.release()
+
+    coordinator.api.get_doorstation_pictures.assert_not_awaited()
+
+
+async def test_a_folder_that_goes_offline_while_waiting_for_a_gallery_place_is_not_read(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    browse = asyncio.ensure_future(media_source.async_browse_media(hass, folder_id))
+    try:
+        async with asyncio.timeout(5):
+            await waiting.wait()
+        coordinator.offline_extensions = {EXTENSION}
+        _release_places(places)
+        async with asyncio.timeout(5):
+            with pytest.raises(BrowseError, match="offline or no longer known"):
+                await browse
+    finally:
+        browse.cancel()
+
+    coordinator.api.get_doorstation_pictures.assert_not_awaited()
+
+
+async def test_a_folder_whose_entry_is_unloaded_while_waiting_for_a_gallery_place_is_not_read(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    folder_id = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    browse = asyncio.ensure_future(media_source.async_browse_media(hass, folder_id))
+    try:
+        async with asyncio.timeout(5):
+            await waiting.wait()
+        # What an unload does: the entry leaves hass.data while the browse waits for its place.
+        hass.data[DOMAIN].pop(mock_config_entry.entry_id)
+        _release_places(places)
+        async with asyncio.timeout(5):
+            with pytest.raises(BrowseError, match="no longer known"):
+                await browse
+    finally:
+        browse.cancel()
+
+    coordinator.api.get_doorstation_pictures.assert_not_awaited()
 
 
 @pytest.mark.parametrize("digit", ["²", "٢", "２", TOO_LONG_EXT_ID])

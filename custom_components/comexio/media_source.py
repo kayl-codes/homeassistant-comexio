@@ -155,7 +155,10 @@ def _offered(coordinator: ComexioCoordinator, ext_id: int) -> bool:
     """Whether the gallery offers a Doorstation: known, and its extension not offline (the picture entities' rule)."""
     if ext_id not in coordinator.doorstations.known:
         return False
-    return _ext_name(coordinator, ext_id) not in (coordinator.offline_extensions or ())
+    name = _ext_name(coordinator, ext_id)
+    # Without any extension name the offline set cannot be checked, so nothing is offered. The picture feed keeps the
+    # last name it saw; the gallery keeps none, so a gap in both sources hides the Doorstation for that time.
+    return name is not None and name not in (coordinator.offline_extensions or ())
 
 
 def _is_gallery_picture(name: str) -> bool:
@@ -211,6 +214,9 @@ def _picture_item(hass: HomeAssistant, entry_id: str, ext_id: int, picture: Door
     )
 
 
+_OFFLINE_OR_UNKNOWN = "Doorstation offline or no longer known"
+
+
 async def _folder_children(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int
 ) -> list[BrowseMediaSource]:
@@ -221,6 +227,9 @@ async def _folder_children(
             asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline,
             _gallery_read_slots(hass, entry_id),
         ):
+            # Offline or unloaded while the place was awaited: no list read takes the Doorstation lock for nothing.
+            if not _still_offered(hass, entry_id, coordinator, ext_id):
+                raise BrowseError(_OFFLINE_OR_UNKNOWN)
             pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
     except TimeoutError:
         if not deadline.expired():
@@ -273,7 +282,7 @@ class DoorstationGallery(MediaSource):
         children = await _folder_children(self.hass, entry.entry_id, coordinator, parsed.ext_id)
         # The list read may have waited: the entry can have been unloaded or reloaded, or the Doorstation gone offline.
         if not _still_offered(self.hass, entry.entry_id, coordinator, parsed.ext_id):
-            raise BrowseError("Doorstation offline or no longer known")
+            raise BrowseError(_OFFLINE_OR_UNKNOWN)
         return BrowseMediaSource(
             domain=DOMAIN,
             identifier=item.identifier,
@@ -335,6 +344,12 @@ class DoorstationPictureView(HomeAssistantView):
         slots = _gallery_read_slots(hass, entry_id)
         try:
             async with asyncio.timeout(DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC) as deadline, slots:
+                # Offline or unloaded while the place was awaited: no read for a picture that is not handed out.
+                if not _still_offered(hass, entry_id, coordinator, number):
+                    _LOGGER.debug(
+                        "Doorstation %s went offline or was unloaded while waiting for a gallery place", number
+                    )
+                    raise web.HTTPServiceUnavailable
                 data, cause = await coordinator.api.get_doorstation_picture(
                     number, name, held_for_sec=DOORSTATION_PICTURE_READ_TIMEOUT_SEC
                 )
