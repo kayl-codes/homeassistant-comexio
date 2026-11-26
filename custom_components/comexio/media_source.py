@@ -116,18 +116,32 @@ async def _await_gallery_place(hass: HomeAssistant, entry_id: str) -> asyncio.Se
         await places.acquire()
     finally:
         waiting.count -= 1
+        if waiting.count == 0:
+            # No thumbnail waits any more (a cancelled or timed-out wait leaves too): a later stall is a new one.
+            waiting.slow = False
     return places
 
 
-def _streak_of(waiting: _Waiting, coordinator: ComexioCoordinator) -> None:
+def _is_entry_coordinator(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator) -> bool:
+    """Whether the coordinator is the one the entry runs with now. A request still running under a replaced instance
+    (a reload) is not: it must neither take over the streaks nor change the flags of the new instance."""
+    return hass.data.get(DOMAIN, {}).get(entry_id) is coordinator
+
+
+def _streak_of(hass: HomeAssistant, entry_id: str, waiting: _Waiting, coordinator: ComexioCoordinator) -> bool:
     """Hands the streaks of a reloaded entry to its new coordinator: a streak logged under the old instance does not
-    silence the first warning of the new one (an unload does not clear the flags, a reload must not inherit them). The
-    reference is weak, so an unloaded coordinator is not kept alive by the waiting state."""
+    silence the first warning of the new one (an unload does not clear the flags, a reload must not inherit them). Only
+    the coordinator the entry runs with now takes the streaks, or they would be handed back and forth and warned again
+    at every switch. Returns False for any other coordinator. The reference is weak, so an unloaded coordinator is not
+    kept alive by the waiting state."""
+    if not _is_entry_coordinator(hass, entry_id, coordinator):
+        return False
     owner = waiting.streak_of() if waiting.streak_of is not None else None
     if owner is not coordinator:
         waiting.streak_of = weakref.ref(coordinator)
         waiting.refusing = False
         waiting.slow = False
+    return True
 
 
 def _refused_for_a_place(
@@ -139,7 +153,11 @@ def _refused_for_a_place(
     if waiting is None:
         _LOGGER.debug("Doorstation %s picture refused (%s): the entry was removed meanwhile", number, why)
         return
-    _streak_of(waiting, coordinator)
+    if not _streak_of(hass, entry_id, waiting, coordinator):
+        _LOGGER.debug(
+            "Doorstation %s picture not answered (%s): its entry was reloaded or unloaded meanwhile", number, why
+        )
+        return
     if waiting.refusing:
         _LOGGER.debug("Doorstation %s picture not answered: %s", number, why)
         return
@@ -153,12 +171,15 @@ def _refused_for_a_place(
 
 
 def _warn_slow_place_wait(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int) -> None:
-    """Logs, once per streak, a thumbnail still waiting for a gallery place after the slow-wait mark (called by a timer
-    while the wait runs, so the log shows the stall before the wait ends)."""
+    """Logs, once per stall, a thumbnail still waiting for a gallery place after the slow-wait mark (called by a timer
+    while the wait runs, so the log shows the stall before the wait ends). A stall ends when a place is granted in time
+    or the queue runs empty (a browser left, a wait timed out); a later stall warns again."""
     waiting = _kept_gallery_waiting(hass, entry_id)
     if waiting is None:
         return
-    _streak_of(waiting, coordinator)
+    if not _streak_of(hass, entry_id, waiting, coordinator):
+        _LOGGER.debug("Doorstation %s still waits for a gallery place, but its entry was reloaded or unloaded", number)
+        return
     if waiting.slow:
         return
     waiting.slow = True
@@ -169,12 +190,14 @@ def _warn_slow_place_wait(hass: HomeAssistant, entry_id: str, coordinator: Comex
     )
 
 
-def _place_granted(hass: HomeAssistant, entry_id: str, waited: float) -> None:
+def _place_granted(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, waited: float) -> None:
     """A thumbnail got its place: the refusal streak ends. The slow streak ends when the places flow again: a place that
     came within the slow mark, or a queue that is now empty. A grant after a long wait while others still queue belongs
-    to the same stall, and the next one must not warn again."""
+    to the same stall, and the next one must not warn again. A grant under a replaced instance changes nothing."""
     waiting = _kept_gallery_waiting(hass, entry_id)
-    if waiting is None:
+    # A grant of a replaced instance leaves the new instance's refusal streak as it is: a repeat warning may then be
+    # lost, but never the first one of a streak.
+    if waiting is None or not _is_entry_coordinator(hass, entry_id, coordinator):
         return
     waiting.refusing = False
     if waited < DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC or waiting.count == 0:
@@ -471,7 +494,7 @@ async def _read_in_a_gallery_place(
     started = loop.time()
     places = await _take_gallery_place(hass, entry_id, coordinator, number)
     try:
-        _place_granted(hass, entry_id, waited=loop.time() - started)
+        _place_granted(hass, entry_id, coordinator, waited=loop.time() - started)
         return await _read_within_thumbnail_budget(hass, entry_id, coordinator, number, name)
     finally:
         places.release()
