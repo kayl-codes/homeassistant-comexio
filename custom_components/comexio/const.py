@@ -313,6 +313,47 @@ DOORSTATION_PICTURE_LIST_TIMEOUT_SEC = 10.0
 DOORSTATION_PICTURE_RETRY_SEC = 60.0
 # The IO of a Doorstation whose push says that a motion picture was taken (the bell buttons say it for bell pictures).
 DOORSTATION_MOTION_IDENTIFIER = "PIR1"
+# The gallery in the media browser (media_source.py) lists the newest bell and motion pictures of a Doorstation, this
+# many at most: each thumbnail is one read of the Doorstation, and the reads queue behind the camera's on the IO-Server.
+DOORSTATION_GALLERY_MAX_PICTURES = 20
+# A folder of the gallery waits this long for its list at most, the wait for the Doorstation lock included (the list
+# read itself holds the lock for DOORSTATION_PICTURE_LIST_TIMEOUT_SEC): the browser answers a browse request in time or
+# not at all. The wait for a gallery place is in it too, behind the thumbnails already queued for that place: with one
+# place, a folder opened while a batch of twenty thumbnails loads can run out of time (not measured on a Doorstation).
+DOORSTATION_GALLERY_LIST_TIMEOUT_SEC = 20.0
+# Once a thumbnail has its gallery place, its read has this long in all, the wait for the Doorstation lock included.
+# The wait for the place comes before it (DOORSTATION_GALLERY_PLACE_WAIT_SEC), so a thumbnail is answered after that
+# plus this at most. The gallery view is a plain HTTP view, not an image entity, so Home Assistant's image timeout does
+# not apply to it; the shorter picture-entity budget let the last ones of a browser batch fail. 30 s is a guess, not
+# measured against a real Doorstation. The read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
+DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC = 30.0
+# The gallery puts at most this many reads on a Doorstation lock at a time, per config entry (media_source.py).
+# The lock runs one read at a time anyway, so a second place adds no throughput; it only lets a second read queue
+# on the lock ahead of the camera, which can then wait for two reads of up to DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC
+# each, past Home Assistant's image timeout. With one place the camera waits behind one read at most.
+DOORSTATION_GALLERY_CONCURRENT_READS = 1
+# A thumbnail that finds this many others already waiting for one of those places is answered at once. Each wait is
+# bounded in time (DOORSTATION_GALLERY_PLACE_WAIT_SEC), but without this cap a flood of requests from an authenticated
+# client parks an unbounded number of them. Two browser batches; a guess, not measured.
+DOORSTATION_GALLERY_MAX_WAITING_READS = 2 * DOORSTATION_GALLERY_MAX_PICTURES
+# A thumbnail waits this long for one of the gallery's places at most (media_source.py). A place is held for one read
+# and its wait for the entry's Doorstation lock, which the camera and the picture entities take too: a thumbnail for
+# DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC at most, a folder list for DOORSTATION_GALLERY_LIST_TIMEOUT_SEC (the lock
+# itself is held for DOORSTATION_PICTURE_READ_TIMEOUT_SEC / DOORSTATION_PICTURE_LIST_TIMEOUT_SEC of that). The value
+# covers the holder and the cap's worth of reads ahead of a thumbnail at the longer of those holds, so an admitted
+# thumbnail gets its place however long the reads ahead wait for the lock; its own read can still run out of its
+# budget. About 20 minutes in the worst case: the value bounds how long a request is parked, not what a viewer sees (a
+# browser or a proxy in between may give up sooner; no such limit was measured). Derived, not measured.
+DOORSTATION_GALLERY_PLACE_HOLD_SEC = max(
+    DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC, DOORSTATION_GALLERY_LIST_TIMEOUT_SEC
+)
+DOORSTATION_GALLERY_PLACE_WAIT_SEC = (DOORSTATION_GALLERY_MAX_WAITING_READS + 1) * DOORSTATION_GALLERY_PLACE_HOLD_SEC
+# How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
+# thumbnails of a folder in that time.
+DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600
+# The view that serves one stored picture to the gallery (its path has the entry, the extension and the file name).
+DOORSTATION_PICTURE_VIEW_PATH = "/api/comexio/doorstation_picture"
+DOORSTATION_PICTURE_VIEW_NAME = "api:comexio:doorstation_picture"
 
 # parse_config() output key of the stored Web-IO commands whose name an earlier command already
 # has. "webio_commands" is keyed by name and holds only the first one; the audit reports the rest
