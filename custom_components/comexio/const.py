@@ -83,6 +83,9 @@ CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE = (11, 1, 5)
 # meanwhile starts the wait afresh, at most CERTIFICATE_AUTO_ACCEPT_MAX_READS reads, then the user decides.
 CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC = 60
 CERTIFICATE_AUTO_ACCEPT_MAX_READS = 3
+# How long the clear of an acceptance push, after the removal of its entry, waits for a push still being sent to end
+# (the removal cancels it), so the clear does not overtake it.
+CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC = 5
 # How often the certificate expiry sensor reads the validity period of the certificate Comexio presents
 # (a bare TLS handshake, no request); Comexio renews its certificate on its own schedule, not by the hour.
 CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC = 24 * 3600
