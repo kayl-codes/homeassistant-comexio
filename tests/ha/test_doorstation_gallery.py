@@ -1389,6 +1389,8 @@ async def test_a_thumbnail_whose_browser_left_while_it_waited_takes_no_place_and
             async with asyncio.timeout(5):
                 while _gallery_waiting(hass, mock_config_entry.entry_id).count:
                     await asyncio.sleep(0.01)
+            with contextlib.suppress(asyncio.CancelledError):
+                await queued
         finally:
             _release_places(places)
 
