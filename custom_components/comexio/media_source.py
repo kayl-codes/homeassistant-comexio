@@ -73,8 +73,8 @@ def _gallery_read_slots(hass: HomeAssistant, entry_id: str) -> asyncio.Semaphore
 
 
 def forget_gallery_read_slots(hass: HomeAssistant, entry_id: str) -> None:
-    """Drops the places of an unloaded entry. A request that still waits keeps its own reference to them; a new one
-    finds the entry unloaded before it reaches for a place (the views and the browser check that first)."""
+    """Drops the places of a removed entry. They outlive an unload: a read of the old instance still in flight holds
+    one of them, and the reloaded entry must count it against the same two places."""
     hass.data.pop(f"{_GALLERY_READ_SLOTS_KEY}_{entry_id}", None)
 
 

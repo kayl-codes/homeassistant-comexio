@@ -1207,8 +1207,10 @@ async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Drop the entry's repairs with nothing left to fix, the certificate push on the phones, its saved config and
     its last plan preview."""
     # Removal normally follows the unload (Home Assistant may also remove after a failed one); an entry id is
-    # never reused, so the lock of a removed entry has no reader left.
+    # never reused, so the pools of a removed entry have no reader left. Both are kept across a reload: a read
+    # of the old instance still in flight shares them with the new one.
     forget_doorstation_read_lock(hass, entry.entry_id)
+    forget_gallery_read_slots(hass, entry.entry_id)
     # Nothing else reads the stores once the entry is gone: a new entry gets a new entry id (#250).
     # finally: a failed delete of one must not keep the others, the webhook secret and the preview name the user's
     # wiring, and a failing cleanup above them must not keep any store either.
@@ -1256,7 +1258,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry):
             finally:
                 coordinator.api.close()
         hass.data[DOMAIN].pop(f"{entry.entry_id}_webhooks", None)
-        forget_gallery_read_slots(hass, entry.entry_id)
 
         # Remove global services when the last entry is unloaded
         if not hass.config_entries.async_entries(DOMAIN):

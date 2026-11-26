@@ -25,7 +25,6 @@ from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_GALLERY_CONCURRENT_READS,
     DOORSTATION_GALLERY_MAX_PICTURES,
-    DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_PATH,
 )
@@ -635,9 +634,26 @@ async def test_the_view_bounds_the_lock_hold_of_its_read_and_answers_what_comes_
     assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
 
-def test_the_thumbnail_budget_outlasts_the_picture_read() -> None:
-    # The thumbnail budget covers the wait for the lock as well as the read, so it must exceed the read's own bound.
-    assert DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC > DOORSTATION_PICTURE_READ_TIMEOUT_SEC
+async def test_the_view_gives_up_at_the_thumbnail_budget_not_at_the_picture_budget(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _endless_read(*_args: Any, **_kwargs: Any) -> tuple[bytes, None]:
+        await asyncio.sleep(1)
+        return JPEG, None
+
+    coordinator.api.get_doorstation_picture.side_effect = _endless_read
+    client = await hass_client()
+
+    # The read would be allowed the picture budget (5 s), so only the thumbnail budget (0.05 s) can end it here.
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_PICTURE_READ_TIMEOUT_SEC", 5),
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC", 0.05),
+    ):
+        response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+
+    assert response.status == HTTPStatus.SERVICE_UNAVAILABLE
 
 
 async def test_the_view_serves_a_read_that_finishes_within_its_budget(
@@ -744,15 +760,21 @@ async def test_a_browse_batch_takes_only_a_couple_of_places_on_the_doorstation_l
     assert most_at_once == DOORSTATION_GALLERY_CONCURRENT_READS
 
 
-async def test_unloading_the_entry_drops_its_gallery_places(
+async def test_the_gallery_places_outlive_a_reload_and_go_with_the_entry_on_removal(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
     await _setup(hass, mock_config_entry)
-    _gallery_read_slots(hass, mock_config_entry.entry_id)
+    key = f"{_GALLERY_READ_SLOTS_KEY}_{mock_config_entry.entry_id}"
+    places = _gallery_read_slots(hass, mock_config_entry.entry_id)
 
     await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    assert hass.data[key] is places
 
-    assert f"{_GALLERY_READ_SLOTS_KEY}_{mock_config_entry.entry_id}" not in hass.data
+    assert await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    assert _gallery_read_slots(hass, mock_config_entry.entry_id) is places
+
+    await hass.config_entries.async_remove(mock_config_entry.entry_id)
+    assert key not in hass.data
 
 
 async def test_a_reloaded_entry_keeps_the_doorstation_lock_of_its_predecessor(
