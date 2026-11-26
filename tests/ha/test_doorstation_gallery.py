@@ -899,7 +899,7 @@ async def test_a_folder_list_that_stalls_with_its_place_is_logged_and_told_apart
     folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
     with (
         patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
-        pytest.raises(BrowseError, match="did not answer in time"),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
     ):
         await media_source.async_browse_media(hass, folder)
     coordinator.api.get_doorstation_pictures.assert_awaited()
@@ -979,7 +979,7 @@ async def test_a_folder_list_that_gets_no_place_in_time_is_logged_as_refused(
     try:
         with (
             patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
-            pytest.raises(BrowseError, match="not read in"),
+            pytest.raises(BrowseError, match=r"not read in .* s \(the wait for a gallery place included\)"),
         ):
             await media_source.async_browse_media(hass, folder)
     finally:
@@ -1177,11 +1177,12 @@ async def test_a_reloaded_entry_starts_its_own_slow_streak(
     assert len(warnings) == 2
 
 
-async def test_a_request_of_a_replaced_instance_neither_warns_nor_clears_the_new_streaks(
+async def test_a_grant_of_a_replaced_instance_ends_only_the_refusal_streak(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # A read that started before the reload still runs to its end: its refusal, its slow mark and its grant must not
-    # warn again or end the streaks the new instance has logged.
+    # A read that started before the reload still runs to its end: its refusal and its slow mark must not warn again or
+    # end the streaks the new instance has logged. Its grant does show the places are free, so the refusal streak ends
+    # (a later refusal of the new instance warns again), while the slow streak, the new instance's own, is left alone.
     entry_id = mock_config_entry.entry_id
     waiting = _gallery_waiting(hass, entry_id)
     old, new = cast(Any, _Instance()), cast(Any, _Instance())
@@ -1191,13 +1192,19 @@ async def test_a_request_of_a_replaced_instance_neither_warns_nor_clears_the_new
     _refused_for_a_place(hass, entry_id, old, 2, "late")
     _warn_slow_place_wait(hass, entry_id, old, 2)
     _place_granted(hass, entry_id, old, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+
+    assert waiting.refusing is False
+    assert waiting.slow is True
+    assert waiting.streak_of() is new
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
     _refused_for_a_place(hass, entry_id, new, 2, "second")
     _warn_slow_place_wait(hass, entry_id, new, 2)
 
     assert waiting.refusing is True
     assert waiting.slow is True
     assert waiting.streak_of() is new
-    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 3
 
 
 async def test_a_request_after_the_entry_was_unloaded_changes_no_streak_and_warns_nothing(
@@ -1321,6 +1328,7 @@ async def test_a_grant_ends_the_slow_streak_only_when_the_places_flow_again(
 ) -> None:
     waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
     waiting.slow = True
+    waiting.refusing = True
     waiting.count = count
     coordinator = cast(Any, _Instance())
     _make_current(hass, mock_config_entry.entry_id, coordinator)
@@ -1330,6 +1338,24 @@ async def test_a_grant_ends_the_slow_streak_only_when_the_places_flow_again(
     )
 
     assert waiting.slow is still_slow
+    assert waiting.refusing is False
+
+
+async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_slow_one(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    # No coordinator is registered for the entry (unloaded, not yet reloaded): a grant still shows the places are free,
+    # so the refusal streak ends; the slow streak is left to the next instance that takes the entry.
+    entry_id = mock_config_entry.entry_id
+    waiting = _gallery_waiting(hass, entry_id)
+    waiting.refusing = True
+    waiting.slow = True
+    _place_granted(
+        hass, entry_id, cast(Any, _Instance()), waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC
+    )
+
+    assert waiting.refusing is False
+    assert waiting.slow is True
 
 
 async def test_a_refusal_and_a_grant_after_the_removal_of_the_entry_create_no_state(
@@ -1622,7 +1648,7 @@ async def test_a_folder_whose_list_takes_too_long_is_an_error_in_the_browser(
 
     with (
         patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.01),
-        pytest.raises(BrowseError, match="not read in"),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
     ):
         await media_source.async_browse_media(hass, folder_id)
     # The list gave its place back when its deadline ran out: DOORSTATION_GALLERY_PLACE_WAIT_SEC counts on that.
@@ -1641,7 +1667,7 @@ async def test_a_folder_waiting_for_a_gallery_place_past_the_budget_is_an_error_
         with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.05):
             # Every place is taken: the folder must answer within its deadline, not wait for a place forever.
             async with asyncio.timeout(5):
-                with pytest.raises(BrowseError, match="not read in"):
+                with pytest.raises(BrowseError, match=r"not read in .* s \(the wait for a gallery place included\)"):
                     await media_source.async_browse_media(hass, folder_id)
     finally:
         for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):

@@ -204,13 +204,16 @@ def _place_granted(
     """A thumbnail or a list read got its place: the refusal streak ends. The slow streak ends when the places flow
     again: a place that came within the read's own slow mark (slow_after), or a queue that is now empty. A grant after a
     long wait while others still queue belongs to the same stall, and the next one must not warn again. A grant under a
-    replaced instance changes nothing."""
+    replaced instance ends the refusal streak only (see below)."""
     waiting = _kept_gallery_waiting(hass, entry_id)
-    # A grant of a replaced instance leaves the new instance's refusal streak as it is: a repeat warning may then be
-    # lost, but never the first one of a streak.
-    if waiting is None or not _is_entry_coordinator(hass, entry_id, coordinator):
+    if waiting is None:
         return
+    # A place granted to any read, a replaced one included, shows the places are free again: a later refusal starts a
+    # new streak (at worst one more line, never a silenced one). A replaced grant itself leaves the slow flag alone; an
+    # emptied queue still clears it in _await_gallery_place, whatever the coordinator.
     waiting.refusing = False
+    if not _is_entry_coordinator(hass, entry_id, coordinator):
+        return
     if waited < slow_after or waiting.count == 0:
         waiting.slow = False
 
@@ -365,6 +368,11 @@ _OFFLINE_OR_UNKNOWN = "Doorstation offline or no longer known"
 _TOO_MANY_WAITING = "Too many gallery reads already wait for a place, try again later"
 
 
+def _list_not_read(detail: str) -> BrowseError:
+    """The browse error of a picture list read that did not finish within its budget."""
+    return BrowseError(f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s {detail}")
+
+
 async def _folder_children(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int
 ) -> list[BrowseMediaSource]:
@@ -405,20 +413,14 @@ async def _folder_children(
             _refused_for_a_place(
                 hass, entry_id, coordinator, ext_id, f"no place within {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s"
             )
-            raise BrowseError(
-                f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s "
-                "(the wait for a gallery place included)"
-            ) from None
+            raise _list_not_read("(the wait for a gallery place included)") from None
         # The place was held and the read did not finish: nothing else logs that, so it is logged here.
         _LOGGER.warning(
             "Doorstation %s picture list read timed out after %g s, with its gallery place",
             ext_id,
             DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
         )
-        raise BrowseError(
-            f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s "
-            "(the Doorstation did not answer in time)"
-        ) from None
+        raise _list_not_read("(the Doorstation did not answer in time)") from None
     if pictures is None:
         if cause is not None:
             # Any failure cause of the list read is only debug-logged by the API (a read that ran out its own budget is
