@@ -307,18 +307,12 @@ DOORSTATION_GALLERY_MAX_PICTURES = 20
 # not at all. The wait for a gallery place is in it too, behind the thumbnails already queued for that place: with one
 # place, a folder opened while a batch of twenty thumbnails loads can run out of time (not measured on a Doorstation).
 DOORSTATION_GALLERY_LIST_TIMEOUT_SEC = 20.0
-# Once a thumbnail has its gallery place, its read has this long in all, the wait for the Doorstation lock included. The
-# gallery view is a plain HTTP view, not an image entity, so Home Assistant's image timeout does not apply to it; the
-# shorter picture-entity budget let the last ones of a browser batch fail. 30 s is a guess, not measured against a real
-# Doorstation. The read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
+# Once a thumbnail has its gallery place, its read has this long in all, the wait for the Doorstation lock included.
+# The wait for the place comes before it (DOORSTATION_GALLERY_PLACE_WAIT_SEC), so a thumbnail is answered after that
+# plus this at most. The gallery view is a plain HTTP view, not an image entity, so Home Assistant's image timeout does
+# not apply to it; the shorter picture-entity budget let the last ones of a browser batch fail. 30 s is a guess, not
+# measured against a real Doorstation. The read itself holds the lock for at most DOORSTATION_PICTURE_READ_TIMEOUT_SEC.
 DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC = 30.0
-# A thumbnail waits this long for one of the gallery's places at most (media_source.py). The entry's Doorstation lock
-# runs the reads one after the other, however many places there are: the last thumbnail of a full browser batch waits
-# for the reads before it, up to DOORSTATION_PICTURE_READ_TIMEOUT_SEC each. The worst case of that batch is the value,
-# and only with the lock free: a place is held for the whole read, its wait for the lock included, so a read that
-# waits behind the camera takes longer. Camera and picture-entity reads that take the lock in between are not in the
-# value either: a thumbnail still waiting when it runs out is answered 503. Derived from those numbers, not measured.
-DOORSTATION_GALLERY_PLACE_WAIT_SEC = DOORSTATION_GALLERY_MAX_PICTURES * DOORSTATION_PICTURE_READ_TIMEOUT_SEC
 # The gallery puts at most this many reads on a Doorstation lock at a time, per config entry (media_source.py).
 # The lock runs one read at a time anyway, so a second place adds no throughput; it only lets a second read queue
 # on the lock ahead of the camera, which can then wait for two reads of up to DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC
@@ -328,6 +322,14 @@ DOORSTATION_GALLERY_CONCURRENT_READS = 1
 # bounded in time (DOORSTATION_GALLERY_PLACE_WAIT_SEC), but without this cap a flood of requests from an authenticated
 # client parks an unbounded number of them. Two browser batches; a guess, not measured.
 DOORSTATION_GALLERY_MAX_WAITING_READS = 2 * DOORSTATION_GALLERY_MAX_PICTURES
+# A thumbnail waits this long for one of the gallery's places at most (media_source.py). The entry's Doorstation lock
+# runs the reads one after the other, however many places there are. A thumbnail admitted behind the cap above waits for
+# the holder of the place and for up to that many reads ahead of it, up to DOORSTATION_PICTURE_READ_TIMEOUT_SEC each:
+# the value covers that queue, so an admitted thumbnail is not answered 503 while the lock is free. A place is held for
+# the whole read, its wait for the lock included, so a read that waits behind the camera takes longer. Camera and
+# picture-entity reads that take the lock in between are not in the value either: a thumbnail still waiting when it runs
+# out is answered 503. Derived from those numbers, not measured.
+DOORSTATION_GALLERY_PLACE_WAIT_SEC = (DOORSTATION_GALLERY_MAX_WAITING_READS + 1) * DOORSTATION_PICTURE_READ_TIMEOUT_SEC
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600
