@@ -6,6 +6,7 @@ import contextlib
 import copy
 from datetime import datetime, timedelta
 from http import HTTPStatus
+import logging
 from time import get_clock_info
 from types import SimpleNamespace
 from typing import Any, cast
@@ -41,6 +42,7 @@ from custom_components.comexio.const import (
 )
 from custom_components.comexio.media_source import (
     _GALLERY_READ_SLOTS_KEY,
+    _await_gallery_place,
     _gallery_read_slots,
     _gallery_waiting,
     _kept_gallery_waiting,
@@ -845,7 +847,8 @@ async def test_a_list_read_that_gets_its_place_at_once_ends_the_slow_streak(
         await asyncio.sleep(0.2)
 
     assert not waiting.slow
-    assert not waiting.refusing
+    # The other thumbnail still waits: the place was handed on, no capacity came back, so the refusal streak goes on.
+    assert waiting.refusing
     assert not [r for r in caplog.records if "still waits" in r.getMessage()]
 
 
@@ -943,6 +946,7 @@ async def test_a_folder_list_that_times_out_after_a_reload_logs_no_warning_for_t
     # warning would blame the active entry for a request it does not own.
     entry_id = mock_config_entry.entry_id
     coordinator = await _setup(hass, mock_config_entry)
+    caplog.set_level(logging.DEBUG, logger="custom_components.comexio.media_source")
 
     async def _stall_across_a_reload(_ext_id: int) -> None:
         _make_current(hass, entry_id, copy.copy(coordinator))
@@ -956,6 +960,8 @@ async def test_a_folder_list_that_times_out_after_a_reload_logs_no_warning_for_t
     ):
         await media_source.async_browse_media(hass, folder)
     assert not [r for r in caplog.records if r.levelname == "WARNING" and "timed out after" in r.getMessage()]
+    # The outcome is logged, only at debug level: a missing line would not pass as "no warning" alone.
+    assert any(r.levelname == "DEBUG" and "timed out after" in r.getMessage() for r in caplog.records)
 
 
 async def test_a_folder_list_that_waits_for_the_doorstation_lock_is_not_blamed_on_the_doorstation(
@@ -1039,7 +1045,8 @@ async def test_a_folder_list_grant_is_judged_by_the_list_mark(
     finally:
         for task in (first, second):
             task.cancel()
-        await asyncio.gather(first, second, return_exceptions=True)
+        async with asyncio.timeout(5):
+            await asyncio.gather(first, second, return_exceptions=True)
 
 
 async def test_a_failed_folder_list_read_is_logged_by_the_browse(
@@ -1308,20 +1315,40 @@ async def test_a_grant_of_a_replaced_instance_ends_only_the_refusal_streak(
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 3
 
 
-async def test_a_grant_handed_on_while_the_waiting_reads_fill_the_cap_keeps_the_refusal_streak(
+async def test_a_grant_handed_on_while_other_reads_still_wait_keeps_the_refusal_streak(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
-    # Under sustained saturation a permit goes to a queued read while the cap is still full: no capacity came back, so
-    # the refusal streak goes on and a later refusal stays at debug level.
+    # Under sustained saturation a permit is handed to a queued read while others still wait: no capacity came back, so
+    # the refusal streak goes on and a later refusal stays at debug level. Real waiters, not a count set by hand.
     entry_id = mock_config_entry.entry_id
     coordinator = await _setup(hass, mock_config_entry)
+    places, _ = await _take_all_places(hass, entry_id)
     waiting = _gallery_waiting(hass, entry_id)
-    waiting.count = DOORSTATION_GALLERY_MAX_WAITING_READS
-    _refused_for_a_place(hass, entry_id, coordinator, 2, "first")
-    _place_granted(hass, entry_id, coordinator, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+    queued = [
+        asyncio.ensure_future(
+            _await_gallery_place(hass, entry_id, coordinator, 2, DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+        )
+        for _ in range(2)
+    ]
+    try:
+        async with asyncio.timeout(5):
+            while waiting.count < 2:
+                await asyncio.sleep(0.01)
+        _refused_for_a_place(hass, entry_id, coordinator, 2, "first")
+        places.release()
+        done, _ = await asyncio.wait(queued, return_when=asyncio.FIRST_COMPLETED, timeout=5)
+        assert len(done) == 1
+        _place_granted(hass, entry_id, coordinator, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
 
-    assert waiting.refusing is True
-    _refused_for_a_place(hass, entry_id, coordinator, 2, "second")
+        assert waiting.count == 1
+        assert waiting.refusing is True
+        _refused_for_a_place(hass, entry_id, coordinator, 2, "second")
+    finally:
+        for task in queued:
+            task.cancel()
+        async with asyncio.timeout(5):
+            await asyncio.gather(*queued, return_exceptions=True)
+        _release_places(places)
 
     warnings = [r for r in caplog.records if r.levelname == "WARNING" and "not answered" in r.getMessage()]
     assert len(warnings) == 1
@@ -1374,7 +1401,8 @@ async def test_a_cancelled_wait_while_another_still_waits_keeps_the_slow_flag(
     finally:
         first.cancel()
         second.cancel()
-        await asyncio.gather(first, second, return_exceptions=True)
+        async with asyncio.timeout(5):
+            await asyncio.gather(first, second, return_exceptions=True)
         _release_places(places)
 
 
@@ -1470,7 +1498,8 @@ async def test_a_grant_ends_the_slow_streak_only_when_the_places_flow_again(
     )
 
     assert waiting.slow is still_slow
-    assert not waiting.refusing
+    # The refusal streak ends only when no read waits any more (see _place_granted).
+    assert waiting.refusing is (count > 0)
 
 
 async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_slow_one(
@@ -1590,7 +1619,8 @@ async def test_a_stall_whose_queue_drains_by_browsers_leaving_is_warned_again_by
     finally:
         for request in queued:
             request.cancel()
-        await asyncio.gather(*queued, return_exceptions=True)
+        async with asyncio.timeout(5):
+            await asyncio.gather(*queued, return_exceptions=True)
         _release_places(places)
 
     coordinator.api.get_doorstation_picture.assert_not_awaited()

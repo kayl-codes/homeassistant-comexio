@@ -202,18 +202,19 @@ def _warn_slow_place_wait(hass: HomeAssistant, entry_id: str, coordinator: Comex
 def _place_granted(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, waited: float, slow_after: float
 ) -> None:
-    """A thumbnail or a list read got its place: the refusal streak ends once the waiting reads have room under their
-    cap again. A permit handed on while the cap is still full is no sign of free capacity, so the streak goes on. The
-    slow streak ends when the places flow again: a place that came within the read's own slow mark (slow_after), or a
-    queue that is now empty. A grant after a long wait while others still queue belongs to the same stall, and the next
-    one must not warn again. A grant under a replaced instance ends the refusal streak only (see below)."""
+    """A thumbnail or a list read got its place: the refusal streak ends once no read waits any more. A permit handed
+    on while other reads still wait is no sign of free capacity, so the streak goes on. The slow streak ends when the
+    places flow again: a place that came within the read's own slow mark (slow_after), or a queue that is now empty.
+    A grant after a long wait while others still queue belongs to the same stall, and the next one must not warn
+    again. A grant under a replaced instance ends the refusal streak only (see below)."""
     waiting = _kept_gallery_waiting(hass, entry_id)
     if waiting is None:
         return
-    # A place granted to any read, a replaced one included, shows the places are free again while the queue has room: a
-    # later refusal then starts a new streak (at worst one more line, never a silenced one). A replaced grant itself
-    # leaves the slow flag alone; an emptied queue still clears it in _await_gallery_place, whatever the coordinator.
-    if waiting.count < DOORSTATION_GALLERY_MAX_WAITING_READS:
+    # A place granted to any read, a replaced one included, shows the places are free again once the queue is empty: a
+    # later refusal then starts a new streak (at worst one more line, never a silenced one). _await_gallery_place has
+    # counted this read out already, so a count of 0 means no other read waits. A replaced grant itself leaves the slow
+    # flag alone; an emptied queue still clears it in _await_gallery_place, whatever the coordinator.
+    if waiting.count == 0:
         waiting.refusing = False
     if not _is_entry_coordinator(hass, entry_id, coordinator):
         return
