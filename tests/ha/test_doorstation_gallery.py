@@ -1006,7 +1006,9 @@ async def test_a_failed_folder_list_read_is_logged_by_the_browse(
     folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
     with pytest.raises(BrowseError, match="not read within 10 s"):
         await media_source.async_browse_media(hass, folder)
-    assert any(r.levelname == "WARNING" and "picture list not read" in r.getMessage() for r in caplog.records)
+    logged = [r for r in caplog.records if "picture list not read" in r.getMessage()]
+    assert [r.levelname for r in logged] == ["WARNING"]
+    assert logged[0].getMessage().endswith("picture list not read: not read within 10 s")
 
 
 async def test_a_folder_list_read_with_the_session_gone_is_not_logged(
@@ -1016,9 +1018,11 @@ async def test_a_folder_list_read_with_the_session_gone_is_not_logged(
     coordinator = await _setup(hass, mock_config_entry)
     coordinator.api.get_doorstation_pictures.return_value = (None, None)
     folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    logged_before = len(caplog.records)
     with pytest.raises(BrowseError, match="not read"):
         await media_source.async_browse_media(hass, folder)
-    assert all("picture list not read" not in r.getMessage() for r in caplog.records)
+    # Only what the browse itself logs: the setup of the entry logs its own warnings.
+    assert not [r for r in caplog.records[logged_before:] if r.levelname == "WARNING"]
 
 
 async def test_a_folder_list_that_gets_no_place_in_time_is_logged_as_refused(
