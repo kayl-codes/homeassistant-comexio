@@ -86,6 +86,9 @@ CERTIFICATE_AUTO_ACCEPT_MAX_READS = 3
 # How long the clear of an acceptance push, after the removal of its entry, waits for a push still being sent to end
 # (the removal cancels it), so the clear does not overtake it.
 CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC = 5
+# The companion-app command that takes a push (by its tag) off the phone; any other notify service would deliver it as
+# this text, so it goes to mobile_app services only.
+MOBILE_APP_CLEAR_NOTIFICATION = "clear_notification"
 # How often the certificate expiry sensor reads the validity period of the certificate Comexio presents
 # (a bare TLS handshake, no request); Comexio renews its certificate on its own schedule, not by the hour.
 CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC = 24 * 3600

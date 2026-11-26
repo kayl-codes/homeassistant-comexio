@@ -51,6 +51,7 @@ from .const import (
     LOGIN_ERROR_CERTIFICATE,
     LOGIN_ERROR_CONNECTION,
     LOGIN_ERROR_REJECTED,
+    MOBILE_APP_CLEAR_NOTIFICATION,
 )
 from .issue_owner import async_create_entry_issue
 from .plan_watchdog import MOBILE_APP_SERVICE_PREFIX, NOTIFY_DOMAIN
@@ -457,8 +458,8 @@ async def _async_clear_certificate_push(
             )
         if not targets:
             return
-        # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-        service_data = {"message": "clear_notification", "data": {"tag": _certificate_push_tag(entry_id)}}
+        # A companion-app command: any other notify service would deliver it as text.
+        service_data = {"message": MOBILE_APP_CLEAR_NOTIFICATION, "data": {"tag": _certificate_push_tag(entry_id)}}
         quiet = set() if final else pushes.clear_failed
         delivered, failed = await _async_notify(hass, service_data, targets, quiet)
         pushes.shown -= delivered

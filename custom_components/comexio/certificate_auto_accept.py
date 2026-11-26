@@ -51,6 +51,7 @@ from .const import (
     CONF_HOST,
     CONF_SERVER_ID,
     DOMAIN,
+    MOBILE_APP_CLEAR_NOTIFICATION,
     certificate_check_signal,
 )
 from .plan_watchdog import NOTIFY_DOMAIN
@@ -246,8 +247,8 @@ async def _async_clear_push(
         _log_unreachable(pushed, set(phones).difference(registered))
         if not registered:
             return
-        # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-        service_data = {"message": "clear_notification", "data": {"tag": _notification_id(entry.entry_id)}}
+        # A companion-app command: any other notify service would deliver it as text.
+        service_data = {"message": MOBILE_APP_CLEAR_NOTIFICATION, "data": {"tag": _notification_id(entry.entry_id)}}
         _, failed = await _async_notify(hass, service_data, registered, set())
         if failed:
             _LOGGER.warning("Comexio acceptance push clear failed for %s: a push already sent may stay", sorted(failed))
