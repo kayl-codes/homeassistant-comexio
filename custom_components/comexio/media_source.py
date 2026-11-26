@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 from typing import NamedTuple
+import weakref
 
 from aiocomexio import DoorstationPicture, DoorstationPictureKind
 from aiocomexio.doorstation_pictures import is_plain_picture_name, picture_of
@@ -34,14 +35,17 @@ from homeassistant.components.media_source import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .api import doorstation_read_got_its_turn
 from .const import (
     DOMAIN,
     DOORSTATION_GALLERY_CONCURRENT_READS,
     DOORSTATION_GALLERY_LINK_EXPIRY_SEC,
+    DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC,
     DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
     DOORSTATION_GALLERY_MAX_PICTURES,
     DOORSTATION_GALLERY_MAX_WAITING_READS,
     DOORSTATION_GALLERY_PLACE_WAIT_SEC,
+    DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC,
     DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_NAME,
@@ -80,11 +84,15 @@ _GALLERY_WAITING_KEY = f"{DOMAIN}_gallery_waiting"
 
 @dataclass
 class _Waiting:
-    """How many thumbnails of one config entry wait for a gallery place right now, and whether a streak of refused
-    thumbnails is being logged (one warning per streak, see _refused_for_a_place)."""
+    """How many reads of one config entry (thumbnails and folder lists) wait for a gallery place right now, and the
+    streaks being logged: a streak of refused reads (one warning, see _refused_for_a_place) and a streak of slow waits
+    (one warning, see _warn_slow_place_wait). A streak belongs to the coordinator it started under: a reloaded entry
+    starts its own."""
 
     count: int = 0
     refusing: bool = False
+    slow: bool = False
+    streak_of: weakref.ref[ComexioCoordinator] | None = None
 
 
 def _gallery_waiting(hass: HomeAssistant, entry_id: str) -> _Waiting:
@@ -92,28 +100,77 @@ def _gallery_waiting(hass: HomeAssistant, entry_id: str) -> _Waiting:
     return hass.data.setdefault(f"{_GALLERY_WAITING_KEY}_{entry_id}", _Waiting())
 
 
-async def _await_gallery_place(hass: HomeAssistant, entry_id: str) -> asyncio.Semaphore | None:
+def _kept_gallery_waiting(hass: HomeAssistant, entry_id: str) -> _Waiting | None:
+    """The waiting state of an entry that is still kept. A callback that outlives a removed entry (a timer, a wait that
+    ends after the removal) must not create the state again: nothing would ever drop it."""
+    return hass.data.get(f"{_GALLERY_WAITING_KEY}_{entry_id}")
+
+
+async def _await_gallery_place(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, slow_after: float
+) -> asyncio.Semaphore | None:
     """Waits for one of the gallery's places, counted against the waiter cap of the entry (thumbnails and browse
     batches alike). None at once when the cap is full; otherwise the caller holds a place and releases that very
-    semaphore (an entry removed meanwhile drops its places, a release by key would land on a new set)."""
+    semaphore (an entry removed meanwhile drops its places, a release by key would land on a new set). A wait that runs
+    past its own slow-wait mark (slow_after, per kind of read) is logged while it runs."""
     waiting = _gallery_waiting(hass, entry_id)
     if waiting.count >= DOORSTATION_GALLERY_MAX_WAITING_READS:
         return None
     places = _gallery_read_slots(hass, entry_id)
     waiting.count += 1
+    slow_warning = asyncio.get_running_loop().call_later(
+        slow_after, _warn_slow_place_wait, hass, entry_id, coordinator, number
+    )
     try:
         await places.acquire()
     finally:
+        slow_warning.cancel()
         waiting.count -= 1
+        if waiting.count == 0:
+            # No thumbnail waits any more (a cancelled or timed-out wait leaves too): a later stall is a new one.
+            waiting.slow = False
     return places
 
 
-def _refused_for_a_place(hass: HomeAssistant, entry_id: str, number: int, why: str) -> None:
-    """Logs a thumbnail refused for lack of a gallery place: the first of a streak as a warning, the others at debug
-    level until a thumbnail gets its place again (a stall is then visible once, not once per refused request)."""
-    waiting = _gallery_waiting(hass, entry_id)
+def _is_entry_coordinator(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator) -> bool:
+    """Whether the coordinator is the one the entry runs with now. A request still running under a replaced instance
+    (a reload) is not: it must neither take over the streaks nor change the flags of the new instance."""
+    return hass.data.get(DOMAIN, {}).get(entry_id) is coordinator
+
+
+def _streak_of(hass: HomeAssistant, entry_id: str, waiting: _Waiting, coordinator: ComexioCoordinator) -> bool:
+    """Hands the streaks of a reloaded entry to its new coordinator: a streak logged under the old instance does not
+    silence the first warning of the new one (an unload does not clear the flags, a reload must not inherit them). Only
+    the coordinator the entry runs with now takes the streaks, or they would be handed back and forth and warned again
+    at every switch. Returns False for any other coordinator. The reference is weak, so an unloaded coordinator is not
+    kept alive by the waiting state."""
+    if not _is_entry_coordinator(hass, entry_id, coordinator):
+        return False
+    owner = waiting.streak_of() if waiting.streak_of is not None else None
+    if owner is not coordinator:
+        waiting.streak_of = weakref.ref(coordinator)
+        waiting.refusing = False
+        waiting.slow = False
+    return True
+
+
+def _refused_for_a_place(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, why: str
+) -> None:
+    """Logs a gallery read (a thumbnail or a folder list) refused for lack of a gallery place: the first of a streak as
+    a warning, the others at debug level until a read gets its place again (a stall is then visible once, not once per
+    refused request)."""
+    waiting = _kept_gallery_waiting(hass, entry_id)
+    if waiting is None:
+        _LOGGER.debug("Doorstation %s gallery read refused (%s): the entry was removed meanwhile", number, why)
+        return
+    if not _streak_of(hass, entry_id, waiting, coordinator):
+        _LOGGER.debug(
+            "Doorstation %s gallery read not answered (%s): its entry was reloaded or unloaded meanwhile", number, why
+        )
+        return
     if waiting.refusing:
-        _LOGGER.debug("Doorstation %s picture not answered: %s", number, why)
+        _LOGGER.debug("Doorstation %s gallery read not answered: %s", number, why)
         return
     waiting.refusing = True
     _LOGGER.warning(
@@ -122,6 +179,47 @@ def _refused_for_a_place(hass: HomeAssistant, entry_id: str, number: int, why: s
         number,
         why,
     )
+
+
+def _warn_slow_place_wait(hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int) -> None:
+    """Logs, once per stall, a gallery read (a thumbnail or a folder list) still waiting for a place after its slow-wait
+    mark (called by a timer while the wait runs, so the log shows the stall before the wait ends). A stall ends when a
+    place is granted in time or the queue runs empty (a browser left, a wait timed out); a later stall warns again. The
+    flag is shared by all reads of the entry whatever their mark: a second read may warn inside one stall, but a stall
+    is never left unlogged."""
+    waiting = _kept_gallery_waiting(hass, entry_id)
+    if waiting is None:
+        return
+    if not _streak_of(hass, entry_id, waiting, coordinator):
+        _LOGGER.debug("Doorstation %s still waits for a gallery place, but its entry was reloaded or unloaded", number)
+        return
+    if waiting.slow:
+        return
+    waiting.slow = True
+    _LOGGER.warning("Doorstation %s gallery read still waits for a gallery place; the places are busy", number)
+
+
+def _place_granted(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, waited: float, slow_after: float
+) -> None:
+    """A thumbnail or a list read got its place: the refusal streak ends once no read waits any more. A permit handed
+    on while other reads still wait is no sign of free capacity, so the streak goes on. The slow streak ends when the
+    places flow again: a place that came within the read's own slow mark (slow_after), or a queue that is now empty.
+    A grant after a long wait while others still queue belongs to the same stall, and the next one must not warn
+    again. A grant under a replaced instance ends the refusal streak only (see below)."""
+    waiting = _kept_gallery_waiting(hass, entry_id)
+    if waiting is None:
+        return
+    # A place granted to any read, a replaced one included, shows the places are free again once the queue is empty: a
+    # later refusal then starts a new streak (at worst one more line, never a silenced one). _await_gallery_place has
+    # counted this read out already, so a count of 0 means no other read waits. A replaced grant itself leaves the slow
+    # flag alone; an emptied queue still clears it in _await_gallery_place, whatever the coordinator.
+    if waiting.count == 0:
+        waiting.refusing = False
+    if not _is_entry_coordinator(hass, entry_id, coordinator):
+        return
+    if waited < slow_after or waiting.count == 0:
+        waiting.slow = False
 
 
 def forget_gallery_read_slots(hass: HomeAssistant, entry_id: str) -> None:
@@ -274,31 +372,99 @@ _OFFLINE_OR_UNKNOWN = "Doorstation offline or no longer known"
 _TOO_MANY_WAITING = "Too many gallery reads already wait for a place, try again later"
 
 
+def _list_not_read(detail: str) -> BrowseError:
+    """The browse error of a picture list read that did not finish within its budget."""
+    return BrowseError(f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s {detail}")
+
+
+def _log_for_current_entry(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, message: str, *args: object
+) -> None:
+    """Warns about a list read's outcome for the entry's current instance. The outcome of a read of a replaced or
+    unloaded instance is debug-logged: a reload must not blame the active entry for it."""
+    level = logging.WARNING if _is_entry_coordinator(hass, entry_id, coordinator) else logging.DEBUG
+    _LOGGER.log(level, message, *args)
+
+
+def _list_timed_out(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int, *, placed: bool
+) -> BrowseError:
+    """The browse error of a picture list read that ran out its budget, with the log line its cause needs."""
+    if not placed:
+        # The wait for the place ate the budget: a refusal like a thumbnail's, so a stall shows in the log.
+        _refused_for_a_place(
+            hass, entry_id, coordinator, ext_id, f"no place within {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s"
+        )
+        return _list_not_read("(the wait for a gallery place included)")
+    if not doorstation_read_got_its_turn.get():
+        # The place was held, but the read waited for the Doorstation's lock behind other reads: it never reached the
+        # Doorstation, so it does not say that the Doorstation did not answer.
+        _log_for_current_entry(
+            hass,
+            entry_id,
+            coordinator,
+            "Doorstation %s picture list read waited out its %g s behind other reads, with its gallery place",
+            ext_id,
+            DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
+        )
+        return _list_not_read("(the Doorstation was busy with other reads)")
+    # The place was held and the read did not finish: nothing else logs that, so it is logged here.
+    _log_for_current_entry(
+        hass,
+        entry_id,
+        coordinator,
+        "Doorstation %s picture list read timed out after %g s, with its gallery place",
+        ext_id,
+        DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
+    )
+    return _list_not_read("(the Doorstation did not answer in time)")
+
+
 async def _folder_children(
     hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, ext_id: int
 ) -> list[BrowseMediaSource]:
     # The list read takes a gallery place like a thumbnail does: a browse batch must not queue on the Doorstation lock
     # ahead of the camera and the picture entities either. The wait for the place counts into the list's deadline.
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    placed = False
     try:
         async with asyncio.timeout(DOORSTATION_GALLERY_LIST_TIMEOUT_SEC) as deadline:
-            places = await _await_gallery_place(hass, entry_id)
+            places = await _await_gallery_place(
+                hass, entry_id, coordinator, ext_id, DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC
+            )
             if places is None:
+                _refused_for_a_place(hass, entry_id, coordinator, ext_id, "the waiting reads are at the cap")
                 raise BrowseError(_TOO_MANY_WAITING)
+            placed = True
             try:
+                # A list read that gets its place is a place flowing again, as a thumbnail's is (_place_granted).
+                _place_granted(
+                    hass,
+                    entry_id,
+                    coordinator,
+                    waited=loop.time() - started,
+                    slow_after=DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC,
+                )
                 # Offline or unloaded while the place was awaited: no list read takes the Doorstation lock for nothing.
                 if not _still_offered(hass, entry_id, coordinator, ext_id):
                     raise BrowseError(_OFFLINE_OR_UNKNOWN)
+                # An earlier read of this task must not decide for this one (see the timeout branch below).
+                doorstation_read_got_its_turn.set(True)
                 pictures, cause = await coordinator.api.get_doorstation_pictures(ext_id)
             finally:
                 places.release()
     except TimeoutError:
         if not deadline.expired():
             raise
-        raise BrowseError(
-            f"Doorstation pictures not read in {DOORSTATION_GALLERY_LIST_TIMEOUT_SEC:g} s "
-            "(the wait for a gallery place included)"
-        ) from None
+        raise _list_timed_out(hass, entry_id, coordinator, ext_id, placed=placed) from None
     if pictures is None:
+        if cause is not None:
+            # Any failure cause of the list read is only debug-logged by the API (a read that ran out its own budget is
+            # one of them), so the browse logs it here, as the deadline path above does.
+            _log_for_current_entry(
+                hass, entry_id, coordinator, "Doorstation %s picture list not read: %s", ext_id, cause
+            )
         raise BrowseError(f"Doorstation pictures not read: {cause or _SESSION_GONE_CAUSE}")
     newest = newest_first(pictures)[:DOORSTATION_GALLERY_MAX_PICTURES]
     return [_picture_item(hass, entry_id, ext_id, picture) for picture in newest]
@@ -376,21 +542,48 @@ async def async_get_media_source(hass: HomeAssistant) -> DoorstationGallery:  # 
     return DoorstationGallery(hass)
 
 
-async def _read_in_a_gallery_place(
-    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int, name: str
-) -> tuple[bytes | None, str | None]:
-    """One picture read in one of the gallery's places; the wait for a place has its own budget and waiter cap."""
+async def _take_gallery_place(
+    hass: HomeAssistant, entry_id: str, coordinator: ComexioCoordinator, number: int
+) -> asyncio.Semaphore:
+    """Waits for one of the gallery's places, its wait bounded by DOORSTATION_GALLERY_PLACE_WAIT_SEC and the waiter cap.
+    A wait that runs past DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC is logged while it runs; a refusal is answered 503."""
     try:
         async with asyncio.timeout(DOORSTATION_GALLERY_PLACE_WAIT_SEC):
-            places = await _await_gallery_place(hass, entry_id)
+            places = await _await_gallery_place(
+                hass, entry_id, coordinator, number, DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC
+            )
     except TimeoutError:
-        _refused_for_a_place(hass, entry_id, number, f"no place within {DOORSTATION_GALLERY_PLACE_WAIT_SEC:g} s")
+        _refused_for_a_place(
+            hass, entry_id, coordinator, number, f"no place within {DOORSTATION_GALLERY_PLACE_WAIT_SEC:g} s"
+        )
         raise web.HTTPServiceUnavailable from None
     if places is None:
-        _refused_for_a_place(hass, entry_id, number, "the waiting thumbnails are at the cap")
+        _refused_for_a_place(hass, entry_id, coordinator, number, "the waiting thumbnails are at the cap")
         raise web.HTTPServiceUnavailable
-    _gallery_waiting(hass, entry_id).refusing = False
+    return places
+
+
+async def _read_in_a_gallery_place(
+    hass: HomeAssistant,
+    entry_id: str,
+    coordinator: ComexioCoordinator,
+    number: int,
+    name: str,
+) -> tuple[bytes | None, str | None]:
+    """One picture read in one of the gallery's places; the wait for a place has its own budget and waiter cap. A
+    browser that leaves cancels the handler (Home Assistant's server does so), at the wait or at the read, and the
+    place goes back either way (the finally below)."""
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    places = await _take_gallery_place(hass, entry_id, coordinator, number)
     try:
+        _place_granted(
+            hass,
+            entry_id,
+            coordinator,
+            waited=loop.time() - started,
+            slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC,
+        )
         return await _read_within_thumbnail_budget(hass, entry_id, coordinator, number, name)
     finally:
         places.release()
