@@ -881,6 +881,100 @@ async def test_the_end_of_a_replaced_wait_does_not_end_the_check_of_the_new_one(
     assert certificate_in_check(hass, entry) is None  # its own end does
 
 
+async def test_a_replaced_wait_is_kept_until_it_ended(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    """A wait a newer report replaced is recorded while it runs, so a removal can wait for it too."""
+    entry.add_to_hass(hass)
+    with patch.object(auto_module, "CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC", 3600):
+        async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+        await asyncio.sleep(0)
+        state = hass.data[CERTIFICATE_AUTO_ACCEPTS][entry.entry_id]
+        first = state.task
+        hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_HOST: "192.0.2.99"})
+        async_certificate_changed(hass, entry, THIRD, FIRMWARE)
+
+        assert state.superseded == {first}
+        await asyncio.gather(first, return_exceptions=True)
+        await asyncio.sleep(0)  # the done callback runs one turn after the end
+
+        assert first.cancelled()
+        assert state.superseded == set()  # its end takes it out again
+        state.task.cancel()
+        await hass.async_block_till_done()
+
+
+async def test_the_clear_waits_for_a_replaced_wait_still_sending_its_push(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    entry.add_to_hass(hass)
+    order: list[str] = []
+    tag = auto_module._notification_id(entry.entry_id)
+
+    async def phone(call: Any) -> None:
+        if call.data["message"] == "clear_notification":
+            if call.data["data"]["tag"] == tag:
+                order.append("clear")
+            return
+        try:
+            await asyncio.Event().wait()
+        finally:
+            for _ in range(50):  # the cancelled send takes many turns to end: a clear that did not wait is first
+                await asyncio.sleep(0)
+            order.append("send ended")
+
+    hass.services.async_register("notify", PHONE, phone)
+    sending = hass.async_create_task(auto_module._async_tell_user(hass, entry, PINNED, _info(OTHER)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    # The send belongs to a wait a newer one replaced; the newer one has ended.
+    hass.data.setdefault(CERTIFICATE_AUTO_ACCEPTS, {})[entry.entry_id] = auto_module._AutoAccepts(superseded={sending})
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert sending.cancelled()
+    assert order == ["send ended", "clear"]
+
+
+async def test_the_clear_waits_for_the_current_and_a_replaced_wait_both_sending(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> None:
+    """The clear comes after the last of them, not after the first that ended."""
+    entry.add_to_hass(hass)
+    order: list[str] = []
+    tag = auto_module._notification_id(entry.entry_id)
+    turns = iter([(50, "replaced ended"), (5, "current ended")])  # the replaced send is the slow one
+
+    async def phone(call: Any) -> None:
+        if call.data["message"] == "clear_notification":
+            if call.data["data"]["tag"] == tag:
+                order.append("clear")
+            return
+        rounds, label = next(turns)
+        try:
+            await asyncio.Event().wait()
+        finally:
+            for _ in range(rounds):
+                await asyncio.sleep(0)
+            order.append(label)
+
+    hass.services.async_register("notify", PHONE, phone)
+    replaced = hass.async_create_task(auto_module._async_tell_user(hass, entry, PINNED, _info(OTHER)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    current = hass.async_create_task(auto_module._async_tell_user(hass, entry, PINNED, _info(THIRD)))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    accepts = auto_module._AutoAccepts(task=current, superseded={replaced})
+    hass.data.setdefault(CERTIFICATE_AUTO_ACCEPTS, {})[entry.entry_id] = accepts
+
+    await hass.config_entries.async_remove(entry.entry_id)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert replaced.cancelled()
+    assert current.cancelled()
+    assert order == ["current ended", "replaced ended", "clear"]
+
+
 async def test_a_read_of_the_wait_that_shows_another_certificate_is_signalled(
     hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock
 ) -> None:
@@ -1196,7 +1290,7 @@ async def test_a_push_that_never_ends_keeps_the_clear_waiting_only_so_long(
         await asyncio.wait_for(got_the_clear.wait(), timeout=5)
 
     assert len(_clears_of_the_acceptance_push(cleared, entry)) == 1
-    assert "acceptance push still being sent" in caplog.text
+    assert f"acceptance push still being sent 0.05 s after entry {entry.entry_id} was removed (1 waits)" in caplog.text
     assert not sending.done()  # the clear did not wait for it any longer
     stuck.set()
     await asyncio.gather(sending, return_exceptions=True)

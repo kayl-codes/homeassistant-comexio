@@ -100,6 +100,8 @@ class _AutoAccepts:
     certificate) pairs the rule turned down."""
 
     task: asyncio.Task[None] | None = None
+    # Waits replaced by a newer one that have not ended yet: one may still be in its notify call.
+    superseded: set[asyncio.Task[None]] = field(default_factory=set)
     connection: tuple[str, str] | None = None
     seen: str | None = None  # the certificate last seen (a report or a read of the wait): what a failure reports
     refused: set[tuple[str, str]] = field(default_factory=set)
@@ -161,8 +163,10 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
         format_fingerprint(pinned),
         CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC,
     )
-    if state.task is not None:
-        state.task.cancel()  # a no-op for a finished one; a wait for the connection before a reconfigure ends here
+    if (replaced := state.task) is not None and not replaced.done():
+        replaced.cancel()  # a wait for the connection before a reconfigure ends here
+        state.superseded.add(replaced)  # a removal waits for it too, should it be sending its push
+        replaced.add_done_callback(state.superseded.discard)
     state.connection = (host, pinned)
     state.seen = actual
     state.task = hass.async_create_background_task(
@@ -208,9 +212,11 @@ def async_remove_auto_accept(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """
     persistent_notification.async_dismiss(hass, _notification_id(entry.entry_id))
     state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry.entry_id, None)
-    ending = state.task if state is not None else None
-    if ending is not None:
-        ending.cancel()
+    ending: set[asyncio.Task[None]] = set()
+    if state is not None:
+        ending = {task for task in (state.task, *state.superseded) if task is not None and not task.done()}
+    for task in ending:
+        task.cancel()
     pushed: set[str] = hass.data.get(CERTIFICATE_AUTO_ACCEPT_PUSHED, {}).pop(entry.entry_id, set())
     # No push sent and no pin, no rule, no push. A background task: the removal does not wait for a slow notify
     # service, and nothing in it can raise into the removal's cleanup behind it. A task cancelled with Home Assistant
@@ -222,14 +228,15 @@ def async_remove_auto_accept(hass: HomeAssistant, entry: ConfigEntry) -> None:
 
 
 async def _async_clear_push(
-    hass: HomeAssistant, entry: ConfigEntry, pushed: set[str], ending: asyncio.Task[None] | None
+    hass: HomeAssistant, entry: ConfigEntry, pushed: set[str], ending: set[asyncio.Task[None]]
 ) -> None:
     """Take the push of an acceptance off the companion apps it may be on; every failure is logged.
 
-    ending: the cancelled wait of the rule, which may still be in its notify call: the clear waits for it to end.
+    ending: the cancelled waits of the rule (the current one and any it replaced), which may still be in their notify
+    call: the clear waits for them to end.
     """
     try:
-        await _async_wait_for_send(ending)
+        await _async_wait_for_send(entry, ending)
         reached = set(pushed)
         if CONF_CERTIFICATE_FINGERPRINT in entry.data:
             reached |= _phones(entry)
@@ -248,15 +255,18 @@ async def _async_clear_push(
         _LOGGER.exception("Comexio acceptance push clear for entry %s failed", entry.entry_id)
 
 
-async def _async_wait_for_send(ending: asyncio.Task[None] | None) -> None:
-    """Wait (bounded) for the cancelled wait to leave its notify call; a send that outlasts the bound is logged."""
-    if ending is None:
+async def _async_wait_for_send(entry: ConfigEntry, ending: set[asyncio.Task[None]]) -> None:
+    """Wait (bounded) for the cancelled waits to leave their notify call; a send that outlasts the bound is logged."""
+    if not ending:
         return
-    _, pending = await asyncio.wait({ending}, timeout=CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC)
+    _, pending = await asyncio.wait(ending, timeout=CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC)
     if pending:
         _LOGGER.warning(
-            "Comexio acceptance push still being sent %s s after the entry was removed: it may stay on the phone",
+            "Comexio acceptance push still being sent %s s after entry %s was removed (%d waits): it may stay on the "
+            "phone",
             CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC,
+            entry.entry_id,
+            len(pending),
         )
 
 
