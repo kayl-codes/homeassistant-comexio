@@ -931,8 +931,31 @@ async def test_a_folder_list_that_stalls_with_its_place_is_logged_and_told_apart
     ):
         await media_source.async_browse_media(hass, folder)
     coordinator.api.get_doorstation_pictures.assert_awaited()
-    assert any(r.levelname == "WARNING" and "timed out after" in r.getMessage() for r in caplog.records)
+    timeouts = [r for r in caplog.records if r.levelname == "WARNING" and "timed out after" in r.getMessage()]
+    assert len(timeouts) == 1
     assert all("no place within" not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_folder_list_that_times_out_after_a_reload_logs_no_warning_for_the_active_entry(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The read of the instance before a reload runs out its budget after the reload: the browse still fails, but a
+    # warning would blame the active entry for a request it does not own.
+    entry_id = mock_config_entry.entry_id
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _stall_across_a_reload(_ext_id: int) -> None:
+        _make_current(hass, entry_id, copy.copy(coordinator))
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _stall_across_a_reload
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    assert not [r for r in caplog.records if r.levelname == "WARNING" and "timed out after" in r.getMessage()]
 
 
 async def test_a_folder_list_that_waits_for_the_doorstation_lock_is_not_blamed_on_the_doorstation(
@@ -1285,6 +1308,25 @@ async def test_a_grant_of_a_replaced_instance_ends_only_the_refusal_streak(
     assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 3
 
 
+async def test_a_grant_handed_on_while_the_waiting_reads_fill_the_cap_keeps_the_refusal_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Under sustained saturation a permit goes to a queued read while the cap is still full: no capacity came back, so
+    # the refusal streak goes on and a later refusal stays at debug level.
+    entry_id = mock_config_entry.entry_id
+    coordinator = await _setup(hass, mock_config_entry)
+    waiting = _gallery_waiting(hass, entry_id)
+    waiting.count = DOORSTATION_GALLERY_MAX_WAITING_READS
+    _refused_for_a_place(hass, entry_id, coordinator, 2, "first")
+    _place_granted(hass, entry_id, coordinator, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+
+    assert waiting.refusing is True
+    _refused_for_a_place(hass, entry_id, coordinator, 2, "second")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "not answered" in r.getMessage()]
+    assert len(warnings) == 1
+
+
 async def test_a_request_after_the_entry_was_unloaded_changes_no_streak_and_warns_nothing(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -1332,6 +1374,7 @@ async def test_a_cancelled_wait_while_another_still_waits_keeps_the_slow_flag(
     finally:
         first.cancel()
         second.cancel()
+        await asyncio.gather(first, second, return_exceptions=True)
         _release_places(places)
 
 
@@ -1547,6 +1590,7 @@ async def test_a_stall_whose_queue_drains_by_browsers_leaving_is_warned_again_by
     finally:
         for request in queued:
             request.cancel()
+        await asyncio.gather(*queued, return_exceptions=True)
         _release_places(places)
 
     coordinator.api.get_doorstation_picture.assert_not_awaited()
