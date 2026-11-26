@@ -114,7 +114,7 @@ class _LabelMaps(NamedTuple):
     webio: Mapping[str, Any]
     ios: Mapping[str, Any]
     # The KNX and 1-Wire maps (resolve_element_label's keywords): live only, a backup does not capture them.
-    sources: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
+    sources: Mapping[str, Any] = MappingProxyType({})
 
     def label(self, elem: dict, catalog: dict) -> str:
         """The label of one plan element."""
@@ -1472,8 +1472,10 @@ async def _resolve_restore_params(
             return None
         return parsed
     fub_id, plan_name_hint, resolve_err = await _resolve_restore_target(hass, call, coordinator, api)
-    if resolve_err:
-        persistent_notification.async_create(hass, resolve_err, title=_TITLE_RESTORE_ERR)
+    if resolve_err or fub_id is None:
+        persistent_notification.async_create(
+            hass, resolve_err or "The restore target could not be resolved.", title=_TITLE_RESTORE_ERR
+        )
         return None
     kind = str(call.data.get("kind", "auto")).strip().lower()
     slot = int(call.data.get("slot", 0))
@@ -1811,6 +1813,7 @@ async def _fetch_live_plan(api, fub_id: int, as_copy: bool) -> tuple[dict[str, A
     still runs. A copy only needs the version and goes on (it reports its own errors); its
     firmware check then may use the last polled version.
     """
+    error: str | None
     try:
         page = await api.get_raw_config()
     except (aiohttp.ClientError, TimeoutError, ComexioConnectionError) as err:
@@ -2009,6 +2012,19 @@ def _refuse_copy_options(
     return False
 
 
+async def _resolve_restore_identity(
+    hass: HomeAssistant, coordinator: ComexioCoordinator, fub_id: int, plan_name_hint: str | None
+) -> str | None:
+    """The plan name a restore acts on, or None when the identity is ambiguous (the reason is notified)."""
+    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
+    if identity_err or plan_name is None:
+        persistent_notification.async_create(
+            hass, identity_err or f"No plan identity for fub {fub_id}.", title=_TITLE_RESTORE_ERR
+        )
+        return None
+    return plan_name
+
+
 async def _run_function_plan_restore(
     hass: HomeAssistant, call: ServiceCall, coordinator: ComexioCoordinator, api, plan_hash
 ) -> None:
@@ -2018,9 +2034,8 @@ async def _run_function_plan_restore(
         return
     fub_id, kind, slot, plan_name_hint = resolved
 
-    plan_name, identity_err = await _resolve_backup_identity(coordinator, fub_id, plan_name_hint)
-    if identity_err:
-        persistent_notification.async_create(hass, identity_err, title=_TITLE_RESTORE_ERR)
+    plan_name = await _resolve_restore_identity(hass, coordinator, fub_id, plan_name_hint)
+    if plan_name is None:
         return
 
     on_conflict = str(call.data.get("on_conflict", "new_id")).strip().lower()

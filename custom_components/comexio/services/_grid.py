@@ -611,7 +611,8 @@ def _io_ref_positions(
         if str(ref.get("type")) != "1":
             continue
         try:
-            slot = ref_slots.get(int(ref.get("ref_id")))
+            ref_id = ref.get("ref_id")
+            slot = None if ref_id is None else ref_slots.get(int(ref_id))
         except (TypeError, ValueError):
             slot = None
         if slot:

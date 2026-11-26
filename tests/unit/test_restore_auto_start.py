@@ -105,3 +105,32 @@ def test_restore_in_place_gets_the_callers_auto_start(auto_start: bool) -> None:
             )
         )
     assert in_place.await_args.kwargs["auto_start"] is auto_start
+
+
+def test_a_restore_with_an_ambiguous_plan_identity_notifies_and_writes_nothing() -> None:
+    """The identity error of the restore (no stored backups, or an ambiguous plan) is notified and stops the run."""
+    api = SimpleNamespace(login=AsyncMock(return_value=True), get_raw_config=AsyncMock())
+    call = SimpleNamespace(data={"confirm": True, "auto_start": True})
+    identity_error = "No stored backups for plan 42."
+    with (
+        patch.object(backup, "_resolve_restore_params", AsyncMock(return_value=(42, "auto", 0, None))),
+        patch.object(backup, "_resolve_backup_identity", AsyncMock(return_value=(None, identity_error))),
+        patch.object(backup, "_resolve_restore_snapshot", AsyncMock()) as snapshot,
+        patch.object(backup, "_refresh_service_descriptions", AsyncMock()),
+        patch.object(backup, "_restore_plan_in_place", AsyncMock()) as in_place,
+        patch.object(backup.persistent_notification, "async_create") as notify,
+    ):
+        asyncio.run(
+            backup._run_function_plan_restore(
+                MagicMock(),
+                call,
+                SimpleNamespace(server_id="iosrv1", vanished_restore_running=lambda *_: False),
+                api,
+                None,
+            )
+        )
+    notify.assert_called_once()
+    assert notify.call_args.args[1] == identity_error
+    assert notify.call_args.kwargs["title"] == backup._TITLE_RESTORE_ERR
+    snapshot.assert_not_awaited()
+    in_place.assert_not_awaited()

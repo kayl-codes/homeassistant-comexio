@@ -133,6 +133,8 @@ def _normalize_ignored_ids(raw_input: str | None, prefix_chars: str = "Mm", cate
 def normalize_ignore_lists(user_input: dict, categories: Iterable[SourceCategory], errors: dict[str, str]) -> None:
     """Normalize the ignore-list of every category in user_input in place; a field error for each invalid one."""
     for cat in categories:
+        if cat.ignored_conf_key is None:  # every caller passes only categories with an ignore list
+            continue
         try:
             ignored_raw = user_input.get(cat.ignored_conf_key, "").strip()
             prefix_chars = cat.audit_key_prefix + cat.audit_key_prefix.lower()
@@ -581,6 +583,8 @@ class ComexioOptionsFlow(config_entries.OptionsFlow):
             {**self._config_entry.options, **user_input}, self._config_entry.data
         )
         for cat in ignore_list_categories():
+            if cat.ignored_conf_key is None:
+                continue
             if not merged_options.get(cat.ignored_conf_key, "").strip():
                 merged_options.pop(cat.ignored_conf_key, None)
         return self.async_create_entry(title="", data=merged_options)
