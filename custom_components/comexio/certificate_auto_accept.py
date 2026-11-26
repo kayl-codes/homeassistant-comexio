@@ -215,7 +215,7 @@ async def _async_decide(
     hass: HomeAssistant, entry: ConfigEntry, state: _AutoAccepts, host: str, pinned: str, seen: str
 ) -> None:
     try:
-        info, last = await _async_settled_certificate(hass, entry.entry_id, host, seen, state)
+        info, last = await _async_settled_certificate(hass, entry, host, pinned, seen, state)
     except (ComexioError, ValueError) as err:
         _LOGGER.warning("Comexio at %s: the new certificate could not be read again (%s); the repair asks", host, err)
         _report_if_current(hass, entry, host, pinned, state.seen or seen)
@@ -292,12 +292,17 @@ def _left_to_open_repair(hass: HomeAssistant, entry: ConfigEntry, host: str, act
 
 
 async def _async_settled_certificate(
-    hass: HomeAssistant, entry_id: str, host: str, seen: str, state: _AutoAccepts
+    hass: HomeAssistant, entry: ConfigEntry, host: str, pinned: str, seen: str, state: _AutoAccepts
 ) -> tuple[CertificateInfo | None, str]:
     """The certificate once it stayed the same for the settle time (None when it kept changing), and the
-    fingerprint read last."""
+    fingerprint read last.
+
+    Ends without a read once the entry no longer has this host and pin (reconfigured, disabled, removed): the old
+    endpoint gets no further handshake, and the caller finds the entry changed."""
     for _ in range(CERTIFICATE_AUTO_ACCEPT_MAX_READS):
         await asyncio.sleep(CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC)
+        if not _still_current(hass, entry, host, pinned):
+            return None, seen
         info = await fetch_certificate(host)
         # The read must match the last read and the newest seen (a report of the wait included): another certificate
         # reported meanwhile restarts the interval, whichever one the read then shows.
@@ -305,7 +310,7 @@ async def _async_settled_certificate(
         changed = info.fingerprint != state.seen
         seen = state.seen = info.fingerprint  # a later failure reports the newest one, not the first
         if changed:
-            async_dispatcher_send(hass, certificate_check_signal(entry_id))  # the connection sensor shows it
+            async_dispatcher_send(hass, certificate_check_signal(entry.entry_id))  # the connection sensor shows it
         if unchanged:
             return info, seen
     return None, seen

@@ -539,7 +539,9 @@ async def test_a_certificate_reported_during_the_wait_restarts_the_settle_interv
     with (
         patch.object(auto_module, "CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC", settle_sec),
         patch.object(
-            auto_module, "asyncio", SimpleNamespace(sleep=recording_sleep, Task=asyncio.Task)
+            auto_module,
+            "asyncio",
+            SimpleNamespace(sleep=recording_sleep, Task=asyncio.Task, current_task=asyncio.current_task),
         ),  # this module only
     ):
         await _changed(hass, entry, OTHER)
@@ -548,6 +550,44 @@ async def test_a_certificate_reported_during_the_wait_restarts_the_settle_interv
     # The settle interval is waited before every read: the second read after the report is not made at once.
     assert slept.count(settle_sec) == 2
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == shown
+
+
+async def _move_host(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_HOST: "192.0.2.99"})
+
+
+async def _disable(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    await hass.config_entries.async_set_disabled_by(entry.entry_id, ConfigEntryDisabler.USER)
+
+
+async def _move_pin(hass: HomeAssistant, entry: MockConfigEntry) -> None:
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_FINGERPRINT: THIRD})
+
+
+@pytest.mark.parametrize("change", [_move_host, _disable, _move_pin], ids=["host", "disabled", "pin"])
+async def test_an_entry_changed_during_the_settle_wait_makes_no_read_of_the_old_host(
+    hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock, change: Any
+) -> None:
+    entry.add_to_hass(hass)
+    slept: list[float] = []
+
+    async def changed_while_sleeping(delay: float, *_args: Any) -> None:
+        slept.append(delay)
+        await change(hass, entry)
+
+    with patch.object(
+        auto_module,
+        "asyncio",
+        SimpleNamespace(sleep=changed_while_sleeping, Task=asyncio.Task, current_task=asyncio.current_task),
+    ):  # this module only
+        await _changed(hass, entry, OTHER)
+
+    assert len(slept) == 1  # the rule started and reached the wait; it ended there
+    reads.assert_not_awaited()  # the old endpoint gets no handshake once the entry moved on
+    accept_read.assert_not_awaited()
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] != OTHER  # nothing pinned by the rule
+    assert _issue(hass, entry) is None  # the new connection decides on its own
+    assert certificate_in_check(hass, entry) is None  # the check ended with the wait
 
 
 async def test_an_entry_disabled_during_the_wait_pins_nothing(
