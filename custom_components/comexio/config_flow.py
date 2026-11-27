@@ -514,9 +514,12 @@ class ComexioConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
     def _show_reconfigure_form(self, conf, errors: dict[str, str]):
         """The reconfigure form, prefilled from conf: the entry, or after an error what the user entered."""
+        # HA 2026.10 types data_schema as probatio.Schema; this form is built with voluptuous
+        # (a type mismatch only). No suggested values are set on it, so the probatio-only branch
+        # of add_suggested_values_to_schema is never reached. Drop the ignore with that switch.
         return self.async_show_form(
             step_id="reconfigure",
-            data_schema=vol.Schema(
+            data_schema=vol.Schema(  # type: ignore[arg-type]
                 {
                     vol.Required(CONF_HOST, default=conf.get(CONF_HOST, DEFAULT_HOST)): str,
                     vol.Required(CONF_USERNAME, default=conf.get(CONF_USERNAME, "admin")): str,

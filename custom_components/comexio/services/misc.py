@@ -369,7 +369,8 @@ async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: Servic
         return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
     coordinator, _api, _fub_id = ctx
 
-    raw_minutes = call.data.get("minutes")
+    # Untyped service input: a missing value (None) is turned away by the TypeError branch below.
+    raw_minutes: Any = call.data.get("minutes")
     try:
         minutes = int(raw_minutes)
     except (TypeError, ValueError):

@@ -87,23 +87,23 @@ _LOGGER = logging.getLogger(__name__)
 # (service name, handler, supports_response) — data-driven so async_setup_services stays a
 # flat loop instead of one "if not has_service: register(...)" block per service (that grew
 # past the cognitive-complexity budget once the service count reached the mid-teens).
-_SIMPLE_SERVICES: tuple[tuple[str, Any, SupportsResponse | None], ...] = (
+_SIMPLE_SERVICES: tuple[tuple[str, Any, SupportsResponse], ...] = (
     ("set_value", _handle_set_value, SupportsResponse.OPTIONAL),
-    ("generate_web_io", handle_generate_web_io, None),
+    ("generate_web_io", handle_generate_web_io, SupportsResponse.NONE),
     ("marker_delete", handle_marker_delete, SupportsResponse.OPTIONAL),
-    (_SVC_CONNECT, handle_function_plan_connect, None),
+    (_SVC_CONNECT, handle_function_plan_connect, SupportsResponse.NONE),
     (_SVC_VISUALIZE, handle_function_plan_visualize, SupportsResponse.OPTIONAL),
     (_SVC_ANALYZE, _handle_function_plan_analyze, SupportsResponse.OPTIONAL),
     (_SVC_FLOW_DIAGRAM, _handle_function_plan_flow_diagram, SupportsResponse.OPTIONAL),
-    (_SVC_SORT, handle_function_plan_sort, None),
-    (_SVC_STOP, handle_function_plan_stop, None),
-    (_SVC_ACTIVATE, handle_function_plan_activate, None),
-    ("function_plan_restore", _handle_function_plan_restore, None),
-    ("function_plan_delete_backups", _handle_function_plan_delete_backups, None),
-    ("function_plan_purge_orphaned_backups", _handle_function_plan_purge_orphaned_backups, None),
-    ("function_plan_keep_backups", _handle_function_plan_keep_backups, None),
+    (_SVC_SORT, handle_function_plan_sort, SupportsResponse.NONE),
+    (_SVC_STOP, handle_function_plan_stop, SupportsResponse.NONE),
+    (_SVC_ACTIVATE, handle_function_plan_activate, SupportsResponse.NONE),
+    ("function_plan_restore", _handle_function_plan_restore, SupportsResponse.NONE),
+    ("function_plan_delete_backups", _handle_function_plan_delete_backups, SupportsResponse.NONE),
+    ("function_plan_purge_orphaned_backups", _handle_function_plan_purge_orphaned_backups, SupportsResponse.NONE),
+    ("function_plan_keep_backups", _handle_function_plan_keep_backups, SupportsResponse.NONE),
     ("function_plan_list_backups", _handle_function_plan_list_backups, SupportsResponse.ONLY),
-    ("function_plan_debug_session", _handle_function_plan_debug_session, None),
+    ("function_plan_debug_session", _handle_function_plan_debug_session, SupportsResponse.NONE),
     ("function_plan_preview_extend", _handle_function_plan_preview_extend, SupportsResponse.OPTIONAL),
     ("function_plan_preview_start", _handle_function_plan_preview_start, SupportsResponse.OPTIONAL),
     ("function_plan_preview_stop", _handle_function_plan_preview_stop, SupportsResponse.OPTIONAL),
@@ -115,8 +115,9 @@ async def async_setup_services(hass: HomeAssistant) -> None:
     """Register additional services for the Comexio integration."""
     for name, handler, supports_response in _SIMPLE_SERVICES:
         if not hass.services.has_service(DOMAIN, name):
-            kwargs = {} if supports_response is None else {"supports_response": supports_response}
-            hass.services.async_register(DOMAIN, name, functools.partial(handler, hass), **kwargs)
+            hass.services.async_register(
+                DOMAIN, name, functools.partial(handler, hass), supports_response=supports_response
+            )
 
     await _update_services_yaml_plans(hass)
 
