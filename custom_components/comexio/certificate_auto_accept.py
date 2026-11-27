@@ -103,6 +103,8 @@ class _AutoAccepts:
     task: asyncio.Task[None] | None = None
     # Waits replaced by a newer one that have not ended yet: one may still be in its notify call.
     superseded: set[asyncio.Task[None]] = field(default_factory=set)
+    # Waits that pinned and are sending the acceptance push: a newer report does not cancel them (it cuts the push).
+    telling: set[asyncio.Task[None]] = field(default_factory=set)
     connection: tuple[str, str] | None = None
     seen: str | None = None  # the certificate last seen (a report or a read of the wait): what a failure reports
     refused: set[tuple[str, str]] = field(default_factory=set)
@@ -165,7 +167,8 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
         CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC,
     )
     if (replaced := state.task) is not None and not replaced.done():
-        replaced.cancel()  # a wait for the connection before a reconfigure ends here
+        if replaced not in state.telling:  # a pin made already keeps its push: it is about the certificate accepted
+            replaced.cancel()  # a wait for the connection before a reconfigure ends here
         state.superseded.add(replaced)  # a removal waits for it too, should it be sending its push
         replaced.add_done_callback(state.superseded.discard)
     state.connection = (host, pinned)
@@ -233,7 +236,8 @@ async def _async_clear_push(
 ) -> None:
     """Take the push of an acceptance off the companion apps it may be on; every failure is logged.
 
-    ending: the cancelled waits of the rule (the current one and any it replaced), which may still be in their notify
+    ending: the waits of the rule still running (the current one and any it replaced; a cancelled one or one that
+    already pinned and is sending its push), which may still be in their notify
     call: the clear waits for them to end.
     """
     try:
@@ -344,11 +348,18 @@ async def _async_after_acceptance(
 
     current: the certificate the acceptance read itself, None where it read none."""
     if outcome == ACCEPT_PINNED:
+        # Marked before the first await (nothing in between can cancel it): see _async_start.
+        sending = asyncio.current_task()
+        if sending is not None:
+            state.telling.add(sending)
         try:
             await _async_tell_user(hass, entry, pinned, info)
         except Exception:
             # Pinned already: the log line is all that is left to say it was the rule.
             _LOGGER.exception("Comexio at %s: certificate pinned by the rule, but the push to the user failed", host)
+        finally:
+            if sending is not None:
+                state.telling.discard(sending)
     elif outcome == ACCEPT_UNREACHABLE:
         # Not read again: the repair asks, for the newest certificate seen (a report during the read counts).
         _report_if_current(hass, entry, host, pinned, state.seen or info.fingerprint)

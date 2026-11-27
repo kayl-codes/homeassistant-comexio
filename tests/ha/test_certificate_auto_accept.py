@@ -976,6 +976,72 @@ async def test_the_clear_waits_for_the_current_and_a_replaced_wait_both_sending(
     assert order == ["current ended", "replaced ended", "clear"]
 
 
+async def test_a_wait_replaced_while_it_sends_its_push_keeps_the_push(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    reads: AsyncMock,
+    accept_read: AsyncMock,
+    reload: MagicMock,
+    notification: MagicMock,
+) -> None:
+    # The pin is made and its push is on the way when a second change comes in. Cancelling that wait would cut the push
+    # of a certificate that is accepted already; the push finishes, the new change's wait runs on its own.
+    entry.add_to_hass(hass)
+    sending = asyncio.Event()
+    release = asyncio.Event()
+    outcome: list[str] = []
+    reads_made = iter([_info(OTHER)])
+    hang = asyncio.Event()  # never set: the wait of the second change reads Comexio only after this
+
+    async def read(_host: str) -> CertificateInfo:
+        if (info := next(reads_made, None)) is not None:
+            return info
+        await hang.wait()
+        return _info(THIRD)
+
+    async def phone(call: Any) -> None:
+        if call.data["message"] == "clear_notification":
+            return
+        sending.set()
+        try:
+            await release.wait()
+            outcome.append("push finished")
+        except asyncio.CancelledError:
+            outcome.append("push cancelled")
+            raise
+
+    reads.side_effect = read
+    hass.services.async_register("notify", PHONE, phone)
+    accept_read.return_value = OTHER
+
+    async_certificate_changed(hass, entry, OTHER, FIRMWARE)
+    await asyncio.wait_for(sending.wait(), timeout=5)  # the pin is made and the push is being sent
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    # A setup reads the issuer of the new pin after the acceptance's reload; the rule applies to a second change then.
+    authority = {"fingerprint": OTHER, "issuer": ISSUER, "authority_key_id": AKI}
+    hass.config_entries.async_update_entry(entry, data={**entry.data, CONF_CERTIFICATE_AUTHORITY: authority})
+    state = hass.data[CERTIFICATE_AUTO_ACCEPTS][entry.entry_id]
+    first = state.superseded.copy() or {state.task}
+    assert state.telling == first  # the pinned wait is marked while it sends
+
+    async_certificate_changed(hass, entry, THIRD, FIRMWARE)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    assert not outcome  # the push is still going: not cancelled by the replacement
+    assert first <= state.superseded  # a removal still waits for it
+    second = state.task
+    assert second is not None
+    assert second not in first
+    assert not second.done()  # the second change got a wait of its own
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*first, return_exceptions=True), timeout=5)
+    assert outcome == ["push finished"]
+    assert state.telling == set()  # the end of the push takes it out again
+    second.cancel()  # the wait of the second change, still reading
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+
 async def test_a_read_of_the_wait_that_shows_another_certificate_is_signalled(
     hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock
 ) -> None:
