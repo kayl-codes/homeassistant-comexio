@@ -313,6 +313,39 @@ async def test_a_target_listed_twice_that_one_call_reached_is_not_reported_as_mi
     assert "no acceptance from" not in caplog.text
 
 
+async def test_the_same_service_with_and_without_the_prefix_is_not_reported_as_missing(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    reads: AsyncMock,
+    accept_read: AsyncMock,
+    reload: MagicMock,
+    notification: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [PHONE, f"notify.{PHONE}"]}
+    )
+    calls: list[Any] = []
+
+    async def flaky(call: Any) -> None:
+        if call.data["message"] == "clear_notification":
+            return
+        calls.append(call)
+        if len(calls) == 1:
+            raise HomeAssistantError("companion app down")
+
+    hass.services.async_register("notify", PHONE, flaky)
+    reads.return_value = _info(OTHER)
+    accept_read.return_value = OTHER
+
+    await _changed(hass, entry, OTHER)
+
+    assert len(calls) == 2  # the one service got the push twice: without the prefix first, then with it
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    assert "no acceptance from" not in caplog.text
+
+
 async def test_a_failed_acceptance_read_asks_for_the_newest_certificate_reported_meanwhile(
     hass: HomeAssistant, entry: MockConfigEntry, reads: AsyncMock, accept_read: AsyncMock
 ) -> None:
