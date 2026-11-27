@@ -901,6 +901,7 @@ def test_removing_the_entry_drops_the_webhook_store_even_when_the_saved_config_s
     monkeypatch.setattr(comexio_init, "saved_config_store", lambda *_: store("saved", fails=True))
     monkeypatch.setattr(comexio_init, "webhook_security_store", lambda *_: store("security"))
     monkeypatch.setattr(comexio_init, "plan_preview_store", lambda *_: store("preview"))
+    monkeypatch.setattr(comexio_init, "async_remove_auto_accept", lambda *_: None)
     monkeypatch.setattr(comexio_init, "async_remove_certificate_pushes", lambda *_: None)
     removal = comexio_init.async_remove_entry(MagicMock(), MagicMock(entry_id="e1", data={}))
 
