@@ -532,10 +532,13 @@ class ComexioRepairFlow(RepairsFlow):
         coordinator = self.hass.data[DOMAIN].get(entry_id)
         count = len(coordinator.orphaned_statistics) if coordinator else self.issue_data.get("count", 0)
 
+        # HA 2026.10 types data_schema as probatio.Schema; this form is built with voluptuous
+        # (a type mismatch only). No suggested values are set on it, so the probatio-only branch
+        # of add_suggested_values_to_schema is never reached. Drop the ignore with that switch.
         return self.async_show_form(
             step_id="statistics_cleanup",
             description_placeholders={"count": str(count)},
-            data_schema=vol.Schema(
+            data_schema=vol.Schema(  # type: ignore[arg-type]
                 {
                     vol.Required("action", default=ACTION_FIX): SelectSelector(
                         SelectSelectorConfig(
