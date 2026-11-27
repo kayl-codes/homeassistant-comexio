@@ -371,8 +371,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Set custom update interval from config
     conf = {**entry.data, **entry.options}
     interval = conf.get("scan_interval", 15)
-    # HA has a setter for update_interval; mypy reads the read-only property of its protocol base instead.
-    coordinator.update_interval = timedelta(minutes=interval)  # type: ignore[misc]
+    coordinator.update_interval = timedelta(minutes=interval)
 
     # Seed the KNX DPT catalog from disk before the first refresh below — that first poll is
     # exactly the case api.seed_knx_dpt_catalog exists to protect: a freshly created api

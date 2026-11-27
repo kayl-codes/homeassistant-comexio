@@ -128,8 +128,7 @@ class ComexioExtensionFirmwareUpdate(ComexioFirmwareUpdateBase):
 
     async def async_prepare_to_add_to_hass(self) -> None:
         # The device name carries an "EXT - " tag now; a new install keeps the id HA derived before it.
-        # mypy misses HA's hook here, as in entity.py.
-        await super().async_prepare_to_add_to_hass()  # type: ignore[misc]
+        await super().async_prepare_to_add_to_hass()
         self.entity_id = f"{self.platform.domain}.{extension_firmware_object_id(self.server_id, self._ext_name)}"
 
     @property
