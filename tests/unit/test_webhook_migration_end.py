@@ -385,6 +385,8 @@ def test_removing_the_entry_takes_both_repairs_and_the_restart_notification_away
     shown = MagicMock()
     monkeypatch.setattr(comexio_init, "ir", registry)
     monkeypatch.setattr(comexio_init, "persistent_notification", shown)
+    # A MagicMock hass would turn the auto-accept clear into a task nobody runs: patch the step out here.
+    monkeypatch.setattr(comexio_init, "async_remove_auto_accept", lambda *_: None)
     monkeypatch.setattr(comexio_init, "async_remove_certificate_pushes", lambda *_: None)
     monkeypatch.setattr(comexio_init, "async_remove_legacy_plan_preview", MagicMock(side_effect=_none_coroutine))
     for store in ("saved_config_store", "webhook_security_store", "plan_preview_store"):
@@ -412,6 +414,7 @@ def test_a_failing_cleanup_does_not_keep_the_stores_of_the_removed_entry(monkeyp
 
     monkeypatch.setattr(comexio_init, "ir", MagicMock())
     monkeypatch.setattr(comexio_init, "persistent_notification", MagicMock())
+    monkeypatch.setattr(comexio_init, "async_remove_auto_accept", lambda *_: None)
     monkeypatch.setattr(comexio_init, "async_remove_certificate_pushes", lambda *_: None)
     monkeypatch.setattr(comexio_init, "async_remove_legacy_plan_preview", failing_preview_cleanup)
     for name in ("saved_config_store", "webhook_security_store", "plan_preview_store"):
@@ -436,6 +439,7 @@ def test_a_failing_certificate_push_cleanup_still_drops_the_repairs_and_the_noti
 
     monkeypatch.setattr(comexio_init, "ir", registry)
     monkeypatch.setattr(comexio_init, "persistent_notification", shown)
+    monkeypatch.setattr(comexio_init, "async_remove_auto_accept", lambda *_: None)
     monkeypatch.setattr(comexio_init, "async_remove_certificate_pushes", failing_push_cleanup)
     for name in ("saved_config_store", "webhook_security_store", "plan_preview_store"):
         monkeypatch.setattr(comexio_init, name, lambda *_: MagicMock(async_remove=_none_coroutine))

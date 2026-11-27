@@ -663,7 +663,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry, async_add_e
     platform.async_register_entity_service(
         "press_action",
         {
-            vol.Required("action"): vol.In(
+            # HA 2026.10 types entity-service schema keys as probatio; this integration still builds its
+            # schemas with voluptuous (a type mismatch only, no runtime change). Drop the ignore with that switch.
+            vol.Required("action"): vol.In(  # type: ignore[dict-item]
                 [
                     "full_sync",
                     "update_types",
@@ -1791,7 +1793,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             self.server_id,
             class_name,
             self.coordinator.webio_source_data(),
-            webio_class=cls,
+            webio_class=WebioClass(cls),
             ignored_marker_ids=self.coordinator.ignored_marker_ids,
             ignored_knx_ids=self.coordinator.ignored_knx_ids,
         )
@@ -2436,7 +2438,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         marker_ids: list[int] = []
         errors: list[str] = []
         for k_id in k_ids:
-            marker_id = bridge_marker_by_k_id.get(str(k_id))
+            marker_id: str | int | None = bridge_marker_by_k_id.get(str(k_id))
             if marker_id is None:
                 marker_id = self._knx_bridge_marker_id_by_title(ctx, k_id)
             if marker_id is None:
