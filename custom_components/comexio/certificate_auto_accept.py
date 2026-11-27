@@ -512,7 +512,7 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
     if failed:
         # The certificate stays pinned either way; the persistent notification still tells the user about it.
         _LOGGER.warning(
-            "Comexio acceptance push of entry %s confirmed by %d of %d notify targets; no confirmation from: %s",
+            "Comexio acceptance push of entry %s accepted by %d of %d notify targets; no acceptance from: %s",
             entry.entry_id,
             len(delivered),
             len(set(targets)),

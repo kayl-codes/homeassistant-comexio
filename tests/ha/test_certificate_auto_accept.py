@@ -161,7 +161,7 @@ async def test_a_new_certificate_of_the_pinned_issuer_is_pinned_and_the_user_is_
     assert told[0].data["data"]["push"]["interruption-level"] == "critical"
     assert told[0].data["data"]["tag"] == _acceptance_tag(entry)
     assert "pinned by the rule for the pinned issuer, replacing AA:AA" in caplog.text
-    assert "no confirmation from" not in caplog.text  # a push that reached its phone is not reported as failed
+    assert "no acceptance from" not in caplog.text  # a push the notify service accepted is not reported as failed
 
 
 async def test_the_notification_stays_english_and_the_push_follows_the_system_language(
@@ -236,7 +236,7 @@ async def test_an_acceptance_push_no_phone_gets_is_summed_up_in_the_log(
     await _changed(hass, entry, OTHER)
 
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER  # pinned although the push failed
-    assert f"confirmed by 0 of 1 notify targets; no confirmation from: ['notify.{PHONE}']" in caplog.text
+    assert f"accepted by 0 of 1 notify targets; no acceptance from: ['notify.{PHONE}']" in caplog.text
 
 
 async def test_a_partly_failed_acceptance_push_names_only_the_targets_without_confirmation(
@@ -249,10 +249,20 @@ async def test_a_partly_failed_acceptance_push_names_only_the_targets_without_co
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     entry.add_to_hass(hass)
+    # the broken target twice: the option is a plain list, and the denominator counts each target once
     hass.config_entries.async_update_entry(
-        entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [f"notify.{PHONE}", "notify.mobile_app_broken"]}
+        entry,
+        options={
+            CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [
+                f"notify.{PHONE}",
+                "notify.mobile_app_second",
+                "notify.mobile_app_broken",
+                "notify.mobile_app_broken",
+            ]
+        },
     )
     pushes = async_mock_service(hass, "notify", PHONE)
+    second = async_mock_service(hass, "notify", "mobile_app_second")
 
     async def broken(_call: Any) -> None:
         raise HomeAssistantError("companion app down")
@@ -266,7 +276,8 @@ async def test_a_partly_failed_acceptance_push_names_only_the_targets_without_co
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
     told = [push for push in pushes if push.data["message"] != "clear_notification"]
     assert len(told) == 1  # the working phone got the push
-    assert "confirmed by 1 of 2 notify targets; no confirmation from: ['notify.mobile_app_broken']" in caplog.text
+    assert len([push for push in second if push.data["message"] != "clear_notification"]) == 1  # so did the second
+    assert "accepted by 2 of 3 notify targets; no acceptance from: ['notify.mobile_app_broken']" in caplog.text
 
 
 async def test_a_failed_acceptance_read_asks_for_the_newest_certificate_reported_meanwhile(
