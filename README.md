@@ -278,6 +278,8 @@ Comexio firmware up to 11.1.5 replaces its certificate on its own, again and aga
 
 It is then pinned as the repair would pin it, and you learn it from a notification and, on the notify services set under **Function plan watchdog: push to**, an urgent push (no button: nothing left to decide), both with the old and new fingerprint and the issuer. Compare the new fingerprint with Comexio's admin page anyway; if it differs, reconfigure the entry. If any condition fails, everything runs as described above.
 
+Removing the entry takes the notification off again, and the push too, from the Companion apps it went to since the last start of Home Assistant and, while the entry still has a pinned certificate, from the Companion apps set under **Function plan watchdog: push to**. A notify group, a Companion app no longer registered and a push from before a restart of an entry without a pinned certificate get no removal; that push stays until you swipe it away.
+
 ### Why it works this way
 
 - **A pin instead of a certificate authority:** Comexio signs its certificate itself, so no authority vouches for it. The pinned fingerprint is the only proof that Home Assistant talks to your Comexio and not to a device that took over its address.
@@ -624,6 +626,8 @@ Comexio-Firmware bis 11.1.5 tauscht ihr Zertifikat von selbst aus, immer wieder 
 - **Noch nicht bei dir:** Keine Zertifikats-Reparatur ist offen, und die Regel hat dieses Zertifikat nicht schon einmal abgelehnt.
 
 Es wird dann so gepinnt, wie die Reparatur es pinnen würde, und du erfährst es aus einer Benachrichtigung und, auf den unter **Logikplan-Watchdog: Push an** eingestellten Benachrichtigungsdiensten, einem dringenden Push (ohne Knopf: Es ist nichts mehr zu entscheiden), beide mit altem und neuem Fingerabdruck und dem Aussteller. Vergleiche den neuen Fingerabdruck trotzdem mit der Admin-Seite des Comexio; weicht er ab, konfiguriere den Eintrag neu. Trifft eine Bedingung nicht zu, läuft alles wie oben beschrieben.
+
+Entfernst du den Eintrag, verschwindet die Benachrichtigung wieder, und auch der Push: von den Companion-Apps, an die er seit dem letzten Start von Home Assistant ging, und, solange der Eintrag noch ein gepinntes Zertifikat hat, von den Companion-Apps unter **Logikplan-Watchdog: Push an**. Eine Benachrichtigungsgruppe, eine nicht mehr registrierte Companion-App und ein Push von vor einem Neustart bei einem Eintrag ohne gepinntes Zertifikat bekommen keine Löschung; dieser Push bleibt, bis du ihn wegwischst.
 
 ### Warum es so läuft
 
