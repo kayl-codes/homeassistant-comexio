@@ -33,7 +33,9 @@ from .certificate import (
     ACCEPT_REPAIR_OPEN,
     ACCEPT_UNREACHABLE,
     _async_notify,
+    _is_mobile_app,
     _notify_targets,
+    _phones,
     async_accept_certificate,
     async_clear_certificate_changed,
     async_report_certificate_changed,
@@ -41,6 +43,7 @@ from .certificate import (
     presented_fingerprint,
 )
 from .const import (
+    CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC,
     CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE,
     CERTIFICATE_AUTO_ACCEPT_MAX_READS,
     CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC,
@@ -48,13 +51,19 @@ from .const import (
     CONF_HOST,
     CONF_SERVER_ID,
     DOMAIN,
+    MOBILE_APP_CLEAR_NOTIFICATION,
     certificate_check_signal,
 )
+from .plan_watchdog import NOTIFY_DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
 # hass.data: entry_id -> _AutoAccepts. Not bound to the entry: a setup retry or a reload must not end the wait.
 CERTIFICATE_AUTO_ACCEPTS = f"{DOMAIN}_certificate_auto_accepts"
+# hass.data: entry_id -> the companion apps an acceptance push was sent to this run (set before the send, so a send
+# cancelled in flight is in it too). The removal of the entry clears these, whatever the notify option or the pin
+# is by then.
+CERTIFICATE_AUTO_ACCEPT_PUSHED = f"{DOMAIN}_certificate_auto_accept_pushed"
 # ASCII: \d alone also matches other scripts' digits. Bounded: int() of a digit string beyond Python's conversion limit
 # (4300) raises, and no real firmware component has more than a few digits, nor a version more than a few parts.
 _FIRMWARE_RE = re.compile(r"\d{1,6}(?:\.\d{1,6}){0,7}", re.ASCII)
@@ -92,6 +101,8 @@ class _AutoAccepts:
     certificate) pairs the rule turned down."""
 
     task: asyncio.Task[None] | None = None
+    # Waits replaced by a newer one that have not ended yet: one may still be in its notify call.
+    superseded: set[asyncio.Task[None]] = field(default_factory=set)
     connection: tuple[str, str] | None = None
     seen: str | None = None  # the certificate last seen (a report or a read of the wait): what a failure reports
     refused: set[tuple[str, str]] = field(default_factory=set)
@@ -153,8 +164,10 @@ def _async_start(hass: HomeAssistant, entry: ConfigEntry, actual: str, firmware:
         format_fingerprint(pinned),
         CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC,
     )
-    if state.task is not None:
-        state.task.cancel()  # a no-op for a finished one; a wait for the connection before a reconfigure ends here
+    if (replaced := state.task) is not None and not replaced.done():
+        replaced.cancel()  # a wait for the connection before a reconfigure ends here
+        state.superseded.add(replaced)  # a removal waits for it too, should it be sending its push
+        replaced.add_done_callback(state.superseded.discard)
     state.connection = (host, pinned)
     state.seen = actual
     state.task = hass.async_create_background_task(
@@ -187,12 +200,84 @@ def _why_not(entry: ConfigEntry, firmware: str | None) -> str | None:
     return None
 
 
-def async_remove_auto_accept(hass: HomeAssistant, entry_id: str) -> None:
-    """A removed entry's rule state goes with it; a wait still running is cancelled, its notice dismissed."""
-    persistent_notification.async_dismiss(hass, _notification_id(entry_id))
-    state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry_id, None)
-    if state is not None and state.task is not None:
-        state.task.cancel()
+def async_remove_auto_accept(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """A removed entry's rule state goes with it; a wait still running is cancelled, its notice dismissed.
+
+    The push of an acceptance is taken off the companion apps as well: the ones it was sent to this run (whatever the
+    notify option says by now), and, while the entry is pinned, every companion app of the notify option too, as the
+    certificate push's first clear does (a push may predate the restart; a clear for a tag the app does not show does
+    nothing). A push still being sent when the entry goes is waited for (bounded) before the clear. Limits: a notify
+    group is not cleared (its members need not be companion apps, and any other would show the text of the clear), a
+    failed clear is not retried, and the platform may still deliver a push after the clear (one that outlives the
+    wait, or is already with the push service, may still show).
+    """
+    persistent_notification.async_dismiss(hass, _notification_id(entry.entry_id))
+    state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry.entry_id, None)
+    ending: set[asyncio.Task[None]] = set()
+    if state is not None:
+        ending = {task for task in (state.task, *state.superseded) if task is not None and not task.done()}
+    for task in ending:
+        task.cancel()
+    pushed: set[str] = hass.data.get(CERTIFICATE_AUTO_ACCEPT_PUSHED, {}).pop(entry.entry_id, set())
+    # No push sent and no pin, no rule, no push. A background task: the removal does not wait for a slow notify
+    # service, and nothing in it can raise into the removal's cleanup behind it. A task cancelled with Home Assistant
+    # leaves the push.
+    if pushed or CONF_CERTIFICATE_FINGERPRINT in entry.data:
+        hass.async_create_background_task(
+            _async_clear_push(hass, entry, pushed, ending), f"{DOMAIN} acceptance push clear"
+        )
+
+
+async def _async_clear_push(
+    hass: HomeAssistant, entry: ConfigEntry, pushed: set[str], ending: set[asyncio.Task[None]]
+) -> None:
+    """Take the push of an acceptance off the companion apps it may be on; every failure is logged.
+
+    ending: the cancelled waits of the rule (the current one and any it replaced), which may still be in their notify
+    call: the clear waits for them to end.
+    """
+    try:
+        await _async_wait_for_send(entry, ending)
+        reached = set(pushed)
+        if CONF_CERTIFICATE_FINGERPRINT in entry.data:
+            reached |= _phones(entry)
+        phones = sorted(reached)
+        prefix = f"{NOTIFY_DOMAIN}."
+        registered = [phone for phone in phones if hass.services.has_service(NOTIFY_DOMAIN, phone.removeprefix(prefix))]
+        _log_unreachable(pushed, set(phones).difference(registered))
+        if not registered:
+            return
+        # A companion-app command: any other notify service would deliver it as text.
+        service_data = {"message": MOBILE_APP_CLEAR_NOTIFICATION, "data": {"tag": _notification_id(entry.entry_id)}}
+        _, failed = await _async_notify(hass, service_data, registered, set())
+        if failed:
+            _LOGGER.warning("Comexio acceptance push clear failed for %s: a push already sent may stay", sorted(failed))
+    except Exception:
+        _LOGGER.exception("Comexio acceptance push clear for entry %s failed", entry.entry_id)
+
+
+async def _async_wait_for_send(entry: ConfigEntry, ending: set[asyncio.Task[None]]) -> None:
+    """Wait (bounded) for the cancelled waits to leave their notify call; a send that outlasts the bound is logged."""
+    if not ending:
+        return
+    _, pending = await asyncio.wait(ending, timeout=CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC)
+    if pending:
+        _LOGGER.warning(
+            "Comexio acceptance push still being sent %s s after entry %s was removed (%d waits): it may stay on the "
+            "phone",
+            CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC,
+            entry.entry_id,
+            len(pending),
+        )
+
+
+def _log_unreachable(pushed: set[str], unreachable: set[str]) -> None:
+    """A phone a push went to that cannot be cleared is a warning; one only taken from the notify option is debug."""
+    if lost := sorted(pushed & unreachable):
+        _LOGGER.warning("Comexio acceptance push may stay on %s: not registered when the entry was removed", lost)
+    if rest := sorted(unreachable - pushed):
+        # Debug: nothing says a push ever went there, and the repair push's removal warns already.
+        _LOGGER.debug("Comexio acceptance push clear skipped for %s: not registered", rest)
 
 
 async def _async_run(
@@ -380,6 +465,9 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
         _LOGGER.exception("Comexio at %s: the notice of the accepted certificate could not be created", values["host"])
     if not (targets := _notify_targets(entry)):
         return
+    # Before the send: one cancelled while in flight may have reached a phone already.
+    if phones := {target for target in targets if _is_mobile_app(target)}:
+        hass.data.setdefault(CERTIFICATE_AUTO_ACCEPT_PUSHED, {}).setdefault(entry.entry_id, set()).update(phones)
     texts = AUTO_ACCEPT_TEXTS.get(hass.config.language, english)
     message = texts["message"].format(**values)
     # As urgent as the push asking for the decision: a certificate the user did not see is trusted now. Its own

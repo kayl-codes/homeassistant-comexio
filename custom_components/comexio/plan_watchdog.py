@@ -41,6 +41,7 @@ from .const import (
     FUNCTION_PLAN_WATCHDOG_PUSH_TIMEOUT_SEC,
     FUNCTION_PLAN_WATCHDOG_RESTOP_WINDOW_SEC,
     FUNCTION_PLAN_WATCHDOG_RETRY_MIN_INTERVAL_SEC,
+    MOBILE_APP_CLEAR_NOTIFICATION,
     one_line,
     one_line_values,
 )
@@ -1315,8 +1316,10 @@ class ManagedPlanWatchdog:
                 or (unless_vanished and token is not None and self.vanished_name(token) is not None)
             ):
                 return
-            # A companion-app command: any other notify service would deliver it as the text "clear_notification".
-            await self._async_send({"message": "clear_notification", "data": {"tag": tag}}, mobile_app_only=True)
+            # A companion-app command: any other notify service would deliver it as text.
+            await self._async_send(
+                {"message": MOBILE_APP_CLEAR_NOTIFICATION, "data": {"tag": tag}}, mobile_app_only=True
+            )
             self._actionable_tags.discard(tag)  # a failed clear is logged, not retried (as every clear)
 
     @asynccontextmanager
