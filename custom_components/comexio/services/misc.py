@@ -358,6 +358,26 @@ _PREVIEW_EXTEND_MIN_MINUTES = 1
 _PREVIEW_EXTEND_MAX_MINUTES = 1440  # 24h — the longest window a user asked to watch for
 
 
+def _whole_minutes(raw: Any) -> int | None:
+    """The minutes of an `/extend` call as a whole number, or None when the value is not one.
+
+    `int()` alone turns 1.9 into 1 and True into 1. A number is therefore taken only when it has no fraction and is
+    not a bool; a string is read with `int()` as before, so "15" works and "1.9" does not.
+    """
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw) if raw.is_integer() else None
+    if isinstance(raw, str):
+        try:
+            return int(raw)
+        except ValueError:
+            return None
+    return None
+
+
 async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: ServiceCall) -> dict:
     """Extend the currently armed preview's Stufe-2 auto-stop window (debug box `/extend <n>`).
 
@@ -369,11 +389,10 @@ async def _handle_function_plan_preview_extend(hass: HomeAssistant, call: Servic
         return {"success": False, "error": _INSTANCE_NOT_RESOLVED_ERR}
     coordinator, _api, _fub_id = ctx
 
-    # Untyped service input: a missing value (None) is turned away by the TypeError branch below.
+    # Untyped service input: anything that is not a whole number (a missing value included) is turned away below.
     raw_minutes: Any = call.data.get("minutes")
-    try:
-        minutes = int(raw_minutes)
-    except (TypeError, ValueError):
+    minutes = _whole_minutes(raw_minutes)
+    if minutes is None:
         error = f"Invalid minutes value '{raw_minutes}' — expected a whole number."
         _LOGGER.info("Function Plan Preview Extend: minutes='%s' error='%s'", raw_minutes, error)
         return {"success": False, "error": error}
