@@ -818,7 +818,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
         start_time = datetime.datetime.now()
         api = self.coordinator.api
         webio_name = self.coordinator.config_entry.data.get("webio_name", "HomeAssistant")
-        class_names = {cls: webio_class_name(webio_name, cls) for cls in WEBIO_CLASSES}
+        class_names: dict[str, str] = {cls: webio_class_name(webio_name, cls) for cls in WEBIO_CLASSES}
         ctx: _SyncContext | None = None
 
         try:
@@ -866,7 +866,7 @@ class ComexioSyncButton(CoordinatorEntity[ComexioCoordinator], ButtonEntity):
             bad_plan_keys = unreadable_plan_keys(api.fub_data)
             audit_data = _plan_audit_for_action(action, bad_plan_keys, audit_data)
             gap_items = _gap_items_for_action(action, audit_data.get("function_plan_missing", []))
-            cleanup_entity_ids: list[tuple[str, int]] = audit_data.get("cleanup_entities", [])
+            cleanup_entity_ids: list[tuple[str, int] | int] = audit_data.get("cleanup_entities", [])
 
             if action == "cleanup_entities":
                 # Standalone action: remove HA entities + Function Plan wiring + WebIO commands

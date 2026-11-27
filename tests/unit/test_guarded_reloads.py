@@ -42,6 +42,7 @@ ALLOWED = {
         "runs under _sync_lock, which the guard would wait for forever",
     ),
     ("certificate.py", "async_accept_certificate"): (2, "only an entry that is not loaded"),
+    ("certificate_auto_accept.py", "_async_decide"): (1, "only an entry that is not loaded (pinned certificate back)"),
     ("switch.py", "ComexioPlanAutoStartSwitch.is_on"): (1, "no reload: getattr reads the plan watchdog flag"),
 }
 

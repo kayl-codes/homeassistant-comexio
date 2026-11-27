@@ -447,6 +447,7 @@ class ComexioDoorstationCamera(ComexioStableEntityIdMixin, CoordinatorEntity[Com
             # await since the `_is_current` check above: the camera is still the one that was asked).
             if self._streams_open:
                 return None
+            error: str | None
             if address is None:
                 if not lookup_timed_out:
                     return None

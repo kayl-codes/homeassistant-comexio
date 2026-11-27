@@ -69,6 +69,26 @@ CONF_CERTIFICATE_FINGERPRINT = "certificate_fingerprint"
 # When that fingerprint was pinned (ISO 8601, UTC), written with it by certificate.pin_data. Absent on
 # entries pinned before it was recorded; the connection sensor then shows no date.
 CONF_CERTIFICATE_PINNED_AT = "certificate_pinned_at"
+# Issuer (RFC 4514) and authority key identifier (lowercase hex) of a pinned certificate, with the fingerprint they
+# were read from: {"fingerprint", "issuer", "authority_key_id"}. Learned at a setup whose handshake presents the pin
+# (certificate.async_learn_pin_authority). They count only while that fingerprint is still the pin, so a new pin
+# never inherits the old one's. A certificate change with the same pair may be taken over by the rule of
+# certificate_auto_accept.py; otherwise the user decides.
+CONF_CERTIFICATE_AUTHORITY = "certificate_authority"
+# Comexio firmware up to this version replaces its certificate on its own (#294); only there is a new certificate
+# of the pinned one's issuer and authority key identifier taken over without asking. A newer or unknown firmware
+# keeps the repair.
+CERTIFICATE_AUTO_ACCEPT_MAX_FIRMWARE = (11, 1, 5)
+# How long a new certificate must stay the same before the rule takes it over: a certificate that changes again
+# meanwhile starts the wait afresh, at most CERTIFICATE_AUTO_ACCEPT_MAX_READS reads, then the user decides.
+CERTIFICATE_AUTO_ACCEPT_SETTLE_SEC = 60
+CERTIFICATE_AUTO_ACCEPT_MAX_READS = 3
+# How long the clear of an acceptance push, after the removal of its entry, waits for a push still being sent to end
+# (the removal cancels it), so the clear does not overtake it.
+CERTIFICATE_AUTO_ACCEPT_CLEAR_WAIT_SEC = 5
+# The companion-app command that takes a push (by its tag) off the phone; any other notify service would deliver it as
+# this text, so it goes to mobile_app services only.
+MOBILE_APP_CLEAR_NOTIFICATION = "clear_notification"
 # How often the certificate expiry sensor reads the validity period of the certificate Comexio presents
 # (a bare TLS handshake, no request); Comexio renews its certificate on its own schedule, not by the hour.
 CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC = 24 * 3600
@@ -334,6 +354,12 @@ DOORSTATION_GALLERY_PLACE_HOLD_SEC = max(
     DOORSTATION_GALLERY_THUMBNAIL_TIMEOUT_SEC, DOORSTATION_GALLERY_LIST_TIMEOUT_SEC
 )
 DOORSTATION_GALLERY_PLACE_WAIT_SEC = (DOORSTATION_GALLERY_MAX_WAITING_READS + 1) * DOORSTATION_GALLERY_PLACE_HOLD_SEC
+# A thumbnail still waiting for its gallery place after this long is logged once, while the wait runs: a stall is then
+# visible before the wait ends, not only at the refusal. The wait itself is DOORSTATION_GALLERY_PLACE_WAIT_SEC. A guess.
+DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC = 60.0
+# The same for a folder list, which has DOORSTATION_GALLERY_LIST_TIMEOUT_SEC in all: its mark must lie below that, or
+# the warning could never come before the list gives up. A guess, like the mark above.
+DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC = 10.0
 # How long a thumbnail link stays valid: it is signed for the connection that browses, and the browser loads the
 # thumbnails of a folder in that time.
 DOORSTATION_GALLERY_LINK_EXPIRY_SEC = 3600
@@ -1126,6 +1152,11 @@ def bus_load_signal(server_id: str) -> str:
     return f"{DOMAIN}_{server_id}_bus_load_update"
 
 
+def certificate_check_signal(entry_id: str) -> str:
+    """Dispatcher signal fired when the rule's check of a changed certificate (#294) starts, sees another or ends."""
+    return f"{DOMAIN}_{entry_id}_certificate_check"
+
+
 # Function plan run states (running / stopped), asked for all plans in one dashboard/refresh
 # request (~90 ms for 26 plans, measured live 2026-10-01). A plan started or stopped in Comexio
 # Studio sends no webhook, so the state is polled:
@@ -1465,10 +1496,10 @@ def function_plans(fub_data: Mapping[str, Any]) -> Iterator[tuple[int, dict[str,
             yield fub_id, info
 
 
-def function_plan_info(fub_data: Mapping[str, Any], fub_id: int | str) -> dict[str, Any]:
+def function_plan_info(fub_data: Mapping[Any, Any], fub_id: int | str) -> dict[str, Any]:
     """The $Fubs info of plan fub_id, {} when it is not listed or its entry is unreadable."""
     key = str(fub_id)
-    info = fub_data.get(key)
+    info: Any = fub_data.get(key)
     if info is None and (plan_id := function_plan_id(key)) is not None:
         info = fub_data.get(plan_id)  # a listing keyed by int, which function_plan_id accepts as well
     return info if _readable_plan_entry_id(key, info) is not None else {}

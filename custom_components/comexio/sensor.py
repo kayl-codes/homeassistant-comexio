@@ -2,7 +2,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import logging
-from typing import Any
+from typing import Any, SupportsFloat, cast
 
 from aiocomexio import ComexioError, fetch_certificate, format_fingerprint
 from homeassistant.components.sensor import (
@@ -36,6 +36,7 @@ from .certificate import (
     connection_state,
     presented_fingerprint,
 )
+from .certificate_auto_accept import certificate_in_check
 from .const import (
     CERTIFICATE_EXPIRY_CHECK_INTERVAL_SEC,
     CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX,
@@ -60,6 +61,7 @@ from .const import (
     SYNC_STATES,
     MarkerKind,
     bus_load_signal,
+    certificate_check_signal,
     function_plan_ids,
     function_plan_info,
     function_plan_run_state_unique_id,
@@ -268,7 +270,11 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
         self._attr_native_unit_of_measurement = unit
         device_class = _io_device_class(unit, str(io.get("identifier", "")))
         self._attr_device_class = device_class
-        self._attr_state_class = DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
+        self._attr_state_class = (
+            SensorStateClass.MEASUREMENT
+            if device_class is None
+            else DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
+        )
 
     @property
     def state_class(self) -> SensorStateClass | None:
@@ -313,7 +319,7 @@ class ComexioOneWireSensor(ComexioOneWireEntity, RestoreSensor):
         if last is None or last.native_value is None:
             return
         try:
-            value = float(last.native_value)
+            value = float(cast("SupportsFloat | str", last.native_value))  # a date or other type raises, as before
         except (TypeError, ValueError):
             _LOGGER.debug("%s: last state %r is no reading, not restored", self.entity_id, last.native_value)
             return
@@ -748,12 +754,13 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
     certificate, which is just when an automation wants to see it. A setup that meets a changed certificate
     loads the entry read only from the saved config (#250), so the sensor shows it after a restart too; only
     without a saved config the entry does not load, the sensor is unavailable and the repair alone remains.
-    Follows the certificate_changed repair through the issue registry; a new pin changes the entry data,
-    which reloads the entry and so this sensor.
+    Follows the certificate_changed repair through the issue registry, and the rule's check of a changed
+    certificate (#294) through its dispatcher signal: HA sends nothing to Comexio during that check either, so it
+    shows certificate_changed too. A new pin changes the entry data, which reloads the entry and so this sensor.
     The fingerprints are public certificate hashes, kept out of the recorder only because they never
     change between states. pinned_at is when the pin was written (None for a pin from before it was
     recorded); HA's own "last changed" restarts with every restart and so cannot tell. The presented
-    fingerprint is there only while the repair is open.
+    fingerprint is there only while the repair is open or the rule checks a certificate.
     """
 
     _attr_has_entity_name = True
@@ -774,7 +781,15 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
 
     @property
     def native_value(self) -> str:
-        return connection_state(self.hass, self.coordinator.config_entry)
+        state = connection_state(self.hass, self.coordinator.config_entry)
+        if state == CONNECTION_HTTP or self._presented() is None:
+            return state
+        return CONNECTION_CERTIFICATE_CHANGED
+
+    def _presented(self) -> str | None:
+        """The certificate Comexio presents instead of the pin: the repair's, else the one the rule checks."""
+        entry = self.coordinator.config_entry
+        return presented_fingerprint(self.hass, entry.entry_id) or certificate_in_check(self.hass, entry)
 
     @property
     def icon(self) -> str:
@@ -791,7 +806,7 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
             ATTR_PINNED_FINGERPRINT: format_fingerprint(pinned) if pinned is not None else None,
             ATTR_PINNED_AT: entry.data.get(CONF_CERTIFICATE_PINNED_AT) if pinned is not None else None,
         }
-        if (presented := presented_fingerprint(self.hass, entry.entry_id)) is not None:
+        if (presented := self._presented()) is not None:
             attributes[ATTR_PRESENTED_FINGERPRINT] = format_fingerprint(presented)
         return attributes
 
@@ -809,6 +824,13 @@ class ComexioConnectionSensor(ComexioStableEntityIdMixin, SensorEntity):
         self.async_on_remove(
             self.hass.bus.async_listen(
                 ir.EVENT_REPAIRS_ISSUE_REGISTRY_UPDATED, _issue_updated, event_filter=_is_this_issue
+            )
+        )
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                certificate_check_signal(self.coordinator.config_entry.entry_id),
+                self.async_write_ha_state,
             )
         )
 
@@ -1230,7 +1252,10 @@ class ComexioFunctionPlanRunStateSensor(
 
     @property
     def icon(self) -> str:
-        return _PLAN_RUN_STATE_ICONS.get(self.native_value, "mdi:help-circle-outline")
+        state = self.native_value
+        if state is None:
+            return "mdi:help-circle-outline"
+        return _PLAN_RUN_STATE_ICONS.get(state, "mdi:help-circle-outline")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -50,7 +50,8 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util, slugify
 
 from .api import SYSTEM_INFO_CERTIFICATE_CHANGED, ComexioAPI, SystemInfoReading
-from .certificate import async_clear_certificate_changed, async_report_certificate_changed
+from .certificate import async_clear_certificate_changed
+from .certificate_auto_accept import async_certificate_changed
 from .cleanup_scope import (
     CLEANUP_SCOPE_FULL,
     CLEANUP_SCOPE_KNX,
@@ -805,6 +806,12 @@ _SAVED_CONFIG_LIST_KEYS = tuple(_SAVED_CONFIG_ITEM_KEYS)
 _SAVED_CONFIG_OPTIONAL_LIST_KEYS = frozenset({ONEWIRE_DATA_KEY})
 _SAVED_CONFIG_DICT_KEYS = ("webio_commands", "webio_names", "webio_devices", "extensions")
 _SAVED_QUICKBUS_DEVICE_KEYS = frozenset({"device_id", "name"})
+
+
+# Key of Comexio's firmware version in the saved config (see coordinator.known_firmware), and of the host it was
+# read from: after a reconfigure to another Comexio it says nothing about that one.
+SAVED_FIRMWARE_KEY = "comexio_version"
+SAVED_FIRMWARE_HOST_KEY = "comexio_version_host"
 
 
 def saved_config_store(hass: HomeAssistant, entry_id: str) -> Store:
@@ -1669,6 +1676,9 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._saved_config_store = saved_config_store(hass, entry.entry_id)
         self._saved_config: dict[str, Any] | None = None
         self._scraped_config: Mapping[str, Any] | None = None
+        # Comexio's firmware version as the saved config holds it, for a setup that meets another certificate
+        # before any poll (see known_firmware).
+        self._saved_firmware: str | None = None
         self.started_from_saved_config = False
         self._full_setup_due = False
         # True from the seed of a setup that found no saved config at all (an entry that never had a scraped poll)
@@ -5840,6 +5850,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._scraped_config is None:
             return
         saved, self._scraped_config = saved_config(self._scraped_config), None
+        # The firmware too: the certificate rule of #294 needs it at a setup that meets another certificate. A poll
+        # that read none keeps the one saved before.
+        if isinstance(firmware := self.known_firmware, str):
+            saved[SAVED_FIRMWARE_KEY] = firmware
+            saved[SAVED_FIRMWARE_HOST_KEY] = self.config_entry.data.get(CONF_HOST)
         if saved == self._saved_config:
             return
         await self._saved_config_store.async_save(saved)
@@ -5878,6 +5893,11 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not is_saved_config(stored):
             _LOGGER.warning(ONEWIRE_SAVED_CONFIG_UNREADABLE_LOG_MSG, self.server_id, "not a saved config")
             return
+        # Only the firmware read from this entry's host counts (a reconfigure may have pointed it at another one).
+        if isinstance(firmware := stored.get(SAVED_FIRMWARE_KEY), str) and stored.get(
+            SAVED_FIRMWARE_HOST_KEY
+        ) == self.config_entry.data.get(CONF_HOST):
+            self._saved_firmware = firmware
         self.api.seed_onewire_items(stored.get(ONEWIRE_DATA_KEY, []))
 
     async def async_start_from_saved_config(self) -> bool:
@@ -7530,8 +7550,18 @@ class ComexioCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return self._vanished_user_plans()
 
     def _report_certificate_changed(self, actual: str) -> None:
-        """Comexio presents `actual` instead of the pinned certificate: raise the certificate_changed repair."""
-        async_report_certificate_changed(self.hass, self.config_entry, actual)
+        """Comexio presents `actual` instead of the pinned certificate: the rule of #294 or the repair decides."""
+        async_certificate_changed(self.hass, self.config_entry, actual, self.known_firmware)
+
+    @property
+    def known_firmware(self) -> str | None:
+        """Comexio's firmware version: from this run's polls, else as the last scraped poll saved it, else None.
+
+        None once the entry points to another host than the API was built for: what it read belongs to the old one.
+        """
+        if self.api.host != self.config_entry.data.get(CONF_HOST):
+            return None
+        return self.api.comexio_version or self._saved_firmware
 
     def _clear_certificate_changed(self) -> None:
         """A poll got through with the pinned certificate: drop the repair, whoever raised it."""

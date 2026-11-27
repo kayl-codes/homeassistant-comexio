@@ -257,7 +257,7 @@ When Comexio serves HTTPS, the integration connects encrypted and pins Comexio's
 
 ### When the certificate changes
 
-A certificate other than the pinned one is never accepted on its own — for example after Comexio generated a new one. What happens then:
+A certificate other than the pinned one is accepted on its own only under the rule for firmware that replaces its certificate itself (next section). Otherwise — for example after Comexio generated a new one with another issuer — what happens is:
 
 1. **Nothing more goes to Comexio** — no login, no write — until you decide. While Home Assistant runs, the entities keep their last values and Comexio's webhook pushes keep updating them; switching or setting a value fails with a note about the certificate. After a restart the integration sets up from the config Comexio last sent: the entities stay but show unknown until Comexio pushes a value, and the plan, bus load, system and firmware checks wait until the certificate is accepted. Only without such a saved config (it is written at every successful poll) does the integration not load.
 2. **A repair shows both fingerprints**, the pinned and the new one.
@@ -267,18 +267,29 @@ A certificate other than the pinned one is never accepted on its own — for exa
 
 Should Comexio present yet another certificate meanwhile, nothing is pinned and that one gets a repair and push of its own. Should Comexio not answer when you tap the button, the push comes back so you can try again.
 
+### Firmware that replaces its certificate itself
+
+Comexio firmware up to 11.1.5 replaces its certificate on its own, again and again (#294). The integration then takes the new certificate over without asking when all of this holds:
+
+- **Same issuer:** the new certificate names the same issuer and the same authority key identifier as the pinned one. The integration reads both from the pinned certificate by itself, at the first start that reaches Comexio with it — nothing to enter.
+- **Known firmware:** the firmware Comexio last reported (from the last poll, kept across restarts) is at most 11.1.5. Unknown or newer firmware: you decide, as above.
+- **Settled:** the new certificate is read again after a minute and has to be the same; one that keeps changing goes to you.
+- **Not yet in your hands:** no certificate repair is open, and the rule has not turned this certificate down before.
+
+It is then pinned as the repair would pin it, and you learn it from a notification and, on the notify services set under **Function plan watchdog: push to**, an urgent push (no button: nothing left to decide), both with the old and new fingerprint and the issuer. Compare the new fingerprint with Comexio's admin page anyway; if it differs, reconfigure the entry. If any condition fails, everything runs as described above.
+
 ### Why it works this way
 
 - **A pin instead of a certificate authority:** Comexio signs its certificate itself, so no authority vouches for it. The pinned fingerprint is the only proof that Home Assistant talks to your Comexio and not to a device that took over its address.
-- **Never accepted automatically:** a device answering in Comexio's place presents another certificate too. Accepting it without asking would hand it the admin login the integration sends next. So the integration goes quiet and asks — an interruption, but no leaked credentials.
-- **No automatic check by serial number, hardware or firmware:** reading them needs a login, which would already hand the admin credentials to whoever answers.
+- **Accepted automatically only under the issuer rule:** a device answering in Comexio's place presents another certificate too. Accepting it without asking would hand it the admin login the integration sends next. So the integration goes quiet and asks — an interruption, but no leaked credentials. The issuer rule narrows that, it does not lift it: issuer and key identifier are part of the certificate and can be copied into a forged one. It only spares you the question for the certificate changes this firmware is known to make.
+- **No check by serial number or hardware, and no fresh firmware read:** reading them needs a login, which would already hand the admin credentials to whoever answers. The rule uses the firmware version read earlier, over the pinned connection.
 - **Only the certificate you were shown:** the button and the repair read the certificate again and pin it only if it matches the one you checked; an older push cannot pin a certificate that came up later.
 - **Only an administrator:** the button counts only when the companion app belongs to a Home Assistant administrator, as the repair needs an administrator too.
 - **Nothing secret in the push:** the fingerprints are hashes of a public certificate.
 
 *Reconfigure* asks before it touches the pin: when the host of an encrypted entry answers no HTTPS, it asks whether to switch to unencrypted HTTP; when a new host presents another certificate, it shows the pinned and the presented fingerprint and asks whether to trust it. Apart from the TLS handshake that reads the certificate, nothing — not even the login test — is sent before you confirm.
 
-The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded, also after a restart that met a changed certificate; only when such a restart finds no saved config does the integration not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
+The diagnostic `Connection` sensor (`sensor.<server>_connection`) shows the state — `https`, `http` or `certificate_changed` — so an automation can watch it. It follows the repair while the integration is loaded, also after a restart that met a changed certificate, and shows `certificate_changed` too while the integration checks a changed certificate before taking it over on its own (Home Assistant sends nothing to Comexio during that check either); only when such a restart finds no saved config does the integration not load, so the sensor is `unavailable` and the repair alone tells why. A trigger `from: https` catches both:
 
 ```yaml
 triggers:
@@ -292,7 +303,7 @@ actions:
       message: "The connection to Comexio is no longer HTTPS with the pinned certificate: {{ states('sensor.iosrv1_connection') }}"
 ```
 
-Its attributes name the pinned fingerprint and `pinned_at`, when it was pinned (empty for a certificate pinned before this was recorded); `presented_fingerprint` appears only while the repair is open. HA's own "last changed" cannot tell when the pin was made: it restarts with every restart.
+Its attributes name the pinned fingerprint and `pinned_at`, when it was pinned (empty for a certificate pinned before this was recorded); `presented_fingerprint` appears only while the repair is open or such a check runs. HA's own "last changed" cannot tell when the pin was made: it restarts with every restart.
 
 The diagnostic `Certificate valid until` sensor (`sensor.<server>_certificate_expiry`, only on an encrypted entry) shows when the pinned certificate expires; the attribute `valid_from` says when it started. It reads the certificate from a bare TLS handshake — no request, no credentials — at startup and once a day, and takes the dates only from the pinned certificate: another certificate is the repair's business and changes nothing here. A failed read keeps the last date, across restarts as well; `unknown` means not read yet or a certificate without readable dates, never one that does not expire. An automation can warn ahead of time, for example 30 days before:
 
@@ -593,7 +604,7 @@ Bietet Comexio HTTPS an, verbindet sich die Integration verschlüsselt und pinnt
 
 ### Wenn sich das Zertifikat ändert
 
-Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa nachdem Comexio ein neues erzeugt hat. Dann passiert Folgendes:
+Ein anderes als das gepinnte Zertifikat wird von selbst nur nach der Regel für Firmware übernommen, die ihr Zertifikat selbst austauscht (nächster Abschnitt). Sonst — etwa nachdem Comexio ein neues mit anderem Aussteller erzeugt hat — passiert Folgendes:
 
 1. **An Comexio geht nichts mehr** — kein Login, kein Schreiben —, bis du entschieden hast. Solange Home Assistant läuft, behalten die Entitäten ihre letzten Werte, und Comexios Webhook-Pushes aktualisieren sie weiter; Schalten oder Setzen scheitert mit einem Hinweis auf das Zertifikat. Nach einem Neustart richtet sich die Integration aus der Konfiguration ein, die Comexio zuletzt geliefert hat: Die Entitäten bleiben, zeigen aber „unbekannt“, bis Comexio einen Wert pusht, und die Plan-, Busauslastungs-, System- und Firmware-Prüfungen warten, bis das Zertifikat übernommen ist. Nur ohne eine solche gespeicherte Konfiguration (sie wird bei jedem erfolgreichen Abruf geschrieben) lädt die Integration nicht.
 2. **Eine Reparatur zeigt beide Fingerabdrücke**, den gepinnten und den neuen.
@@ -603,18 +614,29 @@ Ein anderes als das gepinnte Zertifikat wird nie von selbst übernommen — etwa
 
 Legt Comexio inzwischen ein wieder anderes Zertifikat vor, wird nichts gepinnt, und dieses bekommt eine eigene Reparatur und einen eigenen Push. Antwortet Comexio beim Tipp auf den Knopf nicht, kommt der Push erneut, damit du es noch einmal versuchen kannst.
 
+### Firmware, die ihr Zertifikat selbst austauscht
+
+Comexio-Firmware bis 11.1.5 tauscht ihr Zertifikat von selbst aus, immer wieder (#294). Die Integration übernimmt das neue Zertifikat dann ungefragt, wenn alles Folgende zutrifft:
+
+- **Gleicher Aussteller:** Das neue Zertifikat nennt denselben Aussteller und dieselbe Aussteller-Schlüssel-ID (Authority Key Identifier) wie das gepinnte. Beides liest die Integration selbst aus dem gepinnten Zertifikat, beim ersten Start, der Comexio damit erreicht — einzutragen ist nichts.
+- **Bekannte Firmware:** Die Firmware, die Comexio zuletzt gemeldet hat (vom letzten Abruf, über Neustarts gemerkt), ist höchstens 11.1.5. Unbekannte oder neuere Firmware: Du entscheidest, wie oben.
+- **Stabil:** Das neue Zertifikat wird nach einer Minute erneut gelesen und muss dasselbe sein; eines, das sich weiter ändert, geht an dich.
+- **Noch nicht bei dir:** Keine Zertifikats-Reparatur ist offen, und die Regel hat dieses Zertifikat nicht schon einmal abgelehnt.
+
+Es wird dann so gepinnt, wie die Reparatur es pinnen würde, und du erfährst es aus einer Benachrichtigung und, auf den unter **Logikplan-Watchdog: Push an** eingestellten Benachrichtigungsdiensten, einem dringenden Push (ohne Knopf: Es ist nichts mehr zu entscheiden), beide mit altem und neuem Fingerabdruck und dem Aussteller. Vergleiche den neuen Fingerabdruck trotzdem mit der Admin-Seite des Comexio; weicht er ab, konfiguriere den Eintrag neu. Trifft eine Bedingung nicht zu, läuft alles wie oben beschrieben.
+
 ### Warum es so läuft
 
 - **Ein Pin statt einer Zertifizierungsstelle:** Comexio signiert sein Zertifikat selbst, keine Zertifizierungsstelle bürgt dafür. Der gepinnte Fingerabdruck ist der einzige Beweis, dass Home Assistant mit deinem Comexio spricht und nicht mit einem Gerät, das dessen Adresse übernommen hat.
-- **Nie automatisch übernommen:** Ein Gerät, das an Comexios Stelle antwortet, legt ebenfalls ein anderes Zertifikat vor. Es ungefragt zu übernehmen, gäbe ihm den Admin-Login, den die Integration als Nächstes sendet. Darum verstummt die Integration und fragt — eine Unterbrechung, aber keine abgeflossenen Zugangsdaten.
-- **Keine automatische Prüfung über Seriennummer, Hardware oder Firmware:** Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten schon dem, der antwortet.
+- **Automatisch übernommen nur nach der Aussteller-Regel:** Ein Gerät, das an Comexios Stelle antwortet, legt ebenfalls ein anderes Zertifikat vor. Es ungefragt zu übernehmen, gäbe ihm den Admin-Login, den die Integration als Nächstes sendet. Darum verstummt die Integration und fragt — eine Unterbrechung, aber keine abgeflossenen Zugangsdaten. Die Aussteller-Regel engt das ein, hebt es aber nicht auf: Aussteller und Schlüssel-ID stehen im Zertifikat selbst und lassen sich in ein gefälschtes kopieren. Sie erspart dir nur die Frage bei den Zertifikatswechseln, die diese Firmware bekanntermaßen macht.
+- **Keine Prüfung über Seriennummer oder Hardware und kein frisches Lesen der Firmware:** Um sie zu lesen, müsste sich die Integration anmelden und gäbe die Admin-Zugangsdaten schon dem, der antwortet. Die Regel nutzt die Firmware-Version, die vorher über die gepinnte Verbindung gelesen wurde.
 - **Nur das gezeigte Zertifikat:** Knopf und Reparatur lesen das Zertifikat neu und pinnen es nur, wenn es dem geprüften entspricht; ein älterer Push kann kein später aufgetauchtes Zertifikat pinnen.
 - **Nur ein Administrator:** Der Knopf zählt nur, wenn die Companion-App einem Home-Assistant-Administrator gehört, so wie die Reparatur einen Administrator verlangt.
 - **Nichts Geheimes im Push:** Die Fingerabdrücke sind Hashes eines öffentlichen Zertifikats.
 
 *Neu konfigurieren* fragt nach, bevor es das Pinning ändert: Bietet der Host eines verschlüsselten Eintrags kein HTTPS an, fragt es, ob auf unverschlüsseltes HTTP gewechselt werden soll; legt ein neuer Host ein anderes Zertifikat vor, zeigt es den gepinnten und den vorgelegten Fingerabdruck und fragt, ob ihm vertraut werden soll. Bis auf den TLS-Handshake, der das Zertifikat ausliest, wird vor deiner Bestätigung nichts gesendet — auch nicht der Login-Test.
 
-Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist, auch nach einem Neustart, der auf ein geändertes Zertifikat traf; nur wenn ein solcher Neustart keine gespeicherte Konfiguration findet, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
+Der Diagnose-Sensor `Verbindung` (`sensor.<server>_connection`) zeigt den Zustand — `https`, `http` oder `certificate_changed` —, eine Automation kann ihn also überwachen. Er folgt der Reparatur, solange die Integration geladen ist, auch nach einem Neustart, der auf ein geändertes Zertifikat traf, und zeigt `certificate_changed` auch, solange die Integration ein geändertes Zertifikat prüft, bevor sie es selbst übernimmt (auch während dieser Prüfung sendet Home Assistant nichts an Comexio); nur wenn ein solcher Neustart keine gespeicherte Konfiguration findet, lädt die Integration nicht, der Sensor ist dann `unavailable` und nur die Reparatur nennt den Grund. Ein Trigger `from: https` erfasst beides:
 
 ```yaml
 triggers:
@@ -628,7 +650,7 @@ actions:
       message: "Die Verbindung zu Comexio ist nicht mehr HTTPS mit dem gepinnten Zertifikat: {{ states('sensor.iosrv1_connection') }}"
 ```
 
-Seine Attribute nennen den gepinnten Fingerabdruck und `pinned_at`, wann er gepinnt wurde (leer bei einem Zertifikat, das gepinnt wurde, bevor das erfasst wurde); `presented_fingerprint` erscheint nur, solange die Reparatur offen ist. HAs eigene „Letzte Änderung“ kann den Zeitpunkt des Pinnings nicht zeigen: Sie beginnt mit jedem Neustart neu.
+Seine Attribute nennen den gepinnten Fingerabdruck und `pinned_at`, wann er gepinnt wurde (leer bei einem Zertifikat, das gepinnt wurde, bevor das erfasst wurde); `presented_fingerprint` erscheint nur, solange die Reparatur offen ist oder eine solche Prüfung läuft. HAs eigene „Letzte Änderung“ kann den Zeitpunkt des Pinnings nicht zeigen: Sie beginnt mit jedem Neustart neu.
 
 Der Diagnose-Sensor `Zertifikat gültig bis` (`sensor.<server>_certificate_expiry`, nur bei einem verschlüsselten Eintrag) zeigt, wann das gepinnte Zertifikat abläuft; das Attribut `valid_from` sagt, seit wann es gilt. Er liest das Zertifikat über einen reinen TLS-Handshake — keine Anfrage, keine Zugangsdaten — beim Start und einmal täglich und übernimmt die Daten nur vom gepinnten Zertifikat: Ein anderes Zertifikat ist Sache der Reparatur und ändert hier nichts. Ein fehlgeschlagener Lesevorgang behält das letzte Datum, auch über Neustarts; `unknown` heißt noch nicht gelesen oder ein Zertifikat ohne lesbare Daten, nie eines, das nicht abläuft. Eine Automation kann rechtzeitig warnen, zum Beispiel 30 Tage vorher:
 

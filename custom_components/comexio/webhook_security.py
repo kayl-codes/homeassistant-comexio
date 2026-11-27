@@ -348,7 +348,7 @@ class WebhookSecurity:
         if contested and replaces is not None and replaces != name:
             return self._mark_contested(name, replaces, now, https)
         renamed = replaces is not None and replaces != name and replaces in self.migrated
-        origin = replaces if renamed else name
+        origin = replaces if renamed and replaces is not None else name  # renamed implies replaces is set
         protocol_changed = self._record_write(name, origin, now, https)
         if replaces is not None and replaces != name:
             self._retire_protocol_state(replaces, name, https=https)

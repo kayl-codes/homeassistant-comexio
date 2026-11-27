@@ -2,9 +2,12 @@
 
 import asyncio
 from collections.abc import AsyncGenerator, Generator
+import contextlib
 import copy
 from datetime import datetime, timedelta
 from http import HTTPStatus
+import logging
+from time import get_clock_info
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import PropertyMock, patch
@@ -20,15 +23,33 @@ from homeassistant.setup import async_setup_component
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.comexio.api import doorstation_read_lock, forget_doorstation_read_lock
+from custom_components.comexio.api import (
+    doorstation_read_got_its_turn,
+    doorstation_read_lock,
+    forget_doorstation_read_lock,
+)
 from custom_components.comexio.const import (
     DOMAIN,
     DOORSTATION_GALLERY_CONCURRENT_READS,
+    DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC,
+    DOORSTATION_GALLERY_LIST_TIMEOUT_SEC,
     DOORSTATION_GALLERY_MAX_PICTURES,
+    DOORSTATION_GALLERY_MAX_WAITING_READS,
+    DOORSTATION_GALLERY_PLACE_WAIT_SEC,
+    DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC,
     DOORSTATION_PICTURE_READ_TIMEOUT_SEC,
     DOORSTATION_PICTURE_VIEW_PATH,
 )
-from custom_components.comexio.media_source import _GALLERY_READ_SLOTS_KEY, _gallery_read_slots, _gallery_waiting
+from custom_components.comexio.media_source import (
+    _GALLERY_READ_SLOTS_KEY,
+    _await_gallery_place,
+    _gallery_read_slots,
+    _gallery_waiting,
+    _kept_gallery_waiting,
+    _place_granted,
+    _refused_for_a_place,
+    _warn_slow_place_wait,
+)
 
 pytestmark = pytest.mark.usefixtures("mock_comexio_api")
 
@@ -124,6 +145,24 @@ async def _take_all_places(hass: HomeAssistant, entry_id: str) -> tuple[_Signall
 def _release_places(places: asyncio.Semaphore) -> None:
     for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):
         places.release()
+
+
+@contextlib.contextmanager
+def _recording_slow_timers() -> Generator[list[asyncio.TimerHandle], None, None]:
+    """Records the slow-wait timers the reads arm while the block runs, cancelled or not. A timer that is still armed
+    would fire into the test, so the tests check the handle instead of racing the clock against the mark."""
+    loop = asyncio.get_running_loop()
+    real_call_later = loop.call_later
+    timers: list[asyncio.TimerHandle] = []
+
+    def _record(delay: float, callback: Any, *args: Any, **kwargs: Any) -> asyncio.TimerHandle:
+        handle = real_call_later(delay, callback, *args, **kwargs)
+        if callback is _warn_slow_place_wait:
+            timers.append(handle)
+        return handle
+
+    with patch.object(loop, "call_later", new=_record):
+        yield timers
 
 
 # --- the browser ----------------------------------------------------------------------------------------------------
@@ -790,6 +829,287 @@ async def test_a_browse_batch_reads_one_list_at_a_time_on_the_doorstation_lock(
     assert most_at_once == 1
 
 
+async def test_a_list_read_that_gets_its_place_at_once_ends_the_slow_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A place that comes within the slow mark is the places flowing again, for a list read as for a thumbnail. The
+    # other thumbnail is only counted here: it stays queued, so the empty-queue rule cannot end the streak instead.
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.return_value = ((OTHER_PICTURE,), None)
+    waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
+    waiting.slow = True
+    waiting.refusing = True
+    waiting.count = 1
+
+    with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC", 0.05):
+        await media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
+        # The place came at once: a timer left running would warn after its mark, so wait past it before looking.
+        await asyncio.sleep(0.2)
+
+    assert not waiting.slow
+    # The other thumbnail still waits: the place was handed on, no capacity came back, so the refusal streak goes on.
+    assert waiting.refusing
+    assert not [r for r in caplog.records if "still waits" in r.getMessage()]
+
+
+async def test_a_list_read_waiting_past_the_slow_mark_is_warned_while_it_waits(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The folder list waits for a place like a thumbnail does: the stall is logged while the list still waits, and only
+    # once its own mark has passed (a warning before it would be a thumbnail's mark leaking into the list).
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.return_value = ((OTHER_PICTURE,), None)
+    places, _waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    loop = asyncio.get_running_loop()
+    browse = asyncio.ensure_future(
+        media_source.async_browse_media(hass, f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}")
+    )
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC", 0.2):
+            started = loop.time()
+            async with asyncio.timeout(5):
+                while not any(r.levelname == "WARNING" and "still waits" in r.getMessage() for r in caplog.records):
+                    await asyncio.sleep(0.01)
+            # The mark is 0.2 s; the loop's clock may run up to one tick (about 16 ms on Windows) early: the margin.
+            assert loop.time() - started >= 0.17
+            assert not browse.done()
+    finally:
+        _release_places(places)
+    async with asyncio.timeout(10):
+        await browse
+
+
+def test_the_slow_marks_lie_within_the_waits_they_warn_in() -> None:
+    # A mark past its wait never warns: the wait ends (a refusal or a timeout) first. The folder list had such a mark
+    # while it shared the thumbnails' one, so its browse warning could not come.
+    assert DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC < DOORSTATION_GALLERY_LIST_TIMEOUT_SEC
+    assert DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC < DOORSTATION_GALLERY_PLACE_WAIT_SEC
+
+
+async def test_a_browse_cancelled_while_it_waits_leaves_no_slow_timer_behind(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A browser that leaves while its folder list waits must take the slow-wait timer with it: a leaked timer would warn
+    # about a wait that no longer exists. The mark is far away, so no timer fires during the test; the check is that the
+    # timer the wait armed is cancelled by the browser's leaving.
+    await _setup(hass, mock_config_entry)
+    places, _waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    try:
+        with (
+            patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC", 30.0),
+            _recording_slow_timers() as timers,
+        ):
+            browse = asyncio.ensure_future(media_source.async_browse_media(hass, folder))
+            async with asyncio.timeout(5):
+                while waiting.count < 1:
+                    await asyncio.sleep(0.01)
+            browse.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await browse
+    finally:
+        _release_places(places)
+    assert timers
+    assert all(timer.cancelled() for timer in timers)
+    assert waiting.count == 0
+    assert not waiting.slow
+    assert not [r for r in caplog.records if "still waits" in r.getMessage()]
+
+
+async def test_a_folder_list_that_stalls_with_its_place_is_logged_and_told_apart(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The place was held, so the wait was not the cause: the read itself ran out of time, and that is logged once.
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _stall(_ext_id: int) -> None:
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _stall
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    coordinator.api.get_doorstation_pictures.assert_awaited()
+    timeouts = [r for r in caplog.records if r.levelname == "WARNING" and "timed out after" in r.getMessage()]
+    assert len(timeouts) == 1
+    assert all("no place within" not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_folder_list_that_times_out_after_a_reload_logs_no_warning_for_the_active_entry(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The read of the instance before a reload runs out its budget after the reload: the browse still fails, but a
+    # warning would blame the active entry for a request it does not own.
+    entry_id = mock_config_entry.entry_id
+    coordinator = await _setup(hass, mock_config_entry)
+    caplog.set_level(logging.DEBUG, logger="custom_components.comexio.media_source")
+
+    async def _stall_across_a_reload(_ext_id: int) -> None:
+        _make_current(hass, entry_id, copy.copy(coordinator))
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _stall_across_a_reload
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    assert not [r for r in caplog.records if r.levelname == "WARNING" and "timed out after" in r.getMessage()]
+    # The outcome is logged, only at debug level: a missing line would not pass as "no warning" alone.
+    assert any(r.levelname == "DEBUG" and "timed out after" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_folder_list_that_waits_for_the_doorstation_lock_is_not_blamed_on_the_doorstation(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The place was held, but other reads held the Doorstation's lock, so the read never reached the Doorstation.
+    # The browse must not say it did not answer, nor log a stalled read.
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _wait_for_the_lock(_ext_id: int) -> None:
+        doorstation_read_got_its_turn.set(False)  # what ComexioAPI does while it waits for the Doorstation's lock
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _wait_for_the_lock
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation was busy with other reads\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    coordinator.api.get_doorstation_pictures.assert_awaited()
+    assert any(r.levelname == "WARNING" and "waited out its" in r.getMessage() for r in caplog.records)
+    assert all("did not answer" not in r.getMessage() for r in caplog.records)
+    assert all("timed out after" not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_stale_lock_wait_of_an_earlier_read_does_not_decide_for_a_folder_list_stall(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # An earlier read of this task left the flag at False. This list read reaches the Doorstation and stalls there, so
+    # the flag must not blame the lock: the old "did not answer" text and log line stay.
+    coordinator = await _setup(hass, mock_config_entry)
+
+    async def _stall(_ext_id: int) -> None:
+        await asyncio.Event().wait()
+
+    coordinator.api.get_doorstation_pictures.side_effect = _stall
+    doorstation_read_got_its_turn.set(False)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
+    ):
+        await media_source.async_browse_media(hass, folder)
+    assert any(r.levelname == "WARNING" and "timed out after" in r.getMessage() for r in caplog.records)
+    assert all("busy with other reads" not in r.getMessage() for r in caplog.records)
+
+
+async def test_a_folder_list_grant_is_judged_by_the_list_mark(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    # A stall the folder list sees ends only when the places flow again within the list's own mark. A list read granted
+    # after a longer wait, while another read still queues, keeps the stall: judged by the thumbnails' much longer mark,
+    # the grant would end it, and the next slow wait would warn again.
+    coordinator = await _setup(hass, mock_config_entry)
+    granted_read = asyncio.Event()
+
+    async def _held_read(_ext_id: int) -> tuple[tuple[DoorstationPicture, ...], None]:
+        granted_read.set()
+        await asyncio.Event().wait()
+        return (OTHER_PICTURE,), None
+
+    coordinator.api.get_doorstation_pictures.side_effect = _held_read
+    places, _queued = await _take_all_places(hass, mock_config_entry.entry_id)
+    waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    first = asyncio.ensure_future(media_source.async_browse_media(hass, folder))
+    second = asyncio.ensure_future(media_source.async_browse_media(hass, folder))
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_SLOW_PLACE_WAIT_SEC", 0.05):
+            async with asyncio.timeout(5):
+                while waiting.count < 2 or not waiting.slow:
+                    await asyncio.sleep(0.01)
+            # Both marks have passed by now: the grant comes after a wait well past the list mark, not on its edge.
+            await asyncio.sleep(0.1)
+            _release_places(places)
+            async with asyncio.timeout(5):
+                await granted_read.wait()
+        assert waiting.count == 1
+        assert waiting.slow
+    finally:
+        for task in (first, second):
+            task.cancel()
+        async with asyncio.timeout(5):
+            await asyncio.gather(first, second, return_exceptions=True)
+
+
+async def test_a_failed_folder_list_read_is_logged_by_the_browse(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The read fails without the browse's deadline expiring (here: the read's own budget, as the API words it) and
+    # returns only its cause: the API only debug-logs that, so the browse logs it.
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.return_value = (None, "not read within 10 s")
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    with pytest.raises(BrowseError, match="not read within 10 s"):
+        await media_source.async_browse_media(hass, folder)
+    logged = [r for r in caplog.records if "picture list not read" in r.getMessage()]
+    assert [r.levelname for r in logged] == ["WARNING"]
+    assert logged[0].getMessage().endswith("picture list not read: not read within 10 s")
+
+
+async def test_a_folder_list_read_with_the_session_gone_is_not_logged(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A session that is gone (unload, Home Assistant stopping) answers None without a cause: nothing to log.
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_pictures.return_value = (None, None)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    logged_before = len(caplog.records)
+    with pytest.raises(BrowseError, match="not read"):
+        await media_source.async_browse_media(hass, folder)
+    # Only what the browse itself logs: the setup of the entry logs its own warnings.
+    assert not [r for r in caplog.records[logged_before:] if r.levelname == "WARNING"]
+
+
+async def test_a_folder_list_that_gets_no_place_in_time_is_logged_as_refused(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _setup(hass, mock_config_entry)
+    places, _waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    try:
+        with (
+            patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.2),
+            pytest.raises(BrowseError, match=r"not read in .* s \(the wait for a gallery place included\)"),
+        ):
+            await media_source.async_browse_media(hass, folder)
+    finally:
+        _release_places(places)
+    assert any(r.levelname == "WARNING" and "no place within" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_folder_list_at_the_waiter_cap_is_logged_as_refused(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    await _setup(hass, mock_config_entry)
+    waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
+    folder = f"{MEDIA_ROOT}/{_folder_id(mock_config_entry)}"
+    waiting.count = DOORSTATION_GALLERY_MAX_WAITING_READS
+    try:
+        with pytest.raises(BrowseError, match="Too many gallery reads"):
+            await media_source.async_browse_media(hass, folder)
+    finally:
+        waiting.count = 0
+    assert any(r.levelname == "WARNING" and "at the cap" in r.getMessage() for r in caplog.records)
+
+
 async def test_the_gallery_places_outlive_a_reload_and_go_with_the_entry_on_removal(
     hass: HomeAssistant, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -921,6 +1241,393 @@ async def test_a_stall_at_the_places_is_warned_once_per_streak(
     assert len(warnings) == 1
     # The thumbnail that got its place ended the streak.
     assert _gallery_waiting(hass, mock_config_entry.entry_id).refusing is False
+
+
+class _Instance:
+    """A stand-in for a coordinator instance: a plain object the streak can hold weakly."""
+
+
+def _make_current(hass: HomeAssistant, entry_id: str, instance: Any) -> None:
+    """Makes the stand-in the coordinator the entry runs with now, as setup does (a reload replaces it)."""
+    hass.data.setdefault(DOMAIN, {})[entry_id] = instance
+
+
+async def test_a_reloaded_entry_starts_its_own_refusal_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The streak of the instance before the reload must not silence the first refusal of the instance after it.
+    entry_id = mock_config_entry.entry_id
+    _gallery_waiting(hass, entry_id)  # the entry is kept while its thumbnails wait
+    before, after = cast(Any, _Instance()), cast(Any, _Instance())
+    _make_current(hass, entry_id, before)
+    _refused_for_a_place(hass, entry_id, before, 2, "first")
+    _refused_for_a_place(hass, entry_id, before, 2, "second")
+    _make_current(hass, entry_id, after)
+    _refused_for_a_place(hass, entry_id, after, 2, "third")
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "not answered" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+async def test_a_reloaded_entry_starts_its_own_slow_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    entry_id = mock_config_entry.entry_id
+    _gallery_waiting(hass, entry_id)
+    before, after = cast(Any, _Instance()), cast(Any, _Instance())
+    _make_current(hass, entry_id, before)
+    _warn_slow_place_wait(hass, entry_id, before, 2)
+    _warn_slow_place_wait(hass, entry_id, before, 2)
+    _make_current(hass, entry_id, after)
+    _warn_slow_place_wait(hass, entry_id, after, 2)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "still waits" in r.getMessage()]
+    assert len(warnings) == 2
+
+
+async def test_a_grant_of_a_replaced_instance_ends_only_the_refusal_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A read that started before the reload still runs to its end: its refusal and its slow mark must not warn again or
+    # end the streaks the new instance has logged. Its grant does show the places are free, so the refusal streak ends
+    # (a later refusal of the new instance warns again), while the slow streak, the new instance's own, is left alone.
+    entry_id = mock_config_entry.entry_id
+    waiting = _gallery_waiting(hass, entry_id)
+    old, new = cast(Any, _Instance()), cast(Any, _Instance())
+    _make_current(hass, entry_id, new)
+    _refused_for_a_place(hass, entry_id, new, 2, "first")
+    _warn_slow_place_wait(hass, entry_id, new, 2)
+    _refused_for_a_place(hass, entry_id, old, 2, "late")
+    _warn_slow_place_wait(hass, entry_id, old, 2)
+    _place_granted(hass, entry_id, old, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+
+    assert waiting.refusing is False
+    assert waiting.slow is True
+    assert waiting.streak_of() is new
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 2
+
+    _refused_for_a_place(hass, entry_id, new, 2, "second")
+    _warn_slow_place_wait(hass, entry_id, new, 2)
+
+    assert waiting.refusing is True
+    assert waiting.slow is True
+    assert waiting.streak_of() is new
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 3
+
+
+async def test_a_grant_handed_on_while_other_reads_still_wait_keeps_the_refusal_streak(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Under sustained saturation a permit is handed to a queued read while others still wait: no capacity came back, so
+    # the refusal streak goes on and a later refusal stays at debug level. Real waiters, not a count set by hand.
+    entry_id = mock_config_entry.entry_id
+    coordinator = await _setup(hass, mock_config_entry)
+    places, _ = await _take_all_places(hass, entry_id)
+    waiting = _gallery_waiting(hass, entry_id)
+    queued = [
+        asyncio.ensure_future(
+            _await_gallery_place(hass, entry_id, coordinator, 2, DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+        )
+        for _ in range(2)
+    ]
+    try:
+        async with asyncio.timeout(5):
+            while waiting.count < 2:
+                await asyncio.sleep(0.01)
+        _refused_for_a_place(hass, entry_id, coordinator, 2, "first")
+        places.release()
+        done, _ = await asyncio.wait(queued, return_when=asyncio.FIRST_COMPLETED, timeout=5)
+        assert len(done) == 1
+        _place_granted(hass, entry_id, coordinator, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+
+        assert waiting.count == 1
+        assert waiting.refusing is True
+        _refused_for_a_place(hass, entry_id, coordinator, 2, "second")
+    finally:
+        for task in queued:
+            task.cancel()
+        async with asyncio.timeout(5):
+            await asyncio.gather(*queued, return_exceptions=True)
+        _release_places(places)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "not answered" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+async def test_a_request_after_the_entry_was_unloaded_changes_no_streak_and_warns_nothing(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # No coordinator is registered for the entry any more (unloaded, not yet reloaded): a late request of the old
+    # instance neither warns nor clears what is kept for the entry.
+    entry_id = mock_config_entry.entry_id
+    waiting = _gallery_waiting(hass, entry_id)
+    # Both streaks are running when the late request arrives: it must leave them running, not only find them off.
+    waiting.refusing = True
+    waiting.slow = True
+    old = cast(Any, _Instance())
+    _refused_for_a_place(hass, entry_id, old, 2, "late")
+    _warn_slow_place_wait(hass, entry_id, old, 2)
+
+    assert waiting.refusing
+    assert waiting.slow
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+async def test_a_cancelled_wait_while_another_still_waits_keeps_the_slow_flag(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry
+) -> None:
+    # Only the queue running empty ends a stall: a browser that leaves while another thumbnail still waits must not
+    # reset the flag, or the stall would warn a second time.
+    entry_id = mock_config_entry.entry_id
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, _ = await _take_all_places(hass, entry_id)
+    waiting = _gallery_waiting(hass, entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    first = asyncio.ensure_future(client.get(path))
+    second = asyncio.ensure_future(client.get(path))
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 0.01):
+            # Both must be queued before the cancel, or the queue would run empty and end the stall by itself.
+            async with asyncio.timeout(5):
+                while waiting.count < 2:
+                    await asyncio.sleep(0.01)
+            async with asyncio.timeout(5):
+                while not waiting.slow:
+                    await asyncio.sleep(0.01)
+            first.cancel()
+            async with asyncio.timeout(5):
+                while waiting.count != 1:
+                    await asyncio.sleep(0.01)
+        assert waiting.slow is True
+    finally:
+        first.cancel()
+        second.cancel()
+        async with asyncio.timeout(5):
+            await asyncio.gather(first, second, return_exceptions=True)
+        _release_places(places)
+
+
+async def test_a_slow_wait_that_outlives_its_entry_creates_no_state(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The entry was removed while its thumbnail still waited: the removal drops the waiting state, and the timer that
+    # fires after it must not bring the state back.
+    await _setup(hass, mock_config_entry)
+    entry_id = mock_config_entry.entry_id
+    _gallery_waiting(hass, entry_id).count = 1
+    await hass.config_entries.async_remove(entry_id)
+    _warn_slow_place_wait(hass, entry_id, cast(Any, _Instance()), 2)
+
+    assert _kept_gallery_waiting(hass, entry_id) is None
+    assert not [r for r in caplog.records if "still waits" in r.getMessage()]
+
+
+async def test_a_thumbnail_granted_before_the_slow_mark_is_not_warned(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A free place is taken at once: the timer that would warn at the mark must be cancelled by the grant.
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    client = await hass_client()
+    with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 0.05):
+        response = await client.get(_picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg"))
+        await asyncio.sleep(0.1)
+
+    assert response.status == HTTPStatus.OK
+    assert not [r for r in caplog.records if "still waits" in r.getMessage()]
+
+
+async def test_a_thumbnail_whose_browser_left_while_it_waited_takes_no_place_and_reads_nothing(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Home Assistant's server cancels the handler when the browser disconnects: the queued thumbnail gives its count
+    # back, no read starts when the place comes free, and the slow-wait timer it had set is cancelled with the wait.
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    queued = asyncio.ensure_future(client.get(path))
+    # The mark is far away, so no timer fires during the test: the check is that the timer the wait armed is cancelled
+    # with the wait. A timer the cancel had not taken would be left armed and fire into the next test.
+    with (
+        patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 30.0),
+        _recording_slow_timers() as timers,
+    ):
+        try:
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            queued.cancel()
+            async with asyncio.timeout(5):
+                while _gallery_waiting(hass, mock_config_entry.entry_id).count:
+                    await asyncio.sleep(0.01)
+            with contextlib.suppress(asyncio.CancelledError):
+                await queued
+        finally:
+            _release_places(places)
+
+    assert timers
+    assert all(timer.cancelled() for timer in timers)
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+    assert not _gallery_read_slots(hass, mock_config_entry.entry_id).locked()
+    assert not [r for r in caplog.records if "still waits" in r.getMessage()]
+
+
+@pytest.mark.parametrize(
+    ("count", "waited", "still_slow"),
+    [
+        # A long wait while others still queue: the same stall goes on.
+        (1, DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC, True),
+        # A long wait and the queue is empty now: the stall is over.
+        (0, DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC, False),
+        # A place within the mark: the places flow again, whatever is still queued.
+        (1, 0.0, False),
+    ],
+)
+async def test_a_grant_ends_the_slow_streak_only_when_the_places_flow_again(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, count: int, waited: float, still_slow: bool
+) -> None:
+    waiting = _gallery_waiting(hass, mock_config_entry.entry_id)
+    waiting.slow = True
+    waiting.refusing = True
+    waiting.count = count
+    coordinator = cast(Any, _Instance())
+    _make_current(hass, mock_config_entry.entry_id, coordinator)
+
+    _place_granted(
+        hass, mock_config_entry.entry_id, coordinator, waited=waited, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC
+    )
+
+    assert waiting.slow is still_slow
+    # The refusal streak ends only when no read waits any more (see _place_granted).
+    assert waiting.refusing is (count > 0)
+
+
+async def test_a_grant_after_the_unload_ends_the_refusal_streak_and_leaves_the_slow_one(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry
+) -> None:
+    # No coordinator is registered for the entry (unloaded, not yet reloaded): a grant still shows the places are free,
+    # so the refusal streak ends; the slow streak is left to the next instance that takes the entry.
+    entry_id = mock_config_entry.entry_id
+    waiting = _gallery_waiting(hass, entry_id)
+    waiting.refusing = True
+    waiting.slow = True
+    _place_granted(
+        hass, entry_id, cast(Any, _Instance()), waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC
+    )
+
+    assert not waiting.refusing
+    assert waiting.slow
+
+
+async def test_a_refusal_and_a_grant_after_the_removal_of_the_entry_create_no_state(
+    hass: HomeAssistant, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The entry was removed while a read still held the waiting state: the removal drops that state, and a late refusal
+    # and a late grant create none.
+    await _setup(hass, mock_config_entry)
+    entry_id = mock_config_entry.entry_id
+    _gallery_waiting(hass, entry_id).count = 1
+    await hass.config_entries.async_remove(entry_id)
+    logged_before = len(caplog.records)
+    instance = cast(Any, _Instance())
+    _refused_for_a_place(hass, entry_id, instance, 2, "the cap")
+    _place_granted(hass, entry_id, instance, waited=0.0, slow_after=DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC)
+
+    assert _kept_gallery_waiting(hass, entry_id) is None
+    assert not [r for r in caplog.records[logged_before:] if r.levelname == "WARNING"]
+
+
+async def test_a_thumbnail_waiting_past_the_slow_mark_is_warned_before_its_wait_ends(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, waiting = await _take_all_places(hass, mock_config_entry.entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    queued = None
+    loop = asyncio.get_running_loop()
+    mark = 0.2
+    fired_at: list[float] = []
+
+    def stamped(*args: Any) -> None:
+        # The timer passes its arguments on unchanged: stamp the moment it fires, then log as before.
+        fired_at.append(loop.time())
+        _warn_slow_place_wait(*args)
+
+    try:
+        with (
+            patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", mark),
+            patch("custom_components.comexio.media_source._warn_slow_place_wait", stamped),
+        ):
+            started = loop.time()
+            queued = asyncio.ensure_future(client.get(path))
+            async with asyncio.timeout(5):
+                await waiting.wait()
+            # The timer must not fire before the mark. asyncio may run a timer up to the clock resolution early.
+            # `started` is taken before the timer is armed, so it is never later than the arming: a timer can fire
+            # no earlier than `mark - resolution` after `started`. A loaded runner fires it late, which passes;
+            # a warning fired early, or at once, does not.
+            async with asyncio.timeout(5):
+                while not fired_at:
+                    await asyncio.sleep(0.01)
+            resolution = get_clock_info("monotonic").resolution
+            assert fired_at[0] - started >= mark - resolution
+            # The warning comes while the thumbnail still stands in the queue, not when its wait has ended.
+            assert not queued.done()
+    except BaseException:
+        if queued is not None:
+            queued.cancel()
+        raise
+    finally:
+        _release_places(places)
+    async with asyncio.timeout(10):
+        served = await queued
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "still waits" in r.getMessage()]
+    assert served.status == HTTPStatus.OK
+    assert len(warnings) == 1
+
+
+async def test_a_stall_whose_queue_drains_by_browsers_leaving_is_warned_again_by_the_next_one(
+    hass: HomeAssistant, hass_client: Any, mock_config_entry: MockConfigEntry, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The queue empties when the browser leaves: no thumbnail waits, so the stall is over and the next one gets its own
+    # warning at its mark. A flag left set by the first stall would silence it.
+    entry_id = mock_config_entry.entry_id
+    coordinator = await _setup(hass, mock_config_entry)
+    coordinator.api.get_doorstation_picture.return_value = (JPEG, None)
+    places, waiting = await _take_all_places(hass, entry_id)
+    client = await hass_client()
+    path = _picture_path(mock_config_entry, "26-11-21-18-30-00_bell.jpg")
+    queued: list[asyncio.Future[Any]] = []
+
+    def stall_warnings() -> int:
+        return len([r for r in caplog.records if r.levelname == "WARNING" and "still waits" in r.getMessage()])
+
+    try:
+        with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_SLOW_PLACE_WAIT_SEC", 0.01):
+            for expected in (1, 2):
+                queued.append(asyncio.ensure_future(client.get(path)))
+                async with asyncio.timeout(5):
+                    while stall_warnings() < expected:
+                        await asyncio.sleep(0.01)
+                queued[-1].cancel()
+                async with asyncio.timeout(5):
+                    while _gallery_waiting(hass, entry_id).count:
+                        await asyncio.sleep(0.01)
+    finally:
+        for request in queued:
+            request.cancel()
+        async with asyncio.timeout(5):
+            await asyncio.gather(*queued, return_exceptions=True)
+        _release_places(places)
+
+    coordinator.api.get_doorstation_picture.assert_not_awaited()
+    assert stall_warnings() == 2
 
 
 async def test_a_folder_browse_past_the_waiting_limit_is_refused_at_once(
@@ -1128,7 +1835,7 @@ async def test_a_folder_whose_list_takes_too_long_is_an_error_in_the_browser(
 
     with (
         patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.01),
-        pytest.raises(BrowseError, match="not read in"),
+        pytest.raises(BrowseError, match=r"not read in .* s \(the Doorstation did not answer in time\)"),
     ):
         await media_source.async_browse_media(hass, folder_id)
     # The list gave its place back when its deadline ran out: DOORSTATION_GALLERY_PLACE_WAIT_SEC counts on that.
@@ -1147,7 +1854,7 @@ async def test_a_folder_waiting_for_a_gallery_place_past_the_budget_is_an_error_
         with patch("custom_components.comexio.media_source.DOORSTATION_GALLERY_LIST_TIMEOUT_SEC", 0.05):
             # Every place is taken: the folder must answer within its deadline, not wait for a place forever.
             async with asyncio.timeout(5):
-                with pytest.raises(BrowseError, match="not read in"):
+                with pytest.raises(BrowseError, match=r"not read in .* s \(the wait for a gallery place included\)"):
                     await media_source.async_browse_media(hass, folder_id)
     finally:
         for _ in range(DOORSTATION_GALLERY_CONCURRENT_READS):

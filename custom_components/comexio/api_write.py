@@ -14,7 +14,7 @@ from http import HTTPStatus
 import logging
 import math
 import time
-from typing import Any
+from typing import Any, SupportsFloat, cast
 
 from aiocomexio import (
     WRITE_TARGET_MARKER,
@@ -97,7 +97,7 @@ def is_same_value(cached: object, wanted: float | int) -> bool:
     if cached is None or isinstance(cached, bool):
         return False
     try:
-        return math.isclose(float(cached), float(wanted), rel_tol=0.0, abs_tol=1e-9)
+        return math.isclose(float(cast("SupportsFloat | str", cached)), float(wanted), rel_tol=0.0, abs_tol=1e-9)
     except (TypeError, ValueError, OverflowError):
         return False
 

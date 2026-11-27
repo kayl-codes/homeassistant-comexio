@@ -12,6 +12,7 @@ import pytest
 from custom_components.comexio import SERVER_LEVEL_UNIQUE_ID_SUFFIXES, _server_level_unique_ids, certificate
 from custom_components.comexio.const import (
     CERTIFICATE_EXPIRY_UNIQUE_ID_SUFFIX,
+    CONF_CERTIFICATE_AUTHORITY,
     CONF_CERTIFICATE_FINGERPRINT,
     CONF_CERTIFICATE_PINNED_AT,
     CONF_HOST,
@@ -67,9 +68,17 @@ def test_restamping_dates_a_pin_from_now_and_leaves_an_entry_without_a_pin_alone
     [
         ({CONF_HOST: HOST, CONF_CERTIFICATE_FINGERPRINT: PINNED, CONF_CERTIFICATE_PINNED_AT: NOW.isoformat()}, True),
         ({CONF_HOST: HOST, CONF_CERTIFICATE_FINGERPRINT: PINNED}, True),  # pinned before the date was recorded
+        (
+            {
+                CONF_HOST: HOST,
+                CONF_CERTIFICATE_FINGERPRINT: PINNED,
+                CONF_CERTIFICATE_AUTHORITY: {"fingerprint": PINNED, "issuer": "CN=CA", "authority_key_id": "0a"},
+            },
+            True,
+        ),
         ({CONF_HOST: HOST}, False),
     ],
-    ids=["pin with date", "pin without date", "no pin"],
+    ids=["pin with date", "pin without date", "pin with its issuer", "no pin"],
 )
 def test_dropping_the_pin_drops_its_date(data: dict[str, Any], had_pin: bool) -> None:
     assert certificate.unpin_data(data) is had_pin
