@@ -7,16 +7,23 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 
 ## [Unreleased]
 
+---
+
+## [0.50.0-rc2] — 2026-11-27
+
+Covers everything since v0.50.0-rc1.
+
 ### ✨ New Features
 - **Doorstation pictures in the media browser (#180):** **Media** > **Browse media** now offers **Doorstation pictures**: one folder per Doorstation (`<extension> (<instance>)`) with its 20 newest bell and motion pictures, newest first, each with a thumbnail. Nothing is stored in Home Assistant; the list and every picture are read from the Doorstation when you browse, one read at a time per entry together with the camera and the picture entities (the thumbnails of a folder therefore load one after the other). A folder that is not listed within 20 seconds, or a request that finds 40 others already waiting, shows an error instead of hanging. The thumbnail links are signed for the browsing connection and valid for one hour. Not yet verified against a real Doorstation: the time limits are estimates.
-- **A certificate Comexio replaced on its own is taken over when the issuer matches (#294):** Comexio firmware up to 11.1.5 replaces its TLS certificate on its own, and each time the integration stopped and waited for the user. It now takes the new certificate over without asking when it names the same issuer and authority key identifier as the pinned one, the firmware Comexio last reported is at most 11.1.5, the certificate is still the same when read again a minute later, and no certificate repair is open. Issuer and key identifier are read from the pinned certificate by the integration itself, at the first start that reaches Comexio with it. You learn of every automatic take-over from a notification and an urgent push without a button, with both fingerprints and the issuer. Anything else (another issuer, newer or unknown firmware, a certificate that keeps changing) goes to the repair and push as before. Issuer and key identifier are copied from the certificate, so the rule narrows the trust on first use the pin rests on, it does not replace it. The firmware version is now kept in the saved config, so the rule also works at a start right after a restart. While the rule checks a certificate, the `Connection` sensor shows `certificate_changed` with `presented_fingerprint`, as for the repair: Home Assistant sends nothing to Comexio during that minute either.
+- **A certificate Comexio replaced on its own is taken over when the issuer matches (#294):** Comexio firmware up to 11.1.5 replaces its TLS certificate on its own, and each time the integration stopped and waited for the user. It now takes the new certificate over without asking when it names the same issuer and authority key identifier as the pinned one, the firmware Comexio last reported is at most 11.1.5, the certificate is still the same when read again a minute later, and no certificate repair is open. Issuer and key identifier are read from the pinned certificate by the integration itself, at the first start that reaches Comexio with it. You learn of every automatic take-over from a notification and an urgent push without a button, with both fingerprints and the issuer. Anything else (another issuer, newer or unknown firmware, a certificate that keeps changing) goes to the repair and push as before. Issuer and key identifier are copied from the certificate, so the rule narrows the trust on first use the pin rests on, it does not replace it. The firmware version is now kept in the saved config, so the rule also works at a start right after a restart. While the rule checks a certificate, the `Connection` sensor shows `certificate_changed` with `presented_fingerprint`, as for the repair: Home Assistant sends nothing to Comexio during that minute either. A certificate change that comes in while the push of an accepted certificate is still being sent no longer cuts that push off, and the pushes of one entry go out one after the other (#350). If no notify target accepts the push, a warning says so and names the targets (#355).
 
 ### 🐛 Bug Fixes & Refactoring
 - **Gallery warnings survive a reload of the entry (#346):** the refusal streak of the Doorstation gallery now belongs to the running entry, so reloading the entry no longer starts a new streak that warns again at once, and a removed entry leaves no state behind. A reader that has waited a long time for a gallery place logs one warning once it has waited for a set time, so a busy queue shows in the log before the wait ends. A browse that gets its place ends such a stall, as a thumbnail does.
 - **Acceptance push removed when the entry is removed (#347):** removing the entry takes the push of an automatically accepted certificate off the companion apps it was sent to (`clear_notification` with its tag, only to registered `mobile_app` services). The phones the push went to are remembered before the send, so the clear does not depend on the notify option at removal time; it waits a few seconds at most for a send still in progress. A push that may still show on a phone is logged as a warning.
-- **`/extend` accepts whole minutes only (#353):** the `minutes` value of `function_plan_preview_extend` is no longer truncated. `1.9` and `15.5` used to extend the preview window by `1` and `15`, and `true` by `1`; they are now refused with an error that asks for a whole number. Whole numbers, whole-valued numbers such as `15.0` and numeric text such as `"15"` keep working, and the range of 1 to 1440 minutes is unchanged.
+- **`/extend` accepts whole minutes only (#353):** the `minutes` value of `function_plan_preview_extend` is no longer truncated. `1.9` and `15.5` used to extend the preview window by `1` and `15`, and `true` by `1`; they are now refused with an error that asks for a whole number. Whole numbers, whole-valued numbers such as `15.0` and numeric text such as `"15"` keep working, and the range of 1 to 1440 minutes is unchanged. The minutes field of the service in Home Assistant counts in whole minutes as well (#354).
 
 ### ⚠️ Requirements & Notes
+- **Restart required** after updating.
 - **aiocomexio 0.17.0 (#344):** the integration pins aiocomexio 0.17.0 (was 0.16.0) in `manifest.json` and in the requirements files. Home Assistant installs the new library version with the update.
 
 ---
@@ -572,7 +579,8 @@ Covers everything since v0.10.0, including the pre-releases v0.11.0-rc1/rc2 and 
 - Enforced Unix (LF) line endings for native Linux/HA compatibility.
 - Added bilingual README (English & German) with step-by-step installation guide.
 
-[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.50.0-rc1...HEAD
+[Unreleased]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.50.0-rc2...HEAD
+[0.50.0-rc2]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.50.0-rc1...v0.50.0-rc2
 [0.50.0-rc1]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.43.0...v0.50.0-rc1
 [0.43.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.42.0...v0.43.0
 [0.42.0]: https://github.com/kayl-codes/homeassistant-comexio/compare/v0.41.0...v0.42.0
