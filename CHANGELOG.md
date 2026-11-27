@@ -16,6 +16,9 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/); version
 - **Acceptance push removed when the entry is removed (#347):** removing the entry takes the push of an automatically accepted certificate off the companion apps it was sent to (`clear_notification` with its tag, only to registered `mobile_app` services). The phones the push went to are remembered before the send, so the clear does not depend on the notify option at removal time; it waits a few seconds at most for a send still in progress. A push that may still show on a phone is logged as a warning.
 - **`/extend` accepts whole minutes only (#353):** the `minutes` value of `function_plan_preview_extend` is no longer truncated. `1.9` and `15.5` used to extend the preview window by `1` and `15`, and `true` by `1`; they are now refused with an error that asks for a whole number. Whole numbers, whole-valued numbers such as `15.0` and numeric text such as `"15"` keep working, and the range of 1 to 1440 minutes is unchanged.
 
+### ⚠️ Requirements & Notes
+- **aiocomexio 0.17.0 (#344):** the integration pins aiocomexio 0.17.0 (was 0.16.0) in `manifest.json` and in the requirements files. Home Assistant installs the new library version with the update.
+
 ---
 
 ## [0.50.0-rc1] — 2026-11-25
