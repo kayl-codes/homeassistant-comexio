@@ -64,6 +64,10 @@ CERTIFICATE_AUTO_ACCEPTS = f"{DOMAIN}_certificate_auto_accepts"
 # cancelled in flight is in it too). The removal of the entry clears these, whatever the notify option or the pin
 # is by then.
 CERTIFICATE_AUTO_ACCEPT_PUSHED = f"{DOMAIN}_certificate_auto_accept_pushed"
+# hass.data: entry_id -> asyncio.Lock. The acceptance pushes of one entry are sent one after the other: a newer
+# push must not reach a phone before an older one still in its notify call, or the older text would replace the
+# newer one (same tag).
+CERTIFICATE_AUTO_ACCEPT_SENDS = f"{DOMAIN}_certificate_auto_accept_sends"
 # ASCII: \d alone also matches other scripts' digits. Bounded: int() of a digit string beyond Python's conversion limit
 # (4300) raises, and no real firmware component has more than a few digits, nor a version more than a few parts.
 _FIRMWARE_RE = re.compile(r"\d{1,6}(?:\.\d{1,6}){0,7}", re.ASCII)
@@ -215,6 +219,7 @@ def async_remove_auto_accept(hass: HomeAssistant, entry: ConfigEntry) -> None:
     wait, or is already with the push service, may still show).
     """
     persistent_notification.async_dismiss(hass, _notification_id(entry.entry_id))
+    hass.data.get(CERTIFICATE_AUTO_ACCEPT_SENDS, {}).pop(entry.entry_id, None)
     state: _AutoAccepts | None = hass.data.get(CERTIFICATE_AUTO_ACCEPTS, {}).pop(entry.entry_id, None)
     ending: set[asyncio.Task[None]] = set()
     if state is not None:
@@ -452,6 +457,12 @@ def _notification_id(entry_id: str) -> str:
     return f"{DOMAIN}_certificate_auto_{entry_id}"
 
 
+def _send_lock(hass: HomeAssistant, entry_id: str) -> asyncio.Lock:
+    """The lock that orders the acceptance pushes of one entry (created on first use, dropped with the entry)."""
+    locks: dict[str, asyncio.Lock] = hass.data.setdefault(CERTIFICATE_AUTO_ACCEPT_SENDS, {})
+    return locks.setdefault(entry_id, asyncio.Lock())
+
+
 async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str, info: CertificateInfo) -> None:
     """A persistent notification and a push without a button: the certificate is pinned already.
 
@@ -495,4 +506,6 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
             "push": {"interruption-level": "critical", "sound": {"name": "default", "critical": 1, "volume": 1.0}},
         },
     }
-    await _async_notify(hass, service_data, targets, set())
+    # Behind an older push still being sent (a wait's push is not cancelled by a newer change, see _async_start).
+    async with _send_lock(hass, entry.entry_id):
+        await _async_notify(hass, service_data, targets, set())
