@@ -819,12 +819,13 @@ function_plan_preview_extend:
           integration: comexio
     minutes:
       name: Minutes
-      description: New auto-stop window in minutes, counted from now (1-1440).
+      description: New auto-stop window in whole minutes, counted from now (1-1440).
       required: true
       selector:
         number:
           min: 1
           max: 1440
+          step: 1
           mode: box
 
 function_plan_preview_stop:
