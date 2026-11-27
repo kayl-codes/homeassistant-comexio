@@ -463,6 +463,11 @@ def _send_lock(hass: HomeAssistant, entry_id: str) -> asyncio.Lock:
     return locks.setdefault(entry_id, asyncio.Lock())
 
 
+def _notify_service(target: str) -> str:
+    """The notify service behind a target, whether it is spelled with the "notify." prefix or without."""
+    return target.removeprefix(f"{NOTIFY_DOMAIN}.")
+
+
 async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str, info: CertificateInfo) -> None:
     """A persistent notification and a push without a button: the certificate is pinned already.
 
@@ -508,4 +513,16 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
     }
     # Behind an older push still being sent (a wait's push is not cancelled by a newer change, see _async_start).
     async with _send_lock(hass, entry.entry_id):
-        await _async_notify(hass, service_data, targets, set())
+        delivered, failed = await _async_notify(hass, service_data, targets, set())
+    # Compared by service, not by spelling: a service listed with and without "notify." (or twice) may fail on one
+    # call and be accepted on the other. Only a service no call reached is missing.
+    accepted = {_notify_service(target) for target in delivered}
+    if missing := {_notify_service(target) for target in failed} - accepted:
+        # The certificate stays pinned either way; the persistent notification still tells the user about it.
+        _LOGGER.warning(
+            "Comexio acceptance push of entry %s accepted by %d of %d notify targets; no acceptance from: %s",
+            entry.entry_id,
+            len(accepted),
+            len({_notify_service(target) for target in targets}),
+            sorted(f"{NOTIFY_DOMAIN}.{service}" for service in missing),
+        )
