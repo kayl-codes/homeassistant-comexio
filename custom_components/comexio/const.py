@@ -1496,10 +1496,10 @@ def function_plans(fub_data: Mapping[str, Any]) -> Iterator[tuple[int, dict[str,
             yield fub_id, info
 
 
-def function_plan_info(fub_data: Mapping[str, Any], fub_id: int | str) -> dict[str, Any]:
+def function_plan_info(fub_data: Mapping[Any, Any], fub_id: int | str) -> dict[str, Any]:
     """The $Fubs info of plan fub_id, {} when it is not listed or its entry is unreadable."""
     key = str(fub_id)
-    info = fub_data.get(key)
+    info: Any = fub_data.get(key)
     if info is None and (plan_id := function_plan_id(key)) is not None:
         info = fub_data.get(plan_id)  # a listing keyed by int, which function_plan_id accepts as well
     return info if _readable_plan_entry_id(key, info) is not None else {}

@@ -762,7 +762,8 @@ def presented_fingerprint(hass: HomeAssistant, entry_id: str) -> str | None:
     issue = ir.async_get(hass).async_get_issue(DOMAIN, certificate_issue_id(entry_id))
     if issue is None or issue.data is None:
         return None
-    return issue.data.get("actual")
+    actual = issue.data.get("actual")
+    return actual if isinstance(actual, str) else None  # the repair stores the fingerprint as text
 
 
 def connection_state(hass: HomeAssistant, entry: ConfigEntry) -> str:

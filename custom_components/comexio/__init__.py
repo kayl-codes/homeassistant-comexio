@@ -169,7 +169,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:  # NOSON
 
 _WEBHOOK_VALUE_KEY = "value"
 _WEBHOOK_MISSING_VALUE_LOG_MSG = "[%s] Webhook %s event without a value refused"
-_WEBHOOK_KIND_LABELS = {WebioClass.QUICKBUS: "Quickbus", WebioClass.KNX: "KNX", WebioClass.ONEWIRE: "1-Wire"}
+_WEBHOOK_KIND_LABELS: dict[str, str] = {
+    WebioClass.QUICKBUS: "Quickbus",
+    WebioClass.KNX: "KNX",
+    WebioClass.ONEWIRE: "1-Wire",
+}
 
 
 def _dispatch_push(coordinator: ComexioCoordinator, security: WebhookSecurity, data: dict[str, Any]) -> None:

@@ -2,7 +2,7 @@
 import asyncio
 from datetime import datetime, timedelta
 import logging
-from typing import Any
+from typing import Any, SupportsFloat, cast
 
 from aiocomexio import ComexioError, fetch_certificate, format_fingerprint
 from homeassistant.components.sensor import (
@@ -270,7 +270,11 @@ class ComexioIOSensor(ComexioIOEntity, SensorEntity):
         self._attr_native_unit_of_measurement = unit
         device_class = _io_device_class(unit, str(io.get("identifier", "")))
         self._attr_device_class = device_class
-        self._attr_state_class = DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
+        self._attr_state_class = (
+            SensorStateClass.MEASUREMENT
+            if device_class is None
+            else DEVICE_CLASS_TO_STATE_CLASS.get(device_class, SensorStateClass.MEASUREMENT)
+        )
 
     @property
     def state_class(self) -> SensorStateClass | None:
@@ -315,7 +319,7 @@ class ComexioOneWireSensor(ComexioOneWireEntity, RestoreSensor):
         if last is None or last.native_value is None:
             return
         try:
-            value = float(last.native_value)
+            value = float(cast("SupportsFloat | str", last.native_value))  # a date or other type raises, as before
         except (TypeError, ValueError):
             _LOGGER.debug("%s: last state %r is no reading, not restored", self.entity_id, last.native_value)
             return
@@ -1248,7 +1252,10 @@ class ComexioFunctionPlanRunStateSensor(
 
     @property
     def icon(self) -> str:
-        return _PLAN_RUN_STATE_ICONS.get(self.native_value, "mdi:help-circle-outline")
+        state = self.native_value
+        if state is None:
+            return "mdi:help-circle-outline"
+        return _PLAN_RUN_STATE_ICONS.get(state, "mdi:help-circle-outline")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
