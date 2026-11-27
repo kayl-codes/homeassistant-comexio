@@ -161,6 +161,7 @@ async def test_a_new_certificate_of_the_pinned_issuer_is_pinned_and_the_user_is_
     assert told[0].data["data"]["push"]["interruption-level"] == "critical"
     assert told[0].data["data"]["tag"] == _acceptance_tag(entry)
     assert "pinned by the rule for the pinned issuer, replacing AA:AA" in caplog.text
+    assert "no confirmation from" not in caplog.text  # a push that reached its phone is not reported as failed
 
 
 async def test_the_notification_stays_english_and_the_push_follows_the_system_language(
@@ -212,6 +213,60 @@ async def test_the_push_goes_out_although_the_notification_could_not_be_created(
 
     assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
     assert [push for push in pushes if push.data["message"] != "clear_notification"]  # the user is still told
+
+
+async def test_an_acceptance_push_no_phone_gets_is_summed_up_in_the_log(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    reads: AsyncMock,
+    accept_read: AsyncMock,
+    reload: MagicMock,
+    notification: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entry.add_to_hass(hass)
+
+    async def broken(_call: Any) -> None:
+        raise HomeAssistantError("companion app down")
+
+    hass.services.async_register("notify", PHONE, broken)
+    reads.return_value = _info(OTHER)
+    accept_read.return_value = OTHER
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER  # pinned although the push failed
+    assert f"confirmed by 0 of 1 notify targets; no confirmation from: ['notify.{PHONE}']" in caplog.text
+
+
+async def test_a_partly_failed_acceptance_push_names_only_the_targets_without_confirmation(
+    hass: HomeAssistant,
+    entry: MockConfigEntry,
+    reads: AsyncMock,
+    accept_read: AsyncMock,
+    reload: MagicMock,
+    notification: MagicMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entry.add_to_hass(hass)
+    hass.config_entries.async_update_entry(
+        entry, options={CONF_FUNCTION_PLAN_WATCHDOG_NOTIFY: [f"notify.{PHONE}", "notify.mobile_app_broken"]}
+    )
+    pushes = async_mock_service(hass, "notify", PHONE)
+
+    async def broken(_call: Any) -> None:
+        raise HomeAssistantError("companion app down")
+
+    hass.services.async_register("notify", "mobile_app_broken", broken)
+    reads.return_value = _info(OTHER)
+    accept_read.return_value = OTHER
+
+    await _changed(hass, entry, OTHER)
+
+    assert entry.data[CONF_CERTIFICATE_FINGERPRINT] == OTHER
+    told = [push for push in pushes if push.data["message"] != "clear_notification"]
+    assert len(told) == 1  # the working phone got the push
+    assert "confirmed by 1 of 2 notify targets; no confirmation from: ['notify.mobile_app_broken']" in caplog.text
 
 
 async def test_a_failed_acceptance_read_asks_for_the_newest_certificate_reported_meanwhile(
