@@ -509,12 +509,13 @@ async def _async_tell_user(hass: HomeAssistant, entry: ConfigEntry, pinned: str,
     # Behind an older push still being sent (a wait's push is not cancelled by a newer change, see _async_start).
     async with _send_lock(hass, entry.entry_id):
         delivered, failed = await _async_notify(hass, service_data, targets, set())
-    if failed:
+    # A target listed twice may fail on one call and reach the phone on the other: only what no call reached is missing.
+    if missing := failed - delivered:
         # The certificate stays pinned either way; the persistent notification still tells the user about it.
         _LOGGER.warning(
             "Comexio acceptance push of entry %s accepted by %d of %d notify targets; no acceptance from: %s",
             entry.entry_id,
             len(delivered),
             len(set(targets)),
-            sorted(failed),
+            sorted(missing),
         )
